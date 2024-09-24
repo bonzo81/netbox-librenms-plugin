@@ -2,20 +2,20 @@ from django.views import View
 from django.core.cache import cache
 from django.utils import timezone
 from django.db import transaction
-from django.http import HttpResponse
 from django.contrib import messages
 from django.shortcuts import render, get_object_or_404, redirect
 from django.urls import reverse
-from django.views.generic import TemplateView
 from django.db.models import Q
 from django.core.paginator import Paginator
+from django_tables2 import SingleTableView
+from collections import namedtuple
 
 from utilities.htmx import htmx_partial
 from dcim.models import Device, Interface, Site
 from netbox.views import generic
 from utilities.views import ViewTab, register_model_view
 
-from .tables import LibreNMSInterfaceTable, InterfaceTypeMappingTable
+from .tables import LibreNMSInterfaceTable, InterfaceTypeMappingTable, SiteLocationSyncTable
 from .models import InterfaceTypeMapping
 from .forms import InterfaceTypeMappingForm, InterfaceTypeMappingFilterForm
 from .filters import InterfaceTypeMappingFilterSet
@@ -129,7 +129,7 @@ class SyncInterfacesView(View):
         Check if the data is cached, if not, display a warning message.
         Redirect back to the sync page after synchronization.
         """
-        print("SyncInterfacesView called")
+
         device = get_object_or_404(Device, pk=device_id)
         selected_interfaces = request.POST.getlist('selection')
 
@@ -270,91 +270,91 @@ class InterfaceTypeMappingChangeLogView(generic.ObjectChangeLogView):
     template_name = 'netbox_librenms_plugin/interfacetypemapping_changelog.html'
 
 
-class SiteLocationSyncView(TemplateView):
+class SiteLocationSyncView(SingleTableView):
+    table_class = SiteLocationSyncTable
     template_name = 'netbox_librenms_plugin/site_location_sync.html'
     paginate_by = 25
 
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
+    def get_queryset(self):
         netbox_sites = Site.objects.all()
         librenms_api = LibreNMSAPI()
         success, librenms_locations = librenms_api.get_locations()
-        comparison_data = []
+        SyncData = namedtuple('SyncData', ['netbox_site', 'librenms_location', 'is_synced'])
+        sync_data = []
 
-        COORDINATE_TOLERANCE = 0.0001  # Adjust this value as needed
+        COORDINATE_TOLERANCE = 0.0001
 
         if success and isinstance(librenms_locations, list):
             for site in netbox_sites:
-                matched_location = next((loc for loc in librenms_locations if loc['location'] == site.name), None)
+                matched_location = next((loc for loc in librenms_locations if loc['location'].lower() == site.name.lower()), None)
                 if matched_location:
                     lat_match = lng_match = False
                     if site.latitude is not None and site.longitude is not None:
                         lat_match = abs(float(site.latitude) - float(matched_location.get('lat', 0))) < COORDINATE_TOLERANCE
                         lng_match = abs(float(site.longitude) - float(matched_location.get('lng', 0))) < COORDINATE_TOLERANCE
 
-                    if lat_match and lng_match:
-                        status = 'Fully Matched'
-                    elif site.latitude is None or site.longitude is None:
-                        status = 'Name Matched, Coordinates Missing'
-                    else:
-                        status = 'Name Matched, Coordinates Mismatched'
+                    is_synced = lat_match and lng_match
+
+                    sync_data.append(SyncData(
+                        netbox_site=site,
+                        librenms_location=matched_location,
+                        is_synced=is_synced
+                    ))
                 else:
-                    status = 'Unmatched'
+                    sync_data.append(SyncData(
+                        netbox_site=site,
+                        librenms_location=None,
+                        is_synced=False
+                    ))
 
-                comparison_data.append({
-                    'netbox_site': site,
-                    'librenms_location': matched_location,
-                    'status': status
-                })
-        else:
-            # Handle the case where fetching locations failed or the result is not a list
-            comparison_data = []
-
-        paginator = Paginator(comparison_data, self.paginate_by)
-        page_number = self.request.GET.get('page')
-        page_obj = paginator.get_page(page_number)
-
-        context['table'] = page_obj
-        context['comparison_data'] = comparison_data
-
-        return context
+        return sync_data
 
     def post(self, request, *args, **kwargs):
-        pk = kwargs.get('pk')
+        action = request.POST.get('action')
+        pk = request.POST.get('pk')
+        if not pk:
+            messages.error(request, "No site ID provided.")
+            return redirect('plugins:netbox_librenms_plugin:site_location_sync')
+
         site = get_object_or_404(Site, pk=pk)
+
+        if action == 'update':
+            return self.update_librenms_location(request, site)
+        elif action == 'create':
+            return self.create_librenms_location(request, site)
+
+    def create_librenms_location(self, request, site):
         librenms_api = LibreNMSAPI()
         location_data = {
             "location": site.name,
             "lat": str(site.latitude),
-            "lng": str(site.longitude),
-
+            "lng": str(site.longitude)
         }
-
-        success = librenms_api.add_location(location_data)
+        success, message = librenms_api.add_location(location_data)
 
         if success:
             messages.success(request, f"Location '{site.name}' created in LibreNMS successfully.")
         else:
-            messages.error(request, f"Failed to create location '{site.name}' in LibreNMS.")
+            messages.error(request, f"Failed to create location '{site.name}' in LibreNMS: {message}")
 
         return redirect('plugins:netbox_librenms_plugin:site_location_sync')
 
+    def update_librenms_location(self, request, site):
 
-def update_librenms_location(request, pk):
-    site = get_object_or_404(Site, pk=pk)
-    if site.latitude is None or site.longitude is None:
-        messages.warning(request, f"Latitude and/or longitude is missing. Cannot update location '{site.name}' in LibreNMS.")
+        if site.latitude is None or site.longitude is None:
+            messages.warning(request, f"Latitude and/or longitude is missing. Cannot update location '{site.name}' in LibreNMS.")
+            return redirect('plugins:netbox_librenms_plugin:site_location_sync')
+
+        librenms_api = LibreNMSAPI()
+        location_data = {
+            "lat": str(site.latitude),
+            "lng": str(site.longitude)
+        }
+        success, message = librenms_api.update_location(site.name, location_data)
+
+        if success:
+            messages.success(request, f"Location '{site.name}' updated in LibreNMS successfully.")
+        else:
+            messages.error(request, f"Failed to update location '{site.name}' in LibreNMS: {message}")
+
         return redirect('plugins:netbox_librenms_plugin:site_location_sync')
-    librenms_api = LibreNMSAPI()
-    location_data = {
-        "lat": str(site.latitude),
-        "lng": str(site.longitude)
-    }
-    success, message = librenms_api.update_location(site.name, location_data)
-
-    if success:
-        messages.success(request, f"Location '{site.name}' updated in LibreNMS successfully.")
-    else:
-        messages.error(request, f"Failed to update location '{site.name}' in LibreNMS: {message}")
-
-    return redirect('plugins:netbox_librenms_plugin:site_location_sync')

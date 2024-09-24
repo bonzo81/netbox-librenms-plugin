@@ -1,58 +1,40 @@
 {% extends 'base/layout.html' %}
 {% load buttons %}
+{% load helpers %}
+{% load plugins %}
+{% load static %}
+{% load i18n %}
+{% load render_table from django_tables2 %}
+
+{% block header %}
+  <div class="page-header m-0">
+    {{ block.super }}
+
+    {% block page-header %}
+      <div class="container-fluid mt-2 d-print-none">
+        <div class="d-flex justify-content-between">
+          <div>
+            <h1 class="page-title mt-1 mb-2">Site and Location Sync</h1>
+          </div>
+        </div>
+      </div>
+    {% endblock %}
+  </div>
+{% endblock header %}
 
 {% block content %}
-<h1>Site and Location sync</h1>
-<div class="text-muted mb-3"></div>
-    <p>This page compares NetBox sites with LibreNMS locations.</p>
-    <p>You can use this page to sync Netbox sites to LibreNMS locations.</p>
-</div>
-<table class="table table-hover">
-    <thead>
-        <tr>
-            <th>NetBox Site</th>
-            <th>Latitude</th>
-            <th>Longitude</th>
-            <th>LibreNMS Location</th>
-            <th>Status</th>
-            <th>Action</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for item in comparison_data %}
-        <tr>
-            <td><a href="{% url 'dcim:site' pk=item.netbox_site.pk %}">{{ item.netbox_site.name }}</a></td>
-            <td class="{% if item.status == 'Fully Matched' or item.status == 'Partially Matched' %}text-success{% elif item.status == 'Name Matches, Coordinates Mismatched' %}text-warning{% else %}text-danger{% endif %}">
-                {{ item.netbox_site.latitude }}
-            </td>
-            <td class="{% if item.status == 'Fully Matched' or item.status == 'Partially Matched' %}text-success{% elif item.status == 'Name Matches, Coordinates Mismatched' %}text-warning{% else %}text-danger{% endif %}">
-                {{ item.netbox_site.longitude }}
-            </td>
-            <td>{{ item.librenms_location.location|default:"-" }}</td>
-            <td>{{ item.status }}</td>
-            <td>
-                {% if item.status == 'Fully Matched' %}
-                    <span class="text-success"><i class="mdi mdi-check-circle" aria-hidden="true"></i> Synced</span>
-                {% elif item.status != 'Unmatched' %}
-                    <form method="post" action="{% url 'plugins:netbox_librenms_plugin:update_librenms_location' pk=item.netbox_site.pk %}">
-                        {% csrf_token %}
-                        <button type="submit" class="btn btn-sm btn-warning">
-                            <i class="mdi mdi-pencil" aria-hidden="true"></i> Update in LibreNMS
-                        </button>
-                    </form>
-                {% else %}
-                    <form method="post" action="{% url 'plugins:netbox_librenms_plugin:create_librenms_location' pk=item.netbox_site.pk %}">
-                        {% csrf_token %}
-                        <button type="submit" class="btn btn-sm btn-primary">
-                            <i class="mdi mdi-plus-thick" aria-hidden="true"></i> Create in LibreNMS
-                        </button>
-                    </form>
-                {% endif %}
-            </td>
-            
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-{% include 'inc/paginator.html' with paginator=table.paginator page=table %}
-{% endblock %}
+  <div class="container-fluid">
+    <form method="post">
+      {% csrf_token %}
+      <div class="row mb-3">
+        <div class="col-12">
+          <div class="card">
+            <div class="card-body table-responsive">
+                {% render_table table 'inc/table.html' %}
+            </div>  
+          </div>
+        </div>
+      </div>
+    </form>
+  </div>
+{% endblock content %}

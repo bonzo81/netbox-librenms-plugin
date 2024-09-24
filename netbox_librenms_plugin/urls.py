@@ -16,6 +16,6 @@ urlpatterns = [
     path('add-device-modal/<int:pk>/', views.add_device_modal, name='add_device_modal'),
     path('site-location-comparison/', views.SiteLocationSyncView.as_view(), name='site_location_sync'),
     path('create-librenms-location/<int:pk>/', views.SiteLocationSyncView.as_view(), name='create_librenms_location'),
-    path('update-librenms-location/<int:pk>/', views.update_librenms_location, name='update_librenms_location'),
+    path('update-librenms-location/<int:pk>/', views.SiteLocationSyncView.as_view(), name='update_librenms_location'),
     path('api/', include('netbox_librenms_plugin.api.urls')),
 ]

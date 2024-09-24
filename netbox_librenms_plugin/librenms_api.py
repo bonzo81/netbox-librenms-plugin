@@ -69,7 +69,6 @@ class LibreNMSAPI:
         }
 
         try:
-            # print the ful requests.post call to debug
             response = requests.post(
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
@@ -116,8 +115,8 @@ class LibreNMSAPI:
                 headers=self.headers
             )
             response.raise_for_status()
-
             result = response.json()
+
             if 'locations' in result:
                 return True, result['locations']
             else:
@@ -136,8 +135,9 @@ class LibreNMSAPI:
             response.raise_for_status()
 
             result = response.json()
-            if 'location' in result:
-                return True, result['location']
+            if result.get('status') == 'ok':
+                location_id = result['message'].split('#')[-1]
+                return True, {'id': location_id, 'message': result['message']}
             else:
                 return False, result.get('message', "Unexpected response format")
         except requests.exceptions.RequestException as e:
@@ -145,23 +145,6 @@ class LibreNMSAPI:
             if hasattr(e.response, 'json'):
                 error_details = e.response.json()
                 error_message = error_details.get('message', error_message)
-            return False, error_message
-
-    def delete_location(self, location_id):
-        try:
-            response = requests.delete(
-                f"{self.librenms_url}/api/v0/locations/{location_id}",
-                headers=self.headers
-            )
-            response.raise_for_status()
-
-            result = response.json()
-            if 'message' in result:
-                return True, result['message']
-            else:
-                return False, "Unexpected response format"
-        except requests.exceptions.RequestException as e:
-            error_message = str(e)
             return False, error_message
 
     def update_location(self, location_name, location_data):
@@ -173,13 +156,14 @@ class LibreNMSAPI:
                 json=location_data
             )
             response.raise_for_status()
-
             result = response.json()
-            if 'location' in result:
-                return True, result['location']
+            if result.get('status') == 'ok':
+                return True, result['message']
             else:
-                return False, "Unexpected response format"
+                return False, result.get('message', "Unexpected response format")
         except requests.exceptions.RequestException as e:
             error_message = str(e)
-            print(f"Error updating location in LibreNMS: {error_message}")
+            if hasattr(e.response, 'json'):
+                error_details = e.response.json()
+                error_message = error_details.get('message', error_message)
             return False, error_message
