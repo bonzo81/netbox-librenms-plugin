@@ -1,0 +1,25 @@
+{% extends 'generic/object.html' %}
+{% load render_table from django_tables2 %}
+
+{% block content %}
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">Interface Type Mapping</h5>
+        <div class="card-body">
+          <table class="table table-hover attr-table">
+            <tr>
+              <th scope="row">LibreNMS Type</th>
+              <td>{{ object.librenms_type }}</td>
+            </tr>
+            <tr>
+              <th scope="row">NetBox Type</th>
+              <td>{{ object.get_netbox_type_display }}</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% include 'inc/panel_table.html' with table=table %}
+{% endblock %}

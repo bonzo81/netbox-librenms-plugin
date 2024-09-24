@@ -1,0 +1,23 @@
+{% extends 'generic/object_list.html' %}
+{% load buttons %}
+{% load helpers %}
+{% load plugins %}
+{% load render_table from django_tables2 %}
+{% block content %}
+  <h1>{% block title %}Interface Type Mappings{% endblock %}</h1>
+  <p>This page displays all Netbox to Librenms Interface Type Mappings. Mapping are required to map Librenms interface type to Netbox interface types.</p>
+  {% include 'inc/table_controls_htmx.html' %}
+  
+  <form method="post">
+    {% csrf_token %}
+    <div class="row mb-3">
+      <div class="col col-md-12">
+        <div class="card">
+          <div class="card-body table-responsive">
+            {% include 'htmx/table.html' %}
+          </div>  
+        </div>
+      </div>
+    </div>
+  </form>
+{% endblock content %}

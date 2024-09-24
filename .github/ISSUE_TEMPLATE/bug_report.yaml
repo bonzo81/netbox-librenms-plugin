@@ -1,0 +1,61 @@
+---
+name: 🐛 Bug Report
+description: Report a reproducible bug in the current release of NetBox Librenms Plugin
+labels: ["type: bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        **NOTE:** This form is only for reporting _reproducible bugs_ in a current NetBox Librenms Plugin release.
+  - type: input
+    attributes:
+      label: NetBox Librenms Plugin version
+      description: What version of NetBox Librenms Plugin are you currently running?
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: NetBox version
+      description: What version of NetBox are you currently running?
+      placeholder: v3.6.0
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Python version
+      description: What version of Python are you currently running?
+      options:
+        - "3.8"
+        - "3.9"
+        - "3.10"
+        - "3.11"
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to Reproduce
+      description: >
+        Please provide a minimal working example to demonstrate the bug. Begin with the
+        initialization of any necessary database objects and clearly enumerate each
+        operation carried out. Ensure that your example is as concise as possible
+        while adequately illustrating the issue.
+
+        _Please refrain from including any confidential or sensitive
+        information in your example._
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: The script should execute without raising any errors or exceptions
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Observed Behavior
+      description: What happened instead?
+      placeholder: A TypeError exception was raised
+    validations:
+      required: true

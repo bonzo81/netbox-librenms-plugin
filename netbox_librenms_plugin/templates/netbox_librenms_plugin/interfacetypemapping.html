@@ -1,0 +1,14 @@
+{% extends 'generic/object.html' %}
+{% block content %}
+  <h1>{{ object }}</h1>
+  <table class="table">
+    <tr>
+      <th>LibreNMS Type</th>
+      <td>{{ object.librenms_type }}</td>
+    </tr>
+    <tr>
+      <th>NetBox Type</th>
+      <td>{{ object.get_netbox_type_display }}</td>
+    </tr>
+  </table>
+{% endblock %}

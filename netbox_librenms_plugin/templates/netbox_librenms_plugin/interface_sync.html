@@ -1,0 +1,166 @@
+{% extends 'generic/object.html' %}
+{% load buttons %}
+{% load helpers %}
+{% load plugins %}
+{% load static %}
+{% load i18n %}
+{% load render_table from django_tables2 %}
+
+{% block content %}
+
+<!-- Device Status and LibreNMS Information -->
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="card">
+        <h5 class="card-header">Device Status</h5>
+        <div class="card-body">
+            <table class="table table-hover attr-table">
+                <tbody>
+                    <tr>
+                        <th scope="row">Status</th>
+                        <td>
+                            <span class="{% if device_in_librenms %}text-success{% else %}text-danger{% endif %}">
+                                {% if device_in_librenms %}
+                                    <a href="{{ librenms_device_url }}" target="_blank">Found in LibreNMS</a>
+                                {% else %}
+                                    Not found in LibreNMS
+                                {% endif %}
+                            </span>
+                        </td>
+                    </tr>
+                    {% if device_in_librenms %}
+                    <tr>
+                        <th scope="row">LibreNMS ID</th>
+                        <td>{{ librenms_device_id }}</td>
+                    </tr>
+                    {% endif %}
+                    <tr>
+                        <th scope="row">Device Type</th>
+                        <td>{{ librenms_device_hardware }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Location</th>
+                        <td>{{ librenms_device_location  }}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Action Buttons -->
+<div class="btn-list">
+    <form method="post">
+        {% csrf_token %}
+        {% if has_primary_ip %}
+            {% if device_in_librenms %}
+                <button type="submit" class="btn btn-primary-success mt-2">Refresh Data</button>
+            {% else %}
+                <button hx-get="{% url 'plugins:netbox_librenms_plugin:add_device_modal' pk=object.pk %}"
+                        hx-target="#modal-div"
+                        class="btn btn-primary mt-3">
+                    Add to LibreNMS
+                </button>
+            {% endif %}
+        {% else %}
+            <span class="text-muted mb-3 d-block">A primary IP is required</span>
+            {% if device_in_librenms %}
+                <button type="submit" class="btn btn-primary" disabled>Refresh Data</button>
+            {% else %}
+                <button class="btn btn-secondary" disabled>Add to LibreNMS</button>
+            {% endif %}
+            
+        {% endif %}
+    </form>
+</div>
+
+<!-- Last Updated Information and Cache Countdown -->
+  {% if last_fetched %}
+      <span class="fs-5 mt-2 text-muted">Last data updated: {{ last_fetched|date:"Y-m-d  H:i" }}</span>
+  {% endif %}
+
+<!-- Interface Sync Table -->
+  {% if table %}
+  <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' device_id=object.pk %}">
+    {% csrf_token %}
+    {% block table_actions %}
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+        <div>
+            <button type="submit" class="btn btn-primary">Sync Selected Interfaces</button>
+            <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
+                <i class="mdi mdi-help-circle"></i> info
+            </a>
+        </div>
+        <div class="d-flex align-items-center">
+            {% if cache_expiry %}
+            <div id="cache-countdown" class="me-3">
+                Cache expires in: <span id="countdown-timer"></span>
+            </div>
+            <script>
+                function updateCountdown() {
+                    var now = new Date().getTime();
+                    var expiry = new Date("{{ cache_expiry|date:'c' }}").getTime();
+                    var distance = expiry - now;
+
+                    var minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                    var seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+                    document.getElementById("countdown-timer").innerHTML = minutes + "m " + seconds + "s ";
+
+                    if (distance < 0) {
+                        clearInterval(x);
+                        document.getElementById("countdown-timer").innerHTML = "EXPIRED";
+                    }
+                }
+
+                var x = setInterval(updateCountdown, 1000);
+                updateCountdown();
+            </script>
+            {% endif %}
+            <div class="color-key me-3">
+                <span class="badge text-success text-white">Matching values</span>
+                <span class="badge text-warning text-white">Mismatched values</span>
+                <span class="badge text-danger text-white">Not present in NetBox</span>
+            </div>
+        </div>
+    </div>
+    {% endblock %} <!-- End block table_actions -->
+    
+    
+    <div class="row mb-3">
+        <div class="col col-md-12">
+            <div class="card">
+                <div class="table-responsive">
+                    {% render_table table 'inc/table.html' %}
+                    {% include 'inc/paginator.html' with paginator=table.paginator page=table.page %}
+                </div>
+            </div>
+        </div>
+    </div>
+</form>
+{% endif %}
+
+<!-- Interface Type Help Modal -->
+<div class="modal fade" id="interfaceTypeHelpModal" tabindex="-1" aria-labelledby="interfaceTypeHelpModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="interfaceTypeHelpModalLabel">NetBox Interface Type Explanation</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+            <p>Interface type mappings control how LibreNMS interface types are translated to NetBox interface types during synchronization. These mappings can be customized in the plugin settings menu. The icons in the interface list indicate the mapping status for each interface type:</p>
+            <ul>
+              <li><i class="mdi mdi-link-variant"></i> - A mapping is configured for this interface type</li>
+              <li><i class="mdi mdi-link-variant-off"></i> - No mapping is currently set for this interface type</li>
+            </ul>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<!-- Add to LibreNMS Modal Placeholder-->
+  <div id="modal-div"></div>
+{% endblock %} <!-- End content -->
