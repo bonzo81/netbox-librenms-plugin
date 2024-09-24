@@ -45,16 +45,16 @@ Activate your virtual environment and install the plugin:
 ```bash
 source /opt/netbox/venv/bin/activate
 ```
-While this is still in development and not yet on pypi you can install with pip:
+Install with pip:
 
 ```bash
-(venv) $ pip install git+https://github.com/bonzo81/netbox-librenms-plugin
+(venv) $ pip install netbox-librenms-plugin
 ```
 
 Add to your `local_requirements.txt` to ensure it is automatically reinstalled durintg future upgrades.
 
 ```bash
-# echo "git+https://github.com/bonzo81/netbox-librenms-plugin" >> /opt/netbox/netbox/local_requirements.txt
+ "netbox-librenms-plugin" >> /opt/netbox/netbox/local_requirements.txt
 ```
 
 ### Docker
@@ -65,7 +65,8 @@ For adding to a NetBox Docker setup see how to create a custom Docker image.
 Add the plugin to `plugin_requirements.txt` (netbox-docker):
 
 ```bash
-git+https://github.com//netbox-librenms-plugin
+# plugin_requirements.txt
+netbox-librenms-plugin
 ```
 
 ## Configuration
