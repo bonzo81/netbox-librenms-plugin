@@ -11,7 +11,7 @@ version = "0.1.0"
 authors = [
     {name = "Andy Norwood"},
 ]
-description = "NetBox plugin for syncing interface data from LibreNMS."
+description = "Netbox plugin to sync data between LibreNMS and Netbox."
 readme = "README.md"
 
 classifiers=[
