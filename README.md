@@ -32,7 +32,7 @@ There's more to do! Coding is not my day job so bugs will exist and imporvements
 
 | NetBox Version | Plugin Version |
 |----------------|----------------|
-|     4.0        |      0.1.0     |
+|     4.0        |      0.1.x     |
 
 ## Installing
 

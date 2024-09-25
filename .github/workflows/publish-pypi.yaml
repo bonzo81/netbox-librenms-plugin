@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    - name: Clean previous builds
+      run: rm -rf dist/
     - uses: actions/checkout@v4
     - name: Set up Python
       uses: actions/setup-python@v5.1.0
