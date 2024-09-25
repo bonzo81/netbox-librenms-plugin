@@ -6,7 +6,7 @@ This plugin provides a way to integrate data from Librenms into NetBox.
 
 Sync data between NetBox and Librenms.
 
-Version 0.1.0 of the plugin offers the following key features:
+The plugin offers the following key features:
 
 ### Interface Synchronization
 Pull interface data from LibreNMS into NetBox. The following interface attributes are synchronized:
@@ -32,7 +32,7 @@ There's more to do! Coding is not my day job so bugs will exist and imporvements
 
 | NetBox Version | Plugin Version |
 |----------------|----------------|
-|     4.0        |      0.1.x     |
+|     4.0        |      0.2.x     |
 
 ## Installing
 
