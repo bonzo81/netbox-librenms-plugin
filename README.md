@@ -88,6 +88,26 @@ PLUGINS_CONFIG = {
 }
 ```
 
+### Apply Database Migrations
+
+Apply database migrations with Netbox `manage.py`:
+
+```
+(venv) $ python manage.py migrate
+```
+
+### Restart Netbox
+
+Restart the Netbox service to apply changes:
+
+```
+sudo systemctl restart netbox
+```
+
+## Uninstall
+
+See [the instructions for uninstalling plugins](https://netboxlabs.com/docs/netbox/en/stable/plugins/removal/).
+
 ## Credits
 
 Based on the NetBox plugin tutorial and docs:
