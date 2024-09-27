@@ -9,7 +9,7 @@
 {% block content %}
 
 <!-- Device Status and LibreNMS Information -->
-<div class="d-flex justify-content-between align-items-center mb-3">
+<div class="d-flex justify-content-between align-items-center mb-1">
     <div class="card">
         <h5 class="card-header">Device Status</h5>
         <div class="card-body">
@@ -32,15 +32,32 @@
                         <th scope="row">LibreNMS ID</th>
                         <td>{{ librenms_device_id }}</td>
                     </tr>
-                    {% endif %}
                     <tr>
                         <th scope="row">Device Type</th>
                         <td>{{ librenms_device_hardware }}</td>
                     </tr>
                     <tr>
                         <th scope="row">Location</th>
-                        <td>{{ librenms_device_location  }}</td>
+                        <td>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span>{{ librenms_device_location }}</span>
+                                <form method="post" action="{% url 'plugins:netbox_librenms_plugin:update_device_location' pk=object.pk %}">
+                                    {% csrf_token %}
+                                    {% if librenms_device_location != object.site.name %}
+                                        <button type="submit" class="btn btn-primary" title="Sync location with NetBox">
+                                            <i class="mdi mdi-sync"></i>
+                                        </button>
+                                    {% else %}
+                                        <span class="text-success" title="LibreNMS location matches NetBox site">
+                                            <i class="ms-1 mdi mdi-check-circle"></i>
+                                        </span>
+                                    {% endif %}
+                                </form>
+                            </div>
+                        </td>
+                        
                     </tr>
+                    {% endif %}
                 </tbody>
             </table>
         </div>
@@ -53,7 +70,7 @@
         {% csrf_token %}
         {% if has_primary_ip %}
             {% if device_in_librenms %}
-                <button type="submit" class="btn btn-primary-success mt-2">Refresh Data</button>
+                <button type="submit" class="btn btn-primary-success mt-1">Refresh Data</button>
             {% else %}
                 <button hx-get="{% url 'plugins:netbox_librenms_plugin:add_device_modal' pk=object.pk %}"
                         hx-target="#modal-div"
