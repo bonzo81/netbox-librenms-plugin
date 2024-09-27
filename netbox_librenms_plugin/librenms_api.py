@@ -19,11 +19,17 @@ class LibreNMSAPI:
         self.headers = {'X-Auth-Token': self.api_token}
 
     def get_device_info(self, device_ip):
+        """
+        Fetch device information from LibreNMS using its primary IP.
+        """
+
+        print(f"Fetching device info for IP: {device_ip}")
         try:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_ip}",
                 headers=self.headers
             )
+            print(f"Response json: {response.json()}")
             if response.status_code == 200:
                 device_data = response.json()['devices'][0]
                 return True, device_data
@@ -59,12 +65,21 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return {'error': f'Error connecting to LibreNMS: {str(e)}'}
 
-    def add_device(self, hostname, community, version, location=None):
+    def add_device(self, hostname, community, version):
+        """
+        Add a device to LibreNMS.
+
+        :param hostname: Device hostname as ip address
+        :param community: SNMP community
+        :param version: SNMP version (1, 2c, 3)
+
+        :return: True if successful, False otherwise
+        :return: Message indicating the result
+        """
         data = {
             "hostname": hostname,
             "community": community,
             "version": version,
-            "location": location,
             "force_add": False
         }
 
@@ -86,29 +101,45 @@ class LibreNMSAPI:
             error_message = response_json.get('message', 'Unknown error occurred')
             return False, error_message
 
-    def update_device_location(self, hostname, location):
-        data = {
-            "field": "location",
-            "data": location
-        }
+    def update_device_field(self, hostname, field_data):
+        """
+        Update a specific field for a device in LibreNMS.
+
+        :param hostname: Device hostname as ip address
+        :param field_data: List of dictionaries containing field name and value
+        e.g field_data = {
+                "field": ["location", "override_sysLocation"],
+                "data": [device.site.name, "1"]
+            }
+
+        :return: True if successful, False otherwise
+        :return: Message indicating the result
+        """
         try:
             response = requests.patch(
                 f"{self.librenms_url}/api/v0/devices/{hostname}",
                 headers=self.headers,
-                json=data
+                json=field_data
             )
             response.raise_for_status()
 
             result = response.json()
+
             if result.get('status') == 'ok':
-                return True, "Device location updated successfully"
+                return True, "Device fields updated successfully"
             else:
                 return False, result.get('message', 'Unknown error occurred')
         except requests.exceptions.RequestException as e:
             error_message = str(e)
+            if hasattr(e.response, 'json'):
+                error_details = e.response.json()
+                error_message = error_details.get('message', error_message)
             return False, error_message
 
     def get_locations(self):
+        """
+        Fetch locations data from LibreNMS.
+        """
         try:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/resources/locations/",
@@ -126,6 +157,19 @@ class LibreNMSAPI:
             return False, error_message
 
     def add_location(self, location_data):
+        """
+        Add a location to LibreNMS.
+
+        :param location_data: Dictionary containing location data
+        e.g location_data = {
+                "location": site.name,
+                "lat": str(site.latitude),
+                "lng": str(site.longitude)
+            }
+
+        :return: True if successful, False otherwise
+        :return: Message indicating the result
+        """
         try:
             response = requests.post(
                 f"{self.librenms_url}/api/v0/locations",
@@ -148,6 +192,19 @@ class LibreNMSAPI:
             return False, error_message
 
     def update_location(self, location_name, location_data):
+        """
+        Update a location in LibreNMS.
+
+        :param location_name: Location name
+        :param location_data: Dictionary containing location data
+        e.g location_data = {
+                "lat": str(site.latitude),
+                "lng": str(site.longitude)
+            }
+            
+        :return: True if successful, False otherwise
+        :return: Message indicating the result
+        """
         try:
             encoded_location_name = urllib.parse.quote(location_name)
             response = requests.patch(
