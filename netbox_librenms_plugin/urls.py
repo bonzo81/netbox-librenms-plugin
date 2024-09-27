@@ -13,6 +13,7 @@ urlpatterns = [
     path('interface-type-mappings/<int:pk>/edit/', views.InterfaceTypeMappingEditView.as_view(), name='interfacetypemapping_edit'),
     path('interface-type-mappings/<int:pk>/changelog/', views.InterfaceTypeMappingChangeLogView.as_view(), name='interfacetypemapping_changelog', kwargs={'model': InterfaceTypeMapping}),
     path('add-device-to-librenms/', views.add_device_to_librenms, name='add_device_to_librenms'),
+    path('devices/<int:pk>/update-location/', views.update_device_location, name='update_device_location'),
     path('add-device-modal/<int:pk>/', views.add_device_modal, name='add_device_modal'),
     path('site-location-comparison/', views.SiteLocationSyncView.as_view(), name='site_location_sync'),
     path('create-librenms-location/<int:pk>/', views.SiteLocationSyncView.as_view(), name='create_librenms_location'),
