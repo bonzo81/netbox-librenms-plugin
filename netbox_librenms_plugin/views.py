@@ -63,6 +63,11 @@ class DeviceInterfacesSyncView(generic.ObjectListView):
             table = LibreNMSInterfaceTable(ports_data)
             table.configure(self.request)
 
+        librenms_device_id = None
+        librenms_device_url = None
+        librenms_device_hardware = "-"
+        librenms_device_location = "-"
+
         if device.primary_ip:
             device_exists, librenms_device_data = LibreNMSAPI().get_device_info(str(device.primary_ip.address.ip))
             if device_exists:
@@ -205,9 +210,30 @@ def add_device_to_librenms(request):
         else:
             messages.error(request, f'Error adding device to LibreNMS: {message}')
 
-                # Return a response that closes the modal and triggers a page refresh
+        # Return a response that closes the modal and triggers a page refresh
         # Redirect to the LibreNMS sync page
         return redirect(reverse('plugins:netbox_librenms_plugin:device_interfaces_sync', kwargs={'pk': request.POST.get('device_id')}))
+
+
+def update_device_location(request, pk):
+    print(f"insidde update_device_location function")
+    device = get_object_or_404(Device, pk=pk)
+    if device.site:
+        librenms_api = LibreNMSAPI()
+        field_data = {
+            "field": ["location", "override_sysLocation"],
+            "data": [device.site.name, "1"]
+        }
+        success, message = librenms_api.update_device_field(str(device.primary_ip.address.ip), field_data)
+
+        if success:
+            messages.success(request, f"Device location updated in LibreNMS to {device.site.name}")
+        else:
+            messages.error(request, f"Failed to update device location in LibreNMS: {message}")
+    else:
+        messages.warning(request, "Device has no associated site in NetBox")
+
+    return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
 
 
 class InterfaceTypeMappingListView(generic.ObjectListView):
@@ -290,8 +316,11 @@ class SiteLocationSyncView(SingleTableView):
                 if matched_location:
                     lat_match = lng_match = False
                     if site.latitude is not None and site.longitude is not None:
-                        lat_match = abs(float(site.latitude) - float(matched_location.get('lat', 0))) < COORDINATE_TOLERANCE
-                        lng_match = abs(float(site.longitude) - float(matched_location.get('lng', 0))) < COORDINATE_TOLERANCE
+                        librenms_lat = matched_location.get('lat')
+                        librenms_lng = matched_location.get('lng')
+                        if librenms_lat is not None and librenms_lng is not None:
+                            lat_match = abs(float(site.latitude) - float(librenms_lat)) < COORDINATE_TOLERANCE
+                            lng_match = abs(float(site.longitude) - float(librenms_lng)) < COORDINATE_TOLERANCE
 
                     is_synced = lat_match and lng_match
 
