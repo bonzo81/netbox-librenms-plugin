@@ -23,13 +23,11 @@ class LibreNMSAPI:
         Fetch device information from LibreNMS using its primary IP.
         """
 
-        print(f"Fetching device info for IP: {device_ip}")
         try:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_ip}",
                 headers=self.headers
             )
-            print(f"Response json: {response.json()}")
             if response.status_code == 200:
                 device_data = response.json()['devices'][0]
                 return True, device_data
@@ -201,7 +199,7 @@ class LibreNMSAPI:
                 "lat": str(site.latitude),
                 "lng": str(site.longitude)
             }
-            
+
         :return: True if successful, False otherwise
         :return: Message indicating the result
         """
