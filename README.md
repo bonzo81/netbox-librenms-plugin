@@ -21,8 +21,9 @@ Pull interface data from LibreNMS into NetBox. The following interface attribute
 ### Site to Location Synchronization
 The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 - Compare NetBox sites to LibreNMS location data
-- Create or update LibreNMS locations to match NetBox sites
+- Create LibreNMS locations to match NetBox sites
 - Update existing LibreNMS locations langitude and longitude values based on NetBox data
+- Sync device site to LibreNMS location
 
 
 ## Contributing
