@@ -1,6 +1,6 @@
 # NetBox Librenms Plugin
 
-This plugin provides the ability to sync data between Netbox and Librems.
+This plugin provides the ability to sync data between Netbox and LibreNMS.
 
 ## Features
 
