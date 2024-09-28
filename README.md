@@ -66,7 +66,7 @@ Install with pip:
 (venv) $ pip install netbox-librenms-plugin
 ```
 
-Add to your `local_requirements.txt` to ensure it is automatically reinstalled durintg future upgrades.
+Add to your `local_requirements.txt` to ensure it is automatically reinstalled during future upgrades.
 
 ```bash
  "netbox-librenms-plugin" >> /opt/netbox/netbox/local_requirements.txt
