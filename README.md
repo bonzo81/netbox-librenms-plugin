@@ -18,12 +18,24 @@ Pull interface data from LibreNMS into NetBox. The following interface attribute
 
 ** Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox. 
 
-### Site to Location Synchronization
+### Site & Location Synchronization
 The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 - Compare NetBox sites to LibreNMS location data
 - Create LibreNMS locations to match NetBox sites
 - Update existing LibreNMS locations langitude and longitude values based on NetBox data
 - Sync device site to LibreNMS location
+
+
+## Screnshots/GIFs
+#### Site & Location Sync
+![Site Location Sync](docs/img/Netbox-librenms-plugin-Sites.gif)
+
+#### Sync devices and Interfaces
+![Add device and interfaces](docs/img/Netbox-librenms-plugin-interfaceadd.gif)
+
+#### Interface Type Mappings
+![Interfaces Type Mappings](docs/img/Netbox-librenms-plugin-mappings.png)
+
 
 
 ## Contributing
