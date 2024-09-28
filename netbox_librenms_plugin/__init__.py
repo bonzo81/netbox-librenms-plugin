@@ -6,7 +6,7 @@ class LibreNMSSyncConfig(PluginConfig):
     name = "netbox_librenms_plugin"
     verbose_name = "NetBox Librenms Plugin"
     description = "Sync data from LibreNMS into NetBox"
-    version = "0.2.1"
+    version = "0.2.2"
     base_url = "librenms_plugin"
     required_settings = []
     default_settings = {
