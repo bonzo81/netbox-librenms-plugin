@@ -203,7 +203,7 @@ def add_device_to_librenms(request):
         site = request.POST.get('site')
 
         librenms_api = LibreNMSAPI()
-        result, message = librenms_api.add_device(hostname, community, version, site)
+        result, message = librenms_api.add_device(hostname, community, version)
 
         if result:
             messages.success(request, 'Device added successfully to LibreNMS')
