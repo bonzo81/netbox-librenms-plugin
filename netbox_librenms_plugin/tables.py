@@ -25,19 +25,19 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_ifType(self, value, record):
         mapping = InterfaceTypeMapping.objects.filter(librenms_type=value).first()
-        
+
         if mapping:
             display_value = mapping.netbox_type
             icon = format_html('<i class="mdi mdi-link-variant" title="Mapped from LibreNMS type: {}"></i>', value)
         else:
             display_value = value
             icon = format_html('<i class="mdi mdi-link-variant-off" title="No mapping to NetBox type"></i>')
-        
+
         display_value = format_html("{} {}", display_value, icon)
-        
+
         if not record.get('exists_in_netbox'):
             return format_html('<span class="text-danger">{}</span>', display_value)
-        
+
         netbox_interface = record.get('netbox_interface')
         if netbox_interface:
             netbox_type = getattr(netbox_interface, 'type', None)
@@ -45,7 +45,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 return format_html('<span class="text-success">{}</span>', display_value)
             elif mapping:
                 return format_html('<span class="text-warning">{}</span>', display_value)
-            
+
         return format_html('<span class="text-danger">{}</span>', display_value)
 
     def render_ifSpeed(self, value, record):
@@ -73,7 +73,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 return format_html('<span class="text-warning">{}</span>', display_value)
 
         return format_html('<span class="text-danger">{}</span>', display_value)
-    
+
     def render_ifDescr(self, value, record):
         return self._render_field(value, record, 'ifAlias', 'description')
 

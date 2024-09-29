@@ -186,6 +186,9 @@ class SyncInterfacesView(View):
 
 
 def add_device_modal(request, pk):
+    """
+    Render the modal form for adding a device to LibreNMS.
+    """
     device = get_object_or_404(Device, pk=pk)
     if htmx_partial(request):
         return render(request, 'netbox_librenms_plugin/htmx/add_device_form.html', {
@@ -196,11 +199,13 @@ def add_device_modal(request, pk):
 
 
 def add_device_to_librenms(request):
+    """
+    Handle the POST request to add a device to LibreNMS.
+    """
     if request.method == 'POST':
         hostname = request.POST.get('hostname')
         community = request.POST.get('community')
         version = request.POST.get('version')
-        site = request.POST.get('site')
 
         librenms_api = LibreNMSAPI()
         result, message = librenms_api.add_device(hostname, community, version)
@@ -238,7 +243,7 @@ def update_device_location(request, pk):
 
 class InterfaceTypeMappingListView(generic.ObjectListView):
     """
-        Provides a view for listing all `InterfaceTypeMapping` objects.
+    Provides a view for listing all `InterfaceTypeMapping` objects.
     """
     queryset = InterfaceTypeMapping.objects.all()
     table = InterfaceTypeMappingTable
@@ -297,6 +302,9 @@ class InterfaceTypeMappingChangeLogView(generic.ObjectChangeLogView):
 
 
 class SiteLocationSyncView(SingleTableView):
+    """
+    Provides a view for synchronizing site locations with LibreNMS.
+    """
     table_class = SiteLocationSyncTable
     template_name = 'netbox_librenms_plugin/site_location_sync.html'
     paginate_by = 25
