@@ -1,6 +1,6 @@
 site_name: NetBox librenms Plugin
-site_url: https://.github.io/netbox-librenms-plugin
-repo_url: https://github.com//netbox-librenms-plugin
+site_url: https://bonzo81.github.io/netbox-librenms-plugin
+repo_url: https://github.com/bonzo81/netbox-librenms-plugin
 repo_name: /netbox-librenms-plugin
 #strict: true
 nav:
@@ -41,30 +41,19 @@ markdown_extensions:
   - toc:
       baselevel: 2
       permalink: true
-      slugify: !!python/name:pymdownx.slugs.uslugify
+      slugify: !!python/name:markdown.extensions.toc.slugify
   - meta
 plugins:
   - include-markdown
   - search:
       lang: en
   - mkdocstrings:
-      watch:
-        - netbox-librenms-plugin
+
 extra:
   social:
-    - icon: fontawesome/brands/twitter
-      # replace with your own tweet link below
-      link: https://github.com/netbox-community/cookiecutter-netbox-plugin
-      name: Tweet
-    - icon: fontawesome/brands/facebook
-      # replace with your own facebook link below
-      link: https://github.com/netbox-community/cookiecutter-netbox-plugin
-      name: Facebook
     - icon: fontawesome/brands/github
       link: https://github.com//netbox-librenms-plugin
       name: Github
-    - icon: material/email
-      link: "mailto:"
   # to enable disqus, uncomment the following and put your disqus id below
   # disqus: disqus_id
 # uncomment the following and put your google tracking id below to enable GA

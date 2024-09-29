@@ -39,7 +39,7 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 
 
 ## Contributing
-There's more to do! Coding is not my day job. Bugs will exist and imporvements will be needed. So contributions are very welcome!  I've got more ideas for new features and imporvements but please [contribute](CONTRIBUTING.md) if you can!
+There's more to do! Coding is not my day job. Bugs will exist and imporvements will be needed. So contributions are very welcome!  I've got more ideas for new features and imporvements but please [contribute](docs/contributing.md) if you can!
 
 Or just share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions ).
 
