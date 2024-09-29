@@ -7,11 +7,6 @@ on:
 permissions:
   contents: write
 jobs:
-  copy-readme:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - run: cp README.md docs/index.md
   deploy:
     runs-on: ubuntu-latest
     steps:
