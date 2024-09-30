@@ -1,6 +1,12 @@
 # Changelog
 
+## 0.2.3 (2024-09-30)
+
+* Fix bug where wrong template is used when editing interface mappings
+* Remove unused templates from view
+
 ## 0.2.2 (2024-09-27)
+
 * Fix too many arguments to add_device error
 
 ## 0.2.1 (2024-09-27)

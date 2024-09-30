@@ -5,8 +5,11 @@ repo_name: /netbox-librenms-plugin
 #strict: true
 nav:
   - Home: index.md
+  - Usage: 
+    - Interface Mappings: interface_mappings.md
   - Contributing: contributing.md
   - Changelog: changelog.md
+
 theme:
   name: material
   language: en
