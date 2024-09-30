@@ -8,7 +8,6 @@ from django.utils.safestring import mark_safe
 from django.utils.html import format_html
 from .models import InterfaceTypeMapping
 from django_tables2 import CheckBoxColumn
-from django.urls import reverse
 from django.middleware.csrf import get_token
 
 
@@ -130,7 +129,7 @@ class InterfaceTypeMappingTable(NetBoxTable):
     class Meta:
         model = InterfaceTypeMapping
         fields = ('id', 'librenms_type', 'netbox_type', 'actions')
-        default_columns = ('librenms_type', 'netbox_type', 'actions')
+        default_columns = ('id', 'librenms_type', 'netbox_type', 'actions')
         attrs = {
             'class': 'table table-hover table-headings table-striped'
         }
