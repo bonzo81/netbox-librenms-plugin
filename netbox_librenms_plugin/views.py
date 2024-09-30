@@ -249,7 +249,6 @@ class InterfaceTypeMappingListView(generic.ObjectListView):
     table = InterfaceTypeMappingTable
     filterset = InterfaceTypeMappingFilterSet
     filterset_form = InterfaceTypeMappingFilterForm
-    template_name = 'netbox_librenms_plugin/interfacetypemapping_list.html'
 
 
 class InterfaceTypeMappingCreateView(generic.ObjectEditView):
@@ -265,7 +264,6 @@ class InterfaceTypeMappingView(generic.ObjectView):
     Provides a view for displaying details of a specific `InterfaceTypeMapping` object.
     """
     queryset = InterfaceTypeMapping.objects.all()
-    template_name = 'netbox_librenms_plugin/interfacetypemapping.html'
 
 
 class InterfaceTypeMappingEditView(generic.ObjectEditView):
@@ -274,7 +272,6 @@ class InterfaceTypeMappingEditView(generic.ObjectEditView):
     """
     queryset = InterfaceTypeMapping.objects.all()
     form = InterfaceTypeMappingForm
-    template_name = 'netbox_librenms_plugin/interfacetypemapping_edit.html'
 
 
 class InterfaceTypeMappingDeleteView(generic.ObjectDeleteView):
@@ -282,7 +279,6 @@ class InterfaceTypeMappingDeleteView(generic.ObjectDeleteView):
     Provides a view for deleting a specific `InterfaceTypeMapping` object.
     """
     queryset = InterfaceTypeMapping.objects.all()
-    template_name = 'netbox_librenms_plugin/interfacetypemapping_delete.html'
 
 
 class InterfaceTypeMappingBulkDeleteView(generic.BulkDeleteView):
@@ -298,7 +294,6 @@ class InterfaceTypeMappingChangeLogView(generic.ObjectChangeLogView):
     Provides a view for displaying the change log of a specific `InterfaceTypeMapping` object.
     """
     queryset = InterfaceTypeMapping.objects.all()
-    template_name = 'netbox_librenms_plugin/interfacetypemapping_changelog.html'
 
 
 class SiteLocationSyncView(SingleTableView):
