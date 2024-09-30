@@ -58,21 +58,21 @@ Ready to contribute? Here's how to set up `netbox-librenms-plugin` for local dev
 2. Clone your fork locally
 
     ```
-    $ git clone git@github.com:bonzo81/netbox-librenms-plugin.git
+    $ git clone git@github.com:<username>/netbox-librenms-plugin.git
     ```
 
 3. Activate the NetBox virtual environment (see the NetBox documentation under [Setting up a Development Environment](https://docs.netbox.dev/en/stable/development/getting-started/)):
 
     ```
-    $ source ~/.venv/netbox/bin/activate
+    $ source /opt/netbox/venv/bin/activate
     ```
 
 4. Add the plugin to NetBox virtual environment in Develop mode (see [Plugins Development](https://docs.netbox.dev/en/stable/plugins/development/)):
 
-    To ease development, it is recommended to go ahead and install the plugin at this point using setuptools' develop mode. This will create symbolic links within your Python environment to the plugin development directory. Call setup.py from the plugin's root directory with the develop argument (instead of install):
+    To ease development, it is recommended to go ahead and install the plugin at this point using setuptools' `develop` mode. This will create symbolic links within your Python environment to the plugin development directory. Call `pip` from the plugin's root directory with the `-e` flag:
 
     ```
-    $ python setup.py develop
+    $ pip install -e .
     ```
 
 5. Create a branch for local development:
