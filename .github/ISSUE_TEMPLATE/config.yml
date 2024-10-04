@@ -2,10 +2,10 @@
 blank_issues_enabled: false
 contact_links:
   - name: 📖 Contributing Policy
-    url: https://github.com//netbox-librenms-plugin/blob/main/CONTRIBUTING.md
+    url: https://github.com/bonzo81/netbox-librenms-plugin/blob/main/CONTRIBUTING.md
     about: "Please read through our contributing policy before opening an issue or pull request."
   - name: ❓ Discussion
-    url: https://github.com//netbox-librenms-plugin/discussions
+    url: https://github.com/bonzo81/netbox-librenms-plugin/discussions
     about: "If you're just looking for help, try starting a discussion instead."
   - name: 💬 Community Slack
     url: https://netdev.chat
