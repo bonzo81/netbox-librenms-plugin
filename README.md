@@ -1,6 +1,8 @@
 # NetBox LibreNMS Plugin
 
-This plugin provides the ability to sync data between Netbox and LibreNMS.
+This plugin provides the ability to sync selected data between Netbox and LibreNMS.
+
+The plugin allows Netbox to remain the source of truth by allowing intentional syncing of data between NetBox and LibreNMS. The intention is to make it easier to maintain accurate data between the two systems.
 
 This is in early development.
 
