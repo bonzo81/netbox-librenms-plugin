@@ -22,9 +22,12 @@ from .filters import InterfaceTypeMappingFilterSet
 from .utils import convert_speed_to_kbps, LIBRENMS_TO_NETBOX_MAPPING
 from .librenms_api import LibreNMSAPI
 
+class LibreNMSAPIMixin:
+    def get_librenms_api(self):
+        return LibreNMSAPI()
 
 @register_model_view(Device, name='device_interfaces_sync', path='librenms-sync')
-class DeviceInterfacesSyncView(generic.ObjectListView):
+class DeviceInterfacesSyncView(LibreNMSAPIMixin, generic.ObjectListView):
     """
     Sync view for interfaces from LibreNMS to NetBox, as a tab on the device view.
     """
@@ -36,6 +39,10 @@ class DeviceInterfacesSyncView(generic.ObjectListView):
 
     template_name = 'netbox_librenms_plugin/interface_sync.html'
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.librenms_api = self.get_librenms_api()
+
     def get_interface_type_mappings(self):
         """
         Get all interface type mappings.
@@ -44,11 +51,16 @@ class DeviceInterfacesSyncView(generic.ObjectListView):
         return mappings
 
     def _prepare_context(self, device, cached_data=None, last_fetched=None):
+        """
+        Prepare the context for the template.
+        """
+
         ports_data = []
         table = None
         device_exists = False
         librenms_device_id = None
         librenms_device_url = None
+        
 
         if cached_data:
             ports_data = cached_data.get('ports', [])
@@ -69,12 +81,12 @@ class DeviceInterfacesSyncView(generic.ObjectListView):
         librenms_device_location = "-"
 
         if device.primary_ip:
-            device_exists, librenms_device_data = LibreNMSAPI().get_device_info(str(device.primary_ip.address.ip))
+            device_exists, librenms_device_data = self.librenms_api.get_device_info(str(device.primary_ip.address.ip))
             if device_exists:
                 librenms_device_id = librenms_device_data.get('device_id')
                 librenms_device_hardware = librenms_device_data.get('hardware')
                 librenms_device_location = librenms_device_data.get('location')
-                librenms_device_url = f"{LibreNMSAPI().librenms_url}/device/device={librenms_device_id}/"
+                librenms_device_url = f"{self.librenms_api.librenms_url}/device/device={librenms_device_id}/"
 
         cache_timeout = cache.ttl(f'librenms_ports_{device.pk}')
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_timeout)
@@ -94,6 +106,9 @@ class DeviceInterfacesSyncView(generic.ObjectListView):
             }
 
     def get(self, request, pk):
+        """
+        Handle GET requests to display the interface sync view.
+        """
         device = get_object_or_404(Device, pk=pk)
         cached_data = cache.get(f'librenms_ports_{device.pk}')
         last_fetched = cache.get(f'librenms_ports_last_fetched_{device.pk}')
@@ -102,15 +117,17 @@ class DeviceInterfacesSyncView(generic.ObjectListView):
         return render(request, self.template_name, context)
 
     def post(self, request, pk):
+        """
+        Handle POST requests to sync interfaces from LibreNMS to NetBox.
+        """
         device = get_object_or_404(Device, pk=pk)
         if not device.primary_ip:
             messages.error(request, "This device has no primary IP set. Unable to fetch data from LibreNMS.")
             return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
-
-        librenms_api = LibreNMSAPI()
+    
         ip_address = str(device.primary_ip.address.ip)
 
-        librenms_data = librenms_api.get_ports(ip_address)
+        librenms_data = self.librenms_api.get_ports(ip_address)
 
         if 'error' in librenms_data:
             messages.error(request, librenms_data['error'])
@@ -119,9 +136,8 @@ class DeviceInterfacesSyncView(generic.ObjectListView):
         cache.set(f'librenms_ports_{device.pk}', librenms_data, timeout=300)
         last_fetched = timezone.now()
         cache.set(f'librenms_ports_last_fetched_{device.pk}', last_fetched, timeout=300)
-
         context = self._prepare_context(device, librenms_data, last_fetched)
-        return render(request, self.template_name, context)
+        return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
 
 
 class SyncInterfacesView(View):
@@ -180,34 +196,33 @@ class SyncInterfacesView(View):
                 setattr(interface, netbox_key, netbox_type)
             else:
                 setattr(interface, netbox_key, librenms_interface[librenms_key])
-
         interface.enabled = librenms_interface['ifAdminStatus'].lower() == 'up'
         interface.save()
 
 
-def add_device_modal(request, pk):
+class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
     """
-    Render the modal form for adding a device to LibreNMS.
+    Handle adding a device to LibreNMS, both displaying the form and processing the submission.
     """
-    device = get_object_or_404(Device, pk=pk)
-    if htmx_partial(request):
-        return render(request, 'netbox_librenms_plugin/htmx/add_device_form.html', {
-            'device': device,
-            'form_url': reverse('plugins:netbox_librenms_plugin:add_device_to_librenms'),
-        })
-    return render(request, 'netbox_librenms_plugin/add_device_modal.html', {'device': device})
+    def get(self, request, pk):
+        device = get_object_or_404(Device, pk=pk)
+        if htmx_partial(request):
+            return render(request, 'netbox_librenms_plugin/htmx/add_device_form.html', {
+                'device': device,
+                'form_url': reverse('plugins:netbox_librenms_plugin:add_device_to_librenms', kwargs={'pk': pk}),
+            })
+        return render(request, 'netbox_librenms_plugin/add_device_modal.html', {'device': device})
 
-
-def add_device_to_librenms(request):
-    """
-    Handle the POST request to add a device to LibreNMS.
-    """
-    if request.method == 'POST':
+    def post(self, request, pk):
+        """
+        Handle the submission of the form to add a device to LibreNMS.
+        """
+        device = get_object_or_404(Device, pk=pk)
         hostname = request.POST.get('hostname')
         community = request.POST.get('community')
         version = request.POST.get('version')
 
-        librenms_api = LibreNMSAPI()
+        librenms_api = self.get_librenms_api()
         result, message = librenms_api.add_device(hostname, community, version)
 
         if result:
@@ -215,30 +230,31 @@ def add_device_to_librenms(request):
         else:
             messages.error(request, f'Error adding device to LibreNMS: {message}')
 
-        # Return a response that closes the modal and triggers a page refresh
-        # Redirect to the LibreNMS sync page
-        return redirect(reverse('plugins:netbox_librenms_plugin:device_interfaces_sync', kwargs={'pk': request.POST.get('device_id')}))
+        return redirect(reverse('plugins:netbox_librenms_plugin:device_interfaces_sync', kwargs={'pk': device.pk}))
 
 
-def update_device_location(request, pk):
-    print(f"insidde update_device_location function")
-    device = get_object_or_404(Device, pk=pk)
-    if device.site:
-        librenms_api = LibreNMSAPI()
-        field_data = {
-            "field": ["location", "override_sysLocation"],
-            "data": [device.site.name, "1"]
-        }
-        success, message = librenms_api.update_device_field(str(device.primary_ip.address.ip), field_data)
+class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
+    """
+    Update the device location in LibreNMS based on the device's site in NetBox.
+    """
+    def post(self, request, pk):
+        device = get_object_or_404(Device, pk=pk)
+        if device.site:
+            librenms_api = self.get_librenms_api()
+            field_data = {
+                "field": ["location", "override_sysLocation"],
+                "data": [device.site.name, "1"]
+            }
+            success, message = librenms_api.update_device_field(str(device.primary_ip.address.ip), field_data)
 
-        if success:
-            messages.success(request, f"Device location updated in LibreNMS to {device.site.name}")
+            if success:
+                messages.success(request, f"Device location updated in LibreNMS to {device.site.name}")
+            else:
+                messages.error(request, f"Failed to update device location in LibreNMS: {message}")
         else:
-            messages.error(request, f"Failed to update device location in LibreNMS: {message}")
-    else:
-        messages.warning(request, "Device has no associated site in NetBox")
+            messages.warning(request, "Device has no associated site in NetBox")
 
-    return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
+        return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
 
 
 class InterfaceTypeMappingListView(generic.ObjectListView):
@@ -296,7 +312,7 @@ class InterfaceTypeMappingChangeLogView(generic.ObjectChangeLogView):
     queryset = InterfaceTypeMapping.objects.all()
 
 
-class SiteLocationSyncView(SingleTableView):
+class SiteLocationSyncView(LibreNMSAPIMixin, SingleTableView):
     """
     Provides a view for synchronizing site locations with LibreNMS.
     """
@@ -304,10 +320,16 @@ class SiteLocationSyncView(SingleTableView):
     template_name = 'netbox_librenms_plugin/site_location_sync.html'
     paginate_by = 25
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.librenms_api = self.get_librenms_api()
+
     def get_queryset(self):
+        """
+        Returns the queryset of Netbox sites to be checked with LibreNMS.
+        """
         netbox_sites = Site.objects.all()
-        librenms_api = LibreNMSAPI()
-        success, librenms_locations = librenms_api.get_locations()
+        success, librenms_locations = self.librenms_api.get_locations()
         SyncData = namedtuple('SyncData', ['netbox_site', 'librenms_location', 'is_synced'])
         sync_data = []
 
@@ -342,6 +364,9 @@ class SiteLocationSyncView(SingleTableView):
         return sync_data
 
     def post(self, request, *args, **kwargs):
+        """
+        Handles the POST request for synchronizing Netbox site with LibreNMS locations.
+        """
         action = request.POST.get('action')
         pk = request.POST.get('pk')
         if not pk:
@@ -356,13 +381,15 @@ class SiteLocationSyncView(SingleTableView):
             return self.create_librenms_location(request, site)
 
     def create_librenms_location(self, request, site):
-        librenms_api = LibreNMSAPI()
+        """
+        Creates a new location in LibreNMS based on the site's coordinates.
+        """
         location_data = {
             "location": site.name,
             "lat": str(site.latitude),
             "lng": str(site.longitude)
         }
-        success, message = librenms_api.add_location(location_data)
+        success, message = self.librenms_api.add_location(location_data)
 
         if success:
             messages.success(request, f"Location '{site.name}' created in LibreNMS successfully.")
@@ -372,17 +399,18 @@ class SiteLocationSyncView(SingleTableView):
         return redirect('plugins:netbox_librenms_plugin:site_location_sync')
 
     def update_librenms_location(self, request, site):
-
+        """
+        Updates an existing location in LibreNMS based on the site's coordinates.
+        """
         if site.latitude is None or site.longitude is None:
             messages.warning(request, f"Latitude and/or longitude is missing. Cannot update location '{site.name}' in LibreNMS.")
             return redirect('plugins:netbox_librenms_plugin:site_location_sync')
 
-        librenms_api = LibreNMSAPI()
         location_data = {
             "lat": str(site.latitude),
             "lng": str(site.longitude)
         }
-        success, message = librenms_api.update_location(site.name, location_data)
+        success, message = self.librenms_api.update_location(site.name, location_data)
 
         if success:
             messages.success(request, f"Location '{site.name}' updated in LibreNMS successfully.")
