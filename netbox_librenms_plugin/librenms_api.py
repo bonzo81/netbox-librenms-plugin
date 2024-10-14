@@ -50,7 +50,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_ip}/ports",
                 headers=self.headers,
-                params={'columns': 'port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias'}
+                params={'columns': 'port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu'}
             )
             response.raise_for_status()
             data = response.json()

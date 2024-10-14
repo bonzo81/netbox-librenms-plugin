@@ -72,6 +72,10 @@ class DeviceInterfacesSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 port['exists_in_netbox'] = bool(netbox_interface)
                 port['netbox_interface'] = netbox_interface
 
+                # Add this check to ignore when description is the same as interface name
+                if port['ifAlias'] == port['ifName']:
+                    port['ifAlias'] = ''
+
             table = LibreNMSInterfaceTable(ports_data)
             table.configure(self.request)
 
@@ -118,7 +122,7 @@ class DeviceInterfacesSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
     def post(self, request, pk):
         """
-        Handle POST requests to sync interfaces from LibreNMS to NetBox.
+        Handle POST requests to fetch data from LibreNMS.
         """
         device = get_object_or_404(Device, pk=pk)
         if not device.primary_ip:
@@ -194,6 +198,9 @@ class SyncInterfacesView(View):
                 setattr(interface, netbox_key, convert_speed_to_kbps(librenms_interface[librenms_key]))
             elif librenms_key == 'ifType':
                 setattr(interface, netbox_key, netbox_type)
+            elif librenms_key == 'ifAlias':
+                if librenms_interface['ifAlias'] != librenms_interface['ifName']:
+                    setattr(interface, netbox_key, librenms_interface[librenms_key])
             else:
                 setattr(interface, netbox_key, librenms_interface[librenms_key])
         interface.enabled = librenms_interface['ifAdminStatus'].lower() == 'up'
