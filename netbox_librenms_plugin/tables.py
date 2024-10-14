@@ -9,6 +9,7 @@ from django.utils.html import format_html
 from .models import InterfaceTypeMapping
 from django_tables2 import CheckBoxColumn
 from django.middleware.csrf import get_token
+from .utils import format_mac_address
 
 
 class LibreNMSInterfaceTable(tables.Table):
@@ -19,6 +20,8 @@ class LibreNMSInterfaceTable(tables.Table):
     ifName = tables.Column(verbose_name="Interface Name")
     ifType = tables.Column(verbose_name="Interface Type")
     ifSpeed = tables.Column(verbose_name="Speed")
+    ifPhysAddress = tables.Column(verbose_name="MAC Address")
+    ifMtu = tables.Column(verbose_name="MTU")
     enabled = BooleanColumn(verbose_name="Enabled")
     ifDescr = tables.Column(accessor="ifAlias", verbose_name="Description")
 
@@ -75,6 +78,13 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_ifDescr(self, value, record):
         return self._render_field(value, record, 'ifAlias', 'description')
+
+    def render_ifPhysAddress(self, value, record):
+        formatted_mac = format_mac_address(value)
+        return self._render_field(formatted_mac, record, 'ifPhysAddress', 'mac_address')
+    
+    def render_ifMtu(self, value, record):
+        return self._render_field(value, record, 'ifMtu', 'mtu')
 
     def _render_field(self, value, record, librenms_key, netbox_key):
         if not record.get('exists_in_netbox'):
