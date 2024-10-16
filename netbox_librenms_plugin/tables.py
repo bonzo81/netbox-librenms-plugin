@@ -1,6 +1,6 @@
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
-from netbox.tables.columns import BooleanColumn
+from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.templatetags.helpers import humanize_speed
 from utilities.paginator import EnhancedPaginator, get_paginate_count
 from .utils import convert_speed_to_kbps, LIBRENMS_TO_NETBOX_MAPPING
@@ -16,7 +16,12 @@ class LibreNMSInterfaceTable(tables.Table):
     """
     Table for displaying LibreNMS interface data.
     """
-    selection = CheckBoxColumn(accessor='ifName', orderable=False)
+    selection = ToggleColumn(
+        accessor='ifName',
+        orderable=False, 
+        visible=True,
+        attrs={'input': {'name': 'select'}}
+    )
     ifName = tables.Column(verbose_name="Interface Name")
     ifType = tables.Column(verbose_name="Interface Type")
     ifSpeed = tables.Column(verbose_name="Speed")
@@ -106,7 +111,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
     class Meta:
         attrs = {
-            'class': 'table table-hover table-headings table-striped',
+            'class': 'table table-hover object-list',
             'id': 'librenms-interface-table'
         }
         empty_text = "No data available"
