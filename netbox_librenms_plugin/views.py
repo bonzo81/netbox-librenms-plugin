@@ -156,7 +156,7 @@ class SyncInterfacesView(View):
         """
 
         device = get_object_or_404(Device, pk=device_id)
-        selected_interfaces = request.POST.getlist('selection')
+        selected_interfaces = request.POST.getlist('select')
 
         if not selected_interfaces:
             messages.error(request, "No interfaces selected for synchronization.")

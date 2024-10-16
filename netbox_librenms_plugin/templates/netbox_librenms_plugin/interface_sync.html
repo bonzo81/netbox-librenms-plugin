@@ -146,9 +146,8 @@
     <div class="row mb-3">
         <div class="col col-md-12">
             <div class="card">
-                <div class="table-responsive">
-                    {% render_table table 'inc/table.html' %}
-                    {% include 'inc/paginator.html' with paginator=table.paginator page=table.page %}
+                <div class="htmx-container table-responsive" id="object_list">
+                    {% include 'htmx/table.html' %}
                 </div>
             </div>
         </div>
@@ -180,4 +179,42 @@
 
 <!-- Add to LibreNMS Modal Placeholder-->
   <div id="modal-div"></div>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const toggleAll = document.querySelector('th input.toggle');
+        const checkboxes = document.querySelectorAll('td input[name="select"]');
+        let lastChecked = null;
+
+        // Implement "select all" functionality (similar to wy() in netbox.js)
+        if (toggleAll) {
+            toggleAll.addEventListener('change', function() {
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = toggleAll.checked;
+                });
+            });
+        }
+
+        // Implement shift-click functionality (similar to Ty() and Cf() in netbox.js)
+        checkboxes.forEach(checkbox => {
+            checkbox.addEventListener('click', function(e) {
+                if (!lastChecked) {
+                    lastChecked = checkbox;
+                    return;
+                }
+
+                if (e.shiftKey) {
+                    // This part is similar to the xy() function called within Ty() in netbox.js
+                    const start = Array.from(checkboxes).indexOf(checkbox);
+                    const end = Array.from(checkboxes).indexOf(lastChecked);
+                    Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
+                        cb.checked = lastChecked.checked;
+                    });
+                }
+
+                lastChecked = checkbox;
+            });
+        });
+    });
+</script>
+
 {% endblock %} <!-- End content -->
