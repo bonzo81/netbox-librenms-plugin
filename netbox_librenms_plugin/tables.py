@@ -31,11 +31,20 @@ class LibreNMSInterfaceTable(tables.Table):
     ifDescr = tables.Column(accessor="ifAlias", verbose_name="Description")
 
     def render_ifType(self, value, record):
-        mapping = InterfaceTypeMapping.objects.filter(librenms_type=value).first()
-
+        speed = convert_speed_to_kbps(record.get('ifSpeed', 0))
+        if speed is None:
+            mapping = InterfaceTypeMapping.objects.filter(
+                librenms_type=value,
+                librenms_speed__isnull=True
+            ).first()
+        else:
+            mapping = InterfaceTypeMapping.objects.filter(
+                librenms_type=value,
+                librenms_speed=speed
+            ).first()
         if mapping:
             display_value = mapping.netbox_type
-            icon = format_html('<i class="mdi mdi-link-variant" title="Mapped from LibreNMS type: {}"></i>', value)
+            icon = format_html('<i class="mdi mdi-link-variant" title="Mapped from LibreNMS type: {} (Speed: {})">', value, speed)
         else:
             display_value = value
             icon = format_html('<i class="mdi mdi-link-variant-off" title="No mapping to NetBox type"></i>')
@@ -137,14 +146,21 @@ class InterfaceTypeMappingTable(NetBoxTable):
     netbox_type = tables.Column(
         verbose_name='NetBox Type'
     )
+    librenms_speed = tables.Column(
+        verbose_name='LibreNMS Speed'
+    ) 
     actions = columns.ActionsColumn(
         actions=('edit', 'delete')
     )
 
     class Meta:
         model = InterfaceTypeMapping
-        fields = ('id', 'librenms_type', 'netbox_type', 'actions')
-        default_columns = ('id', 'librenms_type', 'netbox_type', 'actions')
+        fields = (
+            'id', 'librenms_type', 'netbox_type', 'librenms_speed', 'actions'
+        )
+        default_columns = (
+            'id', 'librenms_type', 'netbox_type', 'librenms_speed', 'actions'
+        )
         attrs = {
             'class': 'table table-hover table-headings table-striped'
         }
