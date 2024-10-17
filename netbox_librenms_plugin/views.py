@@ -37,7 +37,7 @@ class DeviceInterfacesSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         permission='dcim.view_device'
     )
 
-    template_name = 'netbox_librenms_plugin/interface_sync.html'
+    template_name = 'netbox_librenms_plugin/librenms_sync.html'
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

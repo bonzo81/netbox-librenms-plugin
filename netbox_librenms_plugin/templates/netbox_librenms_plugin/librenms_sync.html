@@ -62,7 +62,8 @@
             </table>
         </div>
     </div>
-</div>
+</div> <!-- End Device LibreNMS Status -->
+
 
 <!-- Action Buttons -->
 <div class="btn-list">
@@ -88,72 +89,98 @@
             
         {% endif %}
     </form>
-</div>
+</div> <!-- End Action Buttons -->
 
 <!-- Last Updated Information and Cache Countdown -->
   {% if last_fetched %}
       <span class="fs-5 mt-2 text-muted">Last data updated: {{ last_fetched|date:"Y-m-d  H:i" }}</span>
   {% endif %}
 
-<!-- Interface Sync Table -->
-  {% if table %}
-  <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' device_id=object.pk %}">
-    {% csrf_token %}
-    {% block table_actions %}
-    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
-        <div>
-            <button type="submit" class="btn btn-primary">Sync Selected Interfaces</button>
-            <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
-                <i class="mdi mdi-help-circle"></i> info
-            </a>
-        </div>
-        <div class="d-flex align-items-center">
-            {% if cache_expiry %}
-            <div id="cache-countdown" class="me-3">
-                Cache expires in: <span id="countdown-timer"></span>
-            </div>
-            <script>
-                function updateCountdown() {
-                    var now = new Date().getTime();
-                    var expiry = new Date("{{ cache_expiry|date:'c' }}").getTime();
-                    var distance = expiry - now;
+<!-- Tab Navigation -->
+<ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active" id="interfaces-tab" data-bs-toggle="tab" data-bs-target="#interfaces" type="button" role="tab" aria-controls="interfaces" aria-selected="true">Interfaces</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="cables-tab" data-bs-toggle="tab" data-bs-target="#cables" type="button" role="tab" aria-controls="cables" aria-selected="false">Cables</button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="ip-addresses-tab" data-bs-toggle="tab" data-bs-target="#ip-addresses" type="button" role="tab" aria-controls="ip-addresses" aria-selected="false">IP Addresses</button>
+    </li>
+  </ul>
+  
+  <!-- Tab Content -->
+  <div class="tab-content" id="librenmsTabContent">
+    <div class="tab-pane fade show active" id="interfaces" role="tabpanel" aria-labelledby="interfaces-tab">
+        <!-- Interface Sync Table -->
+        {% if table %}
+        <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' device_id=object.pk %}">
+            {% csrf_token %}
+            {% block table_actions %}
+            <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+                <div>
+                    <button type="submit" class="btn btn-primary">Sync Selected Interfaces</button>
+                    <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
+                        <i class="mdi mdi-help-circle"></i> info
+                    </a>
+                </div>
+                <div class="d-flex align-items-center">
+                    {% if cache_expiry %}
+                    <div id="cache-countdown" class="me-3">
+                        Cache expires in: <span id="countdown-timer"></span>
+                    </div>
+                    <script>
+                        function updateCountdown() {
+                            var now = new Date().getTime();
+                            var expiry = new Date("{{ cache_expiry|date:'c' }}").getTime();
+                            var distance = expiry - now;
 
-                    var minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-                    var seconds = Math.floor((distance % (1000 * 60)) / 1000);
+                            var minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                            var seconds = Math.floor((distance % (1000 * 60)) / 1000);
 
-                    document.getElementById("countdown-timer").innerHTML = minutes + "m " + seconds + "s ";
+                            document.getElementById("countdown-timer").innerHTML = minutes + "m " + seconds + "s ";
 
-                    if (distance < 0) {
-                        clearInterval(x);
-                        document.getElementById("countdown-timer").innerHTML = "EXPIRED";
-                    }
-                }
+                            if (distance < 0) {
+                                clearInterval(x);
+                                document.getElementById("countdown-timer").innerHTML = "EXPIRED";
+                            }
+                        }
 
-                var x = setInterval(updateCountdown, 1000);
-                updateCountdown();
-            </script>
-            {% endif %}
-            <div class="color-key me-3">
-                <span class="badge text-success text-white">Matching values</span>
-                <span class="badge text-warning text-white">Mismatched values</span>
-                <span class="badge text-danger text-white">Not present in NetBox</span>
-            </div>
-        </div>
-    </div>
-    {% endblock %} <!-- End block table_actions -->
-    
-    
-    <div class="row mb-3">
-        <div class="col col-md-12">
-            <div class="card">
-                <div class="htmx-container table-responsive" id="object_list">
-                    {% include 'htmx/table.html' %}
+                        var x = setInterval(updateCountdown, 1000);
+                        updateCountdown();
+                    </script>
+                    {% endif %}
+                    <div class="color-key me-3">
+                        <span class="badge text-success text-white">Matching values</span>
+                        <span class="badge text-warning text-white">Mismatched values</span>
+                        <span class="badge text-danger text-white">Not present in NetBox</span>
+                    </div>
                 </div>
             </div>
-        </div>
+            {% endblock %} <!-- End block table_actions -->
+            
+            
+            <div class="row mb-3">
+                <div class="col col-md-12">
+                    <div class="card">
+                        <div class="htmx-container table-responsive" id="object_list">
+                            {% include 'htmx/table.html' %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </form>
+        {% endif %} <!-- End Interface Sync Table -->
     </div>
-</form>
-{% endif %}
+    <div class="tab-pane fade" id="cables" role="tabpanel" aria-labelledby="cables-tab">
+      <!-- Future: Cable connections based on CDP/LLDP data -->
+      <p class="m-2">Cable connection data will be displayed here.</p>
+    </div> <!-- End Cable Connections Tab -->
+    <div class="tab-pane fade" id="ip-addresses" role="tabpanel" aria-labelledby="ip-addresses-tab">
+      <!-- Future: IP address data and creation -->
+      <p class="m-2">IP address data will be displayed here.</p>
+    </div> <!-- End IP Addresses Tab -->
+  </div>
 
 <!-- Interface Type Help Modal -->
 <div class="modal fade" id="interfaceTypeHelpModal" tabindex="-1" aria-labelledby="interfaceTypeHelpModalLabel" aria-hidden="true">
@@ -175,11 +202,13 @@
         </div>
       </div>
     </div>
-  </div>
+</div> <!-- End Interface Type Help Modal -->
 
 <!-- Add to LibreNMS Modal Placeholder-->
-  <div id="modal-div"></div>
-  <script>
+<div id="modal-div"></div>
+
+<!-- Interface Sync Table JavaScript -->
+<script>
     document.addEventListener('DOMContentLoaded', function() {
         const toggleAll = document.querySelector('th input.toggle');
         const checkboxes = document.querySelectorAll('td input[name="select"]');
