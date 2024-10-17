@@ -190,7 +190,12 @@ class SyncInterfacesView(View):
         )
 
         # Fetch the corresponding NetBox interface type
-        mapping = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface['ifType']).first()
+        speed = convert_speed_to_kbps(librenms_interface['ifSpeed'])
+        mapping = InterfaceTypeMapping.objects.filter(
+            librenms_type=librenms_interface['ifType'],
+            librenms_speed__lte=speed
+        ).order_by('-librenms_speed').first()
+        
         netbox_type = mapping.netbox_type if mapping else 'other'
 
         for librenms_key, netbox_key in LIBRENMS_TO_NETBOX_MAPPING.items():
