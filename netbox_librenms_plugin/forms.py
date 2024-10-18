@@ -6,9 +6,9 @@ from .models import InterfaceTypeMapping
 class InterfaceTypeMappingForm(NetBoxModelForm):
     class Meta:
         model = InterfaceTypeMapping
-        fields = ['librenms_type', 'netbox_type', 'librenms_speed']
+        fields = ['librenms_type', 'librenms_speed', 'netbox_type']
 
 class InterfaceTypeMappingFilterForm(NetBoxModelForm):
     class Meta:
         model = InterfaceTypeMapping
-        fields = ['librenms_type', 'netbox_type', 'librenms_speed']
+        fields = ['librenms_type', 'librenms_speed', 'netbox_type']
