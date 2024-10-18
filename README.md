@@ -93,7 +93,7 @@ Enable the plugin in `/opt/netbox/netbox/netbox/configuration.py`,
 
 ```python
 PLUGINS = [
-    'netbox-librenms-plugin'
+    'netbox_librenms_plugin'
 ]
 
 PLUGINS_CONFIG = {
