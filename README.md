@@ -12,11 +12,13 @@ The plugin offers the following key features:
 
 ### Interface Synchronization
 Pull interface data from LibreNMS into NetBox. The following interface attributes are synchronized:
-- Interface Name
-- Interface Description
-- Interface Status (Enabled/Disabled)
-- Interface Type (with custom mapping support)**
-- Interface Speed
+- Name
+- Description
+- Status (Enabled/Disabled)
+- Type (with custom mapping support)**
+- Speed
+- MTU
+- MAC Address
 
 ** Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox. 
 
