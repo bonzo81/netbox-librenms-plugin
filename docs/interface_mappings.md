@@ -3,7 +3,16 @@
 
 Interface type mappings control how LibreNMS interface types are translated to NetBox interface types during synchronization. 
 
-The mappings can be customized in the plugin settings menu. 
+The mappings can be customized in the plugin settings menu.
+
+A mapping of LibreNMS Type an LibreNMS Speed combine to make a unique group that map to a Netbox interface type. This means multiple mapping for the same LibreNMS Type can be created.
+
+> Note: The LibreNMS Speed is entered as Kbps
+
+Example:
+* ethernetCsmacd + 10000000 = 10GBASE-T (10GE)
+* ethernetCsmacd + 1000000 = 1000BASE-T (1GE)
+* ethernetCsmacd + 100000 = 100BASE-TX (10/100ME)
 
 
 ## How to Use Interface Mappings
@@ -19,6 +28,7 @@ The mappings can be customized in the plugin settings menu.
 
 * Click the green `+` or `Add` button either from the menu or on the Interface Mappings page
 * Enter LibreNMS interface type. *You can copy this from plugin's device interface sync page*
+* Enter Librenms interface speed as Kbps
 * Select the Netbox interface type from the dropdown
 * Click `Create` to save the mapping
 
