@@ -26,7 +26,7 @@ class LibreNMSAPI:
         try:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_ip}",
-                headers=self.headers
+                headers=self.headers,
                 timeout=10
             )
             if response.status_code == 200:
@@ -51,7 +51,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_ip}/ports",
                 headers=self.headers,
-                params={'columns': 'port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu'}
+                params={'columns': 'port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu'},
                 timeout=10
             )
             response.raise_for_status()
@@ -120,7 +120,7 @@ class LibreNMSAPI:
             response = requests.patch(
                 f"{self.librenms_url}/api/v0/devices/{hostname}",
                 headers=self.headers,
-                json=field_data
+                json=field_data,
                 timeout=10
             )
             response.raise_for_status()
@@ -145,7 +145,7 @@ class LibreNMSAPI:
         try:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/resources/locations/",
-                headers=self.headers
+                headers=self.headers,
                 timeout=10
             )
             response.raise_for_status()
@@ -177,7 +177,7 @@ class LibreNMSAPI:
             response = requests.post(
                 f"{self.librenms_url}/api/v0/locations",
                 headers=self.headers,
-                json=location_data
+                json=location_data,
                 timeout=10
             )
             response.raise_for_status()
@@ -214,7 +214,7 @@ class LibreNMSAPI:
             response = requests.patch(
                 f"{self.librenms_url}/api/v0/locations/{encoded_location_name}",
                 headers=self.headers,
-                json=location_data
+                json=location_data,
                 timeout=10
             )
             response.raise_for_status()
