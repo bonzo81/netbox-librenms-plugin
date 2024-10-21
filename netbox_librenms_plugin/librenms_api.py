@@ -27,6 +27,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_ip}",
                 headers=self.headers
+                timeout=10
             )
             if response.status_code == 200:
                 device_data = response.json()['devices'][0]
@@ -51,6 +52,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/devices/{device_ip}/ports",
                 headers=self.headers,
                 params={'columns': 'port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu'}
+                timeout=10
             )
             response.raise_for_status()
             data = response.json()
@@ -85,7 +87,8 @@ class LibreNMSAPI:
             response = requests.post(
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
-                json=data
+                json=data,
+                timeout=10
             )
             response.raise_for_status()
 
@@ -96,7 +99,7 @@ class LibreNMSAPI:
                 return False, result.get('message', 'Unknown error occurred')
         except requests.exceptions.RequestException as e:
             response_json = response.json()
-            error_message = response_json.get('message', 'Unknown error occurred')
+            error_message = response_json.get('message', f'Unknown error occurred {str(e)}')
             return False, error_message
 
     def update_device_field(self, hostname, field_data):
@@ -118,6 +121,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/devices/{hostname}",
                 headers=self.headers,
                 json=field_data
+                timeout=10
             )
             response.raise_for_status()
 
@@ -142,6 +146,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/resources/locations/",
                 headers=self.headers
+                timeout=10
             )
             response.raise_for_status()
             result = response.json()
@@ -173,6 +178,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/locations",
                 headers=self.headers,
                 json=location_data
+                timeout=10
             )
             response.raise_for_status()
 
@@ -209,6 +215,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/locations/{encoded_location_name}",
                 headers=self.headers,
                 json=location_data
+                timeout=10
             )
             response.raise_for_status()
             result = response.json()

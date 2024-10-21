@@ -1,0 +1,157 @@
+{% load helpers %}
+{% include 'inc/messages.html' %}
+
+<!-- Interface Sync Table -->
+{% if interface_sync.table %}
+
+<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' device_id=interface_sync.object.pk %}">
+{% csrf_token %}
+{% block table_actions %}
+<div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+    <div>
+        <button type="submit" class="btn btn-primary">Sync Selected Interfaces</button>
+        <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
+            <i class="mdi mdi-help-circle"></i> info
+        </a>
+    </div>
+    <div class="d-flex align-items-center">
+        {% if interface_sync.cache_expiry %}
+        <div id="cache-countdown" class="me-3">
+            Cache expires in: <span id="countdown-timer" data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
+        </div>
+        <script>
+        function initializeCountdown() {
+
+        function updateCountdown() {
+            const countdownElement = document.getElementById("countdown-timer");
+            const expiry = new Date(countdownElement.dataset.expiry).getTime();
+            const now = new Date().getTime();
+            const distance = expiry - now;
+        
+            if (distance < 0) {
+                clearInterval(countdownInterval);
+                countdownElement.innerHTML = "EXPIRED";
+                return;
+            }
+        
+            const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+            const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+            countdownElement.innerHTML = minutes + "m " + seconds + "s ";
+        }
+        
+        function startCountdown() {
+            clearInterval(countdownInterval);
+            updateCountdown();
+            countdownInterval = setInterval(updateCountdown, 1000);
+        }
+        
+        // Clear any existing interval
+        if (window.countdownInterval) {
+            clearInterval(window.countdownInterval);
+        }
+
+        // Start a new interval
+        updateCountdown();
+        window.countdownInterval = setInterval(updateCountdown, 1000);
+        }
+
+        document.addEventListener('htmx:afterSwap', function() {
+            initializeCountdown();
+        });
+
+        // Initial call
+        initializeCountdown();
+        
+        </script>
+        {% endif %}
+        <div class="color-key me-3">
+            <span class="badge text-success text-white">Matching values</span>
+            <span class="badge text-warning text-white">Mismatched values</span>
+            <span class="badge text-danger text-white">Not present in NetBox</span>
+        </div>
+    </div>
+</div>
+{% endblock %} <!-- End block table_actions -->
+
+
+<div class="row mb-3">
+    <div class="col col-md-12">
+        <div class="card">
+            <div class="htmx-container table-responsive" id="object_list">
+                {% include 'htmx/table.html' with table=interface_sync.table  %}
+            </div>
+        </div>
+    </div>
+</div>
+</form>
+
+
+
+{% endif %}
+
+<!-- Interface Type Help Modal -->
+<div class="modal fade" id="interfaceTypeHelpModal" tabindex="-1" aria-labelledby="interfaceTypeHelpModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="interfaceTypeHelpModalLabel">NetBox Interface Type Explanation</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+          <p>Interface type mappings control how LibreNMS interface types are translated to NetBox interface types during synchronization. These mappings can be customized in the plugin settings menu. The icons in the interface list indicate the mapping status for each interface type:</p>
+          <ul>
+            <li><i class="mdi mdi-link-variant"></i> - A mapping is configured for this interface type</li>
+            <li><i class="mdi mdi-link-variant-off"></i> - No mapping is currently set for this interface type</li>
+          </ul>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Interface Sync Table JavaScript -->
+<script>
+    function initializeInterfaceSync() {
+        const toggleAll = document.querySelector('th input.toggle');
+        const checkboxes = document.querySelectorAll('td input[name="select"]');
+        let lastChecked = null;
+    
+        if (toggleAll) {
+            toggleAll.addEventListener('change', function() {
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = toggleAll.checked;
+                });
+            });
+        }
+    
+        checkboxes.forEach(checkbox => {
+            checkbox.addEventListener('click', function(e) {
+                if (!lastChecked) {
+                    lastChecked = checkbox;
+                    return;
+                }
+
+                if (e.shiftKey) {
+                    // This part is similar to the xy() function called within Ty() in netbox.js
+                    const start = Array.from(checkboxes).indexOf(checkbox);
+                    const end = Array.from(checkboxes).indexOf(lastChecked);
+                    Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
+                        cb.checked = lastChecked.checked;
+                    });
+                }
+
+                lastChecked = checkbox;
+            });
+        });
+    };
+    // Initialize on page load
+    initializeInterfaceSync();
+
+    // Reinitialize after HTMX content swap
+    document.body.addEventListener('htmx:afterSwap', function(event) {
+        if (event.detail.target.id === 'interface-sync-content') {
+            initializeInterfaceSync();
+        }
+    });
+</script>
