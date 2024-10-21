@@ -1,3 +1,7 @@
+# Python imports
+from collections import namedtuple
+
+# Django imports
 from django.views import View
 from django.core.cache import cache
 from django.utils import timezone
@@ -5,16 +9,15 @@ from django.db import transaction
 from django.contrib import messages
 from django.shortcuts import render, get_object_or_404, redirect
 from django.urls import reverse
-from django.db.models import Q
-from django.core.paginator import Paginator
 from django_tables2 import SingleTableView
-from collections import namedtuple
 
+# NetBox imports
 from utilities.htmx import htmx_partial
+from utilities.views import ViewTab, register_model_view
 from dcim.models import Device, Interface, Site
 from netbox.views import generic
-from utilities.views import ViewTab, register_model_view
 
+# Plugin imports
 from .tables import LibreNMSInterfaceTable, InterfaceTypeMappingTable, SiteLocationSyncTable
 from .models import InterfaceTypeMapping
 from .forms import InterfaceTypeMappingForm, InterfaceTypeMappingFilterForm
@@ -22,52 +25,100 @@ from .filters import InterfaceTypeMappingFilterSet
 from .utils import convert_speed_to_kbps, LIBRENMS_TO_NETBOX_MAPPING
 from .librenms_api import LibreNMSAPI
 
+
 class LibreNMSAPIMixin:
-    def get_librenms_api(self):
-        return LibreNMSAPI()
-
-@register_model_view(Device, name='device_interfaces_sync', path='librenms-sync')
-class DeviceInterfacesSyncView(LibreNMSAPIMixin, generic.ObjectListView):
     """
-    Sync view for interfaces from LibreNMS to NetBox, as a tab on the device view.
-    """
-    queryset = Device.objects.none()
-    tab = ViewTab(
-        label='LibreNMS Sync',
-        permission='dcim.view_device'
-    )
+    A mixin class that provides access to the LibreNMS API.
 
-    template_name = 'netbox_librenms_plugin/interface_sync.html'
+    This mixin initializes a LibreNMSAPI instance and provides a property
+    to access it. It's designed to be used with other view classes that
+    need to interact with the LibreNMS API.
+
+    Attributes:
+        _librenms_api (LibreNMSAPI): An instance of the LibreNMSAPI class.
+
+    Properties:
+        librenms_api (LibreNMSAPI): A property that returns the LibreNMSAPI instance,
+                                    creating it if it doesn't exist.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.librenms_api = self.get_librenms_api()
+        self._librenms_api = None
 
-    def get_interface_type_mappings(self):
+    @property
+    def librenms_api(self):
         """
-        Get all interface type mappings.
-        """
-        mappings = {mapping.librenms_type: mapping.netbox_type for mapping in InterfaceTypeMapping.objects.all()}
-        return mappings
+        Get or create an instance of LibreNMSAPI.
 
-    def _prepare_context(self, device, cached_data=None, last_fetched=None):
-        """
-        Prepare the context for the template.
-        """
+        This property ensures that only one instance of LibreNMSAPI is created
+        and reused for subsequent calls.
 
+        Returns:
+            LibreNMSAPI: An instance of the LibreNMSAPI class.
+        """
+        if self._librenms_api is None:
+            self._librenms_api = LibreNMSAPI()
+        return self._librenms_api
+
+
+class InterfaceSyncView(LibreNMSAPIMixin, View):
+    """
+    View for fetching interface data from LibreNMS (post) and generateing table data (get_context_data).
+    """
+    partial_template_name = 'netbox_librenms_plugin/_interface_sync_content.html'
+
+    def post(self, request, device_id):
+        """
+        Handle POST request to fetch and cache LibreNMS interface data for a device.
+        """
+        device = get_object_or_404(Device, pk=device_id)
+
+        if not device.primary_ip:
+            messages.error(request, "This device has no primary IP set. Unable to fetch data from LibreNMS.")
+            return redirect('plugins:netbox_librenms_plugin:interface_sync', device_id=device_id)
+
+        ip_address = str(device.primary_ip.address.ip)
+
+        librenms_data = self.librenms_api.get_ports(ip_address)
+
+        if 'error' in librenms_data:
+            messages.error(request, librenms_data['error'])
+            return redirect('plugins:netbox_librenms_plugin:interface_sync', device_id=device_id)
+
+        # Store data in cache
+        cache.set(f'librenms_ports_{device.pk}', librenms_data, timeout=300)
+        last_fetched = timezone.now()
+        cache.set(f'librenms_ports_last_fetched_{device.pk}', last_fetched, timeout=300)
+
+        messages.success(request, "Data refreshed successfully.")
+
+        context = self.get_context_data(request, device)
+        context = {'interface_sync': context}
+
+        return render(request, self.partial_template_name, context)
+
+    def get_context_data(self, request, device):
+        """
+        Get the context data for the interface sync view.
+        """
         ports_data = []
         table = None
-        device_exists = False
-        librenms_device_id = None
-        librenms_device_url = None
-        
+
+        cached_data = cache.get(f'librenms_ports_{device.pk}')
+
+        last_fetched = cache.get(f'librenms_ports_last_fetched_{device.pk}')
 
         if cached_data:
             ports_data = cached_data.get('ports', [])
             netbox_interfaces = device.interfaces.all()
 
             for port in ports_data:
-                port['enabled'] = port['ifAdminStatus'].lower() == 'up' if isinstance(port['ifAdminStatus'], str) else bool(port['ifAdminStatus'])
+                port['enabled'] = (
+                    port['ifAdminStatus'].lower() == 'up'
+                    if isinstance(port['ifAdminStatus'], str)
+                    else bool(port['ifAdminStatus'])
+                )
                 netbox_interface = netbox_interfaces.filter(name=port['ifName']).first()
                 port['exists_in_netbox'] = bool(netbox_interface)
                 port['netbox_interface'] = netbox_interface
@@ -77,71 +128,138 @@ class DeviceInterfacesSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                     port['ifAlias'] = ''
 
             table = LibreNMSInterfaceTable(ports_data)
-            table.configure(self.request)
-
-        librenms_device_id = None
-        librenms_device_url = None
-        librenms_device_hardware = "-"
-        librenms_device_location = "-"
-
-        if device.primary_ip:
-            device_exists, librenms_device_data = self.librenms_api.get_device_info(str(device.primary_ip.address.ip))
-            if device_exists:
-                librenms_device_id = librenms_device_data.get('device_id')
-                librenms_device_hardware = librenms_device_data.get('hardware')
-                librenms_device_location = librenms_device_data.get('location')
-                librenms_device_url = f"{self.librenms_api.librenms_url}/device/device={librenms_device_id}/"
+            table.configure(request)
 
         cache_timeout = cache.ttl(f'librenms_ports_{device.pk}')
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_timeout)
 
         return {
-            "tab": self.tab,
             "object": device,
             "table": table,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
-            "has_primary_ip": bool(device.primary_ip),
-            'device_in_librenms': device_exists,
-            'librenms_device_id': librenms_device_id,
-            'librenms_device_url': librenms_device_url,
-            'librenms_device_hardware': librenms_device_hardware,
-            'librenms_device_location': librenms_device_location,
-            }
+        }
 
-    def get(self, request, pk):
+
+class CableSyncView(LibreNMSAPIMixin, View):
+    """
+    View for synchronizing cable information from LibreNMS.
+    """
+    template_name = 'netbox_librenms_plugin/_cable_sync.html'
+
+    def get_context_data(self, request, device):
         """
-        Handle GET requests to display the interface sync view.
+        Get context data for cable sync view.
+        """
+        context = {
+            'device': device,
+            'cable_sync_message': 'Cable sync coming soon',
+        }
+        return context
+
+
+class IPAddressSyncView(LibreNMSAPIMixin, View):
+    """
+    View for synchronizing IP address information from LibreNMS.
+    """
+    template_name = 'netbox_librenms_plugin/_ipaddress_sync.html'
+
+    def get_context_data(self, request, device):
+        """
+        Get context data for IP address sync view.
+        """
+        context = {
+            'device': device,
+            'ip_sync_message': 'IP address sync coming soon',
+        }
+        return context
+
+
+@register_model_view(Device, name='librenms_sync', path='librenms-sync')
+class DeviceLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
+    """
+    Base view for devices page with LibreNMS sync information.
+    """
+    queryset = Device.objects.none()
+
+    template_name = 'netbox_librenms_plugin/librenms_sync_base.html'
+    tab = ViewTab(
+        label='LibreNMS Sync',
+        permission='dcim.view_device'
+    )
+
+    def get(self, request, pk, context=None):
+        """
+        Handle GET request for the Device Librenms sync view.
         """
         device = get_object_or_404(Device, pk=pk)
-        cached_data = cache.get(f'librenms_ports_{device.pk}')
-        last_fetched = cache.get(f'librenms_ports_last_fetched_{device.pk}')
-
-        context = self._prepare_context(device, cached_data, last_fetched)
+        context = self.get_context_data(request, device)
         return render(request, self.template_name, context)
 
-    def post(self, request, pk):
+    def get_context_data(self, request, device):
         """
-        Handle POST requests to fetch data from LibreNMS.
+        Get the context data for the Device Librenms sync view.
         """
-        device = get_object_or_404(Device, pk=pk)
-        if not device.primary_ip:
-            messages.error(request, "This device has no primary IP set. Unable to fetch data from LibreNMS.")
-            return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
-    
-        ip_address = str(device.primary_ip.address.ip)
+        device_exists = False
+        librenms_device_info = {
+            'librenms_device_id': None,
+            'librenms_device_url': None,
+            'librenms_device_hardware': "-",
+            'librenms_device_location': "-",
+        }
 
-        librenms_data = self.librenms_api.get_ports(ip_address)
+        if device.primary_ip:
+            device_exists, librenms_device_data = self.librenms_api.get_device_info(
+                str(device.primary_ip.address.ip)
+            )
+            if device_exists:
+                librenms_device_info.update({
+                    'librenms_device_id': librenms_device_data.get('device_id'),
+                    'librenms_device_hardware': librenms_device_data.get('hardware'),
+                    'librenms_device_location': librenms_device_data.get('location'),
+                })
+                librenms_device_info['librenms_device_url'] = (
+                    f"{self.librenms_api.librenms_url}/device/device="
+                    f"{librenms_device_info['librenms_device_id']}/"
+                )
 
-        if 'error' in librenms_data:
-            messages.error(request, librenms_data['error'])
-            return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
+        # Get contexts from helper methods
+        interface_context = self.get_interface_context(request, device)
+        cable_context = self.get_cable_context(request, device)
+        ip_context = self.get_ip_context(request, device)
 
-        cache.set(f'librenms_ports_{device.pk}', librenms_data, timeout=300)
-        last_fetched = timezone.now()
-        cache.set(f'librenms_ports_last_fetched_{device.pk}', last_fetched, timeout=300)
-        context = self._prepare_context(device, librenms_data, last_fetched)
-        return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
+        context = {
+            'object': device,
+            'tab': self.tab,
+            'has_primary_ip': bool(device.primary_ip),
+            'device_in_librenms': device_exists,
+            'interface_sync': interface_context,
+            'cable_sync': cable_context,
+            'ip_sync': ip_context,
+            **librenms_device_info,
+        }
+        return context
+
+    def get_interface_context(self, request, device):
+        """
+        Get the context data for interface sync.
+        """
+        interface_sync_view = InterfaceSyncView()
+        return interface_sync_view.get_context_data(request, device)
+
+    def get_cable_context(self, request, device):
+        """
+        Get the context data for cable sync.
+        """
+        cable_sync_view = CableSyncView()
+        return cable_sync_view.get_context_data(request, device)
+
+    def get_ip_context(self, request, device):
+        """
+        Get the context data for IP address sync.
+        """
+        ipaddress_sync_view = IPAddressSyncView()
+        return ipaddress_sync_view.get_context_data(request, device)
 
 
 class SyncInterfacesView(View):
@@ -160,14 +278,14 @@ class SyncInterfacesView(View):
 
         if not selected_interfaces:
             messages.error(request, "No interfaces selected for synchronization.")
-            return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=device_id)
+            return redirect('plugins:netbox_librenms_plugin:librenms_sync', pk=device_id)
 
         # Retrieve the cached data
         cached_data = cache.get(f'librenms_ports_{device.pk}')
 
         if not cached_data:
             messages.warning(request, "No cached data found. Please refresh the data before syncing.")
-            return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=device_id)
+            return redirect('plugins:netbox_librenms_plugin:librenms_sync', pk=device_id)
 
         ports_data = cached_data.get('ports', [])
 
@@ -177,7 +295,7 @@ class SyncInterfacesView(View):
                     self.sync_interface(device, port)
 
         messages.success(request, "Selected interfaces synced successfully.")
-        return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=device_id)
+        return redirect('plugins:netbox_librenms_plugin:librenms_sync', pk=device_id)
 
     @staticmethod
     def sync_interface(device, librenms_interface):
@@ -204,12 +322,10 @@ class SyncInterfacesView(View):
 
         netbox_type = mapping.netbox_type if mapping else 'other'
 
-        
-        netbox_type = mapping.netbox_type if mapping else 'other'
-
         for librenms_key, netbox_key in LIBRENMS_TO_NETBOX_MAPPING.items():
             if librenms_key == 'ifSpeed' and not None:
-                setattr(interface, netbox_key, convert_speed_to_kbps(librenms_interface[librenms_key]))
+                speed = convert_speed_to_kbps(librenms_interface[librenms_key])
+                setattr(interface, netbox_key, speed)
             elif librenms_key == 'ifType':
                 setattr(interface, netbox_key, netbox_type)
             elif librenms_key == 'ifAlias':
@@ -226,6 +342,9 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
     Handle adding a device to LibreNMS, both displaying the form and processing the submission.
     """
     def get(self, request, pk):
+        """
+        Display the form to add a device to LibreNMS.
+        """
         device = get_object_or_404(Device, pk=pk)
         if htmx_partial(request):
             return render(request, 'netbox_librenms_plugin/htmx/add_device_form.html', {
@@ -243,15 +362,15 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
         community = request.POST.get('community')
         version = request.POST.get('version')
 
-        librenms_api = self.get_librenms_api()
+        librenms_api = self.librenms_api
         result, message = librenms_api.add_device(hostname, community, version)
 
         if result:
-            messages.success(request, 'Device added successfully to LibreNMS')
+            messages.success(request, 'Device added successfully to LibreNMS. Allow time for discovery & polling')
         else:
             messages.error(request, f'Error adding device to LibreNMS: {message}')
 
-        return redirect(reverse('plugins:netbox_librenms_plugin:device_interfaces_sync', kwargs={'pk': device.pk}))
+        return redirect(reverse('plugins:netbox_librenms_plugin:librenms_sync', kwargs={'pk': device.pk}))
 
 
 class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
@@ -259,9 +378,12 @@ class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
     Update the device location in LibreNMS based on the device's site in NetBox.
     """
     def post(self, request, pk):
+        """
+        Handle the POST request to update the device location in LibreNMS.
+        """
         device = get_object_or_404(Device, pk=pk)
         if device.site:
-            librenms_api = self.get_librenms_api()
+            librenms_api = self.librenms_api
             field_data = {
                 "field": ["location", "override_sysLocation"],
                 "data": [device.site.name, "1"]
@@ -275,7 +397,7 @@ class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
         else:
             messages.warning(request, "Device has no associated site in NetBox")
 
-        return redirect('plugins:netbox_librenms_plugin:device_interfaces_sync', pk=pk)
+        return redirect('plugins:netbox_librenms_plugin:librenms_sync', pk=pk)
 
 
 class InterfaceTypeMappingListView(generic.ObjectListView):
@@ -341,10 +463,6 @@ class SiteLocationSyncView(LibreNMSAPIMixin, SingleTableView):
     template_name = 'netbox_librenms_plugin/site_location_sync.html'
     paginate_by = 25
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.librenms_api = self.get_librenms_api()
-
     def get_queryset(self):
         """
         Returns the queryset of Netbox sites to be checked with LibreNMS.
@@ -358,7 +476,10 @@ class SiteLocationSyncView(LibreNMSAPIMixin, SingleTableView):
 
         if success and isinstance(librenms_locations, list):
             for site in netbox_sites:
-                matched_location = next((loc for loc in librenms_locations if loc['location'].lower() == site.name.lower()), None)
+                matched_location = next(
+                    (loc for loc in librenms_locations if loc['location'].lower() == site.name.lower()),
+                    None
+                )
                 if matched_location:
                     lat_match = lng_match = False
                     if site.latitude is not None and site.longitude is not None:
@@ -384,7 +505,7 @@ class SiteLocationSyncView(LibreNMSAPIMixin, SingleTableView):
 
         return sync_data
 
-    def post(self, request, *args, **kwargs):
+    def post(self, request):
         """
         Handles the POST request for synchronizing Netbox site with LibreNMS locations.
         """
@@ -424,7 +545,8 @@ class SiteLocationSyncView(LibreNMSAPIMixin, SingleTableView):
         Updates an existing location in LibreNMS based on the site's coordinates.
         """
         if site.latitude is None or site.longitude is None:
-            messages.warning(request, f"Latitude and/or longitude is missing. Cannot update location '{site.name}' in LibreNMS.")
+            messages.warning(request, f"Latitude and/or longitude is missing. "
+                             f"Cannot update location '{site.name}' in LibreNMS.")
             return redirect('plugins:netbox_librenms_plugin:site_location_sync')
 
         location_data = {
