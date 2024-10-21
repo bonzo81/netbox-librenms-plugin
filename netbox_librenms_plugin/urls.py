@@ -6,8 +6,18 @@ from . import views
 urlpatterns = [
     path(
         'device/<int:pk>/librenms-sync/',
-        views.DeviceInterfacesSyncView.as_view(),
-        name='device_interfaces_sync'
+        views.DeviceLibreNMSSyncView.as_view(),
+        name='librenms_sync'
+    ),
+    path(
+        'interface-sync/<int:device_id>/',
+        views.InterfaceSyncView.as_view(),
+        name='interface_sync'
+    ),
+    path(
+        'device/<int:device_id>/sync/selected/',
+        views.SyncInterfacesView.as_view(),
+        name='sync_selected_interfaces'
     ),
     path(
         'device/<int:device_id>/sync/selected/',
