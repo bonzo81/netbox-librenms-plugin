@@ -1,0 +1,40 @@
+{% load helpers %}
+{% load static %}
+
+
+<!-- Action Buttons -->
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>Interface Sync</h2>
+    <div class="btn-list">
+        <form method="post">
+            {% csrf_token %}
+            {% if has_primary_ip %}
+                {% if device_in_librenms %}
+                    <button hx-post="{% url 'plugins:netbox_librenms_plugin:interface_sync' device_id=object.pk %}"
+                    hx-target="#interface-sync-content"
+                    class="btn btn-outline-primary">
+                    Refresh Interfaces
+                    </button>
+                {% else %}
+                    <button hx-get="{% url 'plugins:netbox_librenms_plugin:add_device_modal' pk=object.pk %}"
+                            hx-target="#modal-div"
+                            class="btn btn-primary">
+                        Add to LibreNMS
+                    </button>
+                {% endif %}
+            {% else %}
+                <span class="text-muted d-block">A primary IP is required</span>
+                {% if device_in_librenms %}
+                    <button type="submit" class="btn btn-secondary" disabled>Refresh Interfaces</button>
+                {% else %}
+                    <button class="btn btn-secondary" disabled>Add to LibreNMS</button>
+                {% endif %}
+            {% endif %}
+        </form>
+    </div>
+</div> <!-- End Action Buttons -->
+
+<!-- Container for the interface sync content -->
+<div id="interface-sync-content">
+    {% include 'netbox_librenms_plugin/_interface_sync_content.html' %}
+</div>

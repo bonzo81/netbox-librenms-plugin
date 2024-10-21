@@ -1,0 +1,128 @@
+{% extends 'generic/object.html' %}
+{% load buttons %}
+{% load helpers %}
+{% load plugins %}
+{% load static %}
+{% load i18n %}
+{% load render_table from django_tables2 %}
+
+{% block breadcrumbs %}
+  {{ block.super }}
+  <li class="breadcrumb-item">
+    <a href="{% url 'dcim:site' pk=object.site.pk %}">{{ object.site }}</a>
+  </li>
+{% endblock %}
+
+{% block content %}
+
+<!-- Device Status and LibreNMS Information -->
+<div class="d-flex justify-content-between align-items-center mb-1">
+    <div class="card">
+        <h5 class="card-header">Device Status</h5>
+        <div class="card-body">
+            <table class="table table-hover attr-table">
+                <tbody>
+                    <tr>
+                        <th scope="row">Status</th>
+                        <td>
+                            <span class="{% if device_in_librenms %}text-success{% else %}text-danger{% endif %}">
+                                {% if device_in_librenms %}
+                                    <a href="{{ librenms_device_url }}" target="_blank">Found in LibreNMS</a>
+                                {% else %}
+                                    Not found in LibreNMS
+                                {% endif %}
+                            </span>
+                        </td>
+                    </tr>
+                    {% if device_in_librenms %}
+                    <tr>
+                        <th scope="row">LibreNMS ID</th>
+                        <td>{{ librenms_device_id }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Device Type</th>
+                        <td>{{ librenms_device_hardware }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Location</th>
+                        <td>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span>{{ librenms_device_location }}</span>
+                                <form method="post" action="{% url 'plugins:netbox_librenms_plugin:update_device_location' pk=object.pk %}">
+                                    {% csrf_token %}
+                                    {% if librenms_device_location != object.site.name %}
+                                        <button type="submit" class="btn btn-primary" title="Sync location with NetBox">
+                                            <i class="mdi mdi-sync"></i>
+                                        </button>
+                                    {% else %}
+                                        <span class="text-success" title="LibreNMS location matches NetBox site">
+                                            <i class="ms-1 mdi mdi-check-circle"></i>
+                                        </span>
+                                    {% endif %}
+                                </form>
+                            </div>
+                        </td>
+                        
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div> <!-- End Device LibreNMS Status -->
+
+<!-- Last Updated Information and Cache Countdown -->
+{% if last_fetched %}
+    <span class="fs-5 mt-2 text-muted">Last data updated: {{ last_fetched|date:"Y-m-d  H:i" }}</span>
+{% endif %}
+
+<!-- Tab Navigation -->
+{% if device_in_librenms %}
+<ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
+    <!-- Interface Tab -->
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="interfaces-tab" data-bs-toggle="tab" data-bs-target="#interfaces" type="button" role="tab" aria-controls="interfaces" aria-selected="true">
+            Interfaces
+        </button>
+    </li>
+    <!-- Cables Tab -->
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="cables-tab" data-bs-toggle="tab" data-bs-target="#cables" type="button" role="tab" aria-controls="cables" aria-selected="false">
+            Cables
+        </button>
+    </li>
+    <!-- IP Addresses Tab -->
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="ipaddresses-tab" data-bs-toggle="tab" data-bs-target="#ipaddresses" type="button" role="tab" aria-controls="ipaddresses" aria-selected="false">
+            IP Addresses
+        </button>
+    </li>
+</ul><!-- End Tab Navigation -->
+{% endif %}
+
+<!-- Tab Content -->
+<div class="tab-content mt-3" id="librenmsTabContent">
+
+    <!-- Interface Sync Tab Pane -->
+    <div class="tab-pane fade show active" id="interfaces" role="tabpanel" aria-labelledby="interfaces-tab">
+        {% include 'netbox_librenms_plugin/_interface_sync.html' %}
+    </div>
+
+    <!-- Cable Connections Tab Pane -->
+    <div class="tab-pane fade" id="cables" role="tabpanel" aria-labelledby="cables-tab">
+        {% include 'netbox_librenms_plugin/_cable_sync.html' %}
+    </div>
+
+    <!-- IP Address Tab Pane -->
+    <div class="tab-pane fade" id="ipaddresses" role="tabpanel" aria-labelledby="ipaddresses-tab">
+        {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
+    </div>
+
+</div> <!-- End Tab Content -->
+
+
+<!-- Add to LibreNMS Modal Placeholder-->
+<div id="modal-div"></div>
+
+
+{% endblock %} <!-- End content -->
