@@ -4,90 +4,80 @@
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
 
-<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' device_id=interface_sync.object.pk %}">
-{% csrf_token %}
-{% block table_actions %}
-<div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
-    <div>
-        <button type="submit" class="btn btn-primary">Sync Selected Interfaces</button>
-        <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
-            <i class="mdi mdi-help-circle"></i> info
-        </a>
-    </div>
-    <div class="d-flex align-items-center">
-        {% if interface_sync.cache_expiry %}
-        <div id="cache-countdown" class="me-3">
-            Cache expires in: <span id="countdown-timer" data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
+    {% with model_name=interface_sync.object|meta:"model_name" %}
+    <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}">
+    {% endwith %}
+    {% csrf_token %}
+    {% block table_actions %}
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+        <div>
+            <button type="submit" class="btn btn-primary">Sync Selected Interfaces</button>
+            {% if object|meta:"model_name" == 'device' %}
+                <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
+                    <i class="mdi mdi-help-circle"></i> info
+                </a>
+            {% endif %}
         </div>
-        <script>
-        function initializeCountdown() {
 
-        function updateCountdown() {
-            const countdownElement = document.getElementById("countdown-timer");
-            const expiry = new Date(countdownElement.dataset.expiry).getTime();
-            const now = new Date().getTime();
-            const distance = expiry - now;
-        
-            if (distance < 0) {
-                clearInterval(countdownInterval);
-                countdownElement.innerHTML = "EXPIRED";
-                return;
-            }
-        
-            const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-            const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-            countdownElement.innerHTML = minutes + "m " + seconds + "s ";
-        }
-        
-        function startCountdown() {
-            clearInterval(countdownInterval);
-            updateCountdown();
-            countdownInterval = setInterval(updateCountdown, 1000);
-        }
-        
-        // Clear any existing interval
-        if (window.countdownInterval) {
-            clearInterval(window.countdownInterval);
-        }
-
-        // Start a new interval
-        updateCountdown();
-        window.countdownInterval = setInterval(updateCountdown, 1000);
-        }
-
-        document.addEventListener('htmx:afterSwap', function() {
-            initializeCountdown();
-        });
-
-        // Initial call
-        initializeCountdown();
-        
-        </script>
-        {% endif %}
-        <div class="color-key me-3">
-            <span class="badge text-success text-white">Matching values</span>
-            <span class="badge text-warning text-white">Mismatched values</span>
-            <span class="badge text-danger text-white">Not present in NetBox</span>
-        </div>
-    </div>
-</div>
-{% endblock %} <!-- End block table_actions -->
-
-
-<div class="row mb-3">
-    <div class="col col-md-12">
-        <div class="card">
-            <div class="htmx-container table-responsive" id="object_list">
-                {% include 'htmx/table.html' with table=interface_sync.table  %}
+        <div class="d-flex align-items-center">
+            {% if interface_sync.cache_expiry %}
+            <div id="cache-countdown" class="me-3">
+                Cache expires in: <span id="countdown-timer" data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
+            </div>
+            <script>
+                function initializeCountdown() {
+                    function updateCountdown() {
+                        const countdownElement = document.getElementById("countdown-timer");
+                        const expiry = new Date(countdownElement.dataset.expiry).getTime();
+                        const now = new Date().getTime();
+                        const distance = expiry - now;
+                    
+                        if (distance < 0) {
+                            clearInterval(countdownInterval);
+                            countdownElement.innerHTML = "EXPIRED";
+                            return;
+                        }
+                    
+                        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+                        countdownElement.innerHTML = minutes + "m " + seconds + "s ";
+                    }
+                
+                    // Clear any existing interval
+                    if (window.countdownInterval) {
+                        clearInterval(window.countdownInterval);
+                    }
+                
+                    // Start a new interval
+                    updateCountdown();
+                    window.countdownInterval = setInterval(updateCountdown, 1000);
+                }
+                
+                // Initial call
+                initializeCountdown();
+            </script>
+            {% endif %}
+            <div class="color-key me-3">
+                <span class="badge text-success text-white">Matching values</span>
+                <span class="badge text-warning text-white">Mismatched values</span>
+                <span class="badge text-danger text-white">Not present in NetBox</span>
             </div>
         </div>
     </div>
-</div>
-</form>
+    {% endblock %} <!-- End block table_actions -->
 
 
-
-{% endif %}
+    <div class="row mb-3">
+        <div class="col col-md-12">
+            <div class="card">
+                {% include 'inc/paginator.html' with paginator=interface_sync.table.paginator page=interface_sync.table.page %}
+                {% include 'inc/table.html' with table=interface_sync.table %}
+                {% include 'inc/paginator.html' with paginator=interface_sync.table.paginator page=interface_sync.table.page %}
+            </div>
+        </div>
+    </div>
+    </form>
+{% endif %} <!-- End if interface_sync.table -->
 
 <!-- Interface Type Help Modal -->
 <div class="modal fade" id="interfaceTypeHelpModal" tabindex="-1" aria-labelledby="interfaceTypeHelpModalLabel" aria-hidden="true">
@@ -110,48 +100,41 @@
     </div>
   </div>
 </div>
-<!-- Interface Sync Table JavaScript -->
 <script>
-    function initializeInterfaceSync() {
-        const toggleAll = document.querySelector('th input.toggle');
-        const checkboxes = document.querySelectorAll('td input[name="select"]');
-        let lastChecked = null;
-    
-        if (toggleAll) {
-            toggleAll.addEventListener('change', function() {
-                checkboxes.forEach(checkbox => {
-                    checkbox.checked = toggleAll.checked;
-                });
-            });
-        }
-    
-        checkboxes.forEach(checkbox => {
-            checkbox.addEventListener('click', function(e) {
-                if (!lastChecked) {
-                    lastChecked = checkbox;
-                    return;
-                }
+<!-- Interface Sync Table JavaScript -->
+function initializeInterfaceSync() {
+    const toggleAll = document.querySelector('th input.toggle');
+    const checkboxes = document.querySelectorAll('td input[name="select"]');
+    let lastChecked = null;
 
-                if (e.shiftKey) {
-                    // This part is similar to the xy() function called within Ty() in netbox.js
-                    const start = Array.from(checkboxes).indexOf(checkbox);
-                    const end = Array.from(checkboxes).indexOf(lastChecked);
-                    Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
-                        cb.checked = lastChecked.checked;
-                    });
-                }
-
-                lastChecked = checkbox;
+    if (toggleAll) {
+        toggleAll.addEventListener('change', function() {
+            checkboxes.forEach(checkbox => {
+                checkbox.checked = toggleAll.checked;
             });
         });
-    };
-    // Initialize on page load
-    initializeInterfaceSync();
+    }
 
-    // Reinitialize after HTMX content swap
-    document.body.addEventListener('htmx:afterSwap', function(event) {
-        if (event.detail.target.id === 'interface-sync-content') {
-            initializeInterfaceSync();
-        }
+    checkboxes.forEach(checkbox => {
+        checkbox.addEventListener('click', function(e) {
+            if (!lastChecked) {
+                lastChecked = checkbox;
+                return;
+            }
+
+            if (e.shiftKey) {
+                const start = Array.from(checkboxes).indexOf(checkbox);
+                const end = Array.from(checkboxes).indexOf(lastChecked);
+                Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
+                    cb.checked = lastChecked.checked;
+                });
+            }
+
+            lastChecked = checkbox;
+        });
     });
+}
+
+// Initialize on page load
+initializeInterfaceSync();
 </script>

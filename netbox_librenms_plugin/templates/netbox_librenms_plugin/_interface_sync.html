@@ -1,7 +1,6 @@
 {% load helpers %}
 {% load static %}
 
-
 <!-- Action Buttons -->
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h2>Interface Sync</h2>
@@ -9,25 +8,22 @@
         <form method="post">
             {% csrf_token %}
             {% if has_primary_ip %}
-                {% if device_in_librenms %}
-                    <button hx-post="{% url 'plugins:netbox_librenms_plugin:interface_sync' device_id=object.pk %}"
-                    hx-target="#interface-sync-content"
-                    class="btn btn-outline-primary">
-                    Refresh Interfaces
-                    </button>
-                {% else %}
-                    <button hx-get="{% url 'plugins:netbox_librenms_plugin:add_device_modal' pk=object.pk %}"
-                            hx-target="#modal-div"
-                            class="btn btn-primary">
-                        Add to LibreNMS
-                    </button>
-                {% endif %}
-            {% else %}
-                <span class="text-muted d-block">A primary IP is required</span>
-                {% if device_in_librenms %}
-                    <button type="submit" class="btn btn-secondary" disabled>Refresh Interfaces</button>
-                {% else %}
-                    <button class="btn btn-secondary" disabled>Add to LibreNMS</button>
+                {% if object_in_librenms %}
+                    {% with model_name=object|meta:"model_name" %}
+                        {% if model_name == "device" %}
+                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk %}"
+                                    hx-target="#interface-sync-content"
+                                    class="btn btn-outline-primary">
+                                Refresh Interfaces
+                            </button>
+                        {% elif model_name == "virtualmachine" %}
+                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:vm_interface_sync' pk=object.pk %}"
+                                    hx-target="#interface-sync-content"
+                                    class="btn btn-outline-primary">
+                                Refresh Interfaces
+                            </button>
+                        {% endif %}
+                    {% endwith %}
                 {% endif %}
             {% endif %}
         </form>
