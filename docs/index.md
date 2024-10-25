@@ -9,17 +9,21 @@ This is in early development.
 The plugin offers the following key features:
 
 ### Interface Synchronization
-Pull interface data from LibreNMS into NetBox. The following interface attributes are synchronized:
-
+Pull interface data fro Devices and Virtual Machines from LibreNMS into NetBox. The following interface attributes are synchronized:
 - Name
 - Description
 - Status (Enabled/Disabled)
-- Type (with [custom mapping support](interface_mappings))**
-- Speed
-- MTU
+- Type (with custom mapping support)
+- Speed 
+- MTU 
 - MAC Address
 
-** Set [custom mapping](interface_mappings) for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox. 
+> Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox.
+> Speed and Type are Device only
+
+### Add device to LibreNMS from Netbox
+
+- Add device to LibreNMS from Netbox device page. Only SNMP v2c available.
 
 ### Site & Location Synchronization
 The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
