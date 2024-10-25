@@ -1,92 +1,135 @@
-from django.urls import path, include
-from .models import InterfaceTypeMapping
-from . import views
+from django.urls import include, path
 
+from .models import InterfaceTypeMapping
+from .views import (
+    AddDeviceToLibreNMSView,
+    DeviceCableTableView,
+    DeviceInterfaceTableView,
+    DeviceIPAddressTableView,
+    DeviceLibreNMSSyncView,
+    InterfaceTypeMappingBulkDeleteView,
+    InterfaceTypeMappingChangeLogView,
+    InterfaceTypeMappingCreateView,
+    InterfaceTypeMappingDeleteView,
+    InterfaceTypeMappingEditView,
+    InterfaceTypeMappingListView,
+    InterfaceTypeMappingView,
+    SyncInterfacesView,
+    SyncSiteLocationView,
+    UpdateDeviceLocationView,
+    VMInterfaceTableView,
+    VMIPAddressTableView,
+    VMLibreNMSSyncView,
+)
 
 urlpatterns = [
+    # Device sync URLs
     path(
-        'device/<int:pk>/librenms-sync/',
-        views.DeviceLibreNMSSyncView.as_view(),
-        name='librenms_sync'
+        "device/<int:pk>/librenms-sync/",
+        DeviceLibreNMSSyncView.as_view(),
+        name="device_librenms_sync",
     ),
     path(
-        'interface-sync/<int:device_id>/',
-        views.InterfaceSyncView.as_view(),
-        name='interface_sync'
+        "devices/<int:pk>/interface-sync/",
+        DeviceInterfaceTableView.as_view(),
+        name="device_interface_sync",
     ),
     path(
-        'device/<int:device_id>/sync/selected/',
-        views.SyncInterfacesView.as_view(),
-        name='sync_selected_interfaces'
+        "devices/<int:pk>/cable-sync/",
+        DeviceCableTableView.as_view(),
+        name="device_cable_sync",
     ),
     path(
-        'device/<int:device_id>/sync/selected/',
-        views.SyncInterfacesView.as_view(),
-        name='sync_selected_interfaces'
+        "devices/<int:pk>/ipaddress-sync/",
+        DeviceIPAddressTableView.as_view(),
+        name="device_ipaddress_sync",
+    ),
+    # Virtual machine sync URLs
+    path(
+        "virtual-machines/<int:pk>/interface-sync/",
+        VMInterfaceTableView.as_view(),
+        name="vm_interface_sync",
     ),
     path(
-        'interface-type-mappings/',
-        views.InterfaceTypeMappingListView.as_view(),
-        name='interfacetypemapping_list'
+        "virtual-machines/<int:pk>/ipaddress-sync/",
+        VMIPAddressTableView.as_view(),
+        name="vm_ipaddress_sync",
     ),
     path(
-        'interface-type-mappings/<int:pk>/',
-        views.InterfaceTypeMappingView.as_view(),
-        name='interfacetypemapping_detail'
+        "virtual-machines/<int:pk>/librenms-sync/",
+        VMLibreNMSSyncView.as_view(),
+        name="vm_librenms_sync",
+    ),
+    # Sync interfaces URLs
+    path(
+        "<str:object_type>/<int:object_id>/sync-interfaces/",
+        SyncInterfacesView.as_view(),
+        name="sync_selected_interfaces",
+    ),
+    # Add Device to LibreNMS URLs
+    path(
+        "<str:object_type>/<int:object_id>/add-device-to-librenms/",
+        AddDeviceToLibreNMSView.as_view(),
+        name="add_device_to_librenms",
+    ),
+    # Site > location sync URLs
+    path(
+        "site-location-comparison/",
+        SyncSiteLocationView.as_view(),
+        name="site_location_sync",
     ),
     path(
-        'interface-type-mappings/add/',
-        views.InterfaceTypeMappingCreateView.as_view(),
-        name='interfacetypemapping_add'
+        "create-librenms-location/<int:pk>/",
+        SyncSiteLocationView.as_view(),
+        name="create_librenms_location",
     ),
     path(
-        'interface-type-mappings/<int:pk>/delete/',
-        views.InterfaceTypeMappingDeleteView.as_view(),
-        name='interfacetypemapping_delete'
+        "update-librenms-location/<int:pk>/",
+        SyncSiteLocationView.as_view(),
+        name="update_librenms_location",
+    ),
+    # Update device location URLs
+    path(
+        "devices/<int:pk>/update-location/",
+        UpdateDeviceLocationView.as_view(),
+        name="update_device_location",
+    ),
+    # Interface type mapping URLs
+    path(
+        "interface-type-mappings/",
+        InterfaceTypeMappingListView.as_view(),
+        name="interfacetypemapping_list",
     ),
     path(
-        'interface-type-mappings/<int:pk>/edit/',
-        views.InterfaceTypeMappingEditView.as_view(),
-        name='interfacetypemapping_edit'
+        "interface-type-mappings/<int:pk>/",
+        InterfaceTypeMappingView.as_view(),
+        name="interfacetypemapping_detail",
     ),
     path(
-        'interface-type-mappings/<int:pk>/changelog/',
-        views.InterfaceTypeMappingChangeLogView.as_view(),
-        name='interfacetypemapping_changelog',
-        kwargs={'model': InterfaceTypeMapping}
+        "interface-type-mappings/add/",
+        InterfaceTypeMappingCreateView.as_view(),
+        name="interfacetypemapping_add",
     ),
     path(
-        'add-device-to-librenms/<int:pk>/',
-        views.AddDeviceToLibreNMSView.as_view(),
-        name='add_device_to_librenms'
+        "interface-type-mappings/<int:pk>/delete/",
+        InterfaceTypeMappingDeleteView.as_view(),
+        name="interfacetypemapping_delete",
     ),
     path(
-        'devices/<int:pk>/update-location/',
-        views.UpdateDeviceLocationView.as_view(),
-        name='update_device_location'
+        "interface-type-mappings/<int:pk>/edit/",
+        InterfaceTypeMappingEditView.as_view(),
+        name="interfacetypemapping_edit",
     ),
     path(
-        'add-device-modal/<int:pk>/',
-        views.AddDeviceToLibreNMSView.as_view(),
-        name='add_device_modal'
+        "interface-type-mappings/<int:pk>/changelog/",
+        InterfaceTypeMappingChangeLogView.as_view(),
+        name="interfacetypemapping_changelog",
+        kwargs={"model": InterfaceTypeMapping},
     ),
     path(
-        'site-location-comparison/',
-        views.SiteLocationSyncView.as_view(),
-        name='site_location_sync'
+        "interface-type-mappings/delete/",
+        InterfaceTypeMappingBulkDeleteView.as_view(),
+        name="interfacetypemapping_bulk_delete",
     ),
-    path(
-        'create-librenms-location/<int:pk>/',
-        views.SiteLocationSyncView.as_view(),
-        name='create_librenms_location'
-    ),
-    path(
-        'update-librenms-location/<int:pk>/',
-        views.SiteLocationSyncView.as_view(),
-        name='update_librenms_location'
-    ),
-    path(
-        'api/',
-        include('netbox_librenms_plugin.api.urls')
-    ),
+    path("api/", include("netbox_librenms_plugin.api.urls")),
 ]
