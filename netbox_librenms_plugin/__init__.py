@@ -1,5 +1,4 @@
 from netbox.plugins import PluginConfig
-from netbox.plugins import get_plugin_config
 
 
 class LibreNMSSyncConfig(PluginConfig):
@@ -9,9 +8,7 @@ class LibreNMSSyncConfig(PluginConfig):
     version = "0.2.5"
     base_url = "librenms_plugin"
     required_settings = []
-    default_settings = {
-        'enable_caching': True
-    }
+    default_settings = {"enable_caching": True}
 
 
 config = LibreNMSSyncConfig
