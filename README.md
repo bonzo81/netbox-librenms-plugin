@@ -56,11 +56,11 @@ Or just share your ideas for the plugin over in [discussions](https://github.com
 
 | NetBox Version | Plugin Version |
 |----------------|----------------|
-|     4.0        |      0.2.x     |
+|     4.1        |      0.2.x     |
 
 ## Installing
 
-Netbox 4.0+ is required.
+Netbox 4.1+ is required.
 
 ### Standard Installation
 
