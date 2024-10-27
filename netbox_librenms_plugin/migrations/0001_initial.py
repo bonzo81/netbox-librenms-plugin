@@ -7,16 +7,20 @@ class Migration(migrations.Migration):
 
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='InterfaceTypeMapping',
+            name="InterfaceTypeMapping",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False)),
-                ('librenms_type', models.CharField(max_length=100, unique=True)),
-                ('netbox_type', models.CharField(default='other', max_length=50)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False
+                    ),
+                ),
+                ("librenms_type", models.CharField(max_length=100, unique=True)),
+                ("netbox_type", models.CharField(default="other", max_length=50)),
             ],
         ),
     ]

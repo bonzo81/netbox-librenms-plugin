@@ -30,6 +30,6 @@ def format_mac_address(mac_address):
         return "Invalid MAC Address"  # Return a message if the address is not valid
 
     formatted_mac = ":".join(
-        mac_address[i : i + 2] for i in range(0, len(mac_address), 2)
+        mac_address[i: i + 2] for i in range(0, len(mac_address), 2)
     )
     return formatted_mac.upper()

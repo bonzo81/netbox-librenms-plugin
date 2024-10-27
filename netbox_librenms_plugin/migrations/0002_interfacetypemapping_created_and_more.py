@@ -8,29 +8,33 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('extras', '0121_customfield_related_object_filter'),
-        ('netbox_librenms_plugin', '0001_initial'),
+        ("extras", "0121_customfield_related_object_filter"),
+        ("netbox_librenms_plugin", "0001_initial"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='interfacetypemapping',
-            name='created',
+            model_name="interfacetypemapping",
+            name="created",
             field=models.DateTimeField(auto_now_add=True, null=True),
         ),
         migrations.AddField(
-            model_name='interfacetypemapping',
-            name='custom_field_data',
-            field=models.JSONField(blank=True, default=dict, encoder=utilities.json.CustomFieldJSONEncoder),
+            model_name="interfacetypemapping",
+            name="custom_field_data",
+            field=models.JSONField(
+                blank=True, default=dict, encoder=utilities.json.CustomFieldJSONEncoder
+            ),
         ),
         migrations.AddField(
-            model_name='interfacetypemapping',
-            name='last_updated',
+            model_name="interfacetypemapping",
+            name="last_updated",
             field=models.DateTimeField(auto_now=True, null=True),
         ),
         migrations.AddField(
-            model_name='interfacetypemapping',
-            name='tags',
-            field=taggit.managers.TaggableManager(through='extras.TaggedItem', to='extras.Tag'),
+            model_name="interfacetypemapping",
+            name="tags",
+            field=taggit.managers.TaggableManager(
+                through="extras.TaggedItem", to="extras.Tag"
+            ),
         ),
     ]

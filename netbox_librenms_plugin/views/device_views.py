@@ -2,26 +2,20 @@ from dcim.models import Device
 from django.shortcuts import redirect
 from utilities.views import ViewTab, register_model_view
 
-from .base_views import (
-    BaseCableSyncTableView,
-    BaseInterfaceSyncTableView,
-    BaseIPAddressSyncTableView,
-    BaseLibreNMSSyncView,
-)
+from .base_views import (BaseCableSyncTableView, BaseInterfaceSyncTableView,
+                         BaseIPAddressSyncTableView, BaseLibreNMSSyncView)
 
 
-@register_model_view(Device, name='librenms_sync', path='librenms-sync')
+@register_model_view(Device, name="librenms_sync", path="librenms-sync")
 class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
     """
     View for devices page with LibreNMS sync information.
     """
+
     queryset = Device.objects.all()
     model = Device
-    tab = ViewTab(
-        label='LibreNMS Sync',
-        permission='dcim.view_device'
-    )
-    
+    tab = ViewTab(label="LibreNMS Sync", permission="dcim.view_device")
+
     def get_interface_context(self, request, obj):
         """
         Get the context data for interface sync for devices.
@@ -48,19 +42,23 @@ class DeviceInterfaceTableView(BaseInterfaceSyncTableView):
     """
     View for device interface synchronization.
     """
+
     model = Device
 
     def get_interfaces(self, obj):
         return obj.interfaces.all()
 
     def get_redirect_url(self, obj):
-        return redirect('plugins:netbox_librenms_plugin:device_interface_sync', pk=obj.pk)
+        return redirect(
+            "plugins:netbox_librenms_plugin:device_interface_sync", pk=obj.pk
+        )
 
 
 class DeviceCableTableView(BaseCableSyncTableView):
     """
     View for device cable synchronization.
     """
+
     model = Device
     # Device-specific implementations
 
@@ -69,5 +67,6 @@ class DeviceIPAddressTableView(BaseIPAddressSyncTableView):
     """
     View for device IP address synchronization.
     """
+
     model = Device
     # Device-specific implementations

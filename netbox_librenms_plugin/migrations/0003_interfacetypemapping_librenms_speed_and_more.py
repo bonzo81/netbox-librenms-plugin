@@ -6,22 +6,22 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('netbox_librenms_plugin', '0002_interfacetypemapping_created_and_more'),
+        ("netbox_librenms_plugin", "0002_interfacetypemapping_created_and_more"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='interfacetypemapping',
-            name='librenms_speed',
+            model_name="interfacetypemapping",
+            name="librenms_speed",
             field=models.BigIntegerField(blank=True, null=True),
         ),
         migrations.AlterField(
-            model_name='interfacetypemapping',
-            name='librenms_type',
+            model_name="interfacetypemapping",
+            name="librenms_type",
             field=models.CharField(max_length=100),
         ),
         migrations.AlterUniqueTogether(
-            name='interfacetypemapping',
-            unique_together={('librenms_type', 'librenms_speed')},
+            name="interfacetypemapping",
+            unique_together={("librenms_type", "librenms_speed")},
         ),
     ]
