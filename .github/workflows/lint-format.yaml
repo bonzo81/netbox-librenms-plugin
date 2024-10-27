@@ -28,8 +28,6 @@ jobs:
 
     - name: Run flake8 for linting
       run: flake8 .
-      continue-on-error: false
 
     - name: Run black for formatting
       run: black --check .
-      continue-on-error: false
