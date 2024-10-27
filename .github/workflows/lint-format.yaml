@@ -1,0 +1,35 @@
+name: Lint and Format
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+
+jobs:
+  lint-and-format:
+    name: Lint and Format
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5.1.0
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        pip install flake8 black
+
+    - name: Run flake8 for linting
+      run: flake8 .
+      continue-on-error: false
+
+    - name: Run black for formatting
+      run: black --check .
+      continue-on-error: false
