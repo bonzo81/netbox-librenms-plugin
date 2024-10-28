@@ -8,10 +8,7 @@ class LibreNMSSyncConfig(PluginConfig):
     version = "0.2.6"
     base_url = "librenms_plugin"
     required_settings = []
-    default_settings = {
-        "enable_caching": True,
-        "verify_ssl": True
-    }
+    default_settings = {"enable_caching": True, "verify_ssl": True}
 
 
 config = LibreNMSSyncConfig
