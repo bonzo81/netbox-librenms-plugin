@@ -15,6 +15,7 @@ class LibreNMSAPI:
         self.cache_timeout = get_plugin_config(
             "netbox_librenms_plugin", "cache_timeout", 300
         )
+        self.verify_ssl = get_plugin_config("netbox_librenms_plugin", "verify_ssl")
 
         if not self.librenms_url or not self.api_token:
             raise ValueError("LibrenMS URL or API token is not configured.")
@@ -31,6 +32,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/devices/{device_ip}",
                 headers=self.headers,
                 timeout=10,
+                verify=self.verify_ssl,
             )
             if response.status_code == 200:
                 device_data = response.json()["devices"][0]
@@ -51,6 +53,7 @@ class LibreNMSAPI:
                     "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu"
                 },
                 timeout=10,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
             data = response.json()
@@ -87,6 +90,7 @@ class LibreNMSAPI:
                 headers=self.headers,
                 json=data,
                 timeout=10,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
 
@@ -122,6 +126,7 @@ class LibreNMSAPI:
                 headers=self.headers,
                 json=field_data,
                 timeout=10,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
 
@@ -147,6 +152,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/resources/locations/",
                 headers=self.headers,
                 timeout=10,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
             result = response.json()
@@ -179,6 +185,7 @@ class LibreNMSAPI:
                 headers=self.headers,
                 json=location_data,
                 timeout=10,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
 
@@ -216,6 +223,7 @@ class LibreNMSAPI:
                 headers=self.headers,
                 json=location_data,
                 timeout=10,
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
             result = response.json()
