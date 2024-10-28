@@ -57,7 +57,6 @@ class CacheMixin:
         Get the cache key for the object.
         """
         model_name = obj._meta.model_name
-        print(f"cache key: {self.cache_prefix}_{model_name}_{obj.pk}")
         return f"{self.cache_prefix}_{model_name}_{obj.pk}"
 
     def get_last_fetched_key(self, obj):

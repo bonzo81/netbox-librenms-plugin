@@ -78,7 +78,6 @@ class SyncInterfacesView(CacheMixin, View):
         """
         cached_data = cache.get(self.get_cache_key(obj))
         if not cached_data:
-            print(f"No cached data found for device {obj}")
             messages.warning(
                 self.request,
                 "No cached data found. Please refresh the data before syncing.",
@@ -90,7 +89,6 @@ class SyncInterfacesView(CacheMixin, View):
         """
         Sync the selected interfaces.
         """
-        print(f"port data: {ports_data}")
         with transaction.atomic():
             for port in ports_data:
                 if port["ifName"] in selected_interfaces:
