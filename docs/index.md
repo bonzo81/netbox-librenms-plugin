@@ -107,7 +107,7 @@ PLUGINS_CONFIG = {
         'librenms_url': 'https://your-librenms-instance.com',
         'api_token': 'your_librenms_api_token',
         'cache_timeout': 300,
-        'verify_ssl': True, # Change to False if needed.
+        'verify_ssl': True, # Change to False if needed,
     }
 }
 ```
