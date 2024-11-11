@@ -1,11 +1,12 @@
 from django.shortcuts import redirect
+from django.urls import reverse
 from utilities.views import ViewTab, register_model_view
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables import LibreNMSVMInterfaceTable
 
-from .base_views import (BaseInterfaceSyncTableView,
-                         BaseIPAddressSyncTableView, BaseLibreNMSSyncView)
+from .base_views import (BaseInterfaceTableView,
+                         BaseIPAddressTableView, BaseLibreNMSSyncView)
 
 
 @register_model_view(VirtualMachine, name="librenms_sync", path="librenms-sync")
@@ -42,7 +43,7 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
         return ipaddress_sync_view.get_context_data(request, obj)
 
 
-class VMInterfaceTableView(BaseInterfaceSyncTableView):
+class VMInterfaceTableView(BaseInterfaceTableView):
     """
     View for VM interface synchronization.
     """
@@ -56,10 +57,10 @@ class VMInterfaceTableView(BaseInterfaceSyncTableView):
         return obj.interfaces.all()
 
     def get_redirect_url(self, obj):
-        return redirect("plugins:netbox_librenms_plugin:vm_interface_sync", pk=obj.pk)
+        return reverse('plugins:netbox_librenms_plugin:vm_interface_sync', kwargs={'pk': obj.pk})
 
 
-class VMIPAddressTableView(BaseIPAddressSyncTableView):
+class VMIPAddressTableView(BaseIPAddressTableView):
     """
     View for VM IP address synchronization.
     """
