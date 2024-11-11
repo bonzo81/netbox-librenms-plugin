@@ -277,3 +277,4 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+.vscode/settings.json
