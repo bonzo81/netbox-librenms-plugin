@@ -53,5 +53,5 @@ jobs:
             git commit -m "Apply code formatting and linting fixes"
 
             # Push changes
-            git push origin HEAD
+            git push origin HEAD:refs/pull/${{ github.event.pull_request.number }}/head
           }
