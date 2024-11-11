@@ -101,9 +101,7 @@ class LibreNMSInterfaceTable(tables.Table):
     def render_ifType(self, value, record):
         speed = convert_speed_to_kbps(record.get("ifSpeed", 0))
         mapping = self.get_interface_mapping(value, speed)
-        display_value, icon = self.format_interface_display(
-            value, speed, mapping
-        ) 
+        display_value, icon = self.format_interface_display(value, speed, mapping)
 
         combined_display = format_html("{} {}", display_value, icon)
 
@@ -151,7 +149,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def format_interface_data(self, port_data, device):
         """
-            Format interface data using table rendering logic
+        Format interface data using table rendering logic
         """
 
         # Add NetBox interface data
@@ -201,6 +199,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
     """
     Table for displaying Virtual Chassis interface data.
     """
+
     device_selection = tables.Column(
         verbose_name="Virtual Chassis member",
         accessor="device",
@@ -239,7 +238,9 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
 
     def format_interface_data(self, port_data, device):
         formatted_data = super().format_interface_data(port_data, device)
-        formatted_data["device_selection"] = self.render_device_selection(None, port_data)
+        formatted_data["device_selection"] = self.render_device_selection(
+            None, port_data
+        )
         return formatted_data
 
     class Meta:
@@ -254,6 +255,7 @@ class InterfaceTypeMappingTable(NetBoxTable):
     """
     Table for displaying InterfaceTypeMapping data.
     """
+
     librenms_type = tables.Column(verbose_name="LibreNMS Type")
     librenms_speed = tables.Column(verbose_name="LibreNMS Speed (Kbps)")
     netbox_type = tables.Column(verbose_name="NetBox Type")
@@ -276,6 +278,7 @@ class SiteLocationSyncTable(tables.Table):
     """
     Table for displaying Netbox Site and Librenms Location data.
     """
+
     netbox_site = tables.Column(linkify=True)
     latitude = tables.Column(accessor="netbox_site.latitude")
     longitude = tables.Column(accessor="netbox_site.longitude")

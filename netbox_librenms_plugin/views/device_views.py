@@ -125,7 +125,11 @@ class SingleInterfaceVerifyView(CacheMixin, View):
 
             if port_data:
                 # Choose appropriate table class based on device type
-                table_class = VCInterfaceTable if selected_device.virtual_chassis else LibreNMSInterfaceTable
+                table_class = (
+                    VCInterfaceTable
+                    if selected_device.virtual_chassis
+                    else LibreNMSInterfaceTable
+                )
                 table = table_class([], device=selected_device)
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse(

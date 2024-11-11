@@ -1,18 +1,27 @@
 from django.urls import include, path
 
 from .models import InterfaceTypeMapping
-from .views import (AddDeviceToLibreNMSView, DeviceCableTableView,
-                    DeviceInterfaceTableView, DeviceIPAddressTableView,
-                    DeviceLibreNMSSyncView, SingleInterfaceVerifyView,
-                    InterfaceTypeMappingBulkDeleteView,
-                    InterfaceTypeMappingChangeLogView,
-                    InterfaceTypeMappingCreateView,
-                    InterfaceTypeMappingDeleteView,
-                    InterfaceTypeMappingEditView, InterfaceTypeMappingListView,
-                    InterfaceTypeMappingView, SyncInterfacesView,
-                    SyncSiteLocationView, UpdateDeviceLocationView,
-                    VMInterfaceTableView, VMIPAddressTableView,
-                    VMLibreNMSSyncView)
+from .views import (
+    AddDeviceToLibreNMSView,
+    DeviceCableTableView,
+    DeviceInterfaceTableView,
+    DeviceIPAddressTableView,
+    DeviceLibreNMSSyncView,
+    SingleInterfaceVerifyView,
+    InterfaceTypeMappingBulkDeleteView,
+    InterfaceTypeMappingChangeLogView,
+    InterfaceTypeMappingCreateView,
+    InterfaceTypeMappingDeleteView,
+    InterfaceTypeMappingEditView,
+    InterfaceTypeMappingListView,
+    InterfaceTypeMappingView,
+    SyncInterfacesView,
+    SyncSiteLocationView,
+    UpdateDeviceLocationView,
+    VMInterfaceTableView,
+    VMIPAddressTableView,
+    VMLibreNMSSyncView,
+)
 
 urlpatterns = [
     # Device sync URLs
