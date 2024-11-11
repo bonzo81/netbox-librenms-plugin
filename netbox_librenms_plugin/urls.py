@@ -3,7 +3,8 @@ from django.urls import include, path
 from .models import InterfaceTypeMapping
 from .views import (AddDeviceToLibreNMSView, DeviceCableTableView,
                     DeviceInterfaceTableView, DeviceIPAddressTableView,
-                    DeviceLibreNMSSyncView, InterfaceTypeMappingBulkDeleteView,
+                    DeviceLibreNMSSyncView, SingleInterfaceVerifyView,
+                    InterfaceTypeMappingBulkDeleteView,
                     InterfaceTypeMappingChangeLogView,
                     InterfaceTypeMappingCreateView,
                     InterfaceTypeMappingDeleteView,
@@ -34,6 +35,12 @@ urlpatterns = [
         "devices/<int:pk>/ipaddress-sync/",
         DeviceIPAddressTableView.as_view(),
         name="device_ipaddress_sync",
+    ),
+    # Path for single interface verify javascript call
+    path(
+        "verify-interface/",
+        SingleInterfaceVerifyView.as_view(),
+        name="verify_interface",
     ),
     # Virtual machine sync URLs
     path(
