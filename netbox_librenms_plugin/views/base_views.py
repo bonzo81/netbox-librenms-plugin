@@ -7,6 +7,7 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tables import LibreNMSInterfaceTable
+from netbox_librenms_plugin.utils import get_virtual_chassis_member
 
 
 class LibreNMSAPIMixin:
@@ -86,11 +87,55 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         return render(request, self.template_name, context)
 
     def get_context_data(self, request, obj):
-        """
-        Get the context data for the LibreNMS sync view.
-        """
+        context = {
+            "object": obj,
+            "tab": self.tab,
+            "has_primary_ip": bool(obj.primary_ip),
+        }
+
+        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            vc_master = obj.virtual_chassis.master
+            if not vc_master or not vc_master.primary_ip:
+                # If no master or master has no primary IP, find first member with primary IP
+                vc_master = next(
+                    (
+                        member
+                        for member in obj.virtual_chassis.members.all()
+                        if member.primary_ip
+                    ),
+                    None,
+                )
+
+            context.update(
+                {
+                    "is_vc_member": True,
+                    "has_vc_primary_ip": bool(
+                        vc_master.primary_ip if vc_master else False
+                    ),
+                    "vc_primary_device": vc_master,
+                }
+            )
+
+        librenms_info = self.get_librenms_device_info(obj)
+        interface_context = self.get_interface_context(request, obj)
+        cable_context = self.get_cable_context(request, obj)
+        ip_context = self.get_ip_context(request, obj)
+
+        context.update(
+            {
+                "object_in_librenms": librenms_info["obj_exists"],
+                "interface_sync": interface_context,
+                "cable_sync": cable_context,
+                "ip_sync": ip_context,
+                **librenms_info["details"],
+            }
+        )
+
+        return context
+
+    def get_librenms_device_info(self, obj):
         obj_exists = False
-        librenms_obj_info = {
+        details = {
             "librenms_device_id": None,
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
@@ -102,34 +147,18 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 str(obj.primary_ip.address.ip)
             )
             if obj_exists and librenms_obj_data:
-                librenms_obj_info.update(
+                details.update(
                     {
                         "librenms_device_id": librenms_obj_data.get("device_id"),
                         "librenms_device_hardware": librenms_obj_data.get("hardware"),
                         "librenms_device_location": librenms_obj_data.get("location"),
                     }
                 )
-                librenms_obj_info["librenms_device_url"] = (
+                details["librenms_device_url"] = (
                     f"{self.librenms_api.librenms_url}/device/device="
-                    f"{librenms_obj_info['librenms_device_id']}/"
+                    f"{details['librenms_device_id']}/"
                 )
-
-        # Get contexts from helper methods
-        interface_context = self.get_interface_context(request, obj)
-        cable_context = self.get_cable_context(request, obj)
-        ip_context = self.get_ip_context(request, obj)
-
-        context = {
-            "object": obj,
-            "tab": self.tab,
-            "has_primary_ip": bool(obj.primary_ip),
-            "object_in_librenms": obj_exists,
-            "interface_sync": interface_context,
-            "cable_sync": cable_context,
-            "ip_sync": ip_context,
-            **librenms_obj_info,
-        }
-        return context
+        return {"obj_exists": obj_exists, "details": details}
 
     def get_interface_context(self, request, obj):
         """
@@ -153,7 +182,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         return None
 
 
-class BaseInterfaceSyncTableView(LibreNMSAPIMixin, CacheMixin, View):
+class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for fetching interface data from LibreNMS and generating table data.
     """
@@ -183,7 +212,7 @@ class BaseInterfaceSyncTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         raise NotImplementedError
 
-    def get_table(self, data):
+    def get_table(self, data, obj):
         """
         Returns the table class to use for rendering interface data.
         Can be overridden by subclasses to use different tables.
@@ -251,15 +280,26 @@ class BaseInterfaceSyncTableView(LibreNMSAPIMixin, CacheMixin, View):
                     if isinstance(port["ifAdminStatus"], str)
                     else bool(port["ifAdminStatus"])
                 )
-                netbox_interface = netbox_interfaces.filter(name=port["ifName"]).first()
+
+                # Determine the correct chassis member based on the port description
+                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                    chassis_member = get_virtual_chassis_member(obj, port["ifDescr"])
+                    netbox_interfaces = self.get_interfaces(chassis_member)
+                else:
+                    chassis_member = obj  # Not part of a virtual chassis
+
+                netbox_interface = netbox_interfaces.filter(
+                    name=port["ifDescr"]
+                ).first()
                 port["exists_in_netbox"] = bool(netbox_interface)
                 port["netbox_interface"] = netbox_interface
 
                 # Ignore when description is the same as interface name
-                if port["ifAlias"] == port["ifName"]:
+                if port["ifAlias"] == port["ifDescr"]:
                     port["ifAlias"] = ""
 
-            table = self.get_table(ports_data)
+            table = self.get_table(ports_data, obj)
+
             table.configure(request)
 
         cache_ttl = cache.ttl(self.get_cache_key(obj))
@@ -276,7 +316,7 @@ class BaseInterfaceSyncTableView(LibreNMSAPIMixin, CacheMixin, View):
         }
 
 
-class BaseCableSyncTableView(LibreNMSAPIMixin, View):
+class BaseCableTableView(LibreNMSAPIMixin, View):
     """
     Base view for synchronizing cable information from LibreNMS.
     """
@@ -294,7 +334,7 @@ class BaseCableSyncTableView(LibreNMSAPIMixin, View):
         return context
 
 
-class BaseIPAddressSyncTableView(LibreNMSAPIMixin, View):
+class BaseIPAddressTableView(LibreNMSAPIMixin, View):
     """
     Base view for synchronizing IP address information from LibreNMS.
     """
