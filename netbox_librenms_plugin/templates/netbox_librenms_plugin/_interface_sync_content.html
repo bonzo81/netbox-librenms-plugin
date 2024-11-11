@@ -4,25 +4,28 @@
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
 
-    {% with model_name=interface_sync.object|meta:"model_name" %}
-    <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}">
+{% with model_name=interface_sync.object|meta:"model_name" %}
+<form method="post"
+    action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}">
     {% endwith %}
     {% csrf_token %}
     {% block table_actions %}
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>
-            <button type="submit" class="btn btn-primary">Sync Selected Interfaces</button>
-            {% if object|meta:"model_name" == 'device' %}
-                <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
-                    <i class="mdi mdi-help-circle"></i> info
-                </a>
-            {% endif %}
+            <button type="submit" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected Interfaces</span>
+            </button>
+            <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
+                <i class="mdi mdi-help-circle"></i> info
+            </a>
         </div>
 
         <div class="d-flex align-items-center">
             {% if interface_sync.cache_expiry %}
             <div id="cache-countdown" class="me-3">
-                Cache expires in: <span id="countdown-timer" data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
+                Cache expires in: <span id="countdown-timer"
+                    data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
             </div>
             <script>
                 function initializeCountdown() {
@@ -31,28 +34,28 @@
                         const expiry = new Date(countdownElement.dataset.expiry).getTime();
                         const now = new Date().getTime();
                         const distance = expiry - now;
-                    
+
                         if (distance < 0) {
                             clearInterval(countdownInterval);
                             countdownElement.innerHTML = "EXPIRED";
                             return;
                         }
-                    
+
                         const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
                         const seconds = Math.floor((distance % (1000 * 60)) / 1000);
                         countdownElement.innerHTML = minutes + "m " + seconds + "s ";
                     }
-                
+
                     // Clear any existing interval
                     if (window.countdownInterval) {
                         clearInterval(window.countdownInterval);
                     }
-                
+
                     // Start a new interval
                     updateCountdown();
                     window.countdownInterval = setInterval(updateCountdown, 1000);
                 }
-                
+
                 // Initial call
                 initializeCountdown();
             </script>
@@ -76,65 +79,144 @@
             </div>
         </div>
     </div>
-    </form>
+</form>
 {% endif %} <!-- End if interface_sync.table -->
 
 <!-- Interface Type Help Modal -->
-<div class="modal fade" id="interfaceTypeHelpModal" tabindex="-1" aria-labelledby="interfaceTypeHelpModalLabel" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="interfaceTypeHelpModalLabel">NetBox Interface Type Explanation</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-          <p>Interface type mappings control how LibreNMS interface types are translated to NetBox interface types during synchronization. These mappings can be customized in the plugin settings menu. The icons in the interface list indicate the mapping status for each interface type:</p>
-          <ul>
-            <li><i class="mdi mdi-link-variant"></i> - A mapping is configured for this interface type</li>
-            <li><i class="mdi mdi-link-variant-off"></i> - No mapping is currently set for this interface type</li>
-          </ul>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-      </div>
+<div class="modal fade" id="interfaceTypeHelpModal" tabindex="-1" aria-labelledby="interfaceTypeHelpModalLabel"
+    aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="interfaceTypeHelpModalLabel">NetBox Interface Sync Info</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <h5>Interface Type mapping</h5>
+                <p>Interface type mappings control how LibreNMS interface types are translated to NetBox interface types
+                    during synchronization. These mappings can be customized in the plugin settings menu. The icons in
+                    the interface list indicate the mapping status for each interface type:</p>
+                <ul>
+                    <li><i class="mdi mdi-link-variant"></i> - A mapping is configured for this interface type</li>
+                    <li><i class="mdi mdi-link-variant-off"></i> - No mapping is currently set for this interface type
+                    </li>
+                </ul>
+                <h5>Virtual Chassis Member Selection</h5>
+                <p>For devices that are part of a virtual chassis, the plugin will attempt to select the correct virutal
+                    chassis member by matching the first number in the interface name to the device position in the
+                    virutal chassis. The selected device can be changed in the table before sync the interface.</p>
+                <p>When changing the selected device for an interface row, the data will be checked again against the
+                    newly selected device.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
     </div>
-  </div>
 </div>
 <script>
-<!-- Interface Sync Table JavaScript -->
-function initializeInterfaceSync() {
-    const toggleAll = document.querySelector('th input.toggle');
-    const checkboxes = document.querySelectorAll('td input[name="select"]');
-    let lastChecked = null;
+    <!-- Interface Sync Table JavaScript -->
+    // Function to initialize interface synchronization (checkboxes)
+    function initializeInterfaceSync() {
+        const toggleAll = document.querySelector('th input.toggle');
+        const checkboxes = document.querySelectorAll('td input[name="select"]');
+        let lastChecked = null;
 
-    if (toggleAll) {
-        toggleAll.addEventListener('change', function() {
-            checkboxes.forEach(checkbox => {
-                checkbox.checked = toggleAll.checked;
+        if (toggleAll) {
+            toggleAll.addEventListener('change', function () {
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = toggleAll.checked;
+                });
+            });
+        }
+
+        checkboxes.forEach(checkbox => {
+            checkbox.addEventListener('click', function (e) {
+                if (!lastChecked) {
+                    lastChecked = checkbox;
+                    return;
+                }
+
+                if (e.shiftKey) {
+                    const start = Array.from(checkboxes).indexOf(checkbox);
+                    const end = Array.from(checkboxes).indexOf(lastChecked);
+                    Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
+                        cb.checked = lastChecked.checked;
+                    });
+                }
+
+                lastChecked = checkbox;
             });
         });
     }
 
-    checkboxes.forEach(checkbox => {
-        checkbox.addEventListener('click', function(e) {
-            if (!lastChecked) {
-                lastChecked = checkbox;
-                return;
-            }
+    // Function to initialize TomSelect elements for interface selection
+    function initializeTomSelect() {
+        // Small delay to ensure TomSelect is fully initialized in the DOM before attaching event listeners
+        setTimeout(() => {
+            const selects = document.querySelectorAll('.form-select.tomselected');
 
-            if (e.shiftKey) {
-                const start = Array.from(checkboxes).indexOf(checkbox);
-                const end = Array.from(checkboxes).indexOf(lastChecked);
-                Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
-                    cb.checked = lastChecked.checked;
-                });
-            }
+            selects.forEach(select => {
+                if (select.tomselect) {
 
-            lastChecked = checkbox;
-        });
+                    select.tomselect.on('change', function (value) {
+                        const deviceId = value;
+                        const interfaceName = select.dataset.interface;
+                        const rowId = select.dataset.rowId;
+
+                        fetch('/plugins/librenms_plugin/verify-interface/', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+                            },
+                            body: JSON.stringify({
+                                device_id: deviceId,
+                                interface_name: interfaceName
+                            })
+                        })
+                            .then(response => {
+                                return response.json();
+                            })
+                            .then(data => {
+                                const row = document.querySelector(`tr[data-interface="${rowId}"]`);
+
+
+                                if (data.status === 'success' && row) {
+                                    const formattedRow = data.formatted_row;
+                                    row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
+                                    row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
+                                    row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
+                                    row.querySelector('td[data-col="mac_address"]').innerHTML = formattedRow.mac_address;
+                                    row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
+                                    row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
+                                    row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
+                                }
+                            });
+                    });
+                }
+            });
+        }, 50);
+    }
+
+
+    // Function to initialize all necessary scripts
+    function initializeScripts() {
+        initializeInterfaceSync();
+        initializeTomSelect();
+    }
+
+    // Initialize scripts on initial DOM load
+    document.addEventListener('DOMContentLoaded', function () {
+        initializeScripts();
+
     });
-}
 
-// Initialize on page load
-initializeInterfaceSync();
+    // Initialize scripts after HTMX swaps content
+    document.body.addEventListener('htmx:afterSwap', function (event) {
+        initializeScripts();
+    });
+
+
+
 </script>

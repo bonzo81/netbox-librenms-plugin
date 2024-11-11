@@ -3,6 +3,7 @@ from collections import namedtuple
 from dcim.models import Device, Interface, Site
 from django.contrib import messages
 from django.core.cache import cache
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
@@ -27,20 +28,24 @@ class SyncInterfacesView(CacheMixin, View):
         """
         Handle POST request to sync interfaces.
         """
-        obj = self.get_object(object_type, object_id)
-        selected_interfaces = self.get_selected_interfaces(
-            request, object_type, object_id
+        # Use the correct URL name based on object type
+        url_name = (
+            "device_librenms_sync" if object_type == "device" else "vm_librenms_sync"
         )
+        obj = self.get_object(object_type, object_id)
+        selected_interfaces = self.get_selected_interfaces(request)
+
+        if selected_interfaces is None:
+            return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
+
         ports_data = self.get_cached_ports_data(request, obj)
+        if ports_data is None:
+            return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
 
         self.sync_selected_interfaces(obj, selected_interfaces, ports_data)
 
         messages.success(request, "Selected interfaces synced successfully.")
 
-        # Use the correct URL name based on object type
-        url_name = (
-            "device_librenms_sync" if object_type == "device" else "vm_librenms_sync"
-        )
         return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
 
     def get_object(self, object_type, object_id):
@@ -54,21 +59,14 @@ class SyncInterfacesView(CacheMixin, View):
         else:
             raise Http404("Invalid object type.")
 
-    def get_selected_interfaces(self, request, object_type, object_id):
+    def get_selected_interfaces(self, request):
         """
         Retrieve and validate selected interfaces from the request.
         """
         selected_interfaces = request.POST.getlist("select")
         if not selected_interfaces:
             messages.error(request, "No interfaces selected for synchronization.")
-
-            # Use the correct URL name based on object type
-            url_name = (
-                "device_librenms_sync"
-                if object_type == "device"
-                else "vm_librenms_sync"
-            )
-            return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
+            return None
 
         return selected_interfaces
 
@@ -79,10 +77,10 @@ class SyncInterfacesView(CacheMixin, View):
         cached_data = cache.get(self.get_cache_key(obj))
         if not cached_data:
             messages.warning(
-                self.request,
+                request,
                 "No cached data found. Please refresh the data before syncing.",
             )
-            return redirect(request.path)
+            return None
         return cached_data.get("ports", [])
 
     def sync_selected_interfaces(self, obj, selected_interfaces, ports_data):
@@ -91,7 +89,7 @@ class SyncInterfacesView(CacheMixin, View):
         """
         with transaction.atomic():
             for port in ports_data:
-                if port["ifName"] in selected_interfaces:
+                if port["ifDescr"] in selected_interfaces:
                     self.sync_interface(obj, port)
 
     def sync_interface(self, obj, librenms_interface):
@@ -99,12 +97,21 @@ class SyncInterfacesView(CacheMixin, View):
         Sync a single interface from LibreNMS to NetBox.
         """
         if isinstance(obj, Device):
+            # Get the selected device ID from POST data
+            device_selection_key = f"device_selection_{librenms_interface['ifDescr']}"
+            selected_device_id = self.request.POST.get(device_selection_key)
+
+            if selected_device_id:
+                target_device = Device.objects.get(id=selected_device_id)
+            else:
+                target_device = obj
+
             interface, _ = Interface.objects.get_or_create(
-                device=obj, name=librenms_interface["ifName"]
+                device=target_device, name=librenms_interface["ifDescr"]
             )
         elif isinstance(obj, VirtualMachine):
             interface, _ = VMInterface.objects.get_or_create(
-                virtual_machine=obj, name=librenms_interface["ifName"]
+                virtual_machine=obj, name=librenms_interface["ifDescr"]
             )
         else:
             raise ValueError("Invalid object type.")
@@ -159,7 +166,7 @@ class SyncInterfacesView(CacheMixin, View):
                 if is_device_interface and hasattr(interface, netbox_key):
                     setattr(interface, netbox_key, netbox_type)
             elif librenms_key == "ifAlias":
-                if librenms_interface["ifAlias"] != librenms_interface["ifName"]:
+                if librenms_interface["ifAlias"] != librenms_interface["ifDescr"]:
                     setattr(interface, netbox_key, librenms_interface[librenms_key])
             else:
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))
@@ -327,7 +334,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         """
         try:
             return Site.objects.get(pk=pk)
-        except Site.DoesNotExist:
+        except ObjectDoesNotExist:
             return None
 
     def create_librenms_location(self, request, site):
