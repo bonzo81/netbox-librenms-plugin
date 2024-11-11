@@ -9,7 +9,7 @@ This is in early development.
 The plugin offers the following key features:
 
 ### Interface Synchronization
-Pull interface data fro Devices and Virtual Machines from LibreNMS into NetBox. The following interface attributes are synchronized:
+Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox. The following interface attributes are synchronized:
 - Name
 - Description
 - Status (Enabled/Disabled)
@@ -40,6 +40,9 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 
 #### Sync devices and Interfaces
 ![Add device and interfaces](img/Netbox-librenms-plugin-interfaceadd.gif)
+
+#### Virtual Chassis Member Select
+![Virtual Chassis Member Selection](img/Netbox-librenms-plugin-virtualchassis.gif)
 
 #### Interface Type Mappings
 ![Interfaces Type Mappings](img/Netbox-librenms-plugin-mappings.png)
