@@ -54,14 +54,14 @@
                                     <td>{{ librenms_device_hardware }}</td>
                                 </tr>
                                 <tr>
-                                    <th scope="row">Location</th>
+                                    <th scope="row">LibreNMS Location</th>
                                     <td>
                                         <div class="d-flex justify-content-between align-items-center">
                                             <span>{{ librenms_device_location }}</span>
                                             <form method="post" action="{% url 'plugins:netbox_librenms_plugin:update_device_location' pk=object.pk %}">
                                                 {% csrf_token %}
                                                 {% if librenms_device_location != object.site.name %}
-                                                    <button type="submit" class="btn btn-primary" title="Sync location with NetBox">
+                                                    <button type="submit" class="btn btn-primary" title="Sync LibreNMS location with NetBox Site: {{ object.site.name }}">
                                                         <i class="mdi mdi-sync"></i>
                                                     </button>
                                                 {% else %}
@@ -132,9 +132,21 @@
         </button>
     {% endif %}
 {% else %}
-    <span class="text-muted d-block">A primary IP is required</span>
+    {% if is_vc_member and not has_vc_primary_ip %}
+        <div class="alert alert-warning">
+            Virtual chassis primary device <a href="{{ vc_primary_device.get_absolute_url }}">{{ vc_primary_device }}</a> requires a primary IP for LibreNMS sync
+        </div>
+    {% elif is_vc_member and has_vc_primary_ip %}
+        <div class="alert alert-info">
+            LibreNMS sync is managed by virtual chassis member <a href="{{ vc_primary_device.get_absolute_url }}">{{ vc_primary_device }}</a>
+        </div>
+    {% elif not has_primary_ip %}
+        <div class="alert alert-warning">
+            A primary IP is required for LibreNMS sync
+        </div>
+    {% endif %}
 {% endif %}
- <!-- End Tab Content -->
+<!-- End Tab Content -->
 
 
 <!-- Add to LibreNMS Modal Placeholder-->
@@ -172,7 +184,7 @@
                     {% endwith %}
                     <div class="form-group">
                     <label for="snmpCommunity">SNMP Community</label>
-                    <input type="password" class="form-control" id="snmpCommunity" name="community" required>
+                    <input type="password" class="form-control" id="snmpCommunity" name="community" autocomplete="off" required>
                     </div>
                     <div class="form-group">
                     <label for="snmpVersion">SNMP Version</label>
