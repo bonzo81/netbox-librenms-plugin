@@ -8,15 +8,12 @@ from django.urls import reverse
 from django.views import View
 from utilities.views import ViewTab, register_model_view
 
-from netbox_librenms_plugin.tables import LibreNMSInterfaceTable, VCInterfaceTable
+from netbox_librenms_plugin.tables import (LibreNMSInterfaceTable,
+                                           VCInterfaceTable)
 
-from .base_views import (
-    BaseCableTableView,
-    BaseInterfaceTableView,
-    BaseIPAddressTableView,
-    BaseLibreNMSSyncView,
-    CacheMixin,
-)
+from .base_views import (BaseCableTableView, BaseInterfaceTableView,
+                         BaseIPAddressTableView, BaseLibreNMSSyncView,
+                         CacheMixin)
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")

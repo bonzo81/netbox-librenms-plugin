@@ -13,10 +13,8 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tables import SiteLocationSyncTable
-from netbox_librenms_plugin.utils import (
-    LIBRENMS_TO_NETBOX_MAPPING,
-    convert_speed_to_kbps,
-)
+from netbox_librenms_plugin.utils import (LIBRENMS_TO_NETBOX_MAPPING,
+                                          convert_speed_to_kbps)
 
 from .base_views import CacheMixin, LibreNMSAPIMixin
 

@@ -8,7 +8,8 @@ from utilities.paginator import EnhancedPaginator, get_paginate_count
 from utilities.templatetags.helpers import humanize_speed
 
 from .models import InterfaceTypeMapping
-from .utils import convert_speed_to_kbps, format_mac_address, get_virtual_chassis_member
+from .utils import (convert_speed_to_kbps, format_mac_address,
+                    get_virtual_chassis_member)
 
 
 class LibreNMSInterfaceTable(tables.Table):

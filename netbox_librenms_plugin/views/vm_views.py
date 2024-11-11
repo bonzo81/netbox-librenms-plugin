@@ -5,11 +5,8 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables import LibreNMSVMInterfaceTable
 
-from .base_views import (
-    BaseInterfaceTableView,
-    BaseIPAddressTableView,
-    BaseLibreNMSSyncView,
-)
+from .base_views import (BaseInterfaceTableView, BaseIPAddressTableView,
+                         BaseLibreNMSSyncView)
 
 
 @register_model_view(VirtualMachine, name="librenms_sync", path="librenms-sync")
