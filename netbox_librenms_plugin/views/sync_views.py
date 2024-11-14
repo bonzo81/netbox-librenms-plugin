@@ -15,6 +15,7 @@ from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tables import SiteLocationSyncTable
 from netbox_librenms_plugin.utils import (LIBRENMS_TO_NETBOX_MAPPING,
                                           convert_speed_to_kbps)
+from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
 
 from .base_views import CacheMixin, LibreNMSAPIMixin
 
@@ -245,9 +246,9 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
     """
     Provides a view for synchronizing Netbox site with LibreNMS locations.
     """
-
     table_class = SiteLocationSyncTable
     template_name = "netbox_librenms_plugin/site_location_sync.html"
+    filterset = SiteLocationFilterSet
 
     COORDINATE_TOLERANCE = 0.0001
     SyncData = namedtuple("SyncData", ["netbox_site", "librenms_location", "is_synced"])
@@ -256,6 +257,12 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         table = super().get_table(*args, **kwargs)
         table.configure(self.request)
         return table
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        queryset = self.get_queryset()
+        context['filter_form'] = self.filterset(self.request.GET, queryset=queryset).form
+        return context
 
     def get_queryset(self):
         netbox_sites = Site.objects.all()
@@ -266,6 +273,15 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         sync_data = [
             self.create_sync_data(site, librenms_locations) for site in netbox_sites
         ]
+        # Initialize the filterset correctly
+        if self.request.GET and self.filterset:
+            return self.filterset(self.request.GET, queryset=sync_data).qs
+
+        # Handle quicksearch
+        if 'q' in self.request.GET:
+            q = self.request.GET.get('q', '').lower()
+            sync_data = [item for item in sync_data if q in item.netbox_site.name.lower()]
+
         return sync_data
 
     def get_librenms_locations(self):

@@ -7,35 +7,42 @@
 {% load render_table from django_tables2 %}
 
 {% block header %}
-  <div class="page-header m-0">
-    {{ block.super }}
-
-    {% block page-header %}
-      <div class="container-fluid mt-2 d-print-none">
-        <div class="d-flex justify-content-between">
-          <div>
-            <h1 class="page-title mt-1 mb-2">Site and Location Sync</h1>
-            <p >This page displays the synchronization status between NetBox sites and LibreNMS locations. It allows you to update or create locations in LibreNMS based on NetBox data.</p>
+  <div class="container-fluid mt-2 d-print-none">
+    <div>
+      <h1 class="page-title mt-1 mb-2">Site and Location Sync</h1>
+      <p>This page displays the synchronization status between NetBox sites and LibreNMS locations. It allows you to update or create locations in LibreNMS based on NetBox data.</p>
+      <p class="text-muted">Note: Only LibreNMS locations that match a Netbox site are shown on this page.</p>
+    </div>
+    <div class="mt-3">
+      <form method="get">
+        <div class="d-flex">
+          <div class="search-box" style="width: 300px">
+            {% for field in filter_form %}
+              {{ field }}
+            {% endfor %}
+          </div>
+          <div class="buttons m-2">
+            <button type="submit" class="btn btn-primary">Search</button>
+            <a href="." class="btn btn-secondary">Clear</a>
           </div>
         </div>
-        <div> 
-          <p class="text-muted">Note: Only LibreNMS locations that match a Netbox site are shown on this page.</p>
-        </div>
-      </div>
-    {% endblock %}
+      </form>
+    </div>
   </div>
-{% endblock header %}
+{% endblock %}
+
 
 {% block content %}
+
   <div class="container-fluid">
     <form method="post">
       {% csrf_token %}
       <div class="row mb-3">
         <div class="col-12">
           <div class="card">
-                {% include 'inc/paginator.html' with paginator=table.paginator page=table.page %}
-                {% render_table table 'inc/table.html' %}
-                {% include 'inc/paginator.html' with paginator=table.paginator page=table.page %}
+              {% include 'inc/paginator.html' with paginator=table.paginator page=table.page %}
+              {% render_table table 'inc/table.html' %}
+              {% include 'inc/paginator.html' with paginator=table.paginator page=table.page %}
           </div>
         </div>
       </div>
