@@ -339,6 +339,13 @@ class SiteLocationSyncTable(tables.Table):
                 "</form>"
             )
 
+    def configure(self, request):
+        paginate = {
+            'paginator_class': EnhancedPaginator,
+            'per_page': get_paginate_count(request)
+        }
+        tables.RequestConfig(request, paginate).configure(self)
+
     class Meta:
         fields = (
             "netbox_site",
