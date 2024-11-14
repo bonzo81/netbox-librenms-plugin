@@ -188,12 +188,13 @@ class LibreNMSInterfaceTable(tables.Table):
         row_attrs = {
             "data-interface": lambda record: record["ifDescr"],
             "data-name": lambda record: record["ifDescr"],
-            "data-enabled": lambda record: record.get("ifAdminStatus", "").lower(),
+            "data-enabled": lambda record: record.get("ifAdminStatus", "").lower() if record.get("ifAdminStatus") else "",
         }
         attrs = {
             "class": "table table-hover object-list",
             "id": "librenms-interface-table",
         }
+
 
 
 class VCInterfaceTable(LibreNMSInterfaceTable):
