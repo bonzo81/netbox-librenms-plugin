@@ -124,7 +124,11 @@ class SyncInterfacesView(CacheMixin, View):
         # Update interface attributes
         self.update_interface_attributes(interface, librenms_interface, netbox_type)
 
-        interface.enabled = librenms_interface["ifAdminStatus"].lower() == "up"
+        interface.enabled = True if librenms_interface["ifAdminStatus"] is None else (
+            librenms_interface["ifAdminStatus"].lower() == "up"
+            if isinstance(librenms_interface["ifAdminStatus"], str)
+            else bool(librenms_interface["ifAdminStatus"])
+        )
         interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
