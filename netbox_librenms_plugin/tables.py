@@ -125,13 +125,18 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html('<span class="text-danger">{}</span>', combined_display)
 
     def get_interface_mapping(self, librenms_type, speed):
-        if speed is None:
-            return InterfaceTypeMapping.objects.filter(
-                librenms_type=librenms_type, librenms_speed__isnull=True
-            ).first()
-        return InterfaceTypeMapping.objects.filter(
+        # First try exact match with type and speed
+        mapping = InterfaceTypeMapping.objects.filter(
             librenms_type=librenms_type, librenms_speed=speed
         ).first()
+
+        # If no match found, fall back to type-only match
+        if not mapping:
+            mapping = InterfaceTypeMapping.objects.filter(
+                librenms_type=librenms_type, librenms_speed__isnull=True
+            ).first()
+
+        return mapping
 
     def format_interface_display(self, value, speed, mapping):
         if mapping:
