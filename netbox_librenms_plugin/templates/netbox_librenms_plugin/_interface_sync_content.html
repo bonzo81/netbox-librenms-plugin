@@ -72,6 +72,26 @@
 
     <div class="row mb-3">
         <div class="col col-md-12">
+            <button class="btn btn-sm btn-secondary mb-3" type="button" data-bs-toggle="collapse" data-bs-target="#filterSection" aria-expanded="false" aria-controls="filterSection">
+                <i class="mdi mdi-filter"></i> Toggle Filters
+            </button>
+            <div class="collapse mb-3" id="filterSection">
+                <div class="mb-2">
+                    <small class="text-muted">
+                        <i class="mdi mdi-information"></i> Filters apply to currently displayed interfaces. Adjust the "per page" setting to apply the filters to more interfaces.
+                    </small>
+                </div>
+                <div class="filter-container d-flex gap-2">
+                    <input type="text" id="filter-name" placeholder="Filter by Name" class="form-control">
+                    <input type="text" id="filter-type" placeholder="Filter by Type" class="form-control">
+                    <input type="text" id="filter-speed" placeholder="Filter by Speed" class="form-control">
+                    <input type="text" id="filter-mac" placeholder="Filter by MAC" class="form-control">
+                    <input type="text" id="filter-mtu" placeholder="Filter by MTU" class="form-control">
+                    <input type="text" id="filter-enabled" placeholder="Filter by Status" class="form-control">
+                    <input type="text" id="filter-description" placeholder="Filter by Description" class="form-control">
+                </div>
+
+            </div>
             <div class="card">
                 {% include 'inc/paginator.html' with paginator=interface_sync.table.paginator page=interface_sync.table.page %}
                 {% include 'inc/table.html' with table=interface_sync.table %}
@@ -198,6 +218,49 @@
             });
         }, 50);
     }
+
+// Add event listeners for all filter inputs
+['name', 'type', 'speed', 'mac', 'mtu', 'enabled', 'description'].forEach(filter => {
+    console.log(`Setting up listener for filter-${filter}`);
+    document.getElementById(`filter-${filter}`).addEventListener('input', filterTable);
+});
+
+function filterTable() {
+    console.log('Filter function called');
+    
+    const filters = {
+        name: document.getElementById('filter-name').value.toLowerCase(),
+        type: document.getElementById('filter-type').value.toLowerCase(),
+        speed: document.getElementById('filter-speed').value.toLowerCase(),
+        mac: document.getElementById('filter-mac').value.toLowerCase(),
+        mtu: document.getElementById('filter-mtu').value.toLowerCase(),
+        enabled: document.getElementById('filter-enabled').value.toLowerCase(),
+        description: document.getElementById('filter-description').value.toLowerCase()
+    };
+    console.log('Filter values:', filters);
+
+    const rows = document.querySelectorAll('tr[data-interface]');
+    console.log('Found rows:', rows.length);
+
+    rows.forEach(row => {
+        console.log('Processing row:', row.getAttribute('data-interface'));
+        const matches = {
+            name: (row.querySelector('td[data-col="name"] span')?.textContent || row.querySelector('td[data-col="name"]').textContent).toLowerCase().includes(filters.name),
+            type: (row.querySelector('td[data-col="type"] span')?.textContent || row.querySelector('td[data-col="type"]').textContent).toLowerCase().includes(filters.type),
+            speed: (row.querySelector('td[data-col="speed"] span')?.textContent || row.querySelector('td[data-col="speed"]').textContent).toLowerCase().includes(filters.speed),
+            mac: (row.querySelector('td[data-col="mac_address"] span')?.textContent || row.querySelector('td[data-col="mac_address"]').textContent).toLowerCase().includes(filters.mac),
+            mtu: (row.querySelector('td[data-col="mtu"] span')?.textContent || row.querySelector('td[data-col="mtu"]').textContent).toLowerCase().includes(filters.mtu),
+            enabled: (row.querySelector('td[data-col="enabled"] span')?.textContent || row.querySelector('td[data-col="enabled"]').textContent).toLowerCase().includes(filters.enabled),
+            description: (row.querySelector('td[data-col="description"] span')?.textContent || row.querySelector('td[data-col="description"]').textContent).toLowerCase().includes(filters.description)
+        };
+        console.log('Match results:', matches);
+
+        row.style.display = Object.values(matches).every(match => match) ? '' : 'none';
+    });
+}
+
+
+
 
 
     // Function to initialize all necessary scripts
