@@ -248,10 +248,14 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
 
     table_class = SiteLocationSyncTable
     template_name = "netbox_librenms_plugin/site_location_sync.html"
-    paginate_by = 25
 
     COORDINATE_TOLERANCE = 0.0001
     SyncData = namedtuple("SyncData", ["netbox_site", "librenms_location", "is_synced"])
+
+    def get_table(self, *args, **kwargs):
+        table = super().get_table(*args, **kwargs)
+        table.configure(self.request)
+        return table
 
     def get_queryset(self):
         netbox_sites = Site.objects.all()
