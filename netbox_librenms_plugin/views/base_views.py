@@ -275,7 +275,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             netbox_interfaces = self.get_interfaces(obj)
 
             for port in ports_data:
-                port["enabled"] = (
+                port["enabled"] = True if port["ifAdminStatus"] is None else (
                     port["ifAdminStatus"].lower() == "up"
                     if isinstance(port["ifAdminStatus"], str)
                     else bool(port["ifAdminStatus"])
