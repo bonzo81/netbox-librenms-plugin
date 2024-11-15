@@ -1,2 +1,30 @@
-<h2>Cable Sync</h2>
-<p>{{ cable_sync.cable_sync_message }}</p>
+{% load helpers %}
+{% load static %}
+
+<!-- Action Buttons -->
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>Cable Sync</h2>
+    <div class="btn-list">
+        <form method="post">
+            {% csrf_token %}
+            {% if has_primary_ip %}
+                {% if object_in_librenms %}
+                    {% with model_name=object|meta:"model_name" %}
+                        {% if model_name == "device" %}
+                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_cable_sync' pk=object.pk %}"
+                                    hx-target="#cable-sync-content"
+                                    class="btn btn-outline-primary">
+                                Refresh Cables
+                            </button>
+                        {% endif %}
+                    {% endwith %}
+                {% endif %}
+            {% endif %}
+        </form>
+    </div>
+</div>
+
+<!-- Container for the cable sync content -->
+<div id="cable-sync-content">
+    {% include 'netbox_librenms_plugin/_cable_sync_content.html' %}
+</div>
