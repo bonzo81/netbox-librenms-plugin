@@ -237,3 +237,25 @@ class LibreNMSAPI:
                 error_details = e.response.json()
                 error_message = error_details.get("message", error_message)
             return False, error_message
+
+    def get_device_links(self, hostname):
+        """
+        Get links for a specific device from LibreNMS.
+
+        Args:
+            hostname: Device hostname or ID
+
+        Returns:
+            tuple: (success, data)
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{hostname}/links",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            return True, response.json()
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
