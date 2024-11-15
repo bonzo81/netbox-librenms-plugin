@@ -135,115 +135,121 @@
     </div>
 </div>
 <script>
-    <!-- Interface Sync Table JavaScript -->
-    // Function to initialize interface synchronization (checkboxes)
-    function initializeInterfaceSync() {
-        const toggleAll = document.querySelector('th input.toggle');
-        const checkboxes = document.querySelectorAll('td input[name="select"]');
-        let lastChecked = null;
+<!-- Interface Sync Table JavaScript -->
+// Function to initialize interface synchronization (checkboxes)
+function initializeInterfaceCheckboxes() {
+    const toggleAll = document.querySelector('th input.toggle');
+    const checkboxes = document.querySelectorAll('td input[name="select"]');
+    let lastChecked = null;
 
-        if (toggleAll) {
-            toggleAll.addEventListener('change', function () {
-                checkboxes.forEach(checkbox => {
-                    checkbox.checked = toggleAll.checked;
-                });
-            });
-        }
-
-        checkboxes.forEach(checkbox => {
-            checkbox.addEventListener('click', function (e) {
-                if (!lastChecked) {
-                    lastChecked = checkbox;
-                    return;
-                }
-
-                if (e.shiftKey) {
-                    const start = Array.from(checkboxes).indexOf(checkbox);
-                    const end = Array.from(checkboxes).indexOf(lastChecked);
-                    Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
-                        cb.checked = lastChecked.checked;
-                    });
-                }
-
-                lastChecked = checkbox;
+    if (toggleAll) {
+        toggleAll.addEventListener('change', function () {
+            checkboxes.forEach(checkbox => {
+                checkbox.checked = toggleAll.checked;
             });
         });
     }
 
-    // Function to initialize TomSelect elements for interface selection
-    function initializeTomSelect() {
-        // Small delay to ensure TomSelect is fully initialized in the DOM before attaching event listeners
-        setTimeout(() => {
-            const selects = document.querySelectorAll('.form-select.tomselected');
+    checkboxes.forEach(checkbox => {
+        checkbox.addEventListener('click', function (e) {
+            if (!lastChecked) {
+                lastChecked = checkbox;
+                return;
+            }
 
-            selects.forEach(select => {
-                if (select.tomselect) {
+            if (e.shiftKey) {
+                const start = Array.from(checkboxes).indexOf(checkbox);
+                const end = Array.from(checkboxes).indexOf(lastChecked);
+                Array.from(checkboxes).slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
+                    cb.checked = lastChecked.checked;
+                });
+            }
 
-                    select.tomselect.on('change', function (value) {
-                        const deviceId = value;
-                        const interfaceName = select.dataset.interface;
-                        const rowId = select.dataset.rowId;
+            lastChecked = checkbox;
+        });
+    });
+}
 
-                        fetch('/plugins/librenms_plugin/verify-interface/', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
-                            },
-                            body: JSON.stringify({
-                                device_id: deviceId,
-                                interface_name: interfaceName
-                            })
+// Function to initialize TomSelect elements for interface selection
+function initializeVCMemberSelect() {
+    // Small delay to ensure TomSelect is fully initialized in the DOM before attaching event listeners
+    setTimeout(() => {
+        const interfaceTable = document.getElementById('librenms-interface-table');
+        if (!interfaceTable) return;
+
+        const selects = interfaceTable.querySelectorAll('.form-select.tomselected');
+
+        selects.forEach(select => {
+            
+            if (select.tomselect && !select.dataset.interfaceSelectInitialized) {
+                select.dataset.interfaceSelectInitialized = 'true';
+                select.tomselect.on('change', function(value) {
+                    const deviceId = value;
+                    const interfaceName = select.dataset.interface;
+                    const rowId = select.dataset.rowId;
+
+                    fetch('/plugins/librenms_plugin/verify-interface/', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+                        },
+                        body: JSON.stringify({
+                            device_id: deviceId,
+                            interface_name: interfaceName
                         })
-                            .then(response => {
-                                return response.json();
-                            })
-                            .then(data => {
-                                const row = document.querySelector(`tr[data-interface="${rowId}"]`);
+                    })
+                        .then(response => {
+                            return response.json();
+                        })
+                        .then(data => {
+                            const row = document.querySelector(`tr[data-interface="${rowId}"]`);
 
 
-                                if (data.status === 'success' && row) {
-                                    const formattedRow = data.formatted_row;
-                                    row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
-                                    row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
-                                    row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
-                                    row.querySelector('td[data-col="mac_address"]').innerHTML = formattedRow.mac_address;
-                                    row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
-                                    row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
-                                    row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
-                                }
-                            });
-                    });
-                }
-            });
-        }, 50);
-    }
+                            if (data.status === 'success' && row) {
+                                const formattedRow = data.formatted_row;
+                                row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
+                                row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
+                                row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
+                                row.querySelector('td[data-col="mac_address"]').innerHTML = formattedRow.mac_address;
+                                row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
+                                row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
+                                row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
+                            }
+                        });
+                });
+            }
+        });
+    }, 100);
+}
+function initializeInterfaceFilters() {
+    const interfaceTable = document.getElementById('librenms-interface-table');
+    if (!interfaceTable) return;
 
-// Add event listeners for all filter inputs
-['name', 'type', 'speed', 'mac', 'mtu', 'enabled', 'description'].forEach(filter => {
-    console.log(`Setting up listener for filter-${filter}`);
-    document.getElementById(`filter-${filter}`).addEventListener('input', filterTable);
-});
+    ['name', 'type', 'speed', 'mac', 'mtu', 'enabled', 'description'].forEach(filter => {
+        const filterElement = document.getElementById(`filter-${filter}`);
+        if (filterElement) {
+            filterElement.addEventListener('input', filterTable);
+        }
+    });
+}
 
 function filterTable() {
-    console.log('Filter function called');
-    
+    const interfaceTable = document.getElementById('librenms-interface-table');
+    if (!interfaceTable) return;
+
     const filters = {
-        name: document.getElementById('filter-name').value.toLowerCase(),
-        type: document.getElementById('filter-type').value.toLowerCase(),
-        speed: document.getElementById('filter-speed').value.toLowerCase(),
-        mac: document.getElementById('filter-mac').value.toLowerCase(),
-        mtu: document.getElementById('filter-mtu').value.toLowerCase(),
-        enabled: document.getElementById('filter-enabled').value.toLowerCase(),
-        description: document.getElementById('filter-description').value.toLowerCase()
+        name: document.getElementById('filter-name')?.value.toLowerCase() || '',
+        type: document.getElementById('filter-type')?.value.toLowerCase() || '',
+        speed: document.getElementById('filter-speed')?.value.toLowerCase() || '',
+        mac: document.getElementById('filter-mac')?.value.toLowerCase() || '',
+        mtu: document.getElementById('filter-mtu')?.value.toLowerCase() || '',
+        enabled: document.getElementById('filter-enabled')?.value.toLowerCase() || '',
+        description: document.getElementById('filter-description')?.value.toLowerCase() || ''
     };
-    console.log('Filter values:', filters);
 
-    const rows = document.querySelectorAll('tr[data-interface]');
-    console.log('Found rows:', rows.length);
-
+    const rows = interfaceTable.querySelectorAll('tr[data-interface]');
     rows.forEach(row => {
-        console.log('Processing row:', row.getAttribute('data-interface'));
         const matches = {
             name: (row.querySelector('td[data-col="name"] span')?.textContent || row.querySelector('td[data-col="name"]').textContent).toLowerCase().includes(filters.name),
             type: (row.querySelector('td[data-col="type"] span')?.textContent || row.querySelector('td[data-col="type"]').textContent).toLowerCase().includes(filters.type),
@@ -253,33 +259,28 @@ function filterTable() {
             enabled: (row.querySelector('td[data-col="enabled"] span')?.textContent || row.querySelector('td[data-col="enabled"]').textContent).toLowerCase().includes(filters.enabled),
             description: (row.querySelector('td[data-col="description"] span')?.textContent || row.querySelector('td[data-col="description"]').textContent).toLowerCase().includes(filters.description)
         };
-        console.log('Match results:', matches);
 
         row.style.display = Object.values(matches).every(match => match) ? '' : 'none';
     });
 }
 
 
+// Function to initialize all necessary scripts
+function initializeScripts() {
+    initializeInterfaceCheckboxes();
+    initializeVCMemberSelect();
+    initializeInterfaceFilters();
+    filterTable();
+}
 
+// Initialize scripts on initial DOM load
+document.addEventListener('DOMContentLoaded', function () {
+    initializeScripts();
 
+});
 
-    // Function to initialize all necessary scripts
-    function initializeScripts() {
-        initializeInterfaceSync();
-        initializeTomSelect();
-    }
-
-    // Initialize scripts on initial DOM load
-    document.addEventListener('DOMContentLoaded', function () {
-        initializeScripts();
-
-    });
-
-    // Initialize scripts after HTMX swaps content
-    document.body.addEventListener('htmx:afterSwap', function (event) {
-        initializeScripts();
-    });
-
-
-
+// Initialize scripts after HTMX swaps content
+document.body.addEventListener('htmx:afterSwap', function (event) {
+    initializeScripts();
+});
 </script>
