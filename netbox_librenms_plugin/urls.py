@@ -15,6 +15,7 @@ from .views import (
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
     SingleInterfaceVerifyView,
+    SingleCableVerifyView,
     SyncInterfacesView,
     SyncSiteLocationView,
     UpdateDeviceLocationView,
@@ -50,6 +51,11 @@ urlpatterns = [
         "verify-interface/",
         SingleInterfaceVerifyView.as_view(),
         name="verify_interface",
+    ),
+    path(
+        "verify-cable/",
+        SingleCableVerifyView.as_view(),
+        name="verify_cable",
     ),
     # Virtual machine sync URLs
     path(
