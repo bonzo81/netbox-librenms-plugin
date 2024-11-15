@@ -1,4 +1,3 @@
-# from extras.plugins import PluginMenuButton, PluginMenuItemfrom extras.plugins import PluginMenuButton, PluginMenuItem
 from netbox.choices import ButtonColorChoices
 from netbox.plugins import PluginMenuButton, PluginMenuItem
 
