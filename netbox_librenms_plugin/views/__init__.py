@@ -15,6 +15,7 @@ from .device_views import (
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
     SingleInterfaceVerifyView,
+    SingleCableVerifyView,
 )
 from .mapping_views import (
     InterfaceTypeMappingBulkDeleteView,
