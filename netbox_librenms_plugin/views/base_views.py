@@ -2,11 +2,14 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.urls import reverse
+from django.http import JsonResponse
 from django.views import View
 from netbox.views import generic
+from dcim.models import Device
 
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.tables import LibreNMSInterfaceTable
+from netbox_librenms_plugin.tables import LibreNMSInterfaceTable, LibreNMSCableTable
 from netbox_librenms_plugin.utils import get_virtual_chassis_member
 
 
@@ -118,14 +121,15 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
         librenms_info = self.get_librenms_device_info(obj)
         interface_context = self.get_interface_context(request, obj)
-        cable_context = self.get_cable_context(request, obj)
+        # TODO Remove this once cable sync is implemented
+        # cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
 
         context.update(
             {
                 "object_in_librenms": librenms_info["obj_exists"],
                 "interface_sync": interface_context,
-                "cable_sync": cable_context,
+                "cable_sync": True,
                 "ip_sync": ip_context,
                 **librenms_info["details"],
             }
@@ -275,10 +279,14 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             netbox_interfaces = self.get_interfaces(obj)
 
             for port in ports_data:
-                port["enabled"] = True if port["ifAdminStatus"] is None else (
-                    port["ifAdminStatus"].lower() == "up"
-                    if isinstance(port["ifAdminStatus"], str)
-                    else bool(port["ifAdminStatus"])
+                port["enabled"] = (
+                    True
+                    if port["ifAdminStatus"] is None
+                    else (
+                        port["ifAdminStatus"].lower() == "up"
+                        if isinstance(port["ifAdminStatus"], str)
+                        else bool(port["ifAdminStatus"])
+                    )
                 )
 
                 # Determine the correct chassis member based on the port description
@@ -316,22 +324,142 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         }
 
 
-class BaseCableTableView(LibreNMSAPIMixin, View):
+class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for synchronizing cable information from LibreNMS.
     """
 
-    template_name = "netbox_librenms_plugin/_cable_sync.html"
+    model = None  # To be defined in subclasses
+    partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
 
-    def get_context_data(self, request, device):
+    def get_object(self, pk):
+        return get_object_or_404(self.model, pk=pk)
+
+    def get_ip_address(self, obj):
+        if obj.primary_ip:
+            return str(obj.primary_ip.address.ip)
+        return None
+
+    def get_links_data(self, obj):
         """
-        Get context data for cable sync view.
+        Fetch links data from LibreNMS for the device
         """
-        context = {
-            "device": device,
-            "cable_sync_message": "Cable sync coming soon",
-        }
-        return context
+        ip_address = self.get_ip_address(obj)
+        if not ip_address:
+            return None
+
+        success, data = self.librenms_api.get_device_links(ip_address)
+        if not success or "error" in data:
+            return None
+
+        # Get cached ports data or fetch it if not available
+        cached_data = cache.get(self.get_cache_key(obj))
+        if not cached_data:
+            cached_data = self.librenms_api.get_ports(ip_address)
+            cache.set(self.get_cache_key(obj), cached_data, timeout=self.librenms_api.cache_timeout)
+
+        ports_map = {str(port['port_id']): port['ifDescr'] for port in cached_data.get('ports', [])}
+
+        links = data.get("links", [])
+        table_data = []
+        for link in links:
+            local_port_name = ports_map.get(str(link.get('local_port_id')))
+            table_data.append({
+                'local_port': local_port_name,
+                'remote_port': link.get('remote_port'),
+                'remote_device': link.get('remote_hostname')
+            })
+
+        return table_data
+
+    def get_device_by_name(self, hostname):
+        """
+        Try to find device in NetBox by full name or stripped hostname
+        """
+        try:
+            return Device.objects.get(name=hostname), True
+        except Device.DoesNotExist:
+            # Try without domain name
+            simple_hostname = hostname.split(".")[0]
+            try:
+                return Device.objects.get(name=simple_hostname), True
+            except Device.DoesNotExist:
+                return None, False
+
+    def enrich_local_port(self, link):
+        """
+        Add local port URL if interface exists in NetBox
+        """
+        if local_port := link.get('local_port'):
+            if hasattr(self.device, 'virtual_chassis') and self.device.virtual_chassis:
+                chassis_member = get_virtual_chassis_member(self.device, local_port)
+                if interface := chassis_member.interfaces.filter(name=local_port).first():
+                    link['local_port_url'] = reverse('dcim:interface', args=[interface.pk])
+            else:
+                if interface := self.device.interfaces.filter(name=local_port).first():
+                    link['local_port_url'] = reverse('dcim:interface', args=[interface.pk])
+
+    def enrich_remote_port(self, link, device):
+        """
+        Add remote port URL if device and interface exist in NetBox
+        """
+        if remote_port := link.get("remote_port"):
+            if remote_interface := device.interfaces.filter(name=remote_port).first():
+                link["remote_port_url"] = reverse(
+                    "dcim:interface", args=[remote_interface.pk]
+                )
+
+    def enrich_links_data(self, links_data):
+        """
+        Enrich links data with NetBox device information and port links
+        """
+        for link in links_data:
+            self.enrich_local_port(link)
+
+            if remote_hostname := link.get("remote_device"):
+                device, found = self.get_device_by_name(remote_hostname)
+                if found:
+                    link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
+                    self.enrich_remote_port(link, device)
+
+        return links_data
+
+    def get_table(self, data, obj):
+        enriched_data = self.enrich_links_data(data)
+        return LibreNMSCableTable(enriched_data, device=obj)
+
+    def get_context_data(self, request, obj):
+        """
+        Get the context data for the cable sync view.
+        """
+        links_data = self.get_links_data(obj)
+        table = None
+
+        if links_data:
+            table = self.get_table(links_data, obj)
+
+        return {"cable_sync": {"object": obj, "table": table}}
+
+    def post(self, request, pk):
+        self.device = self.get_object(pk)
+
+        ip_address = self.get_ip_address(self.device)
+        if not ip_address:
+            messages.error(request, "This object has no primary IP set. Unable to fetch data from LibreNMS.")
+            return JsonResponse({"error": "No primary IP"}, status=400)
+
+        links_data = self.get_links_data(self.device)
+        if links_data:
+            table = self.get_table(links_data, self.device)
+            return render(request, self.partial_template_name, {
+                "cable_sync": {
+                    "object": self.device,
+                    "table": table
+                }
+            })
+
+        messages.error(request, "Failed to fetch cable data from LibreNMS")
+        return JsonResponse({"error": "Failed to fetch data"}, status=400)
 
 
 class BaseIPAddressTableView(LibreNMSAPIMixin, View):
