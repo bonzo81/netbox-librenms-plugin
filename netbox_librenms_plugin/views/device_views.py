@@ -8,12 +8,20 @@ from django.urls import reverse
 from django.views import View
 from utilities.views import ViewTab, register_model_view
 
-from netbox_librenms_plugin.tables import (LibreNMSInterfaceTable,
-                                           VCInterfaceTable)
+from netbox_librenms_plugin.tables import (
+    LibreNMSCableTable,
+    LibreNMSInterfaceTable,
+    VCCableTable,
+    VCInterfaceTable,
+)
 
-from .base_views import (BaseCableTableView, BaseInterfaceTableView,
-                         BaseIPAddressTableView, BaseLibreNMSSyncView,
-                         CacheMixin)
+from .base_views import (
+    BaseCableTableView,
+    BaseInterfaceTableView,
+    BaseIPAddressTableView,
+    BaseLibreNMSSyncView,
+    CacheMixin,
+)
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
@@ -144,7 +152,41 @@ class DeviceCableTableView(BaseCableTableView):
     """
 
     model = Device
-    # TODO: Implement the Cable Sync view
+
+    def get_table(self, data, obj):
+        """
+        Returns the appropriate table instance for rendering cable data.
+        """
+        enriched_data = self.enrich_links_data(data)
+        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            return VCCableTable(enriched_data, device=obj)
+        return LibreNMSCableTable(enriched_data, device=obj)
+
+
+class SingleCableVerifyView(CacheMixin, View):
+    def post(self, request):
+        data = json.loads(request.body)
+        selected_device_id = data.get("device_id")
+        local_port = data.get("local_port")
+
+        # Handle empty device selection
+        if not selected_device_id:
+            return JsonResponse({
+                "status": "success",
+                "local_port": local_port,
+                "local_port_url": None
+            })
+
+        selected_device = get_object_or_404(Device, pk=selected_device_id)
+        interface = selected_device.interfaces.filter(name=local_port).first()
+
+        response_data = {
+            "status": "success",
+            "local_port": local_port,
+            "local_port_url": reverse('dcim:interface', args=[interface.pk]) if interface else None
+        }
+
+        return JsonResponse(response_data)
 
 
 class DeviceIPAddressTableView(BaseIPAddressTableView):
