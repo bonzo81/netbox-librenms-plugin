@@ -83,6 +83,11 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         Handle GET request for the LibreNMS sync view.
         """
         obj = get_object_or_404(self.model, pk=pk)
+
+        # Get librenms_id once at the start
+        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        print(f"librenms_id: {self.librenms_id}")
+
         context = self.get_context_data(request, obj)
         return render(request, self.template_name, context)
 
@@ -90,7 +95,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         context = {
             "object": obj,
             "tab": self.tab,
-            "has_primary_ip": bool(obj.primary_ip),
+            "has_librenms_id": bool(self.librenms_id),
         }
 
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
@@ -123,7 +128,6 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
         context.update(
             {
-                "object_in_librenms": librenms_info["obj_exists"],
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
                 "ip_sync": ip_context,
@@ -142,9 +146,9 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             "librenms_device_location": "-",
         }
 
-        if obj.primary_ip:
+        if self.librenms_id:
             obj_exists, librenms_obj_data = self.librenms_api.get_device_info(
-                str(obj.primary_ip.address.ip)
+                self.librenms_id
             )
             if obj_exists and librenms_obj_data:
                 details.update(
@@ -156,7 +160,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 )
                 details["librenms_device_url"] = (
                     f"{self.librenms_api.librenms_url}/device/device="
-                    f"{details['librenms_device_id']}/"
+                    f"{self.librenms_id}/"
                 )
         return {"obj_exists": obj_exists, "details": details}
 
@@ -225,15 +229,14 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         obj = self.get_object(pk)
 
-        ip_address = self.get_ip_address(obj)
-        if not ip_address:
-            messages.error(
-                request,
-                "This object has no primary IP set. Unable to fetch data from LibreNMS.",
-            )
+        # Get librenms_id at the start
+        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+
+        if not self.librenms_id:
+            messages.error(request, "Device not found in LibreNMS.")
             return redirect(self.get_redirect_url(obj))
 
-        librenms_data = self.librenms_api.get_ports(ip_address)
+        librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
         if "error" in librenms_data:
             messages.error(request, librenms_data["error"])
@@ -275,10 +278,14 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             netbox_interfaces = self.get_interfaces(obj)
 
             for port in ports_data:
-                port["enabled"] = True if port["ifAdminStatus"] is None else (
-                    port["ifAdminStatus"].lower() == "up"
-                    if isinstance(port["ifAdminStatus"], str)
-                    else bool(port["ifAdminStatus"])
+                port["enabled"] = (
+                    True
+                    if port["ifAdminStatus"] is None
+                    else (
+                        port["ifAdminStatus"].lower() == "up"
+                        if isinstance(port["ifAdminStatus"], str)
+                        else bool(port["ifAdminStatus"])
+                    )
                 )
 
                 # Determine the correct chassis member based on the port description
