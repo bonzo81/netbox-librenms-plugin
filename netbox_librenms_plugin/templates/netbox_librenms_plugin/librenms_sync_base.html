@@ -33,8 +33,8 @@
                     <tr>
                         <th scope="row">Status</th>
                         <td>
-                            <span class="{% if object_in_librenms %}text-success{% else %}text-danger{% endif %}">
-                                {% if object_in_librenms %}
+                            <span class="{% if has_librenms_id %}text-success{% else %}text-danger{% endif %}">
+                                {% if has_librenms_id %}
                                     <a href="{{ librenms_device_url }}" target="_blank">Found in LibreNMS</a>
                                 {% else %}
                                     Not found in LibreNMS
@@ -42,7 +42,7 @@
                             </span>
                         </td>
                     </tr>
-                    {% if object_in_librenms %}
+                    {% if has_librenms_id %}
                         <tr>
                             <th scope="row">LibreNMS ID</th>
                             <td>{{ librenms_device_id }}</td>
@@ -88,8 +88,8 @@
     <span class="fs-5 mt-2 text-muted">Last data updated: {{ last_fetched|date:"Y-m-d  H:i" }}</span>
 {% endif %}
 
-{% if object.primary_ip %}
-    {% if object_in_librenms %}
+{% if librenms_device_id %}
+    {% if has_librenms_id %}
         <!-- Tab Navigation -->
         <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
             <li class="nav-item" role="presentation">
@@ -140,9 +140,9 @@
         <div class="alert alert-info">
             LibreNMS sync is managed by virtual chassis member <a href="{{ vc_primary_device.get_absolute_url }}">{{ vc_primary_device }}</a>
         </div>
-    {% elif not has_primary_ip %}
+    {% elif not has_librenms_id %}
         <div class="alert alert-warning">
-            A primary IP is required for LibreNMS sync
+            A primary IP or device name is required for LibreNMS sync
         </div>
     {% endif %}
 {% endif %}

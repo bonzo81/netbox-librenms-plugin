@@ -22,6 +22,13 @@ from .base_views import (
     BaseLibreNMSSyncView,
     CacheMixin,
 )
+from .base_views import (
+    BaseCableTableView,
+    BaseInterfaceTableView,
+    BaseIPAddressTableView,
+    BaseLibreNMSSyncView,
+    CacheMixin,
+)
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")

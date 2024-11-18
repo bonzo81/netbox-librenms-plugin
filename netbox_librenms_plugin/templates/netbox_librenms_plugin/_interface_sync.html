@@ -7,24 +7,22 @@
     <div class="btn-list">
         <form method="post">
             {% csrf_token %}
-            {% if has_primary_ip %}
-                {% if object_in_librenms %}
-                    {% with model_name=object|meta:"model_name" %}
-                        {% if model_name == "device" %}
-                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk %}"
-                                    hx-target="#interface-sync-content"
-                                    class="btn btn-outline-primary">
-                                Refresh Interfaces
-                            </button>
-                        {% elif model_name == "virtualmachine" %}
-                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:vm_interface_sync' pk=object.pk %}"
-                                    hx-target="#interface-sync-content"
-                                    class="btn btn-outline-primary">
-                                Refresh Interfaces
-                            </button>
-                        {% endif %}
-                    {% endwith %}
-                {% endif %}
+            {% if has_librenms_id %}
+                {% with model_name=object|meta:"model_name" %}
+                    {% if model_name == "device" %}
+                        <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk %}"
+                                hx-target="#interface-sync-content"
+                                class="btn btn-outline-primary">
+                            Refresh Interfaces
+                        </button>
+                    {% elif model_name == "virtualmachine" %}
+                        <button hx-post="{% url 'plugins:netbox_librenms_plugin:vm_interface_sync' pk=object.pk %}"
+                                hx-target="#interface-sync-content"
+                                class="btn btn-outline-primary">
+                            Refresh Interfaces
+                        </button>
+                    {% endif %}
+                {% endwith %}
             {% endif %}
         </form>
     </div>
