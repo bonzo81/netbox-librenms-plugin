@@ -43,7 +43,6 @@ class LibreNMSAPI:
         librenms_id = obj.custom_field_data.get('librenms_id')  # Use .get() to safely retrieve the value
         if librenms_id:
             return librenms_id
-        else:
 
         # Check cache
         cache_key = f"librenms_device_id_{obj.id}"
