@@ -1,6 +1,7 @@
 import urllib.parse
 
 import requests
+from django.core.cache import cache
 from netbox.plugins import get_plugin_config
 
 
@@ -22,6 +23,125 @@ class LibreNMSAPI:
 
         self.headers = {"X-Auth-Token": self.api_token}
 
+    def get_librenms_id(self, obj):
+        """
+        Args:
+            obj: NetBox device or VM object
+
+        Returns:
+            int: LibreNMS device ID if found, None otherwise
+
+        Notes:
+            Lookup order:
+            1. Custom field 'librenms_id' on object
+            2. Cached librenms_id value
+            3. API lookup using IP/hostname
+
+            If found via API, stores ID in custom field if available,
+            otherwise caches the value.
+        """
+        print(f"Checking custom field for object {obj}")
+        librenms_id = obj.custom_field_data.get('librenms_id')  # Use .get() to safely retrieve the value
+        if librenms_id:
+            print(f"Found librenms_id in custom field: {librenms_id}")
+            return librenms_id
+        else:
+            print("librenms_id custom field is empty or not set.")
+
+        # Check cache
+        cache_key = f"librenms_device_id_{obj.id}"
+        librenms_id = cache.get(cache_key)
+        if librenms_id:
+            print(f"Found librenms_id in cache: {librenms_id}")
+            return librenms_id
+
+        # Determine dynamically from API
+        ip_address = obj.primary_ip.address.ip if obj.primary_ip else None
+        hostname = obj.name
+
+        librenms_id = self.get_device_id(ip_address=ip_address, hostname=hostname)
+
+        if librenms_id:
+            # Store in custom field if available
+            if hasattr(obj, 'custom_field_data'):
+                print(f"Storing librenms_id {librenms_id} in custom field")
+                obj.custom_field_data['librenms_id'] = librenms_id
+                obj.save()
+            else:
+                # Otherwise use cache
+                print(f"Storing librenms_id {librenms_id} in cache")
+                cache.set(cache_key, librenms_id, timeout=3600)
+
+        return librenms_id
+
+    def get_device_id_by_ip(self, ip_address):
+        """
+        Retrieve the device ID using the device's IP address.
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{ip_address}",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            device_data = response.json()["devices"][0]
+            return device_data["device_id"]
+        except (requests.exceptions.RequestException, IndexError, KeyError):
+            return None
+
+    def get_device_id_by_hostname(self, hostname):
+        """
+        Retrieve the device ID using the device's hostname.
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{hostname}",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            device_data = response.json()["devices"][0]
+            return device_data["device_id"]
+        except (requests.exceptions.RequestException, IndexError, KeyError):
+            return None
+
+    def get_device_id(self, ip_address=None, hostname=None):
+        """
+        Retrieve the device ID using IP address or hostname.
+
+        Args:
+            ip_address: Device's primary IP address
+            hostname: Device's hostname
+
+        Returns:
+            int: LibreNMS device ID if found, None otherwise
+
+        Notes:
+            Tries IP lookup first, then falls back to hostname if needed.
+            Both parameters are optional but at least one should be provided.
+        """
+        device_id = None
+
+        # Try IP lookup first if available
+        if ip_address:
+            device_id = self.get_device_id_by_ip(ip_address)
+            if device_id:
+                print(f"Found device ID {device_id} using IP address")
+                return device_id
+
+        # Fall back to hostname lookup
+        if hostname:
+            device_id = self.get_device_id_by_hostname(hostname)
+            if device_id:
+                print(f"Found device ID {device_id} using hostname")
+                return device_id
+
+        print("Device ID lookup failed using both IP and hostname")
+        return None
+
     def get_device_info(self, device_ip):
         """
         Fetch device information from LibreNMS using its primary IP.
@@ -41,13 +161,13 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException:
             return False, None
 
-    def get_ports(self, device_ip):
+    def get_ports(self, device_id):
         """
         Fetch ports data from LibreNMS for a device using its primary IP.
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/devices/{device_ip}/ports",
+                f"{self.librenms_url}/api/v0/devices/{device_id}/ports",
                 headers=self.headers,
                 params={
                     "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu"
@@ -106,7 +226,7 @@ class LibreNMSAPI:
             )
             return False, error_message
 
-    def update_device_field(self, hostname, field_data):
+    def update_device_field(self, device_id, field_data):
         """
         Update a specific field for a device in LibreNMS.
 
@@ -122,7 +242,7 @@ class LibreNMSAPI:
         """
         try:
             response = requests.patch(
-                f"{self.librenms_url}/api/v0/devices/{hostname}",
+                f"{self.librenms_url}/api/v0/devices/{device_id}",
                 headers=self.headers,
                 json=field_data,
                 timeout=10,
