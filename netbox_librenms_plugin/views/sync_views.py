@@ -11,11 +11,13 @@ from django.views import View
 from django_tables2 import SingleTableView
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tables import SiteLocationSyncTable
-from netbox_librenms_plugin.utils import (LIBRENMS_TO_NETBOX_MAPPING,
-                                          convert_speed_to_kbps)
-from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
+from netbox_librenms_plugin.utils import (
+    LIBRENMS_TO_NETBOX_MAPPING,
+    convert_speed_to_kbps,
+)
 
 from .base_views import CacheMixin, LibreNMSAPIMixin
 
@@ -34,6 +36,7 @@ class SyncInterfacesView(CacheMixin, View):
             "device_librenms_sync" if object_type == "device" else "vm_librenms_sync"
         )
         obj = self.get_object(object_type, object_id)
+
         selected_interfaces = self.get_selected_interfaces(request)
 
         if selected_interfaces is None:
@@ -125,10 +128,14 @@ class SyncInterfacesView(CacheMixin, View):
         # Update interface attributes
         self.update_interface_attributes(interface, librenms_interface, netbox_type)
 
-        interface.enabled = True if librenms_interface["ifAdminStatus"] is None else (
-            librenms_interface["ifAdminStatus"].lower() == "up"
-            if isinstance(librenms_interface["ifAdminStatus"], str)
-            else bool(librenms_interface["ifAdminStatus"])
+        interface.enabled = (
+            True
+            if librenms_interface["ifAdminStatus"] is None
+            else (
+                librenms_interface["ifAdminStatus"].lower() == "up"
+                if isinstance(librenms_interface["ifAdminStatus"], str)
+                else bool(librenms_interface["ifAdminStatus"])
+            )
         )
         interface.save()
 
@@ -217,6 +224,9 @@ class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
         Handle the POST request to update the device location in LibreNMS.
         """
         device = get_object_or_404(Device, pk=pk)
+
+        self.librenms_id = self.librenms_api.get_librenms_id(device)
+
         if device.site:
             librenms_api = self.librenms_api
             field_data = {
@@ -224,7 +234,7 @@ class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
                 "data": [device.site.name, "1"],
             }
             success, message = librenms_api.update_device_field(
-                str(device.primary_ip.address.ip), field_data
+                self.librenms_id, field_data
             )
 
             if success:
@@ -246,6 +256,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
     """
     Provides a view for synchronizing Netbox site with LibreNMS locations.
     """
+
     table_class = SiteLocationSyncTable
     template_name = "netbox_librenms_plugin/site_location_sync.html"
     filterset = SiteLocationFilterSet
@@ -261,7 +272,9 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         queryset = self.get_queryset()
-        context['filter_form'] = self.filterset(self.request.GET, queryset=queryset).form
+        context["filter_form"] = self.filterset(
+            self.request.GET, queryset=queryset
+        ).form
         return context
 
     def get_queryset(self):
@@ -278,9 +291,11 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
             return self.filterset(self.request.GET, queryset=sync_data).qs
 
         # Handle quicksearch
-        if 'q' in self.request.GET:
-            q = self.request.GET.get('q', '').lower()
-            sync_data = [item for item in sync_data if q in item.netbox_site.name.lower()]
+        if "q" in self.request.GET:
+            q = self.request.GET.get("q", "").lower()
+            sync_data = [
+                item for item in sync_data if q in item.netbox_site.name.lower()
+            ]
 
         return sync_data
 
