@@ -40,19 +40,15 @@ class LibreNMSAPI:
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
         """
-        print(f"Checking custom field for object {obj}")
         librenms_id = obj.custom_field_data.get('librenms_id')  # Use .get() to safely retrieve the value
         if librenms_id:
-            print(f"Found librenms_id in custom field: {librenms_id}")
             return librenms_id
         else:
-            print("librenms_id custom field is empty or not set.")
 
         # Check cache
         cache_key = f"librenms_device_id_{obj.id}"
         librenms_id = cache.get(cache_key)
         if librenms_id:
-            print(f"Found librenms_id in cache: {librenms_id}")
             return librenms_id
 
         # Determine dynamically from API
@@ -64,12 +60,10 @@ class LibreNMSAPI:
         if librenms_id:
             # Store in custom field if available
             if hasattr(obj, 'custom_field_data'):
-                print(f"Storing librenms_id {librenms_id} in custom field")
                 obj.custom_field_data['librenms_id'] = librenms_id
                 obj.save()
             else:
                 # Otherwise use cache
-                print(f"Storing librenms_id {librenms_id} in cache")
                 cache.set(cache_key, librenms_id, timeout=3600)
 
         return librenms_id
@@ -129,17 +123,14 @@ class LibreNMSAPI:
         if ip_address:
             device_id = self.get_device_id_by_ip(ip_address)
             if device_id:
-                print(f"Found device ID {device_id} using IP address")
                 return device_id
 
         # Fall back to hostname lookup
         if hostname:
             device_id = self.get_device_id_by_hostname(hostname)
             if device_id:
-                print(f"Found device ID {device_id} using hostname")
                 return device_id
 
-        print("Device ID lookup failed using both IP and hostname")
         return None
 
     def get_device_info(self, device_ip):

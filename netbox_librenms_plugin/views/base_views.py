@@ -86,7 +86,6 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
         # Get librenms_id once at the start
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
-        print(f"librenms_id: {self.librenms_id}")
 
         context = self.get_context_data(request, obj)
         return render(request, self.template_name, context)
