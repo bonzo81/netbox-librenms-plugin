@@ -203,5 +203,15 @@
     </div>
 </div>
 
-
+<script>
+    // Check if URL contains tab parameter
+    const urlParams = new URLSearchParams(window.location.search);
+    const tab = urlParams.get('tab');
+    if (tab === 'cables') {
+        // Trigger click on cables tab
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('cables-tab').click();
+        });
+    }
+</script>
 {% endblock %} <!-- End content -->

@@ -7,8 +7,7 @@
     <div class="btn-list">
         <form method="post">
             {% csrf_token %}
-            {% if has_primary_ip %}
-                {% if object_in_librenms %}
+            {% if has_librenms_id %}
                     {% with model_name=object|meta:"model_name" %}
                         {% if model_name == "device" %}
                             <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_cable_sync' pk=object.pk %}"
@@ -18,7 +17,6 @@
                             </button>
                         {% endif %}
                     {% endwith %}
-                {% endif %}
             {% endif %}
         </form>
     </div>

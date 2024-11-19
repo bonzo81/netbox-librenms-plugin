@@ -3,6 +3,17 @@
 
 <!-- Cable Sync Table -->
 {% if cable_sync.table %}
+<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}">
+    {% csrf_token %}
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+        <div>
+            <button type="submit" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected Cables</span>
+            </button>
+        </div>
+    </div>
+
     <div class="row mb-3">
         <div class="col col-md-12">
             <div class="card">
@@ -12,10 +23,7 @@
             </div>
         </div>
     </div>
-{% else %}
-    <div class="row mb-3">
-        <p>Where is the table !!</p>
-    </div>
+</form>
 {% endif %}
 <script>
 function initializeCableSelect() {
