@@ -8,8 +8,7 @@ from utilities.paginator import EnhancedPaginator, get_paginate_count
 from utilities.templatetags.helpers import humanize_speed
 
 from .models import InterfaceTypeMapping
-from .utils import (convert_speed_to_kbps, format_mac_address,
-                    get_virtual_chassis_member)
+from .utils import convert_speed_to_kbps, format_mac_address, get_virtual_chassis_member
 
 
 class LibreNMSInterfaceTable(tables.Table):
@@ -193,13 +192,14 @@ class LibreNMSInterfaceTable(tables.Table):
         row_attrs = {
             "data-interface": lambda record: record["ifDescr"],
             "data-name": lambda record: record["ifDescr"],
-            "data-enabled": lambda record: record.get("ifAdminStatus", "").lower() if record.get("ifAdminStatus") else "",
+            "data-enabled": lambda record: record.get("ifAdminStatus", "").lower()
+            if record.get("ifAdminStatus")
+            else "",
         }
         attrs = {
             "class": "table table-hover object-list",
             "id": "librenms-interface-table",
         }
-
 
 
 class VCInterfaceTable(LibreNMSInterfaceTable):
@@ -255,6 +255,10 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             "data-interface": lambda record: record["ifDescr"],
             "data-name": lambda record: record["ifDescr"],
             "data-enabled": lambda record: record.get("ifAdminStatus", "").lower(),
+        }
+        attrs = {
+            "class": "table table-hover object-list",
+            "id": "librenms-interface-table",
         }
 
 
@@ -341,8 +345,8 @@ class SiteLocationSyncTable(tables.Table):
 
     def configure(self, request):
         paginate = {
-            'paginator_class': EnhancedPaginator,
-            'per_page': get_paginate_count(request)
+            "paginator_class": EnhancedPaginator,
+            "per_page": get_paginate_count(request),
         }
         tables.RequestConfig(request, paginate).configure(self)
 
@@ -370,3 +374,92 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
     # Remove the type and speed column for VMs
     ifType = None
     ifSpeed = None
+
+
+class LibreNMSCableTable(tables.Table):
+    """
+    Table for displaying LibreNMS cable data.
+    """
+    selection = ToggleColumn(
+        accessor="local_port",
+        orderable=False,
+        visible=True,
+        attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
+    )
+
+    local_port = tables.Column(
+        verbose_name="Local Port",
+        attrs={"td": {"data-col": "local_port"}}
+    )
+    remote_port = tables.Column(
+        verbose_name="Remote Port",
+        attrs={"td": {"data-col": "remote_port"}}
+    )
+    remote_device = tables.Column(
+        verbose_name="Remote Device",
+        attrs={"td": {"data-col": "remote_device"}}
+    )
+
+    def render_remote_device(self, value, record):
+        if url := record.get('remote_device_url'):
+            return format_html('<a href="{}">{}</a>', url, value)
+        return value
+
+    def render_local_port(self, value, record):
+        if url := record.get('local_port_url'):
+            return format_html('<a href="{}">{}</a>', url, value)
+        return value
+
+    def render_remote_port(self, value, record):
+        if url := record.get('remote_port_url'):
+            return format_html('<a href="{}">{}</a>', url, value)
+        return value
+
+    class Meta:
+        sequence = ['selection', 'local_port', 'remote_port', 'remote_device']
+        row_attrs = {
+            "data-interface": lambda record: record["local_port"],
+            "data-name": lambda record: record["local_port"]
+        }
+        attrs = {
+            "class": "table table-hover object-list",
+            "id": "librenms-cable-table"
+        }
+
+    def __init__(self, *args, device=None, **kwargs):
+        self.device = device
+        super().__init__(*args, **kwargs)
+
+
+class VCCableTable(LibreNMSCableTable):
+    """
+    Table for displaying LibreNMS cable data for Virtual Chassis devices.
+    """
+    device_selection = tables.Column(
+        verbose_name='Virtual Chassis Member',
+        accessor='local_port'
+    )
+
+    def __init__(self, *args, device=None, **kwargs):
+        super().__init__(*args, device=device, **kwargs)
+
+    def render_device_selection(self, value, record):
+        members = self.device.virtual_chassis.members.all()
+        chassis_member = get_virtual_chassis_member(self.device, record["local_port"])
+        selected_member_id = chassis_member.id if chassis_member else self.device.id
+
+        options = [
+            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{member.name}</option>'
+            for member in members
+        ]
+
+        return format_html(
+            '<div class="ts-wrapper form-select single">'
+            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>'
+            "</div>",
+            record["local_port"],
+            mark_safe("".join(options)),
+        )
+
+    class Meta(LibreNMSCableTable.Meta):
+        sequence = ['selection', 'device_selection', 'local_port', 'remote_port', 'remote_device']

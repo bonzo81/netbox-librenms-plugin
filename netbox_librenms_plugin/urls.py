@@ -15,7 +15,9 @@ from .views import (
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
     SingleInterfaceVerifyView,
+    SingleCableVerifyView,
     SyncInterfacesView,
+    SyncCablesView,
     SyncSiteLocationView,
     UpdateDeviceLocationView,
     VMInterfaceTableView,
@@ -51,6 +53,11 @@ urlpatterns = [
         SingleInterfaceVerifyView.as_view(),
         name="verify_interface",
     ),
+    path(
+        "verify-cable/",
+        SingleCableVerifyView.as_view(),
+        name="verify_cable",
+    ),
     # Virtual machine sync URLs
     path(
         "virtual-machines/<int:pk>/interface-sync/",
@@ -67,11 +74,17 @@ urlpatterns = [
         VMLibreNMSSyncView.as_view(),
         name="vm_librenms_sync",
     ),
-    # Sync interfaces URLs
+    # Sync interfaces URL
     path(
         "<str:object_type>/<int:object_id>/sync-interfaces/",
         SyncInterfacesView.as_view(),
         name="sync_selected_interfaces",
+    ),
+    # Sync cables URL
+    path(
+        "device/<int:pk>/sync-cables/",
+        SyncCablesView.as_view(),
+        name="sync_device_cables",
     ),
     # Add Device to LibreNMS URLs
     path(
