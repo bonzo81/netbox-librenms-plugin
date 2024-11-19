@@ -128,7 +128,6 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         librenms_info = self.get_librenms_device_info(obj)
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
-        print(f"inside baselibrenmssynview: cable_context: {cable_context}")
         ip_context = self.get_ip_context(request, obj)
 
         context.update(
@@ -432,6 +431,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         for link in links_data:
             self.enrich_local_port(link)
+            link["device_id"] = self.device.id
 
             if remote_hostname := link.get("remote_device"):
                 device, found = self.get_device_by_name(remote_hostname)
@@ -449,12 +449,11 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         Get the context data for the cable sync view.
         """
-        print("Inside BaseCableTableView get_context_data")
         cached_links_data = cache.get(self.get_cache_key(obj, "links"))
         table = None
 
         if cached_links_data:
-            links_data = cached_links_data.get('links', [])
+            links_data = cached_links_data.get("links", [])
             table = self.get_table(links_data, obj)
 
         return {"object": obj, "table": table}
@@ -470,7 +469,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             return render(
                 request,
                 self.partial_template_name,
-                {"cable_sync": {"object": self.device, "table": None}}
+                {"cable_sync": {"object": self.device, "table": None}},
             )
 
         enriched_data = self.enrich_links_data(links_data)
@@ -483,7 +482,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return render(
             request,
             self.partial_template_name,
-            {"cable_sync": {"object": self.device, "table": table}}
+            {"cable_sync": {"object": self.device, "table": table}},
         )
 
 
