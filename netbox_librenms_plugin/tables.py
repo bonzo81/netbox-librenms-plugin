@@ -380,6 +380,7 @@ class LibreNMSCableTable(tables.Table):
     """
     Table for displaying LibreNMS cable data.
     """
+
     selection = ToggleColumn(
         accessor="local_port",
         orderable=False,
@@ -388,43 +389,37 @@ class LibreNMSCableTable(tables.Table):
     )
 
     local_port = tables.Column(
-        verbose_name="Local Port",
-        attrs={"td": {"data-col": "local_port"}}
+        verbose_name="Local Port", attrs={"td": {"data-col": "local_port"}}
     )
     remote_port = tables.Column(
-        verbose_name="Remote Port",
-        attrs={"td": {"data-col": "remote_port"}}
+        verbose_name="Remote Port", attrs={"td": {"data-col": "remote_port"}}
     )
     remote_device = tables.Column(
-        verbose_name="Remote Device",
-        attrs={"td": {"data-col": "remote_device"}}
+        verbose_name="Remote Device", attrs={"td": {"data-col": "remote_device"}}
     )
 
     def render_remote_device(self, value, record):
-        if url := record.get('remote_device_url'):
+        if url := record.get("remote_device_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def render_local_port(self, value, record):
-        if url := record.get('local_port_url'):
+        if url := record.get("local_port_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def render_remote_port(self, value, record):
-        if url := record.get('remote_port_url'):
+        if url := record.get("remote_port_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     class Meta:
-        sequence = ['selection', 'local_port', 'remote_port', 'remote_device']
+        sequence = ["selection", "local_port", "remote_port", "remote_device"]
         row_attrs = {
             "data-interface": lambda record: record["local_port"],
-            "data-name": lambda record: record["local_port"]
+            "data-name": lambda record: record["local_port"],
         }
-        attrs = {
-            "class": "table table-hover object-list",
-            "id": "librenms-cable-table"
-        }
+        attrs = {"class": "table table-hover object-list", "id": "librenms-cable-table"}
 
     def __init__(self, *args, device=None, **kwargs):
         self.device = device
@@ -435,9 +430,9 @@ class VCCableTable(LibreNMSCableTable):
     """
     Table for displaying LibreNMS cable data for Virtual Chassis devices.
     """
+
     device_selection = tables.Column(
-        verbose_name='Virtual Chassis Member',
-        accessor='local_port'
+        verbose_name="Virtual Chassis Member", accessor="local_port"
     )
 
     def __init__(self, *args, device=None, **kwargs):
@@ -462,4 +457,15 @@ class VCCableTable(LibreNMSCableTable):
         )
 
     class Meta(LibreNMSCableTable.Meta):
-        sequence = ['selection', 'device_selection', 'local_port', 'remote_port', 'remote_device']
+        sequence = [
+            "selection",
+            "device_selection",
+            "local_port",
+            "remote_port",
+            "remote_device",
+        ]
+        row_attrs = {
+            "data-interface": lambda record: record["local_port"],
+            "data-device": lambda record: record["device_id"],
+            "data-name": lambda record: record["local_port"],
+        }
