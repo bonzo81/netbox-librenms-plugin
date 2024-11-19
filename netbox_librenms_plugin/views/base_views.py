@@ -54,21 +54,23 @@ class CacheMixin:
     A mixin class that provides caching functionality.
     """
 
-    cache_prefix = "librenms_ports"
-
-    def get_cache_key(self, obj):
+    def get_cache_key(self, obj, data_type="ports"):
         """
         Get the cache key for the object.
+
+        Args:
+            obj: The object to cache data for
+            data_type: Type of data being cached ('ports' or 'links')
         """
         model_name = obj._meta.model_name
-        return f"{self.cache_prefix}_{model_name}_{obj.pk}"
+        return f"librenms_{data_type}_{model_name}_{obj.pk}"
 
-    def get_last_fetched_key(self, obj):
+    def get_last_fetched_key(self, obj, data_type="ports"):
         """
         Get the cache key for the last fetched time of the object.
         """
         model_name = obj._meta.model_name
-        return f"{self.cache_prefix}_last_fetched_{model_name}_{obj.pk}"
+        return f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
 
 
 class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
@@ -125,14 +127,14 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
         librenms_info = self.get_librenms_device_info(obj)
         interface_context = self.get_interface_context(request, obj)
-        # TODO Remove this once cable sync is implemented
-        # cable_context = self.get_cable_context(request, obj)
+        cable_context = self.get_cable_context(request, obj)
+        print(f"inside baselibrenmssynview: cable_context: {cable_context}")
         ip_context = self.get_ip_context(request, obj)
 
         context.update(
             {
                 "interface_sync": interface_context,
-                "cable_sync": True,
+                "cable_sync": cable_context,
                 "ip_sync": ip_context,
                 **librenms_info["details"],
             }
@@ -247,13 +249,13 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
 
         # Store data in cache
         cache.set(
-            self.get_cache_key(obj),
+            self.get_cache_key(obj, "ports"),
             librenms_data,
             timeout=self.librenms_api.cache_timeout,
         )
         last_fetched = timezone.now()
         cache.set(
-            self.get_last_fetched_key(obj),
+            self.get_last_fetched_key(obj, "ports"),
             last_fetched,
             timeout=self.librenms_api.cache_timeout,
         )
@@ -272,9 +274,9 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         ports_data = []
         table = None
 
-        cached_data = cache.get(self.get_cache_key(obj))
+        cached_data = cache.get(self.get_cache_key(obj, "ports"))
 
-        last_fetched = cache.get(self.get_last_fetched_key(obj))
+        last_fetched = cache.get(self.get_last_fetched_key(obj), "ports")
 
         if cached_data:
             ports_data = cached_data.get("ports", [])
@@ -312,7 +314,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
 
             table.configure(request)
 
-        cache_ttl = cache.ttl(self.get_cache_key(obj))
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "ports"))
         if cache_ttl is not None:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         else:
@@ -346,37 +348,43 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         Fetch links data from LibreNMS for the device
         """
-        ip_address = self.get_ip_address(obj)
-        if not ip_address:
-            return None
-
-        success, data = self.librenms_api.get_device_links(ip_address)
+        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        success, data = self.librenms_api.get_device_links(self.librenms_id)
         if not success or "error" in data:
             return None
 
         # Get cached ports data or fetch it if not available
-        cached_data = cache.get(self.get_cache_key(obj))
+        cached_data = cache.get(self.get_cache_key(obj, "ports"))
         if not cached_data:
-            cached_data = self.librenms_api.get_ports(ip_address)
-            cache.set(self.get_cache_key(obj), cached_data, timeout=self.librenms_api.cache_timeout)
+            cached_data = self.librenms_api.get_ports(self.librenms_id)
+            cache.set(
+                self.get_cache_key(obj, "ports"),
+                cached_data,
+                timeout=self.librenms_api.cache_timeout,
+            )
 
-        ports_map = {str(port['port_id']): port['ifDescr'] for port in cached_data.get('ports', [])}
+        ports_map = {
+            str(port["port_id"]): port["ifDescr"]
+            for port in cached_data.get("ports", [])
+        }
 
         links = data.get("links", [])
         table_data = []
         for link in links:
-            local_port_name = ports_map.get(str(link.get('local_port_id')))
-            table_data.append({
-                'local_port': local_port_name,
-                'remote_port': link.get('remote_port'),
-                'remote_device': link.get('remote_hostname')
-            })
+            local_port_name = ports_map.get(str(link.get("local_port_id")))
+            table_data.append(
+                {
+                    "local_port": local_port_name,
+                    "remote_port": link.get("remote_port"),
+                    "remote_device": link.get("remote_hostname"),
+                }
+            )
 
         return table_data
 
     def get_device_by_name(self, hostname):
         """
-        Try to find device in NetBox by full name or stripped hostname
+        Try to find device in NetBox by FQDN name or stripped hostname
         """
         try:
             return Device.objects.get(name=hostname), True
@@ -392,14 +400,20 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         Add local port URL if interface exists in NetBox
         """
-        if local_port := link.get('local_port'):
-            if hasattr(self.device, 'virtual_chassis') and self.device.virtual_chassis:
+        if local_port := link.get("local_port"):
+            if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(self.device, local_port)
-                if interface := chassis_member.interfaces.filter(name=local_port).first():
-                    link['local_port_url'] = reverse('dcim:interface', args=[interface.pk])
+                if interface := chassis_member.interfaces.filter(
+                    name=local_port
+                ).first():
+                    link["local_port_url"] = reverse(
+                        "dcim:interface", args=[interface.pk]
+                    )
             else:
                 if interface := self.device.interfaces.filter(name=local_port).first():
-                    link['local_port_url'] = reverse('dcim:interface', args=[interface.pk])
+                    link["local_port_url"] = reverse(
+                        "dcim:interface", args=[interface.pk]
+                    )
 
     def enrich_remote_port(self, link, device):
         """
@@ -410,6 +424,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 link["remote_port_url"] = reverse(
                     "dcim:interface", args=[remote_interface.pk]
                 )
+                link["remote_port_id"] = remote_interface.pk
 
     def enrich_links_data(self, links_data):
         """
@@ -422,46 +437,54 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 device, found = self.get_device_by_name(remote_hostname)
                 if found:
                     link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
+                    link["remote_device_id"] = device.pk
                     self.enrich_remote_port(link, device)
 
         return links_data
 
     def get_table(self, data, obj):
-        enriched_data = self.enrich_links_data(data)
-        return LibreNMSCableTable(enriched_data, device=obj)
+        return LibreNMSCableTable(data, device=obj)
 
     def get_context_data(self, request, obj):
         """
         Get the context data for the cable sync view.
         """
-        links_data = self.get_links_data(obj)
+        print("Inside BaseCableTableView get_context_data")
+        cached_links_data = cache.get(self.get_cache_key(obj, "links"))
         table = None
 
-        if links_data:
+        if cached_links_data:
+            links_data = cached_links_data.get('links', [])
             table = self.get_table(links_data, obj)
 
-        return {"cable_sync": {"object": obj, "table": table}}
+        return {"object": obj, "table": table}
 
     def post(self, request, pk):
         self.device = self.get_object(pk)
 
-        ip_address = self.get_ip_address(self.device)
-        if not ip_address:
-            messages.error(request, "This object has no primary IP set. Unable to fetch data from LibreNMS.")
-            return JsonResponse({"error": "No primary IP"}, status=400)
+        self.librenms_id = self.librenms_api.get_librenms_id(self.device)
 
         links_data = self.get_links_data(self.device)
-        if links_data:
-            table = self.get_table(links_data, self.device)
-            return render(request, self.partial_template_name, {
-                "cable_sync": {
-                    "object": self.device,
-                    "table": table
-                }
-            })
+        if not links_data:
+            messages.error(request, "No links found in LibreNMS")
+            return render(
+                request,
+                self.partial_template_name,
+                {"cable_sync": {"object": self.device, "table": None}}
+            )
 
-        messages.error(request, "Failed to fetch cable data from LibreNMS")
-        return JsonResponse({"error": "Failed to fetch data"}, status=400)
+        enriched_data = self.enrich_links_data(links_data)
+        cache.set(
+            self.get_cache_key(self.device, "links"),
+            {"links": enriched_data},
+            timeout=self.librenms_api.cache_timeout,
+        )
+        table = self.get_table(enriched_data, self.device)
+        return render(
+            request,
+            self.partial_template_name,
+            {"cable_sync": {"object": self.device, "table": table}}
+        )
 
 
 class BaseIPAddressTableView(LibreNMSAPIMixin, View):
