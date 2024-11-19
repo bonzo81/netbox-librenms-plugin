@@ -380,6 +380,13 @@ class LibreNMSCableTable(tables.Table):
     """
     Table for displaying LibreNMS cable data.
     """
+    selection = ToggleColumn(
+        accessor="local_port",
+        orderable=False,
+        visible=True,
+        attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
+    )
+
     local_port = tables.Column(
         verbose_name="Local Port",
         attrs={"td": {"data-col": "local_port"}}
@@ -409,6 +416,7 @@ class LibreNMSCableTable(tables.Table):
         return value
 
     class Meta:
+        sequence = ['selection', 'local_port', 'remote_port', 'remote_device']
         row_attrs = {
             "data-interface": lambda record: record["local_port"],
             "data-name": lambda record: record["local_port"]
@@ -432,9 +440,6 @@ class VCCableTable(LibreNMSCableTable):
         accessor='local_port'
     )
 
-    class Meta(LibreNMSCableTable.Meta):
-        sequence = ('device_selection', 'local_port', 'remote_port', 'remote_device')
-
     def __init__(self, *args, device=None, **kwargs):
         super().__init__(*args, device=device, **kwargs)
 
@@ -455,3 +460,6 @@ class VCCableTable(LibreNMSCableTable):
             record["local_port"],
             mark_safe("".join(options)),
         )
+
+    class Meta(LibreNMSCableTable.Meta):
+        sequence = ['selection', 'device_selection', 'local_port', 'remote_port', 'remote_device']
