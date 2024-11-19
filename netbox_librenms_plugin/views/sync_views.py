@@ -1,12 +1,14 @@
 from collections import namedtuple
 
-from dcim.models import Device, Interface, Site
+from dcim.models import Cable, Device, Interface, Site
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
+from django.urls import reverse
 from django.views import View
 from django_tables2 import SingleTableView
 from virtualization.models import VirtualMachine, VMInterface
@@ -78,7 +80,7 @@ class SyncInterfacesView(CacheMixin, View):
         """
         Retrieve and validate cached ports data.
         """
-        cached_data = cache.get(self.get_cache_key(obj))
+        cached_data = cache.get(self.get_cache_key(obj, "ports"))
         if not cached_data:
             messages.warning(
                 request,
@@ -425,3 +427,108 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         if include_name:
             data["location"] = site.name
         return data
+
+
+class SyncCablesView(CacheMixin, View):
+    """
+    View for creating cables in NetBox from LibreNMS data.
+    """
+
+    def get_selected_interfaces(self, request):
+        """
+        Retrieve and validate selected interfaces from the request.
+        """
+        selected_interfaces = request.POST.getlist("select")
+        if not selected_interfaces:
+            messages.error(request, "No interfaces selected for synchronization.")
+            return None
+
+        return selected_interfaces
+
+    def get_cached_links_data(self, request, obj):
+        cached_data = cache.get(self.get_cache_key(obj, "links"))
+        if not cached_data:
+            return None
+        return cached_data.get("links", [])
+
+    def create_cable(self, local_interface, remote_device, remote_interface, request):
+        try:
+            Cable.objects.create(
+                a_terminations=[local_interface],
+                b_terminations=[remote_interface],
+                status="connected",
+            )
+        except Exception as e:
+            messages.error(request, f"Failed to create cable: {str(e)}")
+
+    def post(self, request, pk):
+        device = get_object_or_404(Device, pk=pk)
+        selected_interfaces = self.get_selected_interfaces(request)
+        cached_links = self.get_cached_links_data(request, device)
+
+        if not cached_links:
+            messages.error(
+                request,
+                "Cache has expired. Please refresh the cable data before syncing.",
+            )
+            return redirect(
+                f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}?tab=cables"
+            )
+
+        if selected_interfaces is None:
+            return redirect(
+                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
+            )
+
+        valid_interfaces = []
+        invalid_interfaces = []
+        duplicate_interfaces = []
+
+        for port_name in selected_interfaces:
+            link_data = next(
+                link for link in cached_links if link["local_port"] == port_name
+            )
+            if "remote_device_id" in link_data and "remote_port_id" in link_data:
+                local_interface = device.interfaces.get(name=link_data["local_port"])
+                remote_device = Device.objects.get(pk=link_data["remote_device_id"])
+                remote_interface = remote_device.interfaces.get(
+                    pk=link_data["remote_port_id"]
+                )
+
+                try:
+                    # Check for existing cable
+                    if not Cable.objects.filter(
+                        Q(terminations__termination_id=local_interface.pk)
+                        | Q(terminations__termination_id=remote_interface.pk)
+                    ).exists():
+                        self.create_cable(
+                            local_interface, remote_device, remote_interface, request
+                        )
+                        valid_interfaces.append(port_name)
+                    else:
+                        duplicate_interfaces.append(port_name)
+                except IntegrityError:
+                    duplicate_interfaces.append(port_name)
+            else:
+                invalid_interfaces.append(port_name)
+
+        # Display appropriate messages for each category
+        if duplicate_interfaces:
+            messages.warning(
+                request,
+                f"Cables already exist for interfaces: {', '.join(duplicate_interfaces)}",
+            )
+        if invalid_interfaces:
+            messages.error(
+                request,
+                f"Cannot create cables - missing remote device or interface IDs: {', '.join(invalid_interfaces)}",
+            )
+        if valid_interfaces:
+            messages.success(
+                request,
+                f"Successfully created cables for interfaces: {', '.join(valid_interfaces)}",
+            )
+
+        return redirect(
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}?tab=cables"
+        )
