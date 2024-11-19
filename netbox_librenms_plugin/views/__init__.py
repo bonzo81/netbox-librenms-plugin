@@ -28,6 +28,7 @@ from .mapping_views import (
 )
 from .sync_views import (
     AddDeviceToLibreNMSView,
+    SyncCablesView,
     SyncInterfacesView,
     SyncSiteLocationView,
     UpdateDeviceLocationView,
