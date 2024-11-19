@@ -123,7 +123,7 @@ class SingleInterfaceVerifyView(CacheMixin, View):
             primary_device = selected_device
 
         # Get cached data using primary device
-        cached_data = cache.get(self.get_cache_key(primary_device))
+        cached_data = cache.get(self.get_cache_key(primary_device, 'ports'))
 
         if cached_data:
             port_data = next(
@@ -164,10 +164,9 @@ class DeviceCableTableView(BaseCableTableView):
         """
         Returns the appropriate table instance for rendering cable data.
         """
-        enriched_data = self.enrich_links_data(data)
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            return VCCableTable(enriched_data, device=obj)
-        return LibreNMSCableTable(enriched_data, device=obj)
+            return VCCableTable(data, device=obj)
+        return LibreNMSCableTable(data, device=obj)
 
 
 class SingleCableVerifyView(CacheMixin, View):
