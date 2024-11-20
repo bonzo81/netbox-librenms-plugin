@@ -376,22 +376,37 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                     "local_port": local_port_name,
                     "remote_port": link.get("remote_port"),
                     "remote_device": link.get("remote_hostname"),
+                    "remote_port_id": link.get("remote_port_id"),
+                    "remote_device_id": link.get("remote_device_id"),
                 }
             )
 
         return table_data
 
-    def get_device_by_name(self, hostname):
+    def get_device_by_id_or_name(self, remote_device_id, hostname):
         """
-        Try to find device in NetBox by FQDN name or stripped hostname
+        Try to find device in NetBox first by librenms_id custom field, then by name
         """
+        # First try matching by LibreNMS ID
+        if remote_device_id:
+            try:
+                device = Device.objects.get(
+                    custom_field_data__librenms_id=remote_device_id
+                )
+                return device, True
+            except Device.DoesNotExist:
+                pass
+
+        # Fall back to name matching if no device found by ID
         try:
-            return Device.objects.get(name=hostname), True
+            device = Device.objects.get(name=hostname)
+            return device, True
         except Device.DoesNotExist:
             # Try without domain name
             simple_hostname = hostname.split(".")[0]
             try:
-                return Device.objects.get(name=simple_hostname), True
+                device = Device.objects.get(name=simple_hostname)
+                return device, True
             except Device.DoesNotExist:
                 return None, False
 
@@ -434,7 +449,10 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             link["device_id"] = self.device.id
 
             if remote_hostname := link.get("remote_device"):
-                device, found = self.get_device_by_name(remote_hostname)
+                remote_device_id = link.get("remote_device_id")
+                device, found = self.get_device_by_id_or_name(
+                    remote_device_id, remote_hostname
+                )
                 if found:
                     link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
                     link["remote_device_id"] = device.pk

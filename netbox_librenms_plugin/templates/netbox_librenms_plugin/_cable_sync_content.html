@@ -11,6 +11,9 @@
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected Cables</span>
             </button>
+            <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#cableSyncHelpModal">
+                <i class="mdi mdi-help-circle"></i> info
+            </a>
         </div>
     </div>
 
@@ -25,6 +28,45 @@
     </div>
 </form>
 {% endif %}
+<!-- Interface Type Help Modal -->
+<div class="modal fade" id="cableSyncHelpModal" tabindex="-1" aria-labelledby="cableSyncHelpModalLabel"
+    aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="cableSyncHelpModalLabel">NetBox Interface Sync Info</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <h5>Device Association</h5>
+                <p>The plugin uses two methods to associate LibreNMS devices with NetBox devices:</p>
+                <ol>
+                    <li><strong>LibreNMS ID (Recommended)</strong>
+                        <ul>
+                            <li>Uses the custom field 'librenms_id' on NetBox devices</li>
+                            <li>Automatically populated when viewing the LibreNMS Sync page if device is found.</li>
+                            <li>Can be manually entered in device custom fields</li>
+                            <li>Provides the most reliable device matching</li>
+                        </ul>
+                    </li>
+                    <li><strong>Device Name Fallback</strong>
+                        <ul>
+                            <li>Used when librenms_id is not available</li>
+                            <li>Matches are case-sensitive</li>
+                            <li>Less reliable due to potential naming differences</li>
+                        </ul>
+                    </li>
+                </ol>
+                <p>For best results, ensure the librenms_id custom field is populated on your devices.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+<!-- Interface Sync Table JavaScript -->
 <script>
 function initializeCableSelect() {
     setTimeout(() => {

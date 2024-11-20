@@ -40,7 +40,9 @@ class LibreNMSAPI:
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
         """
-        librenms_id = obj.custom_field_data.get('librenms_id')  # Use .get() to safely retrieve the value
+        librenms_id = obj.custom_field_data.get(
+            "librenms_id"
+        )  # Use .get() to safely retrieve the value
         if librenms_id:
             return librenms_id
 
@@ -58,8 +60,8 @@ class LibreNMSAPI:
 
         if librenms_id:
             # Store in custom field if available
-            if hasattr(obj, 'custom_field_data'):
-                obj.custom_field_data['librenms_id'] = librenms_id
+            if hasattr(obj, "custom_field_data"):
+                obj.custom_field_data["librenms_id"] = librenms_id
                 obj.save()
             else:
                 # Otherwise use cache

@@ -417,6 +417,7 @@ class LibreNMSCableTable(tables.Table):
         sequence = ["selection", "local_port", "remote_port", "remote_device"]
         row_attrs = {
             "data-interface": lambda record: record["local_port"],
+            "data-device": lambda record: record["device_id"],
             "data-name": lambda record: record["local_port"],
         }
         attrs = {"class": "table table-hover object-list", "id": "librenms-cable-table"}

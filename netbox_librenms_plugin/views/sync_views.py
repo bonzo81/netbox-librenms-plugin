@@ -434,7 +434,7 @@ class SyncCablesView(CacheMixin, View):
     View for creating cables in NetBox from LibreNMS data.
     """
 
-    def get_selected_interfaces(self, request):
+    def get_selected_interfaces(self, request, initial_device):
         """
         Retrieve and validate selected interfaces from the request.
         Include device information with each selected interface.
@@ -446,10 +446,14 @@ class SyncCablesView(CacheMixin, View):
 
         # Parse device and interface information from selected data
         selected_interfaces = []
-        for interface in selected_data:
-            device_id = request.POST.get(f"device_selection_{interface}")
-            selected_interfaces.append({"device_id": device_id, "interface": interface})
 
+        for interface in selected_data:
+            # For VC members, get the device_id from the selection dropdown
+            device_id = request.POST.get(f"device_selection_{interface}")
+            # For standalone devices, use the original device id
+            if not device_id:
+                device_id = initial_device.id
+            selected_interfaces.append({"device_id": device_id, "interface": interface})
         return selected_interfaces
 
     def get_cached_links_data(self, request, obj):
@@ -476,83 +480,104 @@ class SyncCablesView(CacheMixin, View):
         )
         return self.create_interface_connection(device, link_data, port_name)
 
-    def create_interface_connection(self, device, link_data, port_name):
-        if not self.validate_link_data(link_data):
-            return "invalid", port_name
-
-        local_interface = device.interfaces.get(name=link_data["local_port"])
-        remote_device = Device.objects.get(pk=link_data["remote_device_id"])
-        remote_interface = remote_device.interfaces.get(pk=link_data["remote_port_id"])
-
-        if self.check_existing_cable(local_interface, remote_interface):
-            return "duplicate", port_name
-
-        self.create_cable(local_interface, remote_device, remote_interface)
-        return "valid", port_name
-
-    def validate_link_data(self, link_data):
-        return "remote_device_id" in link_data and "remote_port_id" in link_data
-
     def check_existing_cable(self, local_interface, remote_interface):
         return Cable.objects.filter(
             Q(terminations__termination_id=local_interface.pk)
             | Q(terminations__termination_id=remote_interface.pk)
         ).exists()
 
+    def validate_prerequisites(self, cached_links, selected_interfaces, device):
+        """
+        Validates required data before processing cable creation
+        """
+        if not cached_links:
+            messages.error(
+                self.request,
+                "Cache has expired. Please refresh the cable data before syncing.",
+            )
+            return False
+
+        if selected_interfaces is None:
+            messages.error(self.request, "No interfaces selected for synchronization.")
+            return False
+
+        return True
+
+    def display_result_messages(
+        self, request, valid_interfaces, invalid_interfaces, duplicate_interfaces
+    ):
+        """
+        Display appropriate messages for cable creation results
+        """
+        if duplicate_interfaces:
+            messages.warning(
+                request,
+                f"Cable already exist for interfaces: {', '.join(duplicate_interfaces)}",
+            )
+        if invalid_interfaces:
+            messages.error(
+                request,
+                f"Cannot create cable - device or interface not found in NetBox: {', '.join(invalid_interfaces)}",
+            )
+        if valid_interfaces:
+            messages.success(
+                request,
+                f"Successfully created cable for interfaces: {', '.join(valid_interfaces)}",
+            )
+
     @transaction.atomic()
     def post(self, request, pk):
         initial_device = get_object_or_404(Device, pk=pk)
-        device = get_object_or_404(Device, pk=pk)
-
-        selected_interfaces = self.get_selected_interfaces(request)
+        selected_interfaces = self.get_selected_interfaces(request, initial_device)
         cached_links = self.get_cached_links_data(request, initial_device)
 
-        # Check cached links
-        if not cached_links:
-            messages.error(request, "Cache has expired. Please refresh the cable data before syncing.")
-            return redirect(f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}?tab=cables")
-
-        # Check selected interfaces
-        if selected_interfaces is None:
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        if not self.validate_prerequisites(
+            cached_links, selected_interfaces, initial_device
+        ):
+            return redirect(
+                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
+            )
 
         valid_interfaces = []
         invalid_interfaces = []
         duplicate_interfaces = []
 
-        for interface_data in selected_interfaces:
+        for interface in selected_interfaces:
             try:
-                device = Device.objects.get(pk=interface_data["device_id"])
-                port_name = interface_data["interface"]
-                link_data = next(link for link in cached_links if link["local_port"] == port_name)
+                # Find the matching link data from cache
+                link_data = next(
+                    link
+                    for link in cached_links
+                    if link["local_port"] == interface["interface"]
+                )
 
-                if "remote_device_id" in link_data and "remote_port_id" in link_data:
-                    try:
-                        local_interface = device.interfaces.get(name=link_data["local_port"])
-                        remote_device = Device.objects.get(pk=link_data["remote_device_id"])
-                        remote_interface = remote_device.interfaces.get(pk=link_data["remote_port_id"])
+                # Get local interface
+                local_device = Device.objects.get(pk=interface["device_id"])
+                local_interface = local_device.interfaces.get(
+                    name=link_data["local_port"]
+                )
 
-                        if not Cable.objects.filter(
-                            Q(terminations__termination_id=local_interface.pk) |
-                            Q(terminations__termination_id=remote_interface.pk)
-                        ).exists():
-                            self.create_cable(local_interface, remote_device, remote_interface, request)
-                            valid_interfaces.append(port_name)
-                        else:
-                            duplicate_interfaces.append(port_name)
-                    except (Device.DoesNotExist, Interface.DoesNotExist):
-                        invalid_interfaces.append(port_name)
-                else:
-                    invalid_interfaces.append(port_name)
-            except Exception:
-                invalid_interfaces.append(port_name)
+                # Get remote interface
+                remote_device = Device.objects.get(pk=link_data["remote_device_id"])
+                remote_interface = remote_device.interfaces.get(
+                    pk=link_data["remote_port_id"]
+                )
 
-        # Display result messages
-        if duplicate_interfaces:
-            messages.warning(request, f"Cable already exist for interfaces: {', '.join(duplicate_interfaces)}")
-        if invalid_interfaces:
-            messages.error(request, f"Cannot create cable - device or interface not found in NetBox: {', '.join(invalid_interfaces)}")
-        if valid_interfaces:
-            messages.success(request, f"Successfully created cable for interfaces: {', '.join(valid_interfaces)}")
+                if self.check_existing_cable(local_interface, remote_interface):
+                    duplicate_interfaces.append(interface["interface"])
+                    continue
 
-        return redirect(f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables")
+                self.create_cable(
+                    local_interface, remote_device, remote_interface, request
+                )
+                valid_interfaces.append(interface["interface"])
+
+            except (Device.DoesNotExist, Interface.DoesNotExist, StopIteration):
+                invalid_interfaces.append(interface["interface"])
+
+        self.display_result_messages(
+            request, valid_interfaces, invalid_interfaces, duplicate_interfaces
+        )
+        return redirect(
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
+        )
