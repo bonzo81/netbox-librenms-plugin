@@ -123,7 +123,7 @@ class SingleInterfaceVerifyView(CacheMixin, View):
             primary_device = selected_device
 
         # Get cached data using primary device
-        cached_data = cache.get(self.get_cache_key(primary_device, 'ports'))
+        cached_data = cache.get(self.get_cache_key(primary_device, "ports"))
 
         if cached_data:
             port_data = next(
@@ -177,11 +177,9 @@ class SingleCableVerifyView(CacheMixin, View):
 
         # Handle empty device selection
         if not selected_device_id:
-            return JsonResponse({
-                "status": "success",
-                "local_port": local_port,
-                "local_port_url": None
-            })
+            return JsonResponse(
+                {"status": "success", "local_port": local_port, "local_port_url": None}
+            )
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
         interface = selected_device.interfaces.filter(name=local_port).first()
@@ -189,7 +187,9 @@ class SingleCableVerifyView(CacheMixin, View):
         response_data = {
             "status": "success",
             "local_port": local_port,
-            "local_port_url": reverse('dcim:interface', args=[interface.pk]) if interface else None
+            "local_port_url": reverse("dcim:interface", args=[interface.pk])
+            if interface
+            else None,
         }
 
         return JsonResponse(response_data)
