@@ -15,10 +15,31 @@
                 <i class="mdi mdi-help-circle"></i> info
             </a>
         </div>
+        {% if cable_sync.cache_expiry %}
+            <div id="cable-cache-countdown" class="me-3">
+                Cache expires in: <span id="cable-countdown-timer" data-expiry="{{ cable_sync.cache_expiry|date:'c' }}"></span>
+            </div>
+        {% endif %}
     </div>
 
     <div class="row mb-3">
         <div class="col col-md-12">
+            <button class="btn btn-sm btn-secondary mb-3" type="button" data-bs-toggle="collapse" data-bs-target="#cableFilterSection" aria-expanded="false" aria-controls="cableFilterSection">
+                <i class="mdi mdi-filter"></i> Toggle Filters
+            </button>
+            <div class="collapse mb-3" id="cableFilterSection">
+                <div class="mb-2">
+                    <small class="text-muted">
+                        <i class="mdi mdi-information"></i> Filters apply to currently displayed cables.
+                    </small>
+                </div>
+                <div class="filter-container d-flex gap-2">
+                    <input type="text" id="filter-vc-member" placeholder="Filter by VC Member" class="form-control">
+                    <input type="text" id="filter-local-port" placeholder="Filter by Local Port" class="form-control">
+                    <input type="text" id="filter-remote-port" placeholder="Filter by Remote Port" class="form-control">
+                    <input type="text" id="filter-remote-device" placeholder="Filter by Remote Device" class="form-control">
+                </div>
+            </div>
             <div class="card">
                 {% include 'inc/paginator.html' with paginator=cable_sync.table.paginator page=cable_sync.table.page %}
                 {% include 'inc/table.html' with table=cable_sync.table %}
