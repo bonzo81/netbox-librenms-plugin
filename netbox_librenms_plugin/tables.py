@@ -189,6 +189,16 @@ class LibreNMSInterfaceTable(tables.Table):
         tables.RequestConfig(request, paginate).configure(self)
 
     class Meta:
+        sequence = [
+            "selection",
+            "ifName",
+            "ifType",
+            "ifSpeed",
+            "ifPhysAddress",
+            "ifMtu",
+            "enabled",
+            "ifDescr",
+        ]
         row_attrs = {
             "data-interface": lambda record: record["ifDescr"],
             "data-name": lambda record: record["ifDescr"],
@@ -212,6 +222,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         accessor="device",
         orderable=False,
         empty_values=[],
+        attrs={"td": {"data-col": "device_selection"}},
     )
 
     def __init__(self, *args, device=None, **kwargs):
@@ -236,9 +247,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         ]
 
         return format_html(
-            '<div class="ts-wrapper form-select single">'
-            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>'
-            "</div>",
+            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>',
             record["ifDescr"],
             mark_safe("".join(options)),
         )
@@ -251,6 +260,17 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         return formatted_data
 
     class Meta:
+        sequence = [
+            "selection",
+            "device_selection",
+            "ifName",
+            "ifType",
+            "ifSpeed",
+            "ifPhysAddress",
+            "ifMtu",
+            "enabled",
+            "ifDescr",
+        ]
         row_attrs = {
             "data-interface": lambda record: record["ifDescr"],
             "data-name": lambda record: record["ifDescr"],
@@ -433,7 +453,8 @@ class VCCableTable(LibreNMSCableTable):
     """
 
     device_selection = tables.Column(
-        verbose_name="Virtual Chassis Member", accessor="local_port"
+        verbose_name="Virtual Chassis Member", accessor="local_port",
+        attrs={'td': {'class': 'device-selection-col', 'data-col': 'device_selection'}}
     )
 
     def __init__(self, *args, device=None, **kwargs):
@@ -450,9 +471,7 @@ class VCCableTable(LibreNMSCableTable):
         ]
 
         return format_html(
-            '<div class="ts-wrapper form-select single">'
-            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>'
-            "</div>",
+            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>',
             record["local_port"],
             mark_safe("".join(options)),
         )
