@@ -6,6 +6,11 @@
 {% load i18n %}
 {% load render_table from django_tables2 %}
 
+{% block javascript %}
+{{ block.super }}
+<script src="{% static 'netbox_librenms_plugin/js/librenms_sync.js' %}"></script>
+{% endblock %}
+
 {% block breadcrumbs %}
   {{ block.super }}
     {% with model_name=object|meta:"model_name" %}
@@ -203,15 +208,5 @@
     </div>
 </div>
 
-<script>
-    // Check if URL contains tab parameter
-    const urlParams = new URLSearchParams(window.location.search);
-    const tab = urlParams.get('tab');
-    if (tab === 'cables') {
-        // Trigger click on cables tab
-        document.addEventListener('DOMContentLoaded', function() {
-            document.getElementById('cables-tab').click();
-        });
-    }
-</script>
+
 {% endblock %} <!-- End content -->

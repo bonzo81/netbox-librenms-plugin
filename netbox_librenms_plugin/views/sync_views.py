@@ -441,7 +441,6 @@ class SyncCablesView(CacheMixin, View):
         """
         selected_data = request.POST.getlist("select")
         if not selected_data:
-            messages.error(request, "No interfaces selected for synchronization.")
             return None
 
         # Parse device and interface information from selected data
@@ -471,14 +470,6 @@ class SyncCablesView(CacheMixin, View):
             )
         except Exception as e:
             messages.error(request, f"Failed to create cable: {str(e)}")
-
-    def process_single_interface(self, interface_data, cached_links):
-        device = Device.objects.get(pk=interface_data["device_id"])
-        port_name = interface_data["interface"]
-        link_data = next(
-            link for link in cached_links if link["local_port"] == port_name
-        )
-        return self.create_interface_connection(device, link_data, port_name)
 
     def check_existing_cable(self, local_interface, remote_interface):
         return Cable.objects.filter(
@@ -535,7 +526,7 @@ class SyncCablesView(CacheMixin, View):
             cached_links, selected_interfaces, initial_device
         ):
             return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
+                f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
             )
 
         valid_interfaces = []
