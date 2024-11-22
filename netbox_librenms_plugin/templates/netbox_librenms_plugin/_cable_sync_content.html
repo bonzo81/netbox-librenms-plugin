@@ -40,6 +40,23 @@
                     <input type="text" id="filter-remote-device" placeholder="Filter by Remote Device" class="form-control">
                 </div>
             </div>
+            <style>
+                /* Your existing CSS rules */
+                .ts-wrapper.multi .ts-control {
+                    display: flex !important;
+                    flex-wrap: wrap;
+                    align-items: center;
+                }
+                /* Updated rules using min-width */
+                td[data-col="device_selection"] {
+                    width: 300px;
+                    min-width: 200px;
+                }
+                td[data-col="device_selection"] .ts-wrapper {
+                    width: 100%;
+                    max-width: 100%;
+                }
+            </style>
             <div class="card">
                 {% include 'inc/paginator.html' with paginator=cable_sync.table.paginator page=cable_sync.table.page %}
                 {% include 'inc/table.html' with table=cable_sync.table %}
