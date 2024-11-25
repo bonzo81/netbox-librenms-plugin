@@ -35,14 +35,15 @@ class LibreNMSAPI:
             Lookup order:
             1. Custom field 'librenms_id' on object
             2. Cached librenms_id value
-            3. API lookup using IP/hostname
+            3. API lookup using:
+                a. primary_ip
+                b. primary IP's DNS name
+                c. hostname if FQDN
 
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
         """
-        librenms_id = obj.custom_field_data.get(
-            "librenms_id"
-        )  # Use .get() to safely retrieve the value
+        librenms_id = obj.custom_field_data.get("librenms_id")
         if librenms_id:
             return librenms_id
 
@@ -54,85 +55,41 @@ class LibreNMSAPI:
 
         # Determine dynamically from API
         ip_address = obj.primary_ip.address.ip if obj.primary_ip else None
-        hostname = obj.name
+        dns_name = obj.primary_ip.dns_name if obj.primary_ip else None
+        hostname = obj.name if '.' in obj.name else None  # Consider as FQDN if it contains a dot
 
-        librenms_id = self.get_device_id(ip_address=ip_address, hostname=hostname)
-
-        if librenms_id:
-            # Store in custom field if available
-            if hasattr(obj, "custom_field_data"):
-                obj.custom_field_data["librenms_id"] = librenms_id
-                obj.save()
-            else:
-                # Otherwise use cache
-                cache.set(cache_key, librenms_id, timeout=3600)
-
-        return librenms_id
-
-    def get_device_id_by_ip(self, ip_address):
-        """
-        Retrieve the device ID using the device's IP address.
-        """
-        try:
-            response = requests.get(
-                f"{self.librenms_url}/api/v0/devices/{ip_address}",
-                headers=self.headers,
-                timeout=10,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            device_data = response.json()["devices"][0]
-            return device_data["device_id"]
-        except (requests.exceptions.RequestException, IndexError, KeyError):
-            return None
-
-    def get_device_id_by_hostname(self, hostname):
-        """
-        Retrieve the device ID using the device's hostname.
-        """
-        try:
-            response = requests.get(
-                f"{self.librenms_url}/api/v0/devices/{hostname}",
-                headers=self.headers,
-                timeout=10,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            device_data = response.json()["devices"][0]
-            return device_data["device_id"]
-        except (requests.exceptions.RequestException, IndexError, KeyError):
-            return None
-
-    def get_device_id(self, ip_address=None, hostname=None):
-        """
-        Retrieve the device ID using IP address or hostname.
-
-        Args:
-            ip_address: Device's primary IP address
-            hostname: Device's hostname
-
-        Returns:
-            int: LibreNMS device ID if found, None otherwise
-
-        Notes:
-            Tries IP lookup first, then falls back to hostname if needed.
-            Both parameters are optional but at least one should be provided.
-        """
-        device_id = None
-
-        # Try IP lookup first if available
+        # Try IP address
         if ip_address:
-            device_id = self.get_device_id_by_ip(ip_address)
-            if device_id:
-                return device_id
+            librenms_id = self.get_device_id_by_ip(ip_address)
+            if librenms_id:
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
-        # Fall back to hostname lookup
+        # Try primary IP's DNS name
+        if dns_name:
+            librenms_id = self.get_device_id_by_hostname(dns_name)
+            if librenms_id:
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
+
+        # Try hostname if FQDN
         if hostname:
-            device_id = self.get_device_id_by_hostname(hostname)
-            if device_id:
-                return device_id
+            librenms_id = self.get_device_id_by_hostname(hostname)
+            if librenms_id:
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
         return None
+
+    def _store_librenms_id(self, obj, librenms_id):
+        # Store in custom field if available
+        if hasattr(obj, "custom_field_data"):
+            obj.custom_field_data["librenms_id"] = librenms_id
+            obj.save()
+        else:
+            # Otherwise use cache
+            cache_key = f"librenms_device_id_{obj.id}"
+            cache.set(cache_key, librenms_id, timeout=3600)
 
     def get_device_info(self, device_id):
         """
