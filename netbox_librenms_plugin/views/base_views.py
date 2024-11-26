@@ -8,6 +8,7 @@ from django.views import View
 from netbox.views import generic
 from dcim.models import Device
 
+from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tables import LibreNMSInterfaceTable, LibreNMSCableTable
 from netbox_librenms_plugin.utils import get_virtual_chassis_member
@@ -93,6 +94,9 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
 
         context = self.get_context_data(request, obj)
+
+        print(context)
+
         return render(request, self.template_name, context)
 
     def get_context_data(self, request, obj):
@@ -129,11 +133,16 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
+
         context.update(
             {
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
+                'v2form': AddToLIbreSNMPV2(),
+                'v3form': AddToLIbreSNMPV3(),
                 "ip_sync": ip_context,
+                "found_in_librenms": librenms_info["found_in_librenms"],
+                "librenms_device_id": self.librenms_id,
                 **librenms_info["details"],
             }
         )
@@ -141,22 +150,20 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         return context
 
     def get_librenms_device_info(self, obj):
-        obj_exists = False
+        found_in_librenms = False
         details = {
-            "librenms_device_id": None,
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
             "librenms_device_location": "-",
         }
 
         if self.librenms_id:
-            obj_exists, librenms_obj_data = self.librenms_api.get_device_info(
+            found_in_librenms, librenms_obj_data = self.librenms_api.get_device_info(
                 self.librenms_id
             )
-            if obj_exists and librenms_obj_data:
+            if found_in_librenms and librenms_obj_data:
                 details.update(
                     {
-                        "librenms_device_id": librenms_obj_data.get("device_id"),
                         "librenms_device_hardware": librenms_obj_data.get("hardware"),
                         "librenms_device_location": librenms_obj_data.get("location"),
                     }
@@ -165,7 +172,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                     f"{self.librenms_api.librenms_url}/device/device="
                     f"{self.librenms_id}/"
                 )
-        return {"obj_exists": obj_exists, "details": details}
+        return {"found_in_librenms": found_in_librenms, "details": details}
 
     def get_interface_context(self, request, obj):
         """

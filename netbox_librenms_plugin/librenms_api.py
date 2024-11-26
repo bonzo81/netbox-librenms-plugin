@@ -40,9 +40,7 @@ class LibreNMSAPI:
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
         """
-        librenms_id = obj.custom_field_data.get(
-            "librenms_id"
-        )  # Use .get() to safely retrieve the value
+        librenms_id = obj.custom_field_data.get("librenms_id")
         if librenms_id:
             return librenms_id
 
@@ -119,13 +117,11 @@ class LibreNMSAPI:
             Both parameters are optional but at least one should be provided.
         """
         device_id = None
-
         # Try IP lookup first if available
         if ip_address:
             device_id = self.get_device_id_by_ip(ip_address)
             if device_id:
                 return device_id
-
         # Fall back to hostname lookup
         if hostname:
             device_id = self.get_device_id_by_hostname(hostname)
@@ -178,45 +174,50 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return {"error": f"Error connecting to LibreNMS: {str(e)}"}
 
-    def add_device(self, hostname, community, version):
+    def add_device(self, data):
         """
         Add a device to LibreNMS.
 
-        :param hostname: Device hostname as ip address
-        :param community: SNMP community
-        :param version: SNMP version (1, 2c, 3)
-
-        :return: True if successful, False otherwise
-        :return: Message indicating the result
+        :param data: Dictionary containing device data
+        :return: Dictionary with 'success' and 'message' keys
         """
-        data = {
-            "hostname": hostname,
-            "community": community,
-            "version": version,
+        payload = {
+            "hostname": data["hostname"],
+            "version": data["snmp_version"],
             "force_add": False,
         }
 
+        if data["snmp_version"] == "v2c":
+            payload["community"] = data["community"]
+        elif data["snmp_version"] == "v3":
+            payload.update(
+                {
+                    "authlevel": data["authlevel"],
+                    "authname": data["authname"],
+                    "authpass": data["authpass"],
+                    "authalgo": data["authalgo"],
+                    "cryptopass": data["cryptopass"],
+                    "cryptoalgo": data["cryptoalgo"],
+                }
+            )
+
         try:
             response = requests.post(
-                f"{self.librenms_url}/api/v0/devices",
+                f"{self.librenms_url}/api/v0/devices/",
                 headers=self.headers,
-                json=data,
-                timeout=10,
+                json=payload,
+                timeout=20,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-
             result = response.json()
-            if result.get("status") == "ok":
-                return True, "Device added successfully"
-            else:
-                return False, result.get("message", "Unknown error occurred")
+            return {
+                "success": result.get("status") == "ok",
+                "message": result.get("message", "Device added successfully."),
+            }
         except requests.exceptions.RequestException as e:
-            response_json = response.json()
-            error_message = response_json.get(
-                "message", f"Unknown error occurred {str(e)}"
-            )
-            return False, error_message
+            print(f"Error adding device: {str(e)}")
+            return {"success": False, "message": str(e)}
 
     def update_device_field(self, device_id, field_data):
         """

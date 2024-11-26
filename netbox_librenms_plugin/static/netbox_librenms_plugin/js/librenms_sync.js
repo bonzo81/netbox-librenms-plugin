@@ -30,7 +30,7 @@ function initializeCountdowns() {
     if (window.cableCountdownInterval) {
         clearInterval(window.cableCountdownInterval);
     }
-    
+
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
 }
@@ -90,10 +90,10 @@ function initializeVCMemberSelect() {
         const selects = interfaceTable.querySelectorAll('.form-select.tomselected');
 
         selects.forEach(select => {
-            
+
             if (select.tomselect && !select.dataset.interfaceSelectInitialized) {
                 select.dataset.interfaceSelectInitialized = 'true';
-                select.tomselect.on('change', function(value) {
+                select.tomselect.on('change', function (value) {
                     const deviceId = value;
                     const interfaceName = select.dataset.interface;
                     const rowId = select.dataset.rowId;
@@ -223,11 +223,48 @@ const urlParams = new URLSearchParams(window.location.search);
 const tab = urlParams.get('tab');
 if (tab === 'cables') {
     // Trigger click on cables tab
-    document.addEventListener('DOMContentLoaded', function() {
+    document.addEventListener('DOMContentLoaded', function () {
         document.getElementById('cables-tab').click();
     });
 }
 
+// Function to toggle SNMP forms based on version
+function toggleSNMPForms() {
+    const snmpSelect = document.querySelector('#add-device-modal select.form-select');
+    if (!snmpSelect) return;
+    const version = snmpSelect.value;
+
+    const v2Form = document.getElementById('snmpv2-form');
+    const v3Form = document.getElementById('snmpv3-form');
+
+    if (version === 'v2c') {
+        v2Form.style.display = 'block';
+        v3Form.style.display = 'none';
+    } else {
+        v2Form.style.display = 'none';
+        v3Form.style.display = 'block';
+    }
+}
+
+// Function to initialize modal-specific scripts
+function initializeModalScripts() {
+    const snmpSelect = document.querySelector('#add-device-modal select.form-select');
+    if (snmpSelect) {
+        snmpSelect.addEventListener('change', toggleSNMPForms);
+        // Initial call to set the correct form visibility
+        toggleSNMPForms();
+    }
+}
+
+// Listen for the modal 'shown.bs.modal' event to initialize scripts
+document.addEventListener('DOMContentLoaded', function () {
+    const addDeviceModal = document.getElementById('add-device-modal');
+    if (addDeviceModal) {
+        addDeviceModal.addEventListener('shown.bs.modal', function () {
+            initializeModalScripts();
+        });
+    }
+});
 
 // Function to initialize all necessary scripts
 function initializeScripts() {
@@ -236,6 +273,7 @@ function initializeScripts() {
     initializeInterfaceFilters();
     initializeCableFilters();
     initializeCountdowns();
+
 }
 
 
