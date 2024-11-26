@@ -35,7 +35,10 @@ class LibreNMSAPI:
             Lookup order:
             1. Custom field 'librenms_id' on object
             2. Cached librenms_id value
-            3. API lookup using IP/hostname
+            3. API lookup using:
+                a. primary_ip
+                b. primary IP's DNS name
+                c. hostname if FQDN
 
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
@@ -52,83 +55,41 @@ class LibreNMSAPI:
 
         # Determine dynamically from API
         ip_address = obj.primary_ip.address.ip if obj.primary_ip else None
-        hostname = obj.name
+        dns_name = obj.primary_ip.dns_name if obj.primary_ip else None
+        hostname = obj.name if '.' in obj.name else None  # Consider as FQDN if it contains a dot
 
-        librenms_id = self.get_device_id(ip_address=ip_address, hostname=hostname)
-
-        if librenms_id:
-            # Store in custom field if available
-            if hasattr(obj, "custom_field_data"):
-                obj.custom_field_data["librenms_id"] = librenms_id
-                obj.save()
-            else:
-                # Otherwise use cache
-                cache.set(cache_key, librenms_id, timeout=3600)
-
-        return librenms_id
-
-    def get_device_id_by_ip(self, ip_address):
-        """
-        Retrieve the device ID using the device's IP address.
-        """
-        try:
-            response = requests.get(
-                f"{self.librenms_url}/api/v0/devices/{ip_address}",
-                headers=self.headers,
-                timeout=10,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            device_data = response.json()["devices"][0]
-            return device_data["device_id"]
-        except (requests.exceptions.RequestException, IndexError, KeyError):
-            return None
-
-    def get_device_id_by_hostname(self, hostname):
-        """
-        Retrieve the device ID using the device's hostname.
-        """
-        try:
-            response = requests.get(
-                f"{self.librenms_url}/api/v0/devices/{hostname}",
-                headers=self.headers,
-                timeout=10,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            device_data = response.json()["devices"][0]
-            return device_data["device_id"]
-        except (requests.exceptions.RequestException, IndexError, KeyError):
-            return None
-
-    def get_device_id(self, ip_address=None, hostname=None):
-        """
-        Retrieve the device ID using IP address or hostname.
-
-        Args:
-            ip_address: Device's primary IP address
-            hostname: Device's hostname
-
-        Returns:
-            int: LibreNMS device ID if found, None otherwise
-
-        Notes:
-            Tries IP lookup first, then falls back to hostname if needed.
-            Both parameters are optional but at least one should be provided.
-        """
-        device_id = None
-        # Try IP lookup first if available
+        # Try IP address
         if ip_address:
-            device_id = self.get_device_id_by_ip(ip_address)
-            if device_id:
-                return device_id
-        # Fall back to hostname lookup
+            librenms_id = self.get_device_id_by_ip(ip_address)
+            if librenms_id:
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
+
+        # Try primary IP's DNS name
+        if dns_name:
+            librenms_id = self.get_device_id_by_hostname(dns_name)
+            if librenms_id:
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
+
+        # Try hostname if FQDN
         if hostname:
-            device_id = self.get_device_id_by_hostname(hostname)
-            if device_id:
-                return device_id
+            librenms_id = self.get_device_id_by_hostname(hostname)
+            if librenms_id:
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
         return None
+
+    def _store_librenms_id(self, obj, librenms_id):
+        # Store in custom field if available
+        if hasattr(obj, "custom_field_data"):
+            obj.custom_field_data["librenms_id"] = librenms_id
+            obj.save()
+        else:
+            # Otherwise use cache
+            cache_key = f"librenms_device_id_{obj.id}"
+            cache.set(cache_key, librenms_id, timeout=3600)
 
     def get_device_info(self, device_id):
         """
@@ -174,50 +135,45 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return {"error": f"Error connecting to LibreNMS: {str(e)}"}
 
-    def add_device(self, data):
+    def add_device(self, hostname, community, version):
         """
         Add a device to LibreNMS.
 
-        :param data: Dictionary containing device data
-        :return: Dictionary with 'success' and 'message' keys
+        :param hostname: Device hostname as ip address
+        :param community: SNMP community
+        :param version: SNMP version (1, 2c, 3)
+
+        :return: True if successful, False otherwise
+        :return: Message indicating the result
         """
-        payload = {
-            "hostname": data["hostname"],
-            "version": data["snmp_version"],
+        data = {
+            "hostname": hostname,
+            "community": community,
+            "version": version,
             "force_add": False,
         }
 
-        if data["snmp_version"] == "v2c":
-            payload["community"] = data["community"]
-        elif data["snmp_version"] == "v3":
-            payload.update(
-                {
-                    "authlevel": data["authlevel"],
-                    "authname": data["authname"],
-                    "authpass": data["authpass"],
-                    "authalgo": data["authalgo"],
-                    "cryptopass": data["cryptopass"],
-                    "cryptoalgo": data["cryptoalgo"],
-                }
-            )
-
         try:
             response = requests.post(
-                f"{self.librenms_url}/api/v0/devices/",
+                f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
-                json=payload,
-                timeout=20,
+                json=data,
+                timeout=10,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
+
             result = response.json()
-            return {
-                "success": result.get("status") == "ok",
-                "message": result.get("message", "Device added successfully."),
-            }
+            if result.get("status") == "ok":
+                return True, "Device added successfully"
+            else:
+                return False, result.get("message", "Unknown error occurred")
         except requests.exceptions.RequestException as e:
-            print(f"Error adding device: {str(e)}")
-            return {"success": False, "message": str(e)}
+            response_json = response.json()
+            error_message = response_json.get(
+                "message", f"Unknown error occurred {str(e)}"
+            )
+            return False, error_message
 
     def update_device_field(self, device_id, field_data):
         """
