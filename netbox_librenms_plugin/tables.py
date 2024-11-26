@@ -389,7 +389,14 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
     """
 
     class Meta(LibreNMSInterfaceTable.Meta):
-        pass
+        sequence = [
+            "selection",
+            "ifName",
+            "ifPhysAddress",
+            "ifMtu",
+            "enabled",
+            "ifDescr",
+        ]
 
     # Remove the type and speed column for VMs
     ifType = None

@@ -50,8 +50,8 @@ class VMInterfaceTableView(BaseInterfaceTableView):
 
     model = VirtualMachine
 
-    def get_table(self, data):
-        return LibreNMSVMInterfaceTable(data)
+    def get_table(self, data, obj):
+        return LibreNMSVMInterfaceTable(data)   
 
     def get_interfaces(self, obj):
         return obj.interfaces.all()

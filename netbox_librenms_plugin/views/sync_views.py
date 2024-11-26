@@ -214,7 +214,28 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
 
     def form_valid(self, form):
         data = form.cleaned_data
-        result = self.librenms_api.add_device(data)
+        device_data = {
+            'hostname': data.get('hostname'),
+            'snmp_version': data.get('snmp_version')
+        }
+
+        if device_data['snmp_version'] == 'v2c':
+            device_data['community'] = data.get('community')
+        elif device_data['snmp_version'] == 'v3':
+            device_data.update({
+                'authlevel': data.get('authlevel'),
+                'authname': data.get('authname'),
+                'authpass': data.get('authpass'),
+                'authalgo': data.get('authalgo'),
+                'cryptopass': data.get('cryptopass'),
+                'cryptoalgo': data.get('cryptoalgo')
+            })
+        else:
+            messages.error(self.request, "Unknown SNMP version.")
+            return redirect(self.object.get_absolute_url())
+
+        result = self.librenms_api.add_device(device_data)
+
         if result["success"]:
             messages.success(self.request, result["message"])
         else:

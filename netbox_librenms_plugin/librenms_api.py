@@ -43,12 +43,12 @@ class LibreNMSAPI:
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
         """
-        librenms_id = obj.custom_field_data.get("librenms_id")
+        librenms_id = obj.cf.get("librenms_id")
         if librenms_id:
             return librenms_id
 
         # Check cache
-        cache_key = f"librenms_device_id_{obj.id}"
+        cache_key = self._get_cache_key(obj)
         librenms_id = cache.get(cache_key)
         if librenms_id:
             return librenms_id
@@ -56,9 +56,7 @@ class LibreNMSAPI:
         # Determine dynamically from API
         ip_address = obj.primary_ip.address.ip if obj.primary_ip else None
         dns_name = obj.primary_ip.dns_name if obj.primary_ip else None
-        hostname = (
-            obj.name if "." in obj.name else None
-        )  # Consider as FQDN if it contains a dot
+        hostname = obj.name if "." in obj.name else None
 
         # Try IP address
         if ip_address:
@@ -83,15 +81,22 @@ class LibreNMSAPI:
 
         return None
 
+    def _get_cache_key(self, obj):
+        """
+        Generate a unique cache key for an object.
+        """
+        object_type = obj._meta.model_name
+        return f"librenms_device_id_{object_type}_{obj.pk}"
+
     def _store_librenms_id(self, obj, librenms_id):
         # Store in custom field if available
-        if hasattr(obj, "custom_field_data"):
-            obj.custom_field_data["librenms_id"] = librenms_id
+        if "librenms_id" in obj.cf:
+            obj.cf["librenms_id"] = librenms_id
             obj.save()
         else:
-            # Otherwise use cache
-            cache_key = f"librenms_device_id_{obj.id}"
-            cache.set(cache_key, librenms_id, timeout=3600)
+            # Use cache as fallback
+            cache_key = self._get_cache_key(obj)
+            cache.set(cache_key, librenms_id, timeout=self.cache_timeout)
 
     def get_device_id_by_ip(self, ip_address):
         """
@@ -171,45 +176,52 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return {"error": f"Error connecting to LibreNMS: {str(e)}"}
 
-    def add_device(self, hostname, community, version):
+    def add_device(self, data):
         """
         Add a device to LibreNMS.
 
-        :param hostname: Device hostname as ip address
-        :param community: SNMP community
-        :param version: SNMP version (1, 2c, 3)
-
-        :return: True if successful, False otherwise
-        :return: Message indicating the result
+        :param data: Dictionary containing device data
+        :return: Dictionary with 'success' and 'message' keys
         """
-        data = {
-            "hostname": hostname,
-            "community": community,
-            "version": version,
+        payload = {
+            "hostname": data["hostname"],
+            "snmpver": data["snmp_version"],
             "force_add": False,
         }
+
+        if data["snmp_version"] == "v2c":
+            payload["community"] = data["community"]
+        elif data["snmp_version"] == "v3":
+            payload.update(
+                {
+                    "authlevel": data["authlevel"],
+                    "authname": data["authname"],
+                    "authpass": data["authpass"],
+                    "authalgo": data["authalgo"],
+                    "cryptopass": data["cryptopass"],
+                    "cryptoalgo": data["cryptoalgo"],
+                }
+            )
 
         try:
             response = requests.post(
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
-                json=data,
+                json=payload,
                 timeout=10,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-
             result = response.json()
             if result.get("status") == "ok":
-                return True, "Device added successfully"
+                return {"success": True, "message": "Device added successfully."}
             else:
-                return False, result.get("message", "Unknown error occurred")
+                return {
+                    "success": False,
+                    "message": result.get("message", "Unknown error."),
+                }
         except requests.exceptions.RequestException as e:
-            response_json = response.json()
-            error_message = response_json.get(
-                "message", f"Unknown error occurred {str(e)}"
-            )
-            return False, error_message
+            return {"success": False, "message": str(e)}
 
     def update_device_field(self, device_id, field_data):
         """
