@@ -138,8 +138,8 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             {
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
-                'v2form': AddToLIbreSNMPV2(),
-                'v3form': AddToLIbreSNMPV3(),
+                "v2form": AddToLIbreSNMPV2(),
+                "v3form": AddToLIbreSNMPV3(),
                 "ip_sync": ip_context,
                 "found_in_librenms": librenms_info["found_in_librenms"],
                 "librenms_device_id": self.librenms_id,
@@ -265,7 +265,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             timeout=self.librenms_api.cache_timeout,
         )
 
-        messages.success(request, "Interface Data refreshed successfully.")
+        messages.success(request, "Interface data refreshed successfully.")
 
         context = self.get_context_data(request, obj)
         context = {"interface_sync": context}
@@ -532,7 +532,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 {"cable_sync": {"object": obj, "table": None, "cache_expiry": None}},
             )
 
-        messages.success(request, "Cable Data refreshed successfully.")
+        messages.success(request, "Cable data refreshed successfully.")
         return render(
             request,
             self.partial_template_name,
