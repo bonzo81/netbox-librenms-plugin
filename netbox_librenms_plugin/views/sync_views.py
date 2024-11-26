@@ -1,5 +1,6 @@
 from collections import namedtuple
-
+from django.views.generic import FormView
+from django.urls import reverse_lazy
 from dcim.models import Cable, Device, Interface, Site
 from django.contrib import messages
 from django.core.cache import cache
@@ -14,6 +15,8 @@ from django_tables2 import SingleTableView
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
+from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
+
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tables import SiteLocationSyncTable
 from netbox_librenms_plugin.utils import (
@@ -186,34 +189,37 @@ class SyncInterfacesView(CacheMixin, View):
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))
 
 
-class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
-    """
-    Handle adding a device to LibreNMS.
-    """
+class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
+    template_name = "add_device_modal.html"
+    success_url = reverse_lazy("device_list")
 
-    def post(self, request, object_type, object_id):
-        """
-        Handle the submission of the form to add a device to LibreNMS.
-        """
-        hostname = request.POST.get("hostname")
-        community = request.POST.get("community")
-        version = request.POST.get("version")
+    def get_form_class(self):
+        if self.request.POST.get("snmp_version") == "v2c":
+            return AddToLIbreSNMPV2
+        return AddToLIbreSNMPV3
 
-        result, message = self.librenms_api.add_device(hostname, community, version)
+    def get_object(self, object_id):
+        try:
+            return Device.objects.get(pk=object_id)
+        except Device.DoesNotExist:
+            return VirtualMachine.objects.get(pk=object_id)
 
-        if result:
-            messages.success(
-                request,
-                "Device added successfully to LibreNMS. Allow time for discovery & polling",
-            )
+    def post(self, request, object_id):
+        self.object = self.get_object(object_id)
+        form_class = self.get_form_class()
+        form = form_class(request.POST)
+        if form.is_valid():
+            return self.form_valid(form)
+        return self.form_invalid(form)
+
+    def form_valid(self, form):
+        data = form.cleaned_data
+        result = self.librenms_api.add_device(data)
+        if result["success"]:
+            messages.success(self.request, result["message"])
         else:
-            messages.error(request, f"Error adding device to LibreNMS: {message}")
-
-        # Use the correct URL name based on object type
-        url_name = (
-            "device_librenms_sync" if object_type == "device" else "vm_librenms_sync"
-        )
-        return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
+            messages.error(self.request, result["message"])
+        return redirect(self.object.get_absolute_url())
 
 
 class UpdateDeviceLocationView(LibreNMSAPIMixin, View):

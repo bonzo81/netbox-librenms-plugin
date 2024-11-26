@@ -88,7 +88,7 @@ urlpatterns = [
     ),
     # Add Device to LibreNMS URLs
     path(
-        "<str:object_type>/<int:object_id>/add-device-to-librenms/",
+        "add-device/<int:object_id>/",
         AddDeviceToLibreNMSView.as_view(),
         name="add_device_to_librenms",
     ),

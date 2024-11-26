@@ -56,7 +56,9 @@ class LibreNMSAPI:
         # Determine dynamically from API
         ip_address = obj.primary_ip.address.ip if obj.primary_ip else None
         dns_name = obj.primary_ip.dns_name if obj.primary_ip else None
-        hostname = obj.name if '.' in obj.name else None  # Consider as FQDN if it contains a dot
+        hostname = (
+            obj.name if "." in obj.name else None
+        )  # Consider as FQDN if it contains a dot
 
         # Try IP address
         if ip_address:
@@ -90,6 +92,40 @@ class LibreNMSAPI:
             # Otherwise use cache
             cache_key = f"librenms_device_id_{obj.id}"
             cache.set(cache_key, librenms_id, timeout=3600)
+
+    def get_device_id_by_ip(self, ip_address):
+        """
+        Retrieve the device ID using the device's IP address.
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{ip_address}",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            device_data = response.json()["devices"][0]
+            return device_data["device_id"]
+        except (requests.exceptions.RequestException, IndexError, KeyError):
+            return None
+
+    def get_device_id_by_hostname(self, hostname):
+        """
+        Retrieve the device ID using the device's hostname.
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{hostname}",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            device_data = response.json()["devices"][0]
+            return device_data["device_id"]
+        except (requests.exceptions.RequestException, IndexError, KeyError):
+            return None
 
     def get_device_info(self, device_id):
         """
