@@ -397,6 +397,10 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
             "enabled",
             "ifDescr",
         ]
+        attrs = {
+            "class": "table table-hover object-list",
+            "id": "librenms-interface-table-vm",
+        }
 
     # Remove the type and speed column for VMs
     ifType = None
@@ -460,8 +464,9 @@ class VCCableTable(LibreNMSCableTable):
     """
 
     device_selection = tables.Column(
-        verbose_name="Virtual Chassis Member", accessor="local_port",
-        attrs={'td': {'class': 'device-selection-col', 'data-col': 'device_selection'}}
+        verbose_name="Virtual Chassis Member",
+        accessor="local_port",
+        attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
     )
 
     def __init__(self, *args, device=None, **kwargs):
@@ -495,4 +500,6 @@ class VCCableTable(LibreNMSCableTable):
             "data-interface": lambda record: record["local_port"],
             "data-device": lambda record: record["device_id"],
             "data-name": lambda record: record["local_port"],
+            "id": lambda record: record["local_port"],
         }
+        attrs = {"class": "table table-hover object-list", "id": "librenms-cable-table-vc"}
