@@ -95,8 +95,6 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
         context = self.get_context_data(request, obj)
 
-        print(context)
-
         return render(request, self.template_name, context)
 
     def get_context_data(self, request, obj):
