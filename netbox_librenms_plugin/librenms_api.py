@@ -208,7 +208,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
                 json=payload,
-                timeout=10,
+                timeout=20,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
