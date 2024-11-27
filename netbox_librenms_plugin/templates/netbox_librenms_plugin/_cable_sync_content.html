@@ -34,7 +34,9 @@
                     </small>
                 </div>
                 <div class="filter-container d-flex gap-2">
+                    {% if cable_sync.table.attrs.id == "librenms-cable-table-vc" %}
                     <input type="text" id="filter-vc-member" placeholder="Filter by VC Member" class="form-control">
+                    {% endif %}
                     <input type="text" id="filter-local-port" placeholder="Filter by Local Port" class="form-control">
                     <input type="text" id="filter-remote-port" placeholder="Filter by Remote Port" class="form-control">
                     <input type="text" id="filter-remote-device" placeholder="Filter by Remote Device" class="form-control">

@@ -76,6 +76,7 @@ function initializeTableCheckboxes(tableId) {
 // Initialize both tables
 function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-interface-table');
+    initializeTableCheckboxes('librenms-interface-table-vm');
     initializeTableCheckboxes('librenms-cable-table');
 }
 
@@ -135,88 +136,99 @@ function initializeVCMemberSelect() {
     }, 100);
 }
 
-// Main function to initialize interface filters
-function initializeInterfaceFilters() {
-    const interfaceTable = document.getElementById('librenms-interface-table');
-    if (!interfaceTable) return;
+// Generic function to initialize filters for a table
+function initializeTableFilters(tableId, filterKeys, dataCols) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
 
-    ['name', 'type', 'speed', 'mac', 'mtu', 'enabled', 'description'].forEach(filter => {
-        const filterElement = document.getElementById(`filter-${filter}`);
+    filterKeys.forEach(filterKey => {
+        const filterElement = document.getElementById(`filter-${filterKey}`);
         if (filterElement) {
-            filterElement.addEventListener('input', filterInterfaceTable);
+            filterElement.addEventListener('input', () => filterTable(tableId, filterKeys, dataCols));
         }
     });
 }
-// Function to filter the interface table
-function filterInterfaceTable() {
-    const interfaceTable = document.getElementById('librenms-interface-table');
-    if (!interfaceTable) return;
 
-    const filters = {
-        name: document.getElementById('filter-name')?.value.toLowerCase() || '',
-        type: document.getElementById('filter-type')?.value.toLowerCase() || '',
-        speed: document.getElementById('filter-speed')?.value.toLowerCase() || '',
-        mac: document.getElementById('filter-mac')?.value.toLowerCase() || '',
-        mtu: document.getElementById('filter-mtu')?.value.toLowerCase() || '',
-        enabled: document.getElementById('filter-enabled')?.value.toLowerCase() || '',
-        description: document.getElementById('filter-description')?.value.toLowerCase() || ''
-    };
+// Generic function to filter a table
+function filterTable(tableId, filterKeys, dataCols) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
 
-    const rows = interfaceTable.querySelectorAll('tr[data-interface]');
+    const filters = {};
+    filterKeys.forEach(key => {
+        filters[key] = document.getElementById(`filter-${key}`)?.value.toLowerCase() || '';
+    });
+
+    const rows = table.querySelectorAll('tr[data-interface]');
     rows.forEach(row => {
-        const matches = {
-            name: (row.querySelector('td[data-col="name"] span')?.textContent || row.querySelector('td[data-col="name"]').textContent).toLowerCase().includes(filters.name),
-            type: (row.querySelector('td[data-col="type"] span')?.textContent || row.querySelector('td[data-col="type"]').textContent).toLowerCase().includes(filters.type),
-            speed: (row.querySelector('td[data-col="speed"] span')?.textContent || row.querySelector('td[data-col="speed"]').textContent).toLowerCase().includes(filters.speed),
-            mac: (row.querySelector('td[data-col="mac_address"] span')?.textContent || row.querySelector('td[data-col="mac_address"]').textContent).toLowerCase().includes(filters.mac),
-            mtu: (row.querySelector('td[data-col="mtu"] span')?.textContent || row.querySelector('td[data-col="mtu"]').textContent).toLowerCase().includes(filters.mtu),
-            enabled: (row.querySelector('td[data-col="enabled"] span')?.textContent || row.querySelector('td[data-col="enabled"]').textContent).toLowerCase().includes(filters.enabled),
-            description: (row.querySelector('td[data-col="description"] span')?.textContent || row.querySelector('td[data-col="description"]').textContent).toLowerCase().includes(filters.description)
-        };
+        const matches = filterKeys.map(key => {
+            let cellText = '';
+            if (dataCols[key].selector) {
+                cellText = row.querySelector(dataCols[key].selector)?.textContent.toLowerCase() || '';
+            } else {
+                const cell = row.querySelector(`td[data-col="${dataCols[key].name}"]`);
+                cellText = (cell.querySelector('span')?.textContent || cell.textContent).toLowerCase();
+            }
+            return cellText.includes(filters[key]);
+        });
 
-        row.style.display = Object.values(matches).every(match => match) ? '' : 'none';
+        row.style.display = matches.every(Boolean) ? '' : 'none';
     });
 }
 
-// Function to initialize cable filters
-function initializeCableFilters() {
-    const cableTable = document.getElementById('librenms-cable-table');
-    if (!cableTable) return;
-
-    ['vc-member', 'local-port', 'remote-port', 'remote-device'].forEach(filter => {
-        const filterElement = document.getElementById(`filter-${filter}`);
-        if (filterElement) {
-            filterElement.addEventListener('input', filterCableTable);
+// Initialize filters for different tables
+function initializeFilters() {
+    // Interface table
+    initializeTableFilters(
+        'librenms-interface-table',
+        ['name', 'type', 'speed', 'mac', 'mtu', 'enabled', 'description'],
+        {
+            name: { name: 'name' },
+            type: { name: 'type' },
+            speed: { name: 'speed' },
+            mac: { name: 'mac_address' },
+            mtu: { name: 'mtu' },
+            enabled: { name: 'enabled' },
+            description: { name: 'description' }
         }
-    });
+    );
+
+    // VM Interface table
+    initializeTableFilters(
+        'librenms-interface-table-vm',
+        ['name', 'mac', 'mtu', 'enabled', 'description'],
+        {
+            name: { name: 'name' },
+            mac: { name: 'mac_address' },
+            mtu: { name: 'mtu' },
+            enabled: { name: 'enabled' },
+            description: { name: 'description' }
+        }
+    );
+
+    // Non Virtual Chassis Cable table (without 'vc-member' filter)
+    initializeTableFilters(
+        'librenms-cable-table',
+        ['local-port', 'remote-port', 'remote-device'],
+        {
+            'local-port': { name: 'local_port' },
+            'remote-port': { name: 'remote_port' },
+            'remote-device': { name: 'remote_device' }
+        }
+    );
+
+    // VC Cable table (with 'vc-member' filter)
+    initializeTableFilters(
+        'librenms-cable-table-vc',
+        ['vc-member', 'local-port', 'remote-port', 'remote-device'],
+        {
+            'vc-member': { selector: '.ts-control .item' },
+            'local-port': { name: 'local_port' },
+            'remote-port': { name: 'remote_port' },
+            'remote-device': { name: 'remote_device' }
+        }
+    );
 }
-// Main function to filter cable table
-
-function filterCableTable() {
-    const cableTable = document.getElementById('librenms-cable-table');
-    if (!cableTable) return;
-
-    const filters = {
-        vcMember: document.getElementById('filter-vc-member')?.value.toLowerCase() || '',
-        localPort: document.getElementById('filter-local-port')?.value.toLowerCase() || '',
-        remotePort: document.getElementById('filter-remote-port')?.value.toLowerCase() || '',
-        remoteDevice: document.getElementById('filter-remote-device')?.value.toLowerCase() || ''
-    };
-
-    const rows = cableTable.querySelectorAll('tr[data-interface]');
-    rows.forEach(row => {
-        const matches = {
-            vcMember: row.querySelector('.ts-control .item')?.textContent.toLowerCase().includes(filters.vcMember),
-            localPort: row.querySelector('td[data-col="local_port"]').textContent.toLowerCase().includes(filters.localPort),
-            remotePort: row.querySelector('td[data-col="remote_port"]').textContent.toLowerCase().includes(filters.remotePort),
-            remoteDevice: row.querySelector('td[data-col="remote_device"]').textContent.toLowerCase().includes(filters.remoteDevice)
-        };
-
-        row.style.display = Object.values(matches).every(match => match) ? '' : 'none';
-    });
-}
-
-
 
 // Check if URL contains tab parameter
 const urlParams = new URLSearchParams(window.location.search);
@@ -270,8 +282,7 @@ document.addEventListener('DOMContentLoaded', function () {
 function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
-    initializeInterfaceFilters();
-    initializeCableFilters();
+    initializeFilters();
     initializeCountdowns();
 
 }

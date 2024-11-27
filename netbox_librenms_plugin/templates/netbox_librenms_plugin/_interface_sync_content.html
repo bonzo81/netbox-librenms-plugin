@@ -52,8 +52,10 @@
                 </div>
                 <div class="filter-container d-flex gap-2">
                     <input type="text" id="filter-name" placeholder="Filter by Name" class="form-control">
-                    <input type="text" id="filter-type" placeholder="Filter by Type" class="form-control">
-                    <input type="text" id="filter-speed" placeholder="Filter by Speed" class="form-control">
+                    {% if interface_sync.table.attrs.id == 'librenms-interface-table' %}
+                        <input type="text" id="filter-type" placeholder="Filter by Type" class="form-control">
+                        <input type="text" id="filter-speed" placeholder="Filter by Speed" class="form-control">
+                    {% endif %}
                     <input type="text" id="filter-mac" placeholder="Filter by MAC" class="form-control">
                     <input type="text" id="filter-mtu" placeholder="Filter by MTU" class="form-control">
                     <input type="text" id="filter-enabled" placeholder="Filter by Status" class="form-control">
