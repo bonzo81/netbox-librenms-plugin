@@ -56,7 +56,7 @@ class LibreNMSAPI:
         # Determine dynamically from API
         ip_address = obj.primary_ip.address.ip if obj.primary_ip else None
         dns_name = obj.primary_ip.dns_name if obj.primary_ip else None
-        hostname = obj.name if "." in obj.name else None
+        hostname = obj.name if obj.name else None
 
         # Try IP address
         if ip_address:
@@ -91,7 +91,7 @@ class LibreNMSAPI:
     def _store_librenms_id(self, obj, librenms_id):
         # Store in custom field if available
         if "librenms_id" in obj.cf:
-            obj.cf["librenms_id"] = librenms_id
+            obj.custom_field_data["librenms_id"] = librenms_id
             obj.save()
         else:
             # Use cache as fallback

@@ -138,6 +138,37 @@
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
 </div>
+{% elif mismatched_device %}
+<div>
+    <div class="alert alert-warning d-flex align-items-center">
+        <i class="mdi mdi-alert me-2"></i>
+        <div>
+            <strong>Device Mismatch:</strong>
+            The LibreNMS device with ID <code>{{ librenms_device_id }}</code> does not match the NetBox device.
+            <hr class="my-2">
+            <span class="text-muted">
+                Netbox Device Details:
+                <ul class="mb-1">
+                    <li>NetBox Name: {{ object.name }}</li>
+                    <li>Primary IP: {{ object.primary_ip.address.ip|default:'-' }}</li>
+                    <li>Primary IP DNS Name: {{ object.primary_ip.dns_name|default:'-' }}</li>
+                    
+                </ul>
+                LibreNMS Device with ID <code>{{ librenms_device_id }}</code>:
+                <ul class="mb-1">
+                    <li>LibreNMS Name: {{ sysName|default:'-' }}</li>
+                    <li>Hardware: {{ librenms_device_hardware }}</li>
+                    <li>IP Address: {{ librenms_device_ip }}</li>
+                </ul>
+                Options:
+                <ul class="mb-0">
+                    <li>Remove custom field value and let LibreNMS plugin try to find it</li>
+                    <li>Manually enter the correct LibreNMS device ID</li>
+                </ul>
+            </span>
+        </div>
+    </div>
+</div>
 {% else %}
 <div>
     <div class="alert alert-warning d-flex align-items-center">
@@ -167,16 +198,15 @@
 </div>
 {% elif is_vc_member and has_vc_primary_ip %}
 <div class="alert alert-info">
-    LibreNMS sync is managed by virtual chassis member <a href="{{ vc_primary_device.get_absolute_url }}">{{
-        vc_primary_device }}</a>
+    LibreNMS sync is managed by virtual chassis member <a href="{{ vc_primary_device.get_absolute_url }}">{{ vc_primary_device }}</a>
 </div>
 {% elif not found_in_librenms %}
 <div class="alert alert-warning">
-    To match a device with LibreNMS, one of these identifiers must match:
+    To match a device with LibreNMS, one of these identifiers must match the LibreNMS hostname/IP:
     <ul>
-        <li>Device name (FQDN)</li>
-        <li>Primary IP DNS name (FQDN)</li>
         <li>Primary IP address</li>
+        <li>Primary IP DNS name (FQDN)</li>
+        <li>Device name</li>
     </ul>
 </div>
 

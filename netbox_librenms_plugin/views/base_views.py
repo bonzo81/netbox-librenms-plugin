@@ -128,6 +128,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             )
 
         librenms_info = self.get_librenms_device_info(obj)
+
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
@@ -136,12 +137,14 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             {
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
+                "ip_sync": ip_context,
                 "v2form": AddToLIbreSNMPV2(),
                 "v3form": AddToLIbreSNMPV3(),
-                "ip_sync": ip_context,
-                "found_in_librenms": librenms_info["found_in_librenms"],
                 "librenms_device_id": self.librenms_id,
-                **librenms_info["details"],
+                "found_in_librenms": librenms_info.get("found_in_librenms"),
+                "librenms_device_details": librenms_info.get("librenms_device_details"),
+                "mismatched_device": librenms_info.get("mismatched_device"),
+                **librenms_info["librenms_device_details"],
             }
         )
 
@@ -149,28 +152,52 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
     def get_librenms_device_info(self, obj):
         found_in_librenms = False
-        details = {
+        mismatched_device = False
+        librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
             "librenms_device_location": "-",
         }
 
         if self.librenms_id:
-            found_in_librenms, librenms_obj_data = self.librenms_api.get_device_info(
-                self.librenms_id
-            )
-            if found_in_librenms and librenms_obj_data:
-                details.update(
+            success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+            if success and device_info:
+                # Get NetBox device details
+                netbox_ip = str(obj.primary_ip.address.ip) if obj.primary_ip else None
+                netbox_hostname = obj.name
+
+                # Get LibreNMS device details
+                librenms_hostname = device_info.get("sysName")
+                librenms_ip = device_info.get("ip")
+
+                # Update device details regardless of match
+                librenms_device_details.update(
                     {
-                        "librenms_device_hardware": librenms_obj_data.get("hardware"),
-                        "librenms_device_location": librenms_obj_data.get("location"),
+                        "librenms_device_url": f"{self.librenms_api.librenms_url}/device/device={self.librenms_id}/",
+                        "librenms_device_hardware": device_info.get("hardware", "-"),
+                        "librenms_device_location": device_info.get("location", "-"),
+                        "librenms_device_ip": librenms_ip,
+                        "sysName": librenms_hostname,
                     }
                 )
-                details["librenms_device_url"] = (
-                    f"{self.librenms_api.librenms_url}/device/device="
-                    f"{self.librenms_id}/"
+
+                # Get just the hostname part from LibreNMS FQDN if present
+                librenms_host = (
+                    librenms_hostname.split(".")[0] if librenms_hostname else None
                 )
-        return {"found_in_librenms": found_in_librenms, "details": details}
+                netbox_host = netbox_hostname.split(".")[0] if netbox_hostname else None
+
+                # Check for matching IP or hostname
+                if (netbox_ip == librenms_ip) or (netbox_host == librenms_host):
+                    found_in_librenms = True
+                else:
+                    mismatched_device = True
+
+        return {
+            "found_in_librenms": found_in_librenms,
+            "librenms_device_details": librenms_device_details,
+            "mismatched_device": mismatched_device,
+        }
 
     def get_interface_context(self, request, obj):
         """
