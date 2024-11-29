@@ -33,6 +33,9 @@ def format_mac_address(mac_address: str) -> str:
     Returns:
         str: The MAC address formatted as XX:XX:XX:XX:XX:XX.
     """
+    if not mac_address:
+        return ""
+
     mac_address = mac_address.strip().replace(":", "").replace("-", "")
 
     if len(mac_address) != 12:
