@@ -247,7 +247,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         ]
 
         return format_html(
-            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>',
+            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select vc-member-select" data-interface="{0}" data-row-id="{0}">{1}</select>',
             record["ifDescr"],
             mark_safe("".join(options)),
         )
@@ -502,4 +502,7 @@ class VCCableTable(LibreNMSCableTable):
             "data-name": lambda record: record["local_port"],
             "id": lambda record: record["local_port"],
         }
-        attrs = {"class": "table table-hover object-list", "id": "librenms-cable-table-vc"}
+        attrs = {
+            "class": "table table-hover object-list",
+            "id": "librenms-cable-table-vc",
+        }

@@ -302,6 +302,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         Get the context data for the interface sync view.
         """
         ports_data = []
+
         table = None
 
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
@@ -327,6 +328,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     chassis_member = get_virtual_chassis_member(obj, port["ifDescr"])
                     netbox_interfaces = self.get_interfaces(chassis_member)
+
                 else:
                     chassis_member = obj  # Not part of a virtual chassis
 
@@ -344,6 +346,10 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
 
             table.configure(request)
 
+        virtual_chassis_members = []
+        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            virtual_chassis_members = obj.virtual_chassis.members.all()
+
         cache_ttl = cache.ttl(self.get_cache_key(obj, "ports"))
         if cache_ttl is not None:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
@@ -355,6 +361,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             "table": table,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
+            "virtual_chassis_members": virtual_chassis_members,
         }
 
 
