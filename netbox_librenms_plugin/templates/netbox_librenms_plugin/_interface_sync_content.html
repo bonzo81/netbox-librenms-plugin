@@ -41,9 +41,18 @@
 
     <div class="row mb-3">
         <div class="col col-md-12">
-            <button class="btn btn-sm btn-secondary mb-3" type="button" data-bs-toggle="collapse" data-bs-target="#interfaceFilterSection" aria-expanded="false" aria-controls="interfaceFilterSection">
-                <i class="mdi mdi-filter"></i> Toggle Filters
-            </button>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    {% if interface_sync.object.virtual_chassis %}
+                        <button type="button" class="btn btn-secondary" id="bulk-vc-member-button" data-bs-toggle="modal" data-bs-target="#bulkVCMemberModal" disabled>
+                            Bulk Edit VC Member
+                        </button>
+                    {% endif %}
+                </div>
+                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#interfaceFilterSection" aria-expanded="false" aria-controls="interfaceFilterSection">
+                    <i class="mdi mdi-filter"></i> Toggle Filters
+                </button>
+            </div>
             <div class="collapse mb-3" id="interfaceFilterSection">
                 <div class="mb-2">
                     <small class="text-muted">
@@ -61,7 +70,6 @@
                     <input type="text" id="filter-enabled" placeholder="Filter by Status" class="form-control">
                     <input type="text" id="filter-description" placeholder="Filter by Description" class="form-control">
                 </div>
-
             </div>
             <style>
                 /* Your existing CSS rules */
@@ -118,6 +126,31 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bulk VC Member Selection Modal -->
+<div class="modal fade" id="bulkVCMemberModal" tabindex="-1" aria-labelledby="bulkVCMemberModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="bulkVCMemberModalLabel">Set Virtual Chassis Member</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <label for="bulk-vc-member-select">Select Virtual Chassis Member:</label>
+                <select id="bulk-vc-member-select" class="form-select">
+                    {% for member in interface_sync.virtual_chassis_members %}
+                    {{ member.name }}
+                        <option value="{{ member.id }}">{{ member.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" id="apply-bulk-vc-member" data-bs-dismiss="modal">Apply</button>
+                <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
             </div>
         </div>
     </div>
