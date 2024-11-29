@@ -136,68 +136,6 @@ function initializeVCMemberSelect() {
     }, 100);
 }
 
-// Function to initialize the 'Apply' button for bulk VC member assignment
-function initializeBulkEditApply() {
-    const applyButton = document.getElementById('apply-bulk-vc-member');
-    if (applyButton) {
-        applyButton.addEventListener('click', function () {
-            const vcMemberSelectElement = document.getElementById('bulk-vc-member-select');
-            if (!vcMemberSelectElement) return;
-            const selectedVcMemberId = vcMemberSelectElement.value;
-
-            // Get all selected checkboxes within the interface table
-            const interfaceTable = document.getElementById('librenms-interface-table');
-            if (!interfaceTable) return;
-            const selectedCheckboxes = interfaceTable.querySelectorAll('input[name="select"]:checked');
-
-            selectedCheckboxes.forEach(checkbox => {
-                const row = checkbox.closest('tr');
-                const vcMemberSelect = row.querySelector('.vc-member-select');
-                if (vcMemberSelect && vcMemberSelect.tomselect) {
-                    vcMemberSelect.tomselect.setValue(selectedVcMemberId);
-                    // TomSelect handles the change event internally
-                }
-            });
-
-            // Close the modal on 'Apply'
-            const bulkModal = bootstrap.Modal.getInstance(document.getElementById('bulkVCMemberModal'));
-            bulkModal.hide();
-
-        });
-    }
-}
-
-// Update the 'initializeCheckboxListeners' function
-function initializeCheckboxListeners() {
-    const interfaceTable = document.getElementById('librenms-interface-table');
-    if (!interfaceTable) return;
-    const checkboxes = interfaceTable.querySelectorAll('input[name="select"]');
-    checkboxes.forEach(checkbox => {
-        checkbox.addEventListener('change', updateBulkActionButton);
-    });
-
-    const toggleAll = interfaceTable.querySelector('input.toggle');
-    if (toggleAll) {
-        toggleAll.addEventListener('change', function () {
-            checkboxes.forEach(checkbox => {
-                checkbox.checked = toggleAll.checked;
-            });
-            updateBulkActionButton();
-        });
-    }
-}
-
-// Update the 'updateBulkActionButton' function
-function updateBulkActionButton() {
-    const interfaceTable = document.getElementById('librenms-interface-table');
-    if (!interfaceTable) return;
-    const anyChecked = interfaceTable.querySelectorAll('input[name="select"]:checked').length > 0;
-    const bulkButton = document.getElementById('bulk-vc-member-button');
-    if (bulkButton) {
-        bulkButton.disabled = !anyChecked;
-    }
-}
-
 // Generic function to initialize filters for a table
 function initializeTableFilters(tableId, filterKeys, dataCols) {
     const table = document.getElementById(tableId);
@@ -340,19 +278,13 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 });
 
-function openBulkVCModal() {
-    const modal = new bootstrap.Modal(document.getElementById('bulkVCMemberModal'));
-    modal.show();
-}
-
 // Function to initialize all necessary scripts
 function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeFilters();
     initializeCountdowns();
-    initializeCheckboxListeners();
-    initializeBulkEditApply();
+
 }
 
 
