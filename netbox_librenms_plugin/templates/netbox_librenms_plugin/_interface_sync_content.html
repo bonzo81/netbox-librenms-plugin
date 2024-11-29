@@ -20,21 +20,37 @@
                 <i class="mdi mdi-help-circle"></i> info
             </a>
         </div>
-
-        <div class="d-flex align-items-center">
-            {% if interface_sync.cache_expiry %}
-            <div id="cache-countdown" class="me-3">
-                Cache expires in: <span id="countdown-timer"
-                    data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
-            </div>
-
-            {% endif %}
-            <div class="color-key me-3">
-                <span class="badge text-success text-white">Matching values</span>
-                <span class="badge text-warning text-white">Mismatched values</span>
-                <span class="badge text-danger text-white">Not present in NetBox</span>
+        <div class="ms-auto d-flex align-items-center">
+            <div class="exclude-columns-section d-flex align-items-center gap-2 me-2">
+                <h6 class="mb-0">Exclude from Sync:</h6>
+                <div class="d-flex align-items-center m-0">
+                    <span class="small me-1">Type</span>
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="type" id="excludeType">
+                </div>
+                <div class="d-flex align-items-center m-1">
+                    <span class="small me-1">Speed</span>
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="speed" id="excludeSpeed">
+                </div>
+                <div class="d-flex align-items-center m-1">
+                    <span class="small me-1">MAC</span>
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="mac_address" id="excludeMACAddress">
+                </div>
+                <div class="d-flex align-items-center m-1">
+                    <span class="small me-1">MTU</span>
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="mtu" id="excludeMTU">
+                </div>
+                <div class="d-flex align-items-center m-1">
+                    <span class="small me-1">Enabled</span>
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="enabled" id="excludeEnabled">
+                </div>
+                <div class="d-flex align-items-center m-1">
+                    <span class="small me-1">Description</span>
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="description" id="excludeDescription">
+                </div>
             </div>
         </div>
+
+
     </div>
     {% endblock %} <!-- End block table_actions -->
 
@@ -48,6 +64,20 @@
                             Bulk Edit VC Member
                         </button>
                     {% endif %}
+                </div>
+                <div class="ms-auto d-flex align-items-center">
+                    {% if interface_sync.cache_expiry %}
+                    <div id="cache-countdown" class="me-3">
+                        Cache expires in: <span id="countdown-timer"
+                            data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
+                    </div>
+        
+                    {% endif %}
+                    <div class="color-key me-3">
+                        <span class="badge text-success text-white">Matching values</span>
+                        <span class="badge text-warning text-white">Mismatched values</span>
+                        <span class="badge text-danger text-white">Not present in NetBox</span>
+                    </div>
                 </div>
                 <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#interfaceFilterSection" aria-expanded="false" aria-controls="interfaceFilterSection">
                     <i class="mdi mdi-filter"></i> Toggle Filters
@@ -88,6 +118,7 @@
                     max-width: 100%;
                 }
             </style>
+
             <div class="card">
                 {% include 'inc/paginator.html' with paginator=interface_sync.table.paginator page=interface_sync.table.page %}
                 {% include 'inc/table.html' with table=interface_sync.table %}
