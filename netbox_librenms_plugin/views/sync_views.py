@@ -43,6 +43,7 @@ class SyncInterfacesView(CacheMixin, View):
         obj = self.get_object(object_type, object_id)
 
         selected_interfaces = self.get_selected_interfaces(request)
+        exclude_columns = request.POST.getlist('exclude_columns')
 
         if selected_interfaces is None:
             return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
@@ -51,7 +52,7 @@ class SyncInterfacesView(CacheMixin, View):
         if ports_data is None:
             return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
 
-        self.sync_selected_interfaces(obj, selected_interfaces, ports_data)
+        self.sync_selected_interfaces(obj, selected_interfaces, ports_data, exclude_columns)
 
         messages.success(request, "Selected interfaces synced successfully.")
 
@@ -92,16 +93,16 @@ class SyncInterfacesView(CacheMixin, View):
             return None
         return cached_data.get("ports", [])
 
-    def sync_selected_interfaces(self, obj, selected_interfaces, ports_data):
+    def sync_selected_interfaces(self, obj, selected_interfaces, ports_data, exclude_columns):
         """
         Sync the selected interfaces.
         """
         with transaction.atomic():
             for port in ports_data:
                 if port["ifDescr"] in selected_interfaces:
-                    self.sync_interface(obj, port)
+                    self.sync_interface(obj, port, exclude_columns)
 
-    def sync_interface(self, obj, librenms_interface):
+    def sync_interface(self, obj, librenms_interface, exclude_columns):
         """
         Sync a single interface from LibreNMS to NetBox.
         """
@@ -131,17 +132,18 @@ class SyncInterfacesView(CacheMixin, View):
             netbox_type = self.get_netbox_interface_type(librenms_interface)
 
         # Update interface attributes
-        self.update_interface_attributes(interface, librenms_interface, netbox_type)
+        self.update_interface_attributes(interface, librenms_interface, netbox_type, exclude_columns)
 
-        interface.enabled = (
-            True
-            if librenms_interface["ifAdminStatus"] is None
-            else (
-                librenms_interface["ifAdminStatus"].lower() == "up"
-                if isinstance(librenms_interface["ifAdminStatus"], str)
-                else bool(librenms_interface["ifAdminStatus"])
+        if 'enabled' not in exclude_columns:
+            interface.enabled = (
+                True
+                if librenms_interface["ifAdminStatus"] is None
+                else (
+                    librenms_interface["ifAdminStatus"].lower() == "up"
+                    if isinstance(librenms_interface["ifAdminStatus"], str)
+                    else bool(librenms_interface["ifAdminStatus"])
+                )
             )
-        )
         interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
@@ -167,7 +169,7 @@ class SyncInterfacesView(CacheMixin, View):
 
         return mapping.netbox_type if mapping else "other"
 
-    def update_interface_attributes(self, interface, librenms_interface, netbox_type):
+    def update_interface_attributes(self, interface, librenms_interface, netbox_type, exclude_columns):
         """
         Update the attributes of the NetBox interface based on LibreNMS data.
         """
@@ -175,6 +177,9 @@ class SyncInterfacesView(CacheMixin, View):
         is_device_interface = isinstance(interface, Interface)
 
         for librenms_key, netbox_key in LIBRENMS_TO_NETBOX_MAPPING.items():
+            if netbox_key in exclude_columns:
+                continue
+
             if librenms_key == "ifSpeed":
                 speed = convert_speed_to_kbps(librenms_interface.get(librenms_key))
                 setattr(interface, netbox_key, speed)
