@@ -1,6 +1,8 @@
 # NetBox LibreNMS Plugin
 
-This plugin provides the ability to sync data between Netbox and LibreNMS.
+### Intro
+The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but 
+this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox. 
 
 This is in early development.
 
@@ -8,8 +10,9 @@ This is in early development.
 
 The plugin offers the following key features:
 
-### Interface Synchronization
+### Interface Sync
 Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox. The following interface attributes are synchronized:
+
 - Name
 - Description
 - Status (Enabled/Disabled)
@@ -19,13 +22,15 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 - MAC Address
 
 > Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox.
-> Speed and Type are Device only
+
+### Cable Sync
+Create cable connection in NetBox from LibreNMS links data.
 
 ### Add device to LibreNMS from Netbox
 
-- Add device to LibreNMS from Netbox device page. Only SNMP v2c available.
+- Add device to LibreNMS from Netbox device page. SNMP v2c and v3 are supported.
 
-### Site & Location Synchronization
+### Site & Location Sync
 The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 
 - Compare NetBox sites to LibreNMS location data
@@ -58,11 +63,11 @@ Or just share your ideas for the plugin over in [discussions](https://github.com
 
 | NetBox Version | Plugin Version |
 |----------------|----------------|
-|     4.0        |      0.2.x     |
+|     4.1        |      0.2.x     |
 
 ## Installing
 
-Netbox 4.0+ is required.
+Netbox 4.1+ is required.
 
 ### Standard Installation
 
@@ -121,6 +126,14 @@ Apply database migrations with Netbox `manage.py`:
 
 ```
 (venv) $ python manage.py migrate
+```
+
+### Collect Static Files
+
+The plugin includes static files that need to be collected by NetBox. Run the following command to collect static files:
+
+```
+(venv) $ python manage.py collectstatic --no-input
 ```
 
 ### Restart Netbox

@@ -10,9 +10,10 @@ A mapping of LibreNMS Type an LibreNMS Speed combine to make a unique group that
 > Note: The LibreNMS Speed is entered as Kbps
 
 Example:
-* ethernetCsmacd + 10000000 = 10GBASE-T (10GE)
-* ethernetCsmacd + 1000000 = 1000BASE-T (1GE)
-* ethernetCsmacd + 100000 = 100BASE-TX (10/100ME)
+
+    * ethernetCsmacd + 10000000 = 10GBASE-T (10GE)
+    * ethernetCsmacd + 1000000 = 1000BASE-T (1GE)
+    * ethernetCsmacd + 100000 = 100BASE-TX (10/100ME)
 
 
 ## How to Use Interface Mappings
