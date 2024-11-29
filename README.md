@@ -1,8 +1,7 @@
 # NetBox LibreNMS Plugin
 
-This plugin provides the ability to sync selected data between Netbox and LibreNMS.
-
-The plugin allows Netbox to remain the source of truth by allowing intentional syncing of data between NetBox and LibreNMS. The intention is to make it easier to maintain accurate data between the two systems.
+The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but 
+this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox. 
 
 This is in early development.
 
@@ -10,8 +9,9 @@ This is in early development.
 
 The plugin offers the following key features:
 
-### Interface Synchronization
+### Interface Sync
 Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox. The following interface attributes are synchronized:
+
 - Name
 - Description
 - Status (Enabled/Disabled)
@@ -21,7 +21,9 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 - MAC Address
 
 > Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox.
-> Speed and Type are Device only
+
+### Cable Sync
+Create cable connection in NetBox from LibreNMS links data.
 
 ### Add device to LibreNMS from Netbox
 
@@ -122,6 +124,14 @@ Apply database migrations with Netbox `manage.py`:
 
 ```
 (venv) $ python manage.py migrate
+```
+
+### Collect Static Files
+
+The plugin includes static files that need to be collected by NetBox. Run the following command to collect static files:
+
+```
+(venv) $ python manage.py collectstatic --no-input
 ```
 
 ### Restart Netbox
