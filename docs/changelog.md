@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.9 (2024-11-30)
+
+## Fix pypi release
+Add static include in MANIFEST.in for pypi release
+
 ## 0.2.8 (2024-11-29)
 ### Use of Custom Field
 This release introduces the option of using a custom field `librenms_id` (integer) to device and virtual machine objects in NetBox. The plugin will work without it but it is recommended for LibreNMS API lookups especially if no primary IP or FQDN available. 
