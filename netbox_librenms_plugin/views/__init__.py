@@ -14,8 +14,8 @@ from .device_views import (
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
-    SingleInterfaceVerifyView,
     SingleCableVerifyView,
+    SingleInterfaceVerifyView,
 )
 from .mapping_views import (
     InterfaceTypeMappingBulkDeleteView,
@@ -26,11 +26,10 @@ from .mapping_views import (
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
 )
-from .sync_views import (
-    AddDeviceToLibreNMSView,
+from .sync.cables import (
     SyncCablesView,
-    SyncInterfacesView,
-    SyncSiteLocationView,
-    UpdateDeviceLocationView,
 )
+from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView
+from .sync.interfaces import SyncInterfacesView
+from .sync.locations import SyncSiteLocationView
 from .vm_views import VMInterfaceTableView, VMIPAddressTableView, VMLibreNMSSyncView
