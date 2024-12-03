@@ -14,21 +14,11 @@ from netbox_librenms_plugin.tables import (
     VCCableTable,
     VCInterfaceTable,
 )
-
-from .base_views import (
-    BaseCableTableView,
-    BaseInterfaceTableView,
-    BaseIPAddressTableView,
-    BaseLibreNMSSyncView,
-    CacheMixin,
-)
-from .base_views import (
-    BaseCableTableView,
-    BaseInterfaceTableView,
-    BaseIPAddressTableView,
-    BaseLibreNMSSyncView,
-    CacheMixin,
-)
+from .base.cables import BaseCableTableView
+from .base.interfaces import BaseInterfaceTableView
+from .base.ip_addresses import BaseIPAddressTableView
+from .base.librenms_sync import BaseLibreNMSSyncView
+from .mixins import CacheMixin
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")

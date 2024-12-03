@@ -7,7 +7,7 @@ from django.views.generic import FormView
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
-from netbox_librenms_plugin.views.base_views import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 
 class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
