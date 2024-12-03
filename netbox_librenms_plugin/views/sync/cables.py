@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
 
-from netbox_librenms_plugin.views.base_views import CacheMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin
 
 
 class SyncCablesView(CacheMixin, View):

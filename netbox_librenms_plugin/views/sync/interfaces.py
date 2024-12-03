@@ -13,7 +13,7 @@ from netbox_librenms_plugin.utils import (
     LIBRENMS_TO_NETBOX_MAPPING,
     convert_speed_to_kbps,
 )
-from netbox_librenms_plugin.views.base_views import CacheMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin
 
 
 class SyncInterfacesView(CacheMixin, View):
