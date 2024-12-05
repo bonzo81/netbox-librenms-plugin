@@ -14,6 +14,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
     Base view for fetching interface data from LibreNMS and generating table data.
     """
 
+    tab = 'interfaces'
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_interface_sync_content.html"
 
@@ -44,7 +45,10 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         Returns the table class to use for rendering interface data.
         Can be overridden by subclasses to use different tables.
         """
-        return LibreNMSInterfaceTable(data)
+        # Get the table instance from child class
+        table = self.table_class(data, device=obj)  # table_class will be set by child class
+        table.htmx_url = f"{self.request.path}?tab={self.tab}"
+        return table
 
     def post(self, request, pk):
         """
@@ -147,6 +151,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         return {
             "object": obj,
             "table": table,
+            "tab": self.tab,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
             "virtual_chassis_members": virtual_chassis_members,

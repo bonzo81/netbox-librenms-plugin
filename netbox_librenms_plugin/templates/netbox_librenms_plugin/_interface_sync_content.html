@@ -120,9 +120,9 @@
             </style>
 
             <div class="card">
-                {% include 'inc/paginator.html' with paginator=interface_sync.table.paginator page=interface_sync.table.page %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table %}
                 {% include 'inc/table.html' with table=interface_sync.table %}
-                {% include 'inc/paginator.html' with paginator=interface_sync.table.paginator page=interface_sync.table.page %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table %}
             </div>
         </div>
     </div>

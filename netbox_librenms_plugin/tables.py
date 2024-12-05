@@ -8,7 +8,12 @@ from utilities.paginator import EnhancedPaginator, get_paginate_count
 from utilities.templatetags.helpers import humanize_speed
 
 from .models import InterfaceTypeMapping
-from .utils import convert_speed_to_kbps, format_mac_address, get_virtual_chassis_member
+from .utils import (
+    convert_speed_to_kbps,
+    format_mac_address,
+    get_table_paginate_count,
+    get_virtual_chassis_member,
+)
 
 
 class LibreNMSInterfaceTable(tables.Table):
@@ -46,6 +51,9 @@ class LibreNMSInterfaceTable(tables.Table):
     def __init__(self, *args, device=None, **kwargs):
         self.device = device
         super().__init__(*args, **kwargs)
+        self.tab = "interfaces"
+        self.htmx_url = None
+        self.prefix = 'interfaces_'
 
     def render_ifSpeed(self, value, record):
         kbps_value = convert_speed_to_kbps(value)
@@ -184,7 +192,7 @@ class LibreNMSInterfaceTable(tables.Table):
     def configure(self, request):
         paginate = {
             "paginator_class": EnhancedPaginator,
-            "per_page": get_paginate_count(request),
+            "per_page": get_table_paginate_count(request, self.prefix),
         }
         tables.RequestConfig(request, paginate).configure(self)
 
@@ -429,6 +437,13 @@ class LibreNMSCableTable(tables.Table):
         verbose_name="Remote Device", attrs={"td": {"data-col": "remote_device"}}
     )
 
+    def __init__(self, *args, device=None, **kwargs):
+        self.device = device
+        super().__init__(*args, **kwargs)
+        self.tab = "cables"
+        self.htmx_url = None
+        self.prefix = 'cables_'
+
     def render_remote_device(self, value, record):
         if url := record.get("remote_device_url"):
             return format_html('<a href="{}">{}</a>', url, value)
@@ -444,6 +459,14 @@ class LibreNMSCableTable(tables.Table):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
+    def configure(self, request):
+        paginate = {
+            "paginator_class": EnhancedPaginator,
+            "per_page": get_table_paginate_count(request, self.prefix),
+
+        }
+        tables.RequestConfig(request, paginate).configure(self)
+
     class Meta:
         sequence = ["selection", "local_port", "remote_port", "remote_device"]
         row_attrs = {
@@ -452,10 +475,6 @@ class LibreNMSCableTable(tables.Table):
             "data-name": lambda record: record["local_port"],
         }
         attrs = {"class": "table table-hover object-list", "id": "librenms-cable-table"}
-
-    def __init__(self, *args, device=None, **kwargs):
-        self.device = device
-        super().__init__(*args, **kwargs)
 
 
 class VCCableTable(LibreNMSCableTable):

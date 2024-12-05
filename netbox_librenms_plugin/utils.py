@@ -1,3 +1,5 @@
+from utilities.paginator import get_paginate_count as netbox_get_paginate_count
+from netbox.config import get_config
 import re
 
 from dcim.models import Device
@@ -72,3 +74,18 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
         return device.virtual_chassis.members.get(vc_position=vc_position)
     except (re.error, ValueError, ObjectDoesNotExist):
         return device
+
+
+def get_table_paginate_count(request, table_prefix):
+    """
+    Extends Netbox pagination to support multiple tables by using table-specific prefixes
+    """
+    config = get_config()
+    if f"{table_prefix}per_page" in request.GET:
+        try:
+            per_page = int(request.GET.get(f"{table_prefix}per_page"))
+            return min(per_page, config.MAX_PAGE_SIZE)
+        except ValueError:
+            pass
+
+    return netbox_get_paginate_count(request)
