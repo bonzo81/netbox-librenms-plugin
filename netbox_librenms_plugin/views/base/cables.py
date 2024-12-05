@@ -16,6 +16,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
     Base view for synchronizing cable information from LibreNMS.
     """
 
+    tab = 'cables'
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
 
@@ -145,7 +146,10 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return links_data
 
     def get_table(self, data, obj):
-        return LibreNMSCableTable(data, device=obj)
+        # Get the table instance from child class
+        table = super().get_table(data, obj)
+        table.htmx_url = f"{self.request.path}?tab={self.tab}"
+        return table
 
     def _prepare_context(self, request, obj, fetch_cached=False):
         """
@@ -185,8 +189,10 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         # Generate the table
         table = self.get_table(links_data, obj)
 
+        table.configure(request)
+
         # Prepare and return the context
-        return {"table": table, "object": obj, "cache_expiry": cache_expiry}
+        return {"table": table, "object": obj, "cache_expiry": cache_expiry, "tab": self.tab}
 
     def get_context_data(self, request, obj):
         """

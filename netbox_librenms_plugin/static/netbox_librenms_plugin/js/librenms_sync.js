@@ -292,15 +292,19 @@ function initializeFilters() {
     );
 }
 
-// Check if URL contains tab parameter
-const urlParams = new URLSearchParams(window.location.search);
-const tab = urlParams.get('tab');
-if (tab === 'cables') {
-    // Trigger click on cables tab
-    document.addEventListener('DOMContentLoaded', function () {
-        document.getElementById('cables-tab').click();
-    });
-}
+document.addEventListener('DOMContentLoaded', function() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const activeTab = urlParams.get('tab');
+    
+    if (activeTab) {
+        const tabElement = document.querySelector(`[data-tab-id="${activeTab}"]`);
+        if (tabElement) {
+            document.getElementById(`${activeTab}-tab`).click();
+        }
+    }
+});
+
+
 
 // Function to toggle SNMP forms based on version
 function toggleSNMPForms() {
