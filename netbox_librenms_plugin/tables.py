@@ -41,7 +41,6 @@ class LibreNMSInterfaceTable(tables.Table):
     def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()
-        print(f"TABLE: interface_name_field: {self.interface_name_field}")
 
         # Update column accessors after initialization
         for column in ["selection", "name"]:
