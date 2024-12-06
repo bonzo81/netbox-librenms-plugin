@@ -12,7 +12,11 @@ class LibreNMSSyncConfig(PluginConfig):
     base_url = "librenms_plugin"
     min_version = '4.1.0'
     required_settings = ["librenms_url", "api_token"]
-    default_settings = {"enable_caching": True, "verify_ssl": True}
+    default_settings = {
+        "enable_caching": True,
+        "verify_ssl": True,
+        "interface_name_field": "ifName",
+    }
 
 
 config = LibreNMSSyncConfig
