@@ -2,8 +2,8 @@ from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 from netbox_librenms_plugin.utils import get_interface_name_field
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 
 class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):

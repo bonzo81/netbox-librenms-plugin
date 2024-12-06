@@ -6,9 +6,11 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.utils import get_virtual_chassis_member
+from netbox_librenms_plugin.utils import (
+    get_interface_name_field,
+    get_virtual_chassis_member,
+)
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
-from netbox_librenms_plugin.utils import get_interface_name_field
 
 
 class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
