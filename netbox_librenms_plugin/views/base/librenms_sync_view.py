@@ -3,6 +3,7 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.utils import get_interface_name_field
 
 
 class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
@@ -64,6 +65,8 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
 
+        interface_name_field = get_interface_name_field()
+
         context.update(
             {
                 "interface_sync": interface_context,
@@ -76,6 +79,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 "librenms_device_details": librenms_info.get("librenms_device_details"),
                 "mismatched_device": librenms_info.get("mismatched_device"),
                 **librenms_info["librenms_device_details"],
+                "interface_name_field": interface_name_field,
             }
         )
 

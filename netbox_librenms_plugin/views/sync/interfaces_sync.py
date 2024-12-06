@@ -10,8 +10,8 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
-    LIBRENMS_TO_NETBOX_MAPPING,
     convert_speed_to_kbps,
+    get_interface_name_field,
 )
 from netbox_librenms_plugin.views.mixins import CacheMixin
 
@@ -31,7 +31,11 @@ class SyncInterfacesView(CacheMixin, View):
         )
         obj = self.get_object(object_type, object_id)
 
-        selected_interfaces = self.get_selected_interfaces(request)
+        interface_name_field = get_interface_name_field(request)
+
+        selected_interfaces = self.get_selected_interfaces(
+            request, interface_name_field
+        )
         exclude_columns = request.POST.getlist("exclude_columns")
 
         if selected_interfaces is None:
@@ -42,7 +46,7 @@ class SyncInterfacesView(CacheMixin, View):
             return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
 
         self.sync_selected_interfaces(
-            obj, selected_interfaces, ports_data, exclude_columns
+            obj, selected_interfaces, ports_data, exclude_columns, interface_name_field
         )
 
         messages.success(request, "Selected interfaces synced successfully.")
@@ -60,7 +64,7 @@ class SyncInterfacesView(CacheMixin, View):
         else:
             raise Http404("Invalid object type.")
 
-    def get_selected_interfaces(self, request):
+    def get_selected_interfaces(self, request, interface_name_field):
         """
         Retrieve and validate selected interfaces from the request.
         """
@@ -85,23 +89,36 @@ class SyncInterfacesView(CacheMixin, View):
         return cached_data.get("ports", [])
 
     def sync_selected_interfaces(
-        self, obj, selected_interfaces, ports_data, exclude_columns
+        self,
+        obj,
+        selected_interfaces,
+        ports_data,
+        exclude_columns,
+        interface_name_field,
     ):
         """
         Sync the selected interfaces.
         """
         with transaction.atomic():
             for port in ports_data:
-                if port["ifDescr"] in selected_interfaces:
-                    self.sync_interface(obj, port, exclude_columns)
+                port_name = port.get(interface_name_field)
+                if port_name in selected_interfaces:
+                    self.sync_interface(
+                        obj, port, exclude_columns, interface_name_field
+                    )
 
-    def sync_interface(self, obj, librenms_interface, exclude_columns):
+    def sync_interface(
+        self, obj, librenms_interface, exclude_columns, interface_name_field
+    ):
         """
         Sync a single interface from LibreNMS to NetBox.
         """
+
+        interface_name = librenms_interface.get(interface_name_field)
+
         if isinstance(obj, Device):
             # Get the selected device ID from POST data
-            device_selection_key = f"device_selection_{librenms_interface['ifDescr']}"
+            device_selection_key = f"device_selection_{interface_name}"
             selected_device_id = self.request.POST.get(device_selection_key)
 
             if selected_device_id:
@@ -110,11 +127,11 @@ class SyncInterfacesView(CacheMixin, View):
                 target_device = obj
 
             interface, _ = Interface.objects.get_or_create(
-                device=target_device, name=librenms_interface["ifDescr"]
+                device=target_device, name=interface_name
             )
         elif isinstance(obj, VirtualMachine):
             interface, _ = VMInterface.objects.get_or_create(
-                virtual_machine=obj, name=librenms_interface["ifDescr"]
+                virtual_machine=obj, name=interface_name
             )
         else:
             raise ValueError("Invalid object type.")
@@ -126,7 +143,11 @@ class SyncInterfacesView(CacheMixin, View):
 
         # Update interface attributes
         self.update_interface_attributes(
-            interface, librenms_interface, netbox_type, exclude_columns
+            interface,
+            librenms_interface,
+            netbox_type,
+            exclude_columns,
+            interface_name_field,
         )
 
         if "enabled" not in exclude_columns:
@@ -165,13 +186,28 @@ class SyncInterfacesView(CacheMixin, View):
         return mapping.netbox_type if mapping else "other"
 
     def update_interface_attributes(
-        self, interface, librenms_interface, netbox_type, exclude_columns
+        self,
+        interface,
+        librenms_interface,
+        netbox_type,
+        exclude_columns,
+        interface_name_field,
     ):
         """
         Update the attributes of the NetBox interface based on LibreNMS data.
         """
         # Check if the interface is a Device interface or VM interface
         is_device_interface = isinstance(interface, Interface)
+
+        # Generate the mapping dynamically based on interface_name_field
+        LIBRENMS_TO_NETBOX_MAPPING = {
+            interface_name_field: "name",
+            "ifType": "type",
+            "ifSpeed": "speed",
+            "ifAlias": "description",
+            "ifPhysAddress": "mac_address",
+            "ifMtu": "mtu",
+        }
 
         for librenms_key, netbox_key in LIBRENMS_TO_NETBOX_MAPPING.items():
             if netbox_key in exclude_columns:
@@ -185,7 +221,9 @@ class SyncInterfacesView(CacheMixin, View):
                 if is_device_interface and hasattr(interface, netbox_key):
                     setattr(interface, netbox_key, netbox_type)
             elif librenms_key == "ifAlias":
-                if librenms_interface["ifAlias"] != librenms_interface["ifDescr"]:
-                    setattr(interface, netbox_key, librenms_interface[librenms_key])
+                # Update description if it's different from the interface name
+                interface_name = librenms_interface.get(interface_name_field)
+                if librenms_interface.get("ifAlias") != interface_name:
+                    setattr(interface, netbox_key, librenms_interface.get(librenms_key))
             else:
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))

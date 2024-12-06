@@ -1,9 +1,10 @@
-from utilities.paginator import get_paginate_count as netbox_get_paginate_count
-from netbox.config import get_config
 import re
 
 from dcim.models import Device
 from django.core.exceptions import ObjectDoesNotExist
+from netbox.config import get_config
+from netbox.plugins import get_plugin_config
+from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 
 def convert_speed_to_kbps(speed_bps: int) -> int:
@@ -13,16 +14,6 @@ def convert_speed_to_kbps(speed_bps: int) -> int:
     if speed_bps is None:
         return None
     return speed_bps // 1000
-
-
-LIBRENMS_TO_NETBOX_MAPPING = {
-    "ifDescr": "name",
-    "ifType": "type",
-    "ifSpeed": "speed",
-    "ifAlias": "description",
-    "ifPhysAddress": "mac_address",
-    "ifMtu": "mtu",
-}
 
 
 def format_mac_address(mac_address: str) -> str:
@@ -89,3 +80,23 @@ def get_table_paginate_count(request, table_prefix):
             pass
 
     return netbox_get_paginate_count(request)
+
+
+def get_interface_name_field(request=None):
+    """
+    Get interface name field with request override support.
+
+    Args:
+        request: Optional HTTP request object that may contain override
+
+    Returns:
+        str: Interface name field to use
+    """
+    if request:
+        if request.GET.get("interface_name_field"):
+            return request.GET.get("interface_name_field")
+        if request.POST.get("interface_name_field"):
+            return request.POST.get("interface_name_field")
+
+    # Fall back to plugin config
+    return get_plugin_config("netbox_librenms_plugin", "interface_name_field")

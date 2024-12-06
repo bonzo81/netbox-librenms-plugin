@@ -6,9 +6,9 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.tables import LibreNMSCableTable
 from netbox_librenms_plugin.utils import get_virtual_chassis_member
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
+from netbox_librenms_plugin.utils import get_interface_name_field
 
 
 class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
@@ -16,9 +16,10 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
     Base view for synchronizing cable information from LibreNMS.
     """
 
-    tab = 'cables'
+    tab = "cables"
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
+    interface_name_field = get_interface_name_field()
 
     def get_object(self, pk):
         return get_object_or_404(self.model, pk=pk)
@@ -48,7 +49,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
         ports_data = self.get_ports_data(obj)
         ports_map = {
-            str(port["port_id"]): port["ifDescr"]
+            str(port["port_id"]): port[self.interface_name_field]
             for port in ports_data.get("ports", [])
         }
 
@@ -192,7 +193,12 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         table.configure(request)
 
         # Prepare and return the context
-        return {"table": table, "object": obj, "cache_expiry": cache_expiry, "tab": self.tab}
+        return {
+            "table": table,
+            "object": obj,
+            "cache_expiry": cache_expiry,
+            "tab": self.tab,
+        }
 
     def get_context_data(self, request, obj):
         """

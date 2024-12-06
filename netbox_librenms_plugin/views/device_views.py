@@ -14,11 +14,15 @@ from netbox_librenms_plugin.tables import (
     VCCableTable,
     VCInterfaceTable,
 )
-from .base.cables import BaseCableTableView
-from .base.interfaces import BaseInterfaceTableView
-from .base.ip_addresses import BaseIPAddressTableView
-from .base.librenms_sync import BaseLibreNMSSyncView
+from netbox_librenms_plugin.utils import get_interface_name_field
+
+from .base.cables_view import BaseCableTableView
+from .base.interfaces_view import BaseInterfaceTableView
+from .base.ip_addresses_view import BaseIPAddressTableView
+from .base.librenms_sync_view import BaseLibreNMSSyncView
 from .mixins import CacheMixin
+
+
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
@@ -35,8 +39,10 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
         """
         Get the context data for interface sync for devices.
         """
+        interface_name_field = get_interface_name_field(request)
         interface_table_view = DeviceInterfaceTableView()
-        return interface_table_view.get_context_data(request, obj)
+        interface_table_view.request = request
+        return interface_table_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
         """
@@ -68,13 +74,19 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
             "plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": obj.pk}
         )
 
-    def get_table(self, data, obj):
+    def get_table(self, data, obj, interface_name_field):
         """
         Returns the appropriate table instance for rendering interface data.
         """
+        print(f"GET_TABLE: interface_name_field: {interface_name_field}")
+
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            return VCInterfaceTable(data, device=obj)
-        return LibreNMSInterfaceTable(data, device=obj)
+            table = VCInterfaceTable(data, device=obj, interface_name_field=interface_name_field)
+        else:
+            table = LibreNMSInterfaceTable(data, device=obj, interface_name_field=interface_name_field)
+
+        table.htmx_url = f"{self.request.path}?tab={self.tab}"
+        return table
 
 
 class SingleInterfaceVerifyView(CacheMixin, View):
@@ -89,6 +101,8 @@ class SingleInterfaceVerifyView(CacheMixin, View):
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
+
+        interface_name_field = get_interface_name_field()
 
         if not selected_device_id:
             return JsonResponse(
@@ -120,7 +134,7 @@ class SingleInterfaceVerifyView(CacheMixin, View):
                 (
                     port
                     for port in cached_data.get("ports", [])
-                    if port["ifDescr"] == interface_name
+                    if port.get(interface_name_field) == interface_name
                 ),
                 None,
             )
@@ -132,7 +146,11 @@ class SingleInterfaceVerifyView(CacheMixin, View):
                     if selected_device.virtual_chassis
                     else LibreNMSInterfaceTable
                 )
-                table = table_class([], device=selected_device)
+                table = table_class(
+                    [],
+                    device=selected_device,
+                    interface_name_field=interface_name_field,
+                )
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse(
                     {"status": "success", "formatted_row": formatted_row}
