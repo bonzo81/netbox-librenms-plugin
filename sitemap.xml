@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://bonzo81.github.io/netbox-librenms-plugin/</loc>
+         <lastmod>2024-12-10</lastmod>
+    </url>
+    <url>
+         <loc>https://bonzo81.github.io/netbox-librenms-plugin/changelog/</loc>
+         <lastmod>2024-12-10</lastmod>
+    </url>
+    <url>
+         <loc>https://bonzo81.github.io/netbox-librenms-plugin/contributing/</loc>
+         <lastmod>2024-12-10</lastmod>
+    </url>
+    <url>
+         <loc>https://bonzo81.github.io/netbox-librenms-plugin/custom_field/</loc>
+         <lastmod>2024-12-10</lastmod>
+    </url>
+    <url>
+         <loc>https://bonzo81.github.io/netbox-librenms-plugin/feature_list/</loc>
+         <lastmod>2024-12-10</lastmod>
+    </url>
+    <url>
+         <loc>https://bonzo81.github.io/netbox-librenms-plugin/interface_mappings/</loc>
+         <lastmod>2024-12-10</lastmod>
+    </url>
+    <url>
+         <loc>https://bonzo81.github.io/netbox-librenms-plugin/usage_tips/</loc>
+         <lastmod>2024-12-10</lastmod>
+    </url>
+    <url>
+         <loc>https://bonzo81.github.io/netbox-librenms-plugin/virtual_chassis/</loc>
+         <lastmod>2024-12-10</lastmod>
+    </url>
+</urlset>
