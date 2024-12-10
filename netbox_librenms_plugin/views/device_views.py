@@ -23,8 +23,6 @@ from .base.librenms_sync_view import BaseLibreNMSSyncView
 from .mixins import CacheMixin
 
 
-
-
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
 class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
     """
@@ -78,12 +76,15 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
         """
         Returns the appropriate table instance for rendering interface data.
         """
-        print(f"GET_TABLE: interface_name_field: {interface_name_field}")
 
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            table = VCInterfaceTable(data, device=obj, interface_name_field=interface_name_field)
+            table = VCInterfaceTable(
+                data, device=obj, interface_name_field=interface_name_field
+            )
         else:
-            table = LibreNMSInterfaceTable(data, device=obj, interface_name_field=interface_name_field)
+            table = LibreNMSInterfaceTable(
+                data, device=obj, interface_name_field=interface_name_field
+            )
 
         table.htmx_url = f"{self.request.path}?tab={self.tab}"
         return table
@@ -101,8 +102,9 @@ class SingleInterfaceVerifyView(CacheMixin, View):
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
-
-        interface_name_field = get_interface_name_field()
+        interface_name_field = (
+            data.get("interface_name_field") or get_interface_name_field()
+        )
 
         if not selected_device_id:
             return JsonResponse(
