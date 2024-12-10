@@ -4,10 +4,11 @@ from utilities.views import ViewTab, register_model_view
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables import LibreNMSVMInterfaceTable
+from netbox_librenms_plugin.utils import get_interface_name_field
 
 from .base.interfaces_view import BaseInterfaceTableView
-from .base.librenms_sync_view import BaseLibreNMSSyncView
 from .base.ip_addresses_view import BaseIPAddressTableView
+from .base.librenms_sync_view import BaseLibreNMSSyncView
 
 
 @register_model_view(VirtualMachine, name="librenms_sync", path="librenms-sync")
@@ -27,8 +28,9 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
         """
         Get the context data for interface sync for virtual machines.
         """
+        interface_name_field = get_interface_name_field(request)
         interface_sync_view = VMInterfaceTableView()
-        return interface_sync_view.get_context_data(request, obj)
+        return interface_sync_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
         """
@@ -51,8 +53,8 @@ class VMInterfaceTableView(BaseInterfaceTableView):
 
     model = VirtualMachine
 
-    def get_table(self, data, obj):
-        return LibreNMSVMInterfaceTable(data)   
+    def get_table(self, data, obj, interface_name_field):
+        return LibreNMSVMInterfaceTable(data)
 
     def get_interfaces(self, obj):
         return obj.interfaces.all()
