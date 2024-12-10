@@ -4,9 +4,12 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views import View
 
-
-from netbox_librenms_plugin.utils import get_virtual_chassis_member, get_interface_name_field
+from netbox_librenms_plugin.utils import (
+    get_interface_name_field,
+    get_virtual_chassis_member,
+)
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
+
 
 class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
     """
@@ -97,7 +100,6 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         table = None
 
         self.interface_name_field = get_interface_name_field(request)
-        print(f"get_context_data interface_name_field: {self.interface_name_field}")
 
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
 
@@ -120,7 +122,9 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
 
                 # Determine the correct chassis member based on the port description
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    chassis_member = get_virtual_chassis_member(obj, port[self.interface_name_field])
+                    chassis_member = get_virtual_chassis_member(
+                        obj, port[self.interface_name_field]
+                    )
                     netbox_interfaces = self.get_interfaces(chassis_member)
 
                 else:
@@ -133,7 +137,10 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                 port["netbox_interface"] = netbox_interface
 
                 # Ignore when description is the same as interface name
-                if port["ifAlias"] == port["ifDescr"] or port["ifAlias"] == port["ifName"]:
+                if (
+                    port["ifAlias"] == port["ifDescr"]
+                    or port["ifAlias"] == port["ifName"]
+                ):
                     port["ifAlias"] = ""
 
             table = self.get_table(ports_data, obj, self.interface_name_field)
@@ -157,5 +164,5 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
             "virtual_chassis_members": virtual_chassis_members,
-            "interface_name_field": self.interface_name_field
+            "interface_name_field": self.interface_name_field,
         }

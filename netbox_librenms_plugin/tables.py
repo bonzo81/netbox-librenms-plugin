@@ -41,7 +41,6 @@ class LibreNMSInterfaceTable(tables.Table):
     def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()
-        print(f"TABLE: interface_name_field: {self.interface_name_field}")
 
         # Update column accessors after initialization
         for column in ["selection", "name"]:
@@ -241,7 +240,10 @@ class LibreNMSInterfaceTable(tables.Table):
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
 
         # Clear description if it matches interface name
-        if port_data["ifAlias"] == interface_name:
+        if (
+            port_data["ifAlias"] == port_data["ifName"]
+            or port_data["ifAlias"] == port_data["ifDescr"]
+        ):
             port_data["ifAlias"] = ""
 
         formatted_data = {
@@ -477,7 +479,9 @@ class LibreNMSCableTable(tables.Table):
         verbose_name="Local Port", attrs={"td": {"data-col": "local_port"}}
     )
     remote_port = tables.Column(
-        verbose_name="Remote Port", attrs={"td": {"data-col": "remote_port"}}
+        accessor="remote_port_name",
+        verbose_name="Remote Port",
+        attrs={"td": {"data-col": "remote_port"}},
     )
     remote_device = tables.Column(
         verbose_name="Remote Device", attrs={"td": {"data-col": "remote_device"}}
