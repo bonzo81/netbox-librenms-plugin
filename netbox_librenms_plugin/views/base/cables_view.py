@@ -6,9 +6,11 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.utils import get_virtual_chassis_member
+from netbox_librenms_plugin.utils import (
+    get_interface_name_field,
+    get_virtual_chassis_member,
+)
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
-from netbox_librenms_plugin.utils import get_interface_name_field
 
 
 class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
@@ -48,15 +50,16 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             return None
 
         ports_data = self.get_ports_data(obj)
-        ports_map = {
-            str(port["port_id"]): port[self.interface_name_field]
-            for port in ports_data.get("ports", [])
-        }
+        local_ports_map = {}
+        for port in ports_data.get("ports", []):
+            port_id = str(port["port_id"])
+            port_name = port[self.interface_name_field]
+            local_ports_map[port_id] = port_name
 
         links = data.get("links", [])
         table_data = []
         for link in links:
-            local_port_name = ports_map.get(str(link.get("local_port_id")))
+            local_port_name = local_ports_map.get(str(link.get("local_port_id")))
             table_data.append(
                 {
                     "local_port": local_port_name,
@@ -101,16 +104,33 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         Add local port URL if interface exists in NetBox
         """
         if local_port := link.get("local_port"):
+            interface = None
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(obj, local_port)
-                if interface := chassis_member.interfaces.filter(
-                    name=local_port
-                ).first():
+                if local_port_id := link.get("local_port_id"):
+                    interface = chassis_member.interfaces.filter(
+                        custom_field_data__librenms_id=local_port_id
+                    ).first()
+
+                if not interface:
+                    interface = chassis_member.interfaces.filter(
+                        name=local_port
+                    ).first()
+
+                if interface:
                     link["local_port_url"] = reverse(
                         "dcim:interface", args=[interface.pk]
                     )
             else:
-                if interface := obj.interfaces.filter(name=local_port).first():
+                if local_port_id := link.get("local_port_id"):
+                    interface = obj.interfaces.filter(
+                        custom_field_data__librenms_id=local_port_id
+                    ).first()
+
+                if not interface:
+                    interface = obj.interfaces.filter(name=local_port).first()
+
+                if interface:
                     link["local_port_url"] = reverse(
                         "dcim:interface", args=[interface.pk]
                     )
@@ -119,12 +139,28 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         Add remote port URL if device and interface exist in NetBox
         """
+
         if remote_port := link.get("remote_port"):
-            if remote_interface := device.interfaces.filter(name=remote_port).first():
+            # First try to find interface by librenms_id
+            if remote_port_id := link.get("remote_port_id"):
+                netbox_remote_interface = device.interfaces.filter(
+                    custom_field_data__librenms_id=remote_port_id
+                ).first()
+
+            # If not found by librenms_id, fall back to name matching
+            if not netbox_remote_interface:
+                netbox_remote_interface = device.interfaces.filter(
+                    name=remote_port
+                ).first()
+
+            if netbox_remote_interface:
                 link["remote_port_url"] = reverse(
-                    "dcim:interface", args=[remote_interface.pk]
+                    "dcim:interface", args=[netbox_remote_interface.pk]
                 )
-                link["remote_port_id"] = remote_interface.pk
+                link["remote_port_id"] = netbox_remote_interface.pk
+                link["remote_port_name"] = netbox_remote_interface.name
+
+        return link
 
     def enrich_links_data(self, links_data, obj):
         """
@@ -142,8 +178,9 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 if found:
                     link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
                     link["remote_device_id"] = device.pk
-                    self.enrich_remote_port(link, device)
-
+                    link = self.enrich_remote_port(link, device)
+                else:
+                    link["remote_port_name"] = link["remote_port"]
         return links_data
 
     def get_table(self, data, obj):
@@ -169,9 +206,6 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             if not links_data:
                 return None  # Indicate that no data was found
 
-            # Enrich links data
-            links_data = self.enrich_links_data(links_data, obj)
-
             # Cache the enriched data
             cache.set(
                 self.get_cache_key(obj, "links"),
@@ -181,6 +215,9 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         else:
             # If cache is empty and not fetching new data, return None
             return None
+
+        # Enrich links data
+        links_data = self.enrich_links_data(links_data, obj)
 
         # Calculate cache expiry
         cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
