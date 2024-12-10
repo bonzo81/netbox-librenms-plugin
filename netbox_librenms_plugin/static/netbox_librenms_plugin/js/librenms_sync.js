@@ -107,7 +107,8 @@ function initializeVCMemberSelect() {
                         },
                         body: JSON.stringify({
                             device_id: deviceId,
-                            interface_name: interfaceName
+                            interface_name: interfaceName,
+                            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value
                         })
                     })
                         .then(response => {
@@ -115,7 +116,6 @@ function initializeVCMemberSelect() {
                         })
                         .then(data => {
                             const row = document.querySelector(`tr[data-interface="${rowId}"]`);
-
 
                             if (data.status === 'success' && row) {
                                 const formattedRow = data.formatted_row;
@@ -127,7 +127,7 @@ function initializeVCMemberSelect() {
                                 row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
                                 row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
 
-                                filterCableTable();
+                                initializeFilters();
                             }
                         });
                 });
