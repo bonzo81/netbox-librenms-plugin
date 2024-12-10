@@ -32,6 +32,7 @@ class LibreNMSInterfaceTable(tables.Table):
             "mtu",
             "enabled",
             "description",
+            "librenms_id",
         ]
         attrs = {
             "class": "table table-hover object-list",
@@ -90,6 +91,11 @@ class LibreNMSInterfaceTable(tables.Table):
         verbose_name="Description",
         attrs={"td": {"data-col": "description"}},
     )
+    librenms_id = tables.Column(
+        accessor="port_id",
+        verbose_name="LibreNMS ID",
+        attrs={"td": {"data-col": "librenms_id"}},
+    )
 
     def render_speed(self, value, record):
         kbps_value = convert_speed_to_kbps(value)
@@ -141,6 +147,38 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_mtu(self, value, record):
         return self._render_field(value, record, "ifMtu", "mtu")
+
+    def render_librenms_id(self, value, record):
+        """
+        Render the 'librenms_id' field with appropriate styling based on comparison with NetBox.
+        """
+        # Early return with danger styling if interface doesn't exist in NetBox
+        if not record.get("exists_in_netbox"):
+            return mark_safe(f'<span class="text-danger">{value}</span>')
+
+        # Proceed only if we have a valid NetBox interface
+        netbox_interface = record.get("netbox_interface")
+        if not netbox_interface:
+            return mark_safe(f'<span class="text-danger">{value}</span>')
+
+        # Get the 'librenms_id' from NetBox custom fields
+        netbox_librenms_id = netbox_interface.custom_field_data.get("librenms_id")
+
+        # Check if the custom field exists
+        if netbox_librenms_id is None:
+            return mark_safe(
+                f'<span class="text-danger" title="No librenms_id custom field value found">{value}</span>'
+            )
+
+        # Compare the IDs
+        if str(value) != str(netbox_librenms_id):
+            # IDs do not match
+            return mark_safe(
+                f'<span class="text-warning" title="Existing LibreNMS ID: {netbox_librenms_id}">{value}</span>'
+            )
+        else:
+            # IDs match
+            return mark_safe(f'<span class="text-success">{value}</span>')
 
     def _render_field(self, value, record, librenms_key, netbox_key):
         """

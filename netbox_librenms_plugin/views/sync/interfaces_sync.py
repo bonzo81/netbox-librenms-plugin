@@ -227,3 +227,12 @@ class SyncInterfacesView(CacheMixin, View):
                     setattr(interface, netbox_key, librenms_interface.get(librenms_key))
             else:
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))
+
+        # Initialize the librenms_id key if it doesn't exist
+        if "librenms_id" not in interface.custom_field_data:
+            interface.custom_field_data["librenms_id"] = None
+
+        # Now update the value
+        interface.custom_field_data["librenms_id"] = librenms_interface.get("port_id")
+
+        interface.save()
