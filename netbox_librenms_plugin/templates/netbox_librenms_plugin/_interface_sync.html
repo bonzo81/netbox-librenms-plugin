@@ -11,17 +11,11 @@
             <div class="btn-group btn-group-sm me-2" role="group" data-bs-toggle="tooltip" data-bs-placement="top" 
             title="Select interface name field: Select the field to use as the interface name.">
                 <input type="radio" class="btn-check" name="interface_name_field" value="ifDescr" id="ifDescr" 
-                    {% if interface_name_field == 'ifDescr' %}checked{% endif %}
-                    hx-post="{{ request.path }}"
-                    hx-target="#interface-sync"
-                    hx-include="[name='interface_name_field']">
+                    {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
                 <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
                 
                 <input type="radio" class="btn-check" name="interface_name_field" value="ifName" id="ifName" 
-                    {% if interface_name_field == 'ifName' %}checked{% endif %}
-                    hx-post="{{ request.path }}"
-                    hx-target="#interface-sync"
-                    hx-include="[name='interface_name_field']">
+                    {% if interface_name_field == 'ifName' %}checked{% endif %}>
                 <label class="btn btn-outline-primary" for="ifName">ifName</label>
             </div>
             {% if has_librenms_id %}
