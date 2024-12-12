@@ -65,7 +65,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
 
-        interface_name_field = get_interface_name_field()
+        interface_name_field = get_interface_name_field(request)
 
         context.update(
             {
