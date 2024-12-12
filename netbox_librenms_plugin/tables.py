@@ -303,6 +303,7 @@ class LibreNMSInterfaceTable(tables.Table):
             "paginator_class": EnhancedPaginator,
             "per_page": get_table_paginate_count(request, self.prefix),
         }
+
         tables.RequestConfig(request, paginate).configure(self)
 
 
@@ -330,8 +331,13 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             self.base_columns["selection"].accessor = self.interface_name_field
 
     def render_device_selection(self, value, record):
+        """
+        Renders a device selection dropdown for virtual chassis members.
+        Determines the selected member based on interface type and name.
+        Returns an HTML select element with appropriate member options.
+        """
         members = self.device.virtual_chassis.members.all()
-        if_type = record.get("type", "").lower()
+        if_type = record.get("ifType", "").lower()
         interface_name = record.get(self.interface_name_field)
 
         if "ethernet" in if_type:
@@ -524,6 +530,23 @@ class LibreNMSCableTable(tables.Table):
     remote_device = tables.Column(
         verbose_name="Remote Device", attrs={"td": {"data-col": "remote_device"}}
     )
+    cable_status = tables.Column(
+        verbose_name="Cable Status", attrs={"td": {"data-col": "cable_status"}}
+    )
+    actions = tables.TemplateColumn(
+        template_code="""
+        {% if record.can_create_cable %}
+        <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' record.device_id %}">
+            {% csrf_token %}
+            <input type="hidden" name="select" value="{{ record.local_port }}">
+            <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
+        </form>
+        {% endif %}
+        """,
+        verbose_name="",
+        orderable=False,
+        attrs={"td": {"data-col": "actions"}},
+    )
 
     def __init__(self, *args, device=None, **kwargs):
         self.device = device
@@ -547,6 +570,11 @@ class LibreNMSCableTable(tables.Table):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
+    def render_cable_status(self, value, record):
+        if url := record.get("cable_url"):
+            return format_html('<a href="{}">{}</a>', url, value)
+        return value
+
     def configure(self, request):
         paginate = {
             "paginator_class": EnhancedPaginator,
@@ -555,7 +583,14 @@ class LibreNMSCableTable(tables.Table):
         tables.RequestConfig(request, paginate).configure(self)
 
     class Meta:
-        sequence = ["selection", "local_port", "remote_port", "remote_device"]
+        sequence = [
+            "selection",
+            "local_port",
+            "remote_port",
+            "remote_device",
+            "cable_status",
+            "actions",
+        ]
         row_attrs = {
             "data-interface": lambda record: record["local_port"],
             "data-device": lambda record: record["device_id"],
@@ -601,6 +636,8 @@ class VCCableTable(LibreNMSCableTable):
             "local_port",
             "remote_port",
             "remote_device",
+            "cable_status",
+            "actions",
         ]
         row_attrs = {
             "data-interface": lambda record: record["local_port"],

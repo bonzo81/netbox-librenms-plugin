@@ -5,6 +5,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
+from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
@@ -50,8 +51,12 @@ class SyncInterfacesView(CacheMixin, View):
         )
 
         messages.success(request, "Selected interfaces synced successfully.")
-
-        return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
+        base_url = reverse(
+            f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": object_id}
+        )
+        return redirect(
+            f"{base_url}?tab=interfaces&interface_name_field={interface_name_field}"
+        )
 
     def get_object(self, object_type, object_id):
         """
@@ -102,6 +107,7 @@ class SyncInterfacesView(CacheMixin, View):
         with transaction.atomic():
             for port in ports_data:
                 port_name = port.get(interface_name_field)
+
                 if port_name in selected_interfaces:
                     self.sync_interface(
                         obj, port, exclude_columns, interface_name_field

@@ -1,7 +1,9 @@
 import re
+from typing import Optional
 
 from dcim.models import Device
 from django.core.exceptions import ObjectDoesNotExist
+from django.http import HttpRequest
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
@@ -63,11 +65,11 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
         # Get the port number and use it
         vc_position = int(match.group(1))
         return device.virtual_chassis.members.get(vc_position=vc_position)
-    except (re.error, ValueError, ObjectDoesNotExist):
+    except (re.error, ValueError, ObjectDoesNotExist) as e:
         return device
 
 
-def get_table_paginate_count(request, table_prefix):
+def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     """
     Extends Netbox pagination to support multiple tables by using table-specific prefixes
     """
@@ -82,7 +84,7 @@ def get_table_paginate_count(request, table_prefix):
     return netbox_get_paginate_count(request)
 
 
-def get_interface_name_field(request=None):
+def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
     """
     Get interface name field with request override support.
 

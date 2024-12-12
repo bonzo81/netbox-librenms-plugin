@@ -7,28 +7,19 @@
     <div class="btn-list">
         <form method="post">
             {% csrf_token %}
-            <input type="hidden" name="interface_name_field" value="{{ interface_name_field }}">
-            <div class="btn-group btn-group-sm me-2" role="group" data-bs-toggle="tooltip" data-bs-placement="top" 
-            title="Select interface name field: Select the field to use as the interface name.">
-                <input type="radio" class="btn-check" name="interface_name_field" value="ifDescr" id="ifDescr" 
-                    {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
-                <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
-                
-                <input type="radio" class="btn-check" name="interface_name_field" value="ifName" id="ifName" 
-                    {% if interface_name_field == 'ifName' %}checked{% endif %}>
-                <label class="btn btn-outline-primary" for="ifName">ifName</label>
-            </div>
             {% if has_librenms_id %}
                 {% with model_name=object|meta:"model_name" %}
                     {% if model_name == "device" %}
                         <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk %}"
                                 hx-target="#interface-sync-content"
+                                hx-include="[name='interface_name_field']"
                                 class="btn btn-outline-primary">
                             Refresh Interfaces
                         </button>
                     {% elif model_name == "virtualmachine" %}
                         <button hx-post="{% url 'plugins:netbox_librenms_plugin:vm_interface_sync' pk=object.pk %}"
                                 hx-target="#interface-sync-content"
+                                hx-include="[name='interface_name_field']"
                                 class="btn btn-outline-primary">
                             Refresh Interfaces
                         </button>
@@ -38,7 +29,7 @@
         </form>
     </div>
 </div>
- <!-- End Action Buttons -->
+<!-- End Action Buttons -->
 
 <!-- Container for the interface sync content -->
 <div id="interface-sync-content">

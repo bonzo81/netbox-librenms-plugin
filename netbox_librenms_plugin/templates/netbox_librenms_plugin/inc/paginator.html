@@ -9,7 +9,7 @@
         <ul class="pagination mb-0">
           {% if table.page.has_previous %}
             <li class="page-item">
-                <a href="?tab={{ table.tab }}&{{ page_param }}={{ page.previous_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}" class="page-link">
+              <a href="?tab={{ table.tab }}&{{ page_param }}={{ page.previous_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}" class="page-link">
                 <i class="mdi mdi-chevron-left"></i>
               </a>
             </li>
@@ -18,7 +18,7 @@
           {% for p in table.page.smart_pages %}
             <li class="page-item{% if table.page.number == p %} active{% endif %}">
               {% if p %}
-              <a href="?tab={{ table.tab }}&{{ page_param }}={{ p }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}" class="page-link">{{ p }}</a>
+              <a href="?tab={{ table.tab }}&{{ page_param }}={{ p }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}" class="page-link">{{ p }}</a>
               {% else %}
                 <span class="page-link" disabled>&hellip;</span>
               {% endif %}
@@ -27,7 +27,7 @@
 
           {% if table.page.has_next %}
             <li class="page-item">
-                <a href="?tab={{ table.tab }}&{{ page_param }}={{ page.next_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}" class="page-link">
+              <a href="?tab={{ table.tab }}&{{ page_param }}={{ page.next_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}" class="page-link">
                 <i class="mdi mdi-chevron-right"></i>
               </a>
             </li>
@@ -49,7 +49,7 @@
         </button>
         <div class="dropdown-menu">
           {% for n in table.paginator.get_page_lengths %}
-          <a href="?tab={{ table.tab }}&{{ table.prefix }}per_page={{ n }}&{{ page_param }}={{ table.page.number }}" class="dropdown-item">{{ n }}</a>
+          <a href="?tab={{ table.tab }}&{{ table.prefix }}per_page={{ n }}&{{ page_param }}={{ table.page.number }}&interface_name_field={{ interface_name_field }}" class="dropdown-item">{{ n }}</a>
           {% endfor %}
         </div>
       </div>
