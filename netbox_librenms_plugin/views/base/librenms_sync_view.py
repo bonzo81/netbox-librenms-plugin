@@ -118,9 +118,9 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
                 # Get just the hostname part from LibreNMS FQDN if present
                 librenms_host = (
-                    librenms_hostname.split(".")[0] if librenms_hostname else None
+                    librenms_hostname.split(".")[0].lower() if librenms_hostname else None
                 )
-                netbox_host = netbox_hostname.split(".")[0] if netbox_hostname else None
+                netbox_host = netbox_hostname.split(".")[0].lower() if netbox_hostname else None
 
                 # Check for matching IP or hostname
                 if (netbox_ip == librenms_ip) or (netbox_host == librenms_host):
