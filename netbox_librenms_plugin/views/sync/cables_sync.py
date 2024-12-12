@@ -113,6 +113,7 @@ class SyncCablesView(CacheMixin, View):
         valid_interfaces = []
         invalid_interfaces = []
         duplicate_interfaces = []
+        missing_remote_interfaces = []
 
         for interface in selected_interfaces:
             try:
@@ -122,30 +123,38 @@ class SyncCablesView(CacheMixin, View):
                     for link in cached_links
                     if link["local_port"] == interface["interface"]
                 )
+                try:
+                    # Get interfaces using the cached NetBox IDs
+                    local_interface = Interface.objects.get(
+                        pk=link_data["netbox_local_interface_id"]
+                    )
+                    remote_device = Device.objects.get(pk=link_data["remote_device_id"])
+                    remote_interface = Interface.objects.get(
+                        pk=link_data["netbox_remote_interface_id"]
+                    )
 
-                # Get local interface
-                local_device = Device.objects.get(pk=interface["device_id"])
-                local_interface = local_device.interfaces.get(
-                    name=link_data["local_port"]
-                )
+                    if self.check_existing_cable(local_interface, remote_interface):
+                        duplicate_interfaces.append(interface["interface"])
+                        continue
 
-                # Get remote interface
-                remote_device = Device.objects.get(pk=link_data["remote_device_id"])
-                remote_interface = remote_device.interfaces.get(
-                    pk=link_data["remote_port_id"]
-                )
+                    self.create_cable(
+                        local_interface, remote_device, remote_interface, request
+                    )
+                    valid_interfaces.append(interface["interface"])
 
-                if self.check_existing_cable(local_interface, remote_interface):
-                    duplicate_interfaces.append(interface["interface"])
-                    continue
+                except Device.DoesNotExist:
+                    missing_remote_interfaces.append(interface["interface"])
+                except Interface.DoesNotExist:
+                    missing_remote_interfaces.append(interface["interface"])
 
-                self.create_cable(
-                    local_interface, remote_device, remote_interface, request
-                )
-                valid_interfaces.append(interface["interface"])
-
-            except (Device.DoesNotExist, Interface.DoesNotExist, StopIteration):
+            except StopIteration:
                 invalid_interfaces.append(interface["interface"])
+
+        if missing_remote_interfaces:
+            messages.error(
+                request,
+                f"Remote device or interface not found in NetBox for: {', '.join(missing_remote_interfaces)}",
+            )
 
         self.display_result_messages(
             request, valid_interfaces, invalid_interfaces, duplicate_interfaces
