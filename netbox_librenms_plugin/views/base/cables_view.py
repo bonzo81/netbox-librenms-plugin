@@ -1,6 +1,9 @@
-from dcim.models import Device
+import json
+
+from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils import timezone
@@ -42,7 +45,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
     def get_links_data(self, obj):
         """
-        Fetch links data from LibreNMS for the device
+        Fetch links data from LibreNMS for the device and add local port names.
         """
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
         success, data = self.librenms_api.get_device_links(self.librenms_id)
@@ -57,12 +60,13 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             local_ports_map[port_id] = port_name
 
         links = data.get("links", [])
-        table_data = []
+        links_data = []
         for link in links:
             local_port_name = local_ports_map.get(str(link.get("local_port_id")))
-            table_data.append(
+            links_data.append(
                 {
                     "local_port": local_port_name,
+                    "local_port_id": link.get("local_port_id"),
                     "remote_port": link.get("remote_port"),
                     "remote_device": link.get("remote_hostname"),
                     "remote_port_id": link.get("remote_port_id"),
@@ -70,7 +74,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 }
             )
 
-        return table_data
+        return links_data
 
     def get_device_by_id_or_name(self, remote_device_id, hostname):
         """
@@ -105,46 +109,47 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         if local_port := link.get("local_port"):
             interface = None
+            local_port_id = link.get("local_port_id")
+
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(obj, local_port)
-                if local_port_id := link.get("local_port_id"):
+
+                # First try to find interface by librenms_id
+                if local_port_id:
                     interface = chassis_member.interfaces.filter(
                         custom_field_data__librenms_id=local_port_id
                     ).first()
 
+                # Only if librenms_id match fails, try matching by name
                 if not interface:
                     interface = chassis_member.interfaces.filter(
                         name=local_port
                     ).first()
-
-                if interface:
-                    link["local_port_url"] = reverse(
-                        "dcim:interface", args=[interface.pk]
-                    )
             else:
-                if local_port_id := link.get("local_port_id"):
+                # First try to find interface by librenms_id
+                if local_port_id:
                     interface = obj.interfaces.filter(
                         custom_field_data__librenms_id=local_port_id
                     ).first()
 
+                # Only if librenms_id match fails, try matching by name
                 if not interface:
                     interface = obj.interfaces.filter(name=local_port).first()
 
-                if interface:
-                    link["local_port_url"] = reverse(
-                        "dcim:interface", args=[interface.pk]
-                    )
+            if interface:
+                link["local_port_url"] = reverse("dcim:interface", args=[interface.pk])
+                link["netbox_local_interface_id"] = interface.pk
 
     def enrich_remote_port(self, link, device):
         """
         Add remote port URL if device and interface exist in NetBox
         """
-
         if remote_port := link.get("remote_port"):
             # First try to find interface by librenms_id
-            if remote_port_id := link.get("remote_port_id"):
+            librenms_remote_port_id = link.get("remote_port_id")
+            if librenms_remote_port_id:
                 netbox_remote_interface = device.interfaces.filter(
-                    custom_field_data__librenms_id=remote_port_id
+                    custom_field_data__librenms_id=librenms_remote_port_id
                 ).first()
 
             # If not found by librenms_id, fall back to name matching
@@ -157,15 +162,36 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 link["remote_port_url"] = reverse(
                     "dcim:interface", args=[netbox_remote_interface.pk]
                 )
-                link["remote_port_id"] = netbox_remote_interface.pk
+                link["netbox_remote_interface_id"] = netbox_remote_interface.pk
                 link["remote_port_name"] = netbox_remote_interface.name
 
         return link
 
+    def check_cable_status(self, link):
+        """
+        Check cable status between two interfaces.
+        """
+        local_interface_id = link.get("netbox_local_interface_id")
+        remote_interface_id = link.get("netbox_remote_interface_id")
+
+        if local_interface_id and remote_interface_id:
+            local_interface = Interface.objects.get(pk=local_interface_id)
+            remote_interface = Interface.objects.get(pk=remote_interface_id)
+
+            existing_cable = local_interface.cable or remote_interface.cable
+            if existing_cable:
+                link["cable_status"] = "Cable Found"
+                link["cable_url"] = reverse("dcim:cable", args=[existing_cable.pk])
+                link["can_create_cable"] = False
+            else:
+                link["cable_status"] = "No Cable"
+                link["can_create_cable"] = True
+        else:
+            link["cable_status"] = "Missing Interface"
+            link["can_create_cable"] = False
+        return link
+
     def enrich_links_data(self, links_data, obj):
-        """
-        Enrich links data with NetBox device information and port links
-        """
         for link in links_data:
             self.enrich_local_port(link, obj)
             link["device_id"] = obj.id
@@ -179,8 +205,11 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                     link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
                     link["remote_device_id"] = device.pk
                     link = self.enrich_remote_port(link, device)
+                    link = self.check_cable_status(link)
                 else:
                     link["remote_port_name"] = link["remote_port"]
+                    link["cable_status"] = "Device Not Found in NetBox"
+                    link["can_create_cable"] = False
         return links_data
 
     def get_table(self, data, obj):
@@ -189,35 +218,36 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         table.htmx_url = f"{self.request.path}?tab={self.tab}"
         return table
 
-    def _prepare_context(self, request, obj, fetch_cached=False):
+    def _prepare_context(self, request, obj, fetch_fresh=False):
         """
         Helper method to prepare the context data for cable sync views.
         """
-        # Attempt to retrieve cached data
-        cached_links_data = cache.get(self.get_cache_key(obj, "links"))
         table = None
         cache_expiry = None
 
-        if cached_links_data:
-            links_data = cached_links_data.get("links", [])
-        elif fetch_cached:
-            # Fetch links data if not cached
+        if fetch_fresh:
+            # Always fetch new data when requested
             links_data = self.get_links_data(obj)
             if not links_data:
-                return None  # Indicate that no data was found
+                return None
+        else:
+            # Try to use cached data
+            cached_links_data = cache.get(self.get_cache_key(obj, "links"))
+            if cached_links_data:
+                links_data = cached_links_data.get("links", [])
+            else:
+                return None
 
-            # Cache the enriched data
+        # Enrich data in both cases to ensure current NetBox state
+        links_data = self.enrich_links_data(links_data, obj)
+
+        if fetch_fresh:
+            # Cache the fresh data after enrichment
             cache.set(
                 self.get_cache_key(obj, "links"),
                 {"links": links_data},
                 timeout=self.librenms_api.cache_timeout,
             )
-        else:
-            # If cache is empty and not fetching new data, return None
-            return None
-
-        # Enrich links data
-        links_data = self.enrich_links_data(links_data, obj)
 
         # Calculate cache expiry
         cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
@@ -241,7 +271,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         Get the context data for the cable sync view.
         """
-        context = self._prepare_context(request, obj, fetch_cached=False)
+        context = self._prepare_context(request, obj, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table
             context = {"table": None, "object": obj, "cache_expiry": None}
@@ -249,7 +279,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
     def post(self, request, pk):
         obj = self.get_object(pk)
-        context = self._prepare_context(request, obj, fetch_cached=True)
+        context = self._prepare_context(request, obj, fetch_fresh=True)
 
         if context is None:
             messages.error(request, "No links found in LibreNMS")
@@ -265,3 +295,119 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             self.partial_template_name,
             {"cable_sync": context},
         )
+
+
+class SingleCableVerifyView(BaseCableTableView):
+    def post(self, request):
+        data = json.loads(request.body)
+        selected_device_id = data.get("device_id")
+        local_port = data.get("local_port")
+
+        formatted_row = {
+            "local_port": local_port,
+            "remote_port": "",
+            "remote_device": "",
+            "cable_status": "Missing Ports",
+            "actions": "",
+        }
+
+        if selected_device_id:
+            selected_device = get_object_or_404(Device, pk=selected_device_id)
+
+            # Get the primary device (master or first with IP) if part of virtual chassis
+            if selected_device.virtual_chassis:
+                primary_device = selected_device.virtual_chassis.master
+                if not primary_device or not primary_device.primary_ip:
+                    primary_device = next(
+                        (
+                            member
+                            for member in selected_device.virtual_chassis.members.all()
+                            if member.primary_ip
+                        ),
+                        None,
+                    )
+            else:
+                primary_device = selected_device
+
+            cached_links = cache.get(self.get_cache_key(primary_device, "links"))
+
+            if cached_links:
+                link_data = next(
+                    (
+                        link
+                        for link in cached_links.get("links", [])
+                        if link["local_port"] == local_port
+                    ),
+                    None,
+                )
+                if link_data:
+                    # First try to find interface by librenms_id
+                    interface = None
+                    if local_port_id := link_data.get("local_port_id"):
+                        interface = selected_device.interfaces.filter(
+                            custom_field_data__librenms_id=local_port_id
+                        ).first()
+
+                    # If not found by librenms_id, try matching by name
+                    if not interface:
+                        interface = selected_device.interfaces.filter(
+                            name=local_port
+                        ).first()
+
+                    if interface:
+                        link_data["netbox_local_interface_id"] = interface.pk
+                        link_data = self.check_cable_status(link_data)
+
+                        formatted_row["local_port"] = (
+                            f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{local_port}</a>'
+                        )
+                        remote_port_name = link_data.get(
+                            "remote_port_name", link_data.get("remote_port", "")
+                        )
+                        formatted_row["remote_port"] = (
+                            f'<a href="{link_data["remote_port_url"]}">{remote_port_name}</a>'
+                            if link_data.get("remote_port_url")
+                            else remote_port_name
+                        )
+                        remote_device_name = link_data.get("remote_device", "")
+                        formatted_row["remote_device"] = (
+                            f'<a href="{link_data["remote_device_url"]}">{remote_device_name}</a>'
+                            if link_data.get("remote_device_url")
+                            else remote_device_name
+                        )
+                        if link_data.get("cable_url"):
+                            formatted_row["cable_status"] = (
+                                f'<a href="{link_data["cable_url"]}">{link_data["cable_status"]}</a>'
+                            )
+                        else:
+                            formatted_row["cable_status"] = link_data["cable_status"]
+
+                        if link_data.get("can_create_cable"):
+                            formatted_row["actions"] = f"""
+                                <form method="post" action="{reverse('plugins:netbox_librenms_plugin:sync_device_cables', args=[selected_device.id])}">
+                                    <input type="hidden" name="select" value="{local_port}">
+                                    <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
+                                </form>
+                            """
+                    else:
+                        formatted_row["local_port"] = local_port
+                        # Keep remote port name visible, add URL if available
+                        remote_port_name = link_data.get(
+                            "remote_port_name", link_data.get("remote_port", "")
+                        )
+                        formatted_row["remote_port"] = (
+                            f'<a href="{link_data["remote_port_url"]}">{remote_port_name}</a>'
+                            if link_data.get("remote_port_url")
+                            else remote_port_name
+                        )
+                        # Keep remote device name visible, add URL if available
+                        remote_device_name = link_data.get("remote_device", "")
+                        formatted_row["remote_device"] = (
+                            f'<a href="{link_data["remote_device_url"]}">{remote_device_name}</a>'
+                            if link_data.get("remote_device_url")
+                            else remote_device_name
+                        )
+                        formatted_row["cable_status"] = "Missing Interface"
+                        formatted_row["actions"] = ""
+
+        return JsonResponse({"status": "success", "formatted_row": formatted_row})
