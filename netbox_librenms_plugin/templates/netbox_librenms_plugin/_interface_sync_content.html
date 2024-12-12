@@ -6,7 +6,7 @@
 
 {% with model_name=interface_sync.object|meta:"model_name" %}
 <form method="post"
-    action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}">
+action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
     {% endwith %}
     {% csrf_token %}
     {% block table_actions %}
@@ -53,8 +53,6 @@
 
     </div>
     {% endblock %} <!-- End block table_actions -->
-
-
     <div class="row mb-3">
         <div class="col col-md-12">
             <div class="d-flex justify-content-between align-items-center mb-3">
