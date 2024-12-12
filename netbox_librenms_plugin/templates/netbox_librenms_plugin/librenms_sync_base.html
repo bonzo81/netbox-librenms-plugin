@@ -103,47 +103,58 @@
 {% if librenms_device_id %}
 {% if found_in_librenms %}
 <!-- Tab Navigation -->
-<ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
-    <li class="nav-item" role="presentation">
-        <button class="nav-link {% if tab == 'interfaces' %}active{% endif %}"
-                id="interfaces-tab"
-                data-bs-toggle="tab"
-                data-bs-target="#interfaces"
-                type="button"
-                role="tab"
-                aria-controls="interfaces"
-                aria-selected="{% if tab == 'interfaces' %}true{% else %}false{% endif %}">
-            Interfaces
-        </button>
-    </li>
-    {% if cable_sync %}
-    <li class="nav-item" role="presentation">
-        <button class="nav-link {% if tab == 'cables' %}active{% endif %}"
-                id="cables-tab"
-                data-bs-toggle="tab"
-                data-bs-target="#cables"
-                type="button"
-                role="tab"
-                aria-controls="cables"
-                aria-selected="{% if tab == 'cables' %}true{% else %}false{% endif %}">
-            Cables
-        </button>
-    </li>
-    {% endif %}
-    <li class="nav-item" role="presentation">
-        <button class="nav-link {% if tab == 'ipaddresses' %}active{% endif %}"
-                id="ipaddresses-tab"
-                data-bs-toggle="tab"
-                data-bs-target="#ipaddresses"
-                type="button"
-                role="tab"
-                aria-controls="ipaddresses"
-                aria-selected="{% if tab == 'ipaddresses' %}true{% else %}false{% endif %}">
-            IP Addresses
-        </button>
-    </li>
-</ul>
-
+<div class="d-flex justify-content-between align-items-center">
+    <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link {% if tab == 'interfaces' %}active{% endif %}"
+                    id="interfaces-tab"
+                    data-bs-toggle="tab"
+                    data-bs-target="#interfaces"
+                    type="button"
+                    role="tab"
+                    aria-controls="interfaces"
+                    aria-selected="{% if tab == 'interfaces' %}true{% else %}false{% endif %}">
+                Interfaces
+            </button>
+        </li>
+        {% if cable_sync %}
+        <li class="nav-item" role="presentation">
+            <button class="nav-link {% if tab == 'cables' %}active{% endif %}"
+                    id="cables-tab"
+                    data-bs-toggle="tab"
+                    data-bs-target="#cables"
+                    type="button"
+                    role="tab"
+                    aria-controls="cables"
+                    aria-selected="{% if tab == 'cables' %}true{% else %}false{% endif %}">
+                Cables
+            </button>
+        </li>
+        {% endif %}
+        <li class="nav-item" role="presentation">
+            <button class="nav-link {% if tab == 'ipaddresses' %}active{% endif %}"
+                    id="ipaddresses-tab"
+                    data-bs-toggle="tab"
+                    data-bs-target="#ipaddresses"
+                    type="button"
+                    role="tab"
+                    aria-controls="ipaddresses"
+                    aria-selected="{% if tab == 'ipaddresses' %}true{% else %}false{% endif %}">
+                IP Addresses
+            </button>
+        </li>
+    </ul>
+    <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top" 
+         title="Select interface name field: ifDescr shows port description, ifName shows port name">
+        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifDescr" id="ifDescr" 
+               {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
+        <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
+        
+        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifName" id="ifName" 
+               {% if interface_name_field == 'ifName' %}checked{% endif %}>
+        <label class="btn btn-outline-primary" for="ifName">ifName</label>
+    </div>
+</div>
 <!-- Tab Content -->
 <div class="tab-content mt-3" id="librenmsTabContent">
     <div class="tab-pane fade {% if request.GET.tab == 'interfaces' %}show active{% endif %}" 
