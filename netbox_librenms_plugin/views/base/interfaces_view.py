@@ -88,6 +88,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
 
         context = self.get_context_data(request, obj, interface_name_field)
         context = {"interface_sync": context}
+        context["interface_name_field"] = interface_name_field
 
         return render(request, self.partial_template_name, context)
 
@@ -99,7 +100,8 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
 
         table = None
 
-        self.interface_name_field = get_interface_name_field(request)
+        if interface_name_field is None:
+            interface_name_field = get_interface_name_field(request)
 
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
 
@@ -123,7 +125,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                 # Determine the correct chassis member based on the port description
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     chassis_member = get_virtual_chassis_member(
-                        obj, port[self.interface_name_field]
+                        obj, port[interface_name_field]
                     )
                     netbox_interfaces = self.get_interfaces(chassis_member)
 
@@ -131,7 +133,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                     chassis_member = obj  # Not part of a virtual chassis
 
                 netbox_interface = netbox_interfaces.filter(
-                    name=port[self.interface_name_field]
+                    name=port[interface_name_field]
                 ).first()
                 port["exists_in_netbox"] = bool(netbox_interface)
                 port["netbox_interface"] = netbox_interface
@@ -143,7 +145,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                 ):
                     port["ifAlias"] = ""
 
-            table = self.get_table(ports_data, obj, self.interface_name_field)
+            table = self.get_table(ports_data, obj, interface_name_field)
 
             table.configure(request)
 
@@ -157,12 +159,14 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         else:
             cache_expiry = None
 
-        return {
+        context = {
             "object": obj,
             "table": table,
             "tab": self.tab,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
             "virtual_chassis_members": virtual_chassis_members,
-            "interface_name_field": self.interface_name_field,
+            "interface_name_field": interface_name_field,
         }
+
+        return context
