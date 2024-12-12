@@ -80,61 +80,97 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-cable-table');
 }
 
-
-// Function to initialize TomSelect elements for interface selection
+// Initialize the 'Apply' button for the bulk VCMember select
 function initializeVCMemberSelect() {
-    // Small delay to ensure TomSelect is fully initialized in the DOM before attaching event listeners
     setTimeout(() => {
         const interfaceTable = document.getElementById('librenms-interface-table');
-        if (!interfaceTable) return;
+        const cableTable = document.getElementById('librenms-cable-table-vc');
 
-        const selects = interfaceTable.querySelectorAll('.form-select.tomselected');
+        if (interfaceTable) {
+            const interfaceSelects = interfaceTable.querySelectorAll('.form-select.tomselected');
+            interfaceSelects.forEach(select => {
+                if (select.tomselect && !select.dataset.interfaceSelectInitialized) {
+                    select.dataset.interfaceSelectInitialized = 'true';
+                    select.tomselect.on('change', function(value) {
+                        handleInterfaceChange(select, value);
+                    });
+                }
+            });
+        }
 
-        selects.forEach(select => {
-
-            if (select.tomselect && !select.dataset.interfaceSelectInitialized) {
-                select.dataset.interfaceSelectInitialized = 'true';
-                select.tomselect.on('change', function (value) {
-                    const deviceId = value;
-                    const interfaceName = select.dataset.interface;
-                    const rowId = select.dataset.rowId;
-
-                    fetch('/plugins/librenms_plugin/verify-interface/', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
-                        },
-                        body: JSON.stringify({
-                            device_id: deviceId,
-                            interface_name: interfaceName,
-                            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value
-                        })
-                    })
-                        .then(response => {
-                            return response.json();
-                        })
-                        .then(data => {
-                            const row = document.querySelector(`tr[data-interface="${rowId}"]`);
-
-                            if (data.status === 'success' && row) {
-                                const formattedRow = data.formatted_row;
-                                row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
-                                row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
-                                row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
-                                row.querySelector('td[data-col="mac_address"]').innerHTML = formattedRow.mac_address;
-                                row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
-                                row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
-                                row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
-
-                                initializeFilters();
-                            }
-                        });
-                });
-            }
-        });
+        if (cableTable) {
+            const cableSelects = cableTable.querySelectorAll('.form-select.tomselected');
+            cableSelects.forEach(select => {
+                if (select.tomselect && !select.dataset.cableSelectInitialized) {
+                    select.dataset.cableSelectInitialized = 'true';
+                    select.tomselect.on('change', function(value) {
+                        handleCableChange(select, value);
+                    });
+                }
+            });
+        }
     }, 100);
 }
+// Function to handle VC member interface change event
+function handleInterfaceChange(select, value) {
+    fetch('/plugins/librenms_plugin/verify-interface/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+        },
+        body: JSON.stringify({
+            device_id: value,
+            interface_name: select.dataset.interface,
+            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+        if (data.status === 'success' && row) {
+            const formattedRow = data.formatted_row;
+            row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
+            row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
+            row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
+            row.querySelector('td[data-col="mac_address"]').innerHTML = formattedRow.mac_address;
+            row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
+            row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
+            row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
+            initializeFilters();
+        }
+    });
+}
+// Function to handle cable VC member change event
+function handleCableChange(select, value) {
+    fetch('/plugins/librenms_plugin/verify-cable/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+        },
+        body: JSON.stringify({
+            device_id: value,
+            local_port: select.dataset.interface
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+
+        if (data.status === 'success' && row) {
+            const formattedRow = data.formatted_row;
+            const actionsCell = row.querySelector('td[data-col="actions"]');
+            row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
+            row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
+            row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
+            row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
+            row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
+
+        }
+    });
+}
+
 
 // Function to initialize the 'Apply' button for bulk VC member assignment
 function initializeBulkEditApply() {
@@ -291,7 +327,7 @@ function initializeFilters() {
         }
     );
 }
-
+// Function to initialize the 'active' tab based on the URL
 document.addEventListener('DOMContentLoaded', function() {
     const urlParams = new URLSearchParams(window.location.search);
     const activeTab = urlParams.get('tab');
@@ -303,8 +339,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 });
-
-
 
 // Function to toggle SNMP forms based on version
 function toggleSNMPForms() {
@@ -325,7 +359,7 @@ function toggleSNMPForms() {
 }
 
 // Function to initialize modal-specific scripts
-function initializeModalScripts() {
+function initializeSNMPModalScripts() {
     const snmpSelect = document.querySelector('#add-device-modal select.form-select');
     if (snmpSelect) {
         snmpSelect.addEventListener('change', toggleSNMPForms);
@@ -334,19 +368,51 @@ function initializeModalScripts() {
     }
 }
 
-// Listen for the modal 'shown.bs.modal' event to initialize scripts
+// Listen for the modal 'add-device-modal' 'shown.bs.modal' event to initialize scripts
 document.addEventListener('DOMContentLoaded', function () {
     const addDeviceModal = document.getElementById('add-device-modal');
     if (addDeviceModal) {
         addDeviceModal.addEventListener('shown.bs.modal', function () {
-            initializeModalScripts();
+            initializeSNMPModalScripts();
         });
     }
 });
 
+// Function to open the bulk VC modal
 function openBulkVCModal() {
     const modal = new bootstrap.Modal(document.getElementById('bulkVCMemberModal'));
     modal.show();
+}
+
+// Function to update the interface_name_field radio button
+function updateInterfaceNameField() {
+    document.querySelectorAll('.interface-name-field').forEach(radio => {
+        radio.addEventListener('change', function() {
+            const url = new URL(window.location);
+            url.searchParams.set('interface_name_field', this.value);
+            window.history.pushState({}, '', url);
+            
+            // Set HTMX headers for subsequent requests
+            htmx.config.defaultHeaders['X-Interface-Name-Field'] = this.value;
+            
+            // Refresh current tab content
+            const activeTab = document.querySelector('.tab-pane.active');
+            if (activeTab) {
+                htmx.trigger(activeTab, 'htmx:refresh');
+            }
+        });
+    });
+}
+// Function to set the interface_name_field from the URL
+function setInterfaceNameFieldFromURL() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const interfaceNameField = urlParams.get('interface_name_field');
+    if (interfaceNameField) {
+        const radio = document.querySelector(`input[name="interface_name_field"][value="${interfaceNameField}"]`);
+        if (radio) {
+            radio.checked = true;
+        }
+    }
 }
 
 // Function to initialize all necessary scripts
@@ -357,6 +423,8 @@ function initializeScripts() {
     initializeCountdowns();
     initializeCheckboxListeners();
     initializeBulkEditApply();
+    updateInterfaceNameField();
+    setInterfaceNameFieldFromURL();
 }
 
 
