@@ -328,17 +328,17 @@ function initializeFilters() {
     );
 }
 // Function to initialize the 'active' tab based on the URL
-document.addEventListener('DOMContentLoaded', function() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const activeTab = urlParams.get('tab');
-    
-    if (activeTab) {
-        const tabElement = document.querySelector(`[data-tab-id="${activeTab}"]`);
-        if (tabElement) {
-            document.getElementById(`${activeTab}-tab`).click();
-        }
-    }
-});
+function initializeTabs() {
+    const tabs = document.querySelectorAll('[data-bs-toggle="tab"]');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', function(e) {
+            const tabId = this.getAttribute('data-tab-id');
+            const url = new URL(window.location);
+            url.searchParams.set('tab', tabId);
+            window.history.pushState({}, '', url);
+        });
+    });
+}
 
 // Function to toggle SNMP forms based on version
 function toggleSNMPForms() {
@@ -425,6 +425,7 @@ function initializeScripts() {
     initializeBulkEditApply();
     updateInterfaceNameField();
     setInterfaceNameFieldFromURL();
+    initializeTabs()
 }
 
 
