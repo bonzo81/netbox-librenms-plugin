@@ -2,9 +2,11 @@
 
 ## Overview
 
-To enhance device identification and synchronization between NetBox and LibreNMS, this plugin supports using a custom field `librenms_id` on Device and Virtual Machine objects. While the plugin works without it, using this custom field is recommended for LibreNMS API lookups, and to assist with matching the remote device and remote interface for cable creation in Netbox. It can also be entered manually if no primary IP or FQDN is available.
+To enhance device identification and synchronization between NetBox and LibreNMS, this plugin supports using a custom field `librenms_id` on Device, Virtual Machine and Interface objects. While the plugin works without it, using this custom field is recommended for LibreNMS API lookups, and to assist with matching the remote device and remote interfaces for cable creation in Netbox. It can also be entered manually if no primary IP or FQDN is available.
 
-The plugin will automatically populate this field with the LibreNMS ID when opening the LibreNMS Sync page if the device has been found in LibreNMS.
+For the Device and Virtual Machine objects the plugin will automatically populate the LibreNMS ID custom field when opening the LibreNMS Sync page if the device has been found in LibreNMS.
+
+For the Interface object, the plugin will automatically populate the LibreNMS ID custom field when the interface data is synced from LibreNMS.
 
 ## Benefits of Using `librenms_id`
 
@@ -31,6 +33,7 @@ Follow these steps to create the `librenms_id` custom field in NetBox:
     - **Object Types:** 
         - Check **dcim > device**
         - Check **virtualization > virtual machine**
+        - Check **dcim > interface**
     - **Name:** `librenms_id`
     - **Label:** `LibreNMS ID`
     - **Description:** (Optional) Add a description like "LibreNMS Device ID for synchronization".
@@ -71,3 +74,4 @@ You can manually assign a value to the `librenms_id` custom field for a device u
 - If `librenms_id` is set, the plugin will prioritize it over other identification methods.
 - Ensure the `librenms_id` corresponds to the correct device ID in LibreNMS to prevent mismatches.
 - The custom field is optional but recommended for optimal plugin performance.
+- Using the custom field on interfaces will greatly improve the interface matching required for cable creation.

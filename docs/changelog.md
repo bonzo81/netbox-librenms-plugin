@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 (2024-12-13)
+
+### New Setting
+* Add `interface_name_feild` optional setting to allow choice of interface name field used when syncing interface data.
+* Add `interface_name_field` override in GUI for per device control and flexibility.
+
+### Improvements
+* Add `librenms_id` to interface sync table and data sync
+* Use of `librenms_id` custom field on interface lookup for improved matching in the cables table.
+* Add Pagination support to the cables table.
+
+
+### Fixes
+* Fix issue with case sensitive hostname matching
+
+### Under the hood
+* Refactor views into seperate modules for better maintainability
+
+
 ## 0.2.9 (2024-11-30)
 
 ## Fix pypi release

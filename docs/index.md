@@ -16,7 +16,7 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 - Name
 - Description
 - Status (Enabled/Disabled)
-- Type (with custom mapping support)
+- Type (with [custom mapping support](interface_mappings.md))
 - Speed 
 - MTU 
 - MAC Address
@@ -63,7 +63,7 @@ Or just share your ideas for the plugin over in [discussions](https://github.com
 
 | NetBox Version | Plugin Version |
 |----------------|----------------|
-|     4.1        |      0.2.x     |
+|     4.1        |      0.2.x - 0.3.x     |
 
 ## Installing
 
@@ -102,6 +102,7 @@ netbox-librenms-plugin
 
 ## Configuration
 
+### 1. Enable the Plugin
 Enable the plugin in `/opt/netbox/netbox/netbox/configuration.py`,
  or if you use netbox-docker, your `/configuration/plugins.py` file :
 
@@ -115,12 +116,13 @@ PLUGINS_CONFIG = {
         'librenms_url': 'https://your-librenms-instance.com',
         'api_token': 'your_librenms_api_token',
         'cache_timeout': 300,
-        'verify_ssl': True, # Change to False if needed,
+        'verify_ssl': True, # Optional: Change to False if needed,
+        'interface_name_field': 'ifDescr', # Optional: LibreNMS field used for interface name. ifName used as default
     }
 }
 ```
 
-### Apply Database Migrations
+### 2. Apply Database Migrations
 
 Apply database migrations with Netbox `manage.py`:
 
@@ -128,7 +130,7 @@ Apply database migrations with Netbox `manage.py`:
 (venv) $ python manage.py migrate
 ```
 
-### Collect Static Files
+### 3. Collect Static Files
 
 The plugin includes static files that need to be collected by NetBox. Run the following command to collect static files:
 
@@ -136,13 +138,29 @@ The plugin includes static files that need to be collected by NetBox. Run the fo
 (venv) $ python manage.py collectstatic --no-input
 ```
 
-### Restart Netbox
+### 4. Restart Netbox
 
 Restart the Netbox service to apply changes:
 
 ```
 sudo systemctl restart netbox
 ```
+
+### 5. Custom Field
+It is recommended (but not essential) to add a custom field `librenms_id` to the Device, Virtual Machine and Interface models in NetBox. Use the following settings:
+
+- **Object Types:** 
+    - Check **dcim > device**
+    - Check **virtualization > virtual machine**
+    - Check **dcim > interface**
+- **Name:** `librenms_id`
+- **Label:** `LibreNMS ID`
+- **Description:** (Optional) Add a description like "LibreNMS ID for LibreNMS Plugin".
+- **Type:** Integer
+- **Required:** Leave unchecked.
+- **Default Value:** Leave blank.
+
+For more info check out [custom field docs](custom_field.md)
 
 ## Uninstall
 
