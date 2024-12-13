@@ -187,8 +187,14 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 link["cable_status"] = "No Cable"
                 link["can_create_cable"] = True
         else:
-            link["cable_status"] = "Missing Interface"
             link["can_create_cable"] = False
+            if not local_interface_id and not remote_interface_id:
+                link["cable_status"] = "Both Interfaces Not Found in Netbox"
+            elif not local_interface_id:
+                link["cable_status"] = "Local Interface Not Found in Netbox"
+            elif not remote_interface_id:
+                link["cable_status"] = "Remote Interface Not Found in Netbox"
+
         return link
 
     def enrich_links_data(self, links_data, obj):
@@ -356,7 +362,16 @@ class SingleCableVerifyView(BaseCableTableView):
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk
-                        link_data = self.check_cable_status(link_data)
+
+                        # Check remote device existence first
+                        remote_device_name = link_data.get("remote_device", "")
+                        if remote_device_name and not link_data.get(
+                            "remote_device_url"
+                        ):
+                            formatted_row["cable_status"] = "Device Not Found in NetBox"
+                        else:
+                            link_data = self.check_cable_status(link_data)
+                            formatted_row["cable_status"] = link_data["cable_status"]
 
                         formatted_row["local_port"] = (
                             f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{local_port}</a>'
@@ -407,7 +422,23 @@ class SingleCableVerifyView(BaseCableTableView):
                             if link_data.get("remote_device_url")
                             else remote_device_name
                         )
-                        formatted_row["cable_status"] = "Missing Interface"
+
+                        # First check if remote device exists in NetBox
+                        if remote_device_name and not link_data.get(
+                            "remote_device_url"
+                        ):
+                            formatted_row["cable_status"] = "Device Not Found in NetBox"
+                        # Then check interface status
+                        elif link_data.get("remote_device_url") and link_data.get(
+                            "remote_port_url"
+                        ):
+                            formatted_row["cable_status"] = (
+                                "Local Interface Not Found in NetBox"
+                            )
+                        else:
+                            formatted_row["cable_status"] = "Missing Interface"
+
                         formatted_row["actions"] = ""
 
+        print(f"Debug: Sending formatted row: {formatted_row}")
         return JsonResponse({"status": "success", "formatted_row": formatted_row})
