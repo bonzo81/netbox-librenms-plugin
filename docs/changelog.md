@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 (2024-12-13)
+
+### Fixes
+* Fix issue with tab selection not working after sync task
+* Updated interface name field tooltip
+
 ## 0.3.0 (2024-12-13)
 
 ### New Setting
