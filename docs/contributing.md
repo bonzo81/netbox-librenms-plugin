@@ -19,8 +19,7 @@ Report bugs at https://github.com/bonzo81/netbox-librenms-plugin/issues.
 
 If you are reporting a bug, please include:
 
-* Your operating system name and version.
-* Any details about your local setup that might be helpful in troubleshooting.
+* Any details about your local environment that might be helpful in troubleshooting.
 * Detailed steps to reproduce the bug.
 
 ### Fix Bugs
@@ -35,8 +34,8 @@ and "help wanted" is open to whoever wants to implement it.
 
 ### Write Documentation
 
-NetBox librenms Plugin could always use more documentation, whether as part of the
-official NetBox librenms Plugin docs, in docstrings, or even on the web in blog posts,
+NetBox LibreNMS Plugin could always use more documentation, whether as part of the
+official NetBox LibreNMS Plugin docs, in docstrings, or even on the web in blog posts,
 articles, and such.
 
 ### Submit Feedback

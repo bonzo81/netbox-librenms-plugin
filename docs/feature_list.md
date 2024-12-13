@@ -27,6 +27,7 @@
 
 ### Cable 
 - Create Cable connection in NetBox from LibreNMS links data
+- Best results when the [custom field](custom_field.md) `librenms_id` is populated on interfaces
 
 ### Location 
 - NetBox Site to LibreNMS location synchronization
