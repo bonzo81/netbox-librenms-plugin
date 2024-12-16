@@ -18,22 +18,20 @@ class SyncCablesView(CacheMixin, View):
     def get_selected_interfaces(self, request, initial_device):
         """
         Retrieve and validate selected interfaces from the request.
-        Include device information with each selected interface.
+        Returns a list of dictionaries containing device_id and interface name.
         """
-        selected_data = request.POST.getlist("select")
+        selected_interfaces = []
+        selected_data = [x for x in request.POST.getlist("select") if x]
+
         if not selected_data:
             return None
 
-        # Parse device and interface information from selected data
-        selected_interfaces = []
-
         for interface in selected_data:
-            # For VC members, get the device_id from the selection dropdown
-            device_id = request.POST.get(f"device_selection_{interface}")
-            # For standalone devices, use the original device id
-            if not device_id:
-                device_id = initial_device.id
+            device_id = (
+                request.POST.get(f"device_selection_{interface}") or initial_device.id
+            )
             selected_interfaces.append({"device_id": device_id, "interface": interface})
+
         return selected_interfaces
 
     def get_cached_links_data(self, request, obj):
@@ -75,27 +73,54 @@ class SyncCablesView(CacheMixin, View):
 
         return True
 
-    def display_result_messages(
-        self, request, valid_interfaces, invalid_interfaces, duplicate_interfaces
-    ):
+    def process_single_interface(self, interface, cached_links):
+        """Process a single interface and return its status"""
+        try:
+            link_data = next(
+                link
+                for link in cached_links
+                if link["local_port"] == interface["interface"]
+            )
+            return self.handle_cable_creation(link_data, interface)
+        except StopIteration:
+            return {"status": "invalid"}
+
+    def verify_cable_creation_requirements(self, link_data):
         """
-        Display appropriate messages for cable creation results
+        Verify if cable can be created by checking required data exists
         """
-        if duplicate_interfaces:
-            messages.warning(
-                request,
-                f"Cable already exist for interfaces: {', '.join(duplicate_interfaces)}",
+        required_fields = [
+            "netbox_local_interface_id",
+            "netbox_remote_device_id",
+            "netbox_remote_interface_id",
+        ]
+
+        return all(link_data.get(field) for field in required_fields)
+
+    def handle_cable_creation(self, link_data, interface):
+        """Handle the cable creation process for valid link data"""
+        if not self.verify_cable_creation_requirements(link_data):
+            return {"status": "invalid", "interface": interface["interface"]}
+
+        try:
+            local_interface = Interface.objects.get(
+                pk=link_data["netbox_local_interface_id"]
             )
-        if invalid_interfaces:
-            messages.error(
-                request,
-                f"Cannot create cable - device or interface not found in NetBox: {', '.join(invalid_interfaces)}",
+            remote_device = Device.objects.get(pk=link_data["netbox_remote_device_id"])
+            remote_interface = Interface.objects.get(
+                pk=link_data["netbox_remote_interface_id"]
             )
-        if valid_interfaces:
-            messages.success(
-                request,
-                f"Successfully created cable for interfaces: {', '.join(valid_interfaces)}",
+
+            if self.check_existing_cable(local_interface, remote_interface):
+                return {"status": "duplicate", "interface": interface["interface"]}
+
+            self.create_cable(
+                local_interface, remote_device, remote_interface, self.request
             )
+            return {"status": "valid", "interface": interface["interface"]}
+
+        except (Device.DoesNotExist, Interface.DoesNotExist):
+            return {"status": "missing_remote", "interface": interface["interface"]}
 
     @transaction.atomic()
     def post(self, request, pk):
@@ -106,59 +131,39 @@ class SyncCablesView(CacheMixin, View):
         if not self.validate_prerequisites(
             cached_links, selected_interfaces, initial_device
         ):
-            return redirect(
-                f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
-            )
+            return redirect(self.get_cables_tab_url(initial_device))
 
-        valid_interfaces = []
-        invalid_interfaces = []
-        duplicate_interfaces = []
-        missing_remote_interfaces = []
+        results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
 
         for interface in selected_interfaces:
-            try:
-                # Find the matching link data from cache
-                link_data = next(
-                    link
-                    for link in cached_links
-                    if link["local_port"] == interface["interface"]
-                )
-                try:
-                    # Get interfaces using the cached NetBox IDs
-                    local_interface = Interface.objects.get(
-                        pk=link_data["netbox_local_interface_id"]
-                    )
-                    remote_device = Device.objects.get(pk=link_data["remote_device_id"])
-                    remote_interface = Interface.objects.get(
-                        pk=link_data["netbox_remote_interface_id"]
-                    )
+            result = self.process_single_interface(interface, cached_links)
+            results[result["status"]].append(result.get("interface", ""))
 
-                    if self.check_existing_cable(local_interface, remote_interface):
-                        duplicate_interfaces.append(interface["interface"])
-                        continue
+        self.display_sync_results(request, results)
 
-                    self.create_cable(
-                        local_interface, remote_device, remote_interface, request
-                    )
-                    valid_interfaces.append(interface["interface"])
-
-                except Device.DoesNotExist:
-                    missing_remote_interfaces.append(interface["interface"])
-                except Interface.DoesNotExist:
-                    missing_remote_interfaces.append(interface["interface"])
-
-            except StopIteration:
-                invalid_interfaces.append(interface["interface"])
-
-        if missing_remote_interfaces:
-            messages.error(
-                request,
-                f"Remote device or interface not found in NetBox for: {', '.join(missing_remote_interfaces)}",
-            )
-
-        self.display_result_messages(
-            request, valid_interfaces, invalid_interfaces, duplicate_interfaces
-        )
         return redirect(
             f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
         )
+
+    def display_sync_results(self, request, results):
+        """Display messages for cable sync results"""
+        if results["missing_remote"]:
+            messages.error(
+                request,
+                f"Remote device or interface not found in NetBox for: {', '.join(results['missing_remote'])}",
+            )
+        if results["invalid"]:
+            messages.error(
+                request,
+                f"No LibreNMS link data found for interfaces: {', '.join(results['invalid'])}",
+            )
+        if results["duplicate"]:
+            messages.warning(
+                request,
+                f"Cable already exists for interfaces: {', '.join(results['duplicate'])}",
+            )
+        if results["valid"]:
+            messages.success(
+                request,
+                f"Successfully created cable for interfaces: {', '.join(results['valid'])}",
+            )

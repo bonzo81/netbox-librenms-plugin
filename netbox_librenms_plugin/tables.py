@@ -536,11 +536,11 @@ class LibreNMSCableTable(tables.Table):
     actions = tables.TemplateColumn(
         template_code="""
         {% if record.can_create_cable %}
-        <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' record.device_id %}">
-            {% csrf_token %}
-            <input type="hidden" name="select" value="{{ record.local_port }}">
-            <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
-        </form>
+            <button type="submit"
+                    class="btn btn-sm btn-primary"
+                    onclick="document.getElementById('selected_port').value='{{ record.local_port }}'">
+                Sync Cable
+            </button>
         {% endif %}
         """,
         verbose_name="",
