@@ -91,7 +91,7 @@ function initializeVCMemberSelect() {
             interfaceSelects.forEach(select => {
                 if (select.tomselect && !select.dataset.interfaceSelectInitialized) {
                     select.dataset.interfaceSelectInitialized = 'true';
-                    select.tomselect.on('change', function(value) {
+                    select.tomselect.on('change', function (value) {
                         handleInterfaceChange(select, value);
                     });
                 }
@@ -103,7 +103,7 @@ function initializeVCMemberSelect() {
             cableSelects.forEach(select => {
                 if (select.tomselect && !select.dataset.cableSelectInitialized) {
                     select.dataset.cableSelectInitialized = 'true';
-                    select.tomselect.on('change', function(value) {
+                    select.tomselect.on('change', function (value) {
                         handleCableChange(select, value);
                     });
                 }
@@ -125,21 +125,21 @@ function handleInterfaceChange(select, value) {
             interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value
         })
     })
-    .then(response => response.json())
-    .then(data => {
-        const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
-        if (data.status === 'success' && row) {
-            const formattedRow = data.formatted_row;
-            row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
-            row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
-            row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
-            row.querySelector('td[data-col="mac_address"]').innerHTML = formattedRow.mac_address;
-            row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
-            row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
-            row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
-            initializeFilters();
-        }
-    });
+        .then(response => response.json())
+        .then(data => {
+            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+            if (data.status === 'success' && row) {
+                const formattedRow = data.formatted_row;
+                row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
+                row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
+                row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
+                row.querySelector('td[data-col="mac_address"]').innerHTML = formattedRow.mac_address;
+                row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
+                row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
+                row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
+                initializeFilters();
+            }
+        });
 }
 // Function to handle cable VC member change event
 function handleCableChange(select, value) {
@@ -154,21 +154,21 @@ function handleCableChange(select, value) {
             local_port: select.dataset.interface
         })
     })
-    .then(response => response.json())
-    .then(data => {
-        const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+        .then(response => response.json())
+        .then(data => {
+            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
 
-        if (data.status === 'success' && row) {
-            const formattedRow = data.formatted_row;
-            const actionsCell = row.querySelector('td[data-col="actions"]');
-            row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
-            row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
-            row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
-            row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
-            row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
+            if (data.status === 'success' && row) {
+                const formattedRow = data.formatted_row;
+                const actionsCell = row.querySelector('td[data-col="actions"]');
+                row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
+                row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
+                row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
+                row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
+                row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
 
-        }
-    });
+            }
+        });
 }
 
 
@@ -327,17 +327,48 @@ function initializeFilters() {
         }
     );
 }
+
+// Initialize a flag to prevent adding duplicate event listeners
+let tabsInitialized = false;
 // Function to initialize the 'active' tab based on the URL
 function initializeTabs() {
-    const tabs = document.querySelectorAll('[data-bs-toggle="tab"]');
-    tabs.forEach(tab => {
-        tab.addEventListener('click', function(e) {
-            const tabId = this.getAttribute('data-tab-id');
-            const url = new URL(window.location);
-            url.searchParams.set('tab', tabId);
-            window.history.pushState({}, '', url);
+    const urlParams = new URLSearchParams(window.location.search);
+    const activeTab = urlParams.get('tab') || 'interfaces'; // Set default tab
+    const interfaceNameField = urlParams.get('interface_name_field');
+
+    // Activate the tab based on the 'tab' parameter in the URL
+    if (activeTab) {
+        const tabElement = document.querySelector(`#${activeTab}-tab`);
+        const tabContent = document.querySelector(`#${activeTab}`);
+
+        if (tabElement && tabContent) {
+            tabContent.classList.add('show', 'active');
+            tabElement.classList.add('active');
+        }
+    }
+
+    // Add event listeners only once
+    if (!tabsInitialized) {
+        const tabs = document.querySelectorAll('[data-bs-toggle="tab"]')
+        tabs.forEach(tab => {
+            tab.addEventListener('shown.bs.tab', function (e) {
+                const tabId = this.getAttribute('aria-controls');
+                const url = new URL(window.location);
+
+                // Update the 'tab' parameter in the URL
+                url.searchParams.set('tab', tabId);
+
+                // Preserve 'interface_name_field' parameter if it exists
+                if (interfaceNameField) {
+                    url.searchParams.set('interface_name_field', interfaceNameField);
+                }
+
+                // Update the browser history without reloading the page
+                window.history.replaceState({}, '', url);
+            });
         });
-    });
+        tabsInitialized = true;
+    }
 }
 
 // Function to toggle SNMP forms based on version
@@ -387,14 +418,14 @@ function openBulkVCModal() {
 // Function to update the interface_name_field radio button
 function updateInterfaceNameField() {
     document.querySelectorAll('.interface-name-field').forEach(radio => {
-        radio.addEventListener('change', function() {
+        radio.addEventListener('change', function () {
             const url = new URL(window.location);
             url.searchParams.set('interface_name_field', this.value);
             window.history.pushState({}, '', url);
-            
+
             // Set HTMX headers for subsequent requests
             htmx.config.defaultHeaders['X-Interface-Name-Field'] = this.value;
-            
+
             // Refresh current tab content
             const activeTab = document.querySelector('.tab-pane.active');
             if (activeTab) {
