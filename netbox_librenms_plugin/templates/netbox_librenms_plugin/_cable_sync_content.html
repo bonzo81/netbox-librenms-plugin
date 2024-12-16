@@ -5,6 +5,7 @@
 {% if cable_sync.table %}
 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}">
     {% csrf_token %}
+    <input type="hidden" id="selected_port" name="select" value="">
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>
             <button type="submit" class="btn btn-primary">
