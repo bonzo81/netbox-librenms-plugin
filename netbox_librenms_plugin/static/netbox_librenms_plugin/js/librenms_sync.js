@@ -3,6 +3,8 @@ function initializeCountdown(elementId) {
     const countdownElement = document.getElementById(elementId);
     if (!countdownElement) return;
 
+    let countdownInterval;
+
     function updateCountdown() {
         const expiry = new Date(countdownElement.dataset.expiry).getTime();
         const now = new Date().getTime();
@@ -20,7 +22,8 @@ function initializeCountdown(elementId) {
     }
 
     updateCountdown();
-    return setInterval(updateCountdown, 1000);
+    countdownInterval = setInterval(updateCountdown, 1000);
+    return countdownInterval;
 }
 
 function initializeCountdowns() {
