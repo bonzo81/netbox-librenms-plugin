@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 (2024-12-16)
+
+### Fixes
+* Refactor tab handling for interface and cable views 
+* Fix Duplicate ID in SNMP forms 
+* Refactor cable link processing and fix CSRF token error. 
+* Generate unique base ID for TomSelect components in VCInterfaceTable
+* Add countdown interval variable to initializeCountdown function
 ## 0.3.1 (2024-12-13)
 
 ### Fixes
