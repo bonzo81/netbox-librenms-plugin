@@ -346,15 +346,19 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         else:
             selected_member_id = self.device.id
 
+        # Create unique base ID for TomSelect components
+        base_id = f"device_selection_{interface_name}_{hash(interface_name)}"
+
         options = [
             f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{member.name}</option>'
             for member in members
         ]
 
         return format_html(
-            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select vc-member-select" data-interface="{0}" data-row-id="{0}">{1}</select>',
+            '<select name="device_selection_{0}" id="{1}" class="form-select vc-member-select" data-interface="{0}" data-row-id="{0}">{2}</select>',
             interface_name,
-            mark_safe("".join(options)),
+            base_id,
+            mark_safe("".join(options))
         )
 
     def format_interface_data(self, port_data, device):
