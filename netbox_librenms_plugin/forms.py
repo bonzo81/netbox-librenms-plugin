@@ -18,14 +18,28 @@ class InterfaceTypeMappingFilterForm(NetBoxModelForm):
 
 
 class AddToLIbreSNMPV2(forms.Form):
-    hostname = forms.CharField(label="Hostname/IP", max_length=255, required=True)
-    snmp_version = forms.CharField(widget=forms.HiddenInput(), initial="v2c")
+    hostname = forms.CharField(
+        label="Hostname/IP",
+        max_length=255,
+        required=True,
+        widget=forms.TextInput(attrs={"id": "id_hostname_v2"}),
+    )
+    snmp_version = forms.CharField(
+        widget=forms.HiddenInput(attrs={"id": "id_snmp_version_v2"})
+    )
     community = forms.CharField(label="SNMP Community", max_length=255, required=True)
 
 
 class AddToLIbreSNMPV3(forms.Form):
-    hostname = forms.CharField(label="Hostname/IP", max_length=255, required=True)
-    snmp_version = forms.CharField(widget=forms.HiddenInput(), initial="v3")
+    hostname = forms.CharField(
+        label="Hostname/IP",
+        max_length=255,
+        required=True,
+        widget=forms.TextInput(attrs={"id": "id_hostname_v3"}),
+    )
+    snmp_version = forms.CharField(
+        widget=forms.HiddenInput(attrs={"id": "id_snmp_version_v3"}), initial="v3"
+    )
     authlevel = forms.ChoiceField(
         label="Auth Level",
         choices=[
