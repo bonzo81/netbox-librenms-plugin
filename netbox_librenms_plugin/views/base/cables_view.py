@@ -72,7 +72,6 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                     "remote_device_id": link.get("remote_device_id"),
                 }
             )
-
         return links_data
 
     def get_device_by_id_or_name(self, remote_device_id, hostname):
@@ -146,6 +145,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         if remote_port := link.get("remote_port"):
             # First try to find interface by librenms_id
             librenms_remote_port_id = link.get("remote_port_id")
+            netbox_remote_interface = None
             if librenms_remote_port_id:
                 netbox_remote_interface = device.interfaces.filter(
                     custom_field_data__librenms_id=librenms_remote_port_id
@@ -168,57 +168,83 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
     def check_cable_status(self, link):
         """
-        Check cable status between two interfaces.
+        Check cable status and add cable URL if cable exists in NetBox
         """
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
 
+        # Default state
+        link["can_create_cable"] = False
+
         if local_interface_id and remote_interface_id:
             local_interface = Interface.objects.get(pk=local_interface_id)
             remote_interface = Interface.objects.get(pk=remote_interface_id)
-
             existing_cable = local_interface.cable or remote_interface.cable
+
             if existing_cable:
-                link["cable_status"] = "Cable Found"
-                link["cable_url"] = reverse("dcim:cable", args=[existing_cable.pk])
-                link["can_create_cable"] = False
+                link.update(
+                    {
+                        "cable_status": "Cable Found",
+                        "cable_url": reverse("dcim:cable", args=[existing_cable.pk]),
+                    }
+                )
             else:
-                link["cable_status"] = "No Cable"
-                link["can_create_cable"] = True
+                link.update({"cable_status": "No Cable", "can_create_cable": True})
         else:
-            link["can_create_cable"] = False
-            if not local_interface_id and not remote_interface_id:
-                link["cable_status"] = "Both Interfaces Not Found in Netbox"
-            elif not local_interface_id:
-                link["cable_status"] = "Local Interface Not Found in Netbox"
-            elif not remote_interface_id:
-                link["cable_status"] = "Remote Interface Not Found in Netbox"
+            link["cable_status"] = (
+                "Both Interfaces Not Found in Netbox"
+                if not (local_interface_id or remote_interface_id)
+                else "Local Interface Not Found in Netbox"
+                if not local_interface_id
+                else "Remote Interface Not Found in Netbox"
+            )
 
         return link
 
+    def process_remote_device(self, link, remote_hostname, remote_device_id):
+        """
+        Process remote device data and add remote device URL if device exists in NetBox
+        """
+        device, found = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
+        if found:
+            link.update(
+                {
+                    "remote_device_url": reverse("dcim:device", args=[device.pk]),
+                    "netbox_remote_device_id": device.pk,
+                }
+            )
+            return self.enrich_remote_port(link, device)
+
+        link.update(
+            {
+                "remote_port_name": link["remote_port"],
+                "cable_status": "Device Not Found in NetBox",
+                "can_create_cable": False,
+            }
+        )
+        return link
+
     def enrich_links_data(self, links_data, obj):
+        """
+        Enrich links data with local and remote port URLs and cable status.
+        """
         for link in links_data:
             self.enrich_local_port(link, obj)
             link["device_id"] = obj.id
 
             if remote_hostname := link.get("remote_device"):
-                remote_device_id = link.get("remote_device_id")
-                device, found = self.get_device_by_id_or_name(
-                    remote_device_id, remote_hostname
+                link = self.process_remote_device(
+                    link, remote_hostname, link.get("remote_device_id")
                 )
-                if found:
-                    link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
-                    link["remote_device_id"] = device.pk
-                    link = self.enrich_remote_port(link, device)
+                if link.get("netbox_remote_device_id"):
                     link = self.check_cable_status(link)
-                else:
-                    link["remote_port_name"] = link["remote_port"]
-                    link["cable_status"] = "Device Not Found in NetBox"
-                    link["can_create_cable"] = False
+
         return links_data
 
     def get_table(self, data, obj):
-        # Get the table instance from child class
+        """
+        Get the table instance for the view.
+        """
         table = super().get_table(data, obj)
         table.htmx_url = f"{self.request.path}?tab=cables"
         return table
@@ -282,6 +308,9 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return context
 
     def post(self, request, pk):
+        """
+        Handle POST request for cable sync view.
+        """
         obj = self.get_object(pk)
         context = self._prepare_context(request, obj, fetch_fresh=True)
 
@@ -302,6 +331,10 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
 
 class SingleCableVerifyView(BaseCableTableView):
+    """
+    View to verify a single cable link between two devices.
+    """
+
     def post(self, request):
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
@@ -438,5 +471,4 @@ class SingleCableVerifyView(BaseCableTableView):
 
                         formatted_row["actions"] = ""
 
-        print(f"Debug: Sending formatted row: {formatted_row}")
         return JsonResponse({"status": "success", "formatted_row": formatted_row})
