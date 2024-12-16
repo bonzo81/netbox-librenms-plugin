@@ -51,11 +51,9 @@ class SyncInterfacesView(CacheMixin, View):
         )
 
         messages.success(request, "Selected interfaces synced successfully.")
-        base_url = reverse(
-            f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": object_id}
-        )
         return redirect(
-            f"{base_url}?tab=interfaces&interface_name_field={interface_name_field}"
+            reverse("dcim:device_librenms_sync", kwargs={"pk": object_id})
+            + f"?tab=interfaces&interface_name_field={interface_name_field}"
         )
 
     def get_object(self, object_type, object_id):

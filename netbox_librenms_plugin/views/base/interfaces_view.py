@@ -16,7 +16,6 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
     Base view for fetching interface data from LibreNMS and generating table data.
     """
 
-    tab = "interfaces"
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_interface_sync_content.html"
     interface_name_field = None
@@ -97,7 +96,6 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         Get the context data for the interface sync view.
         """
         ports_data = []
-
         table = None
 
         if interface_name_field is None:
@@ -162,7 +160,6 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         context = {
             "object": obj,
             "table": table,
-            "tab": self.tab,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
             "virtual_chassis_members": virtual_chassis_members,
