@@ -84,7 +84,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
             table = LibreNMSInterfaceTable(
                 data, device=obj, interface_name_field=interface_name_field
             )
-        table.htmx_url = f"{self.request.path}?tab={self.tab}"
+        table.htmx_url = f"{self.request.path}?tab=interfaces"
         return table
 
 
