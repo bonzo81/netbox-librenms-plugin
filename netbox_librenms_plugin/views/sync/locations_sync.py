@@ -7,7 +7,7 @@ from django.shortcuts import redirect
 from django_tables2 import SingleTableView
 
 from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
-from netbox_librenms_plugin.tables import SiteLocationSyncTable
+from netbox_librenms_plugin.tables.locations import SiteLocationSyncTable
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 

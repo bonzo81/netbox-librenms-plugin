@@ -8,10 +8,12 @@ from django.urls import reverse
 from django.views import View
 from utilities.views import ViewTab, register_model_view
 
-from netbox_librenms_plugin.tables import (
+from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
-    LibreNMSInterfaceTable,
     VCCableTable,
+)
+from netbox_librenms_plugin.tables.interfaces import (
+    LibreNMSInterfaceTable,
     VCInterfaceTable,
 )
 from netbox_librenms_plugin.utils import get_interface_name_field

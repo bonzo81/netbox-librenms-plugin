@@ -1,9 +1,8 @@
-from django.shortcuts import redirect
 from django.urls import reverse
 from utilities.views import ViewTab, register_model_view
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.tables import LibreNMSVMInterfaceTable
+from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
 from netbox_librenms_plugin.utils import get_interface_name_field
 
 from .base.interfaces_view import BaseInterfaceTableView
