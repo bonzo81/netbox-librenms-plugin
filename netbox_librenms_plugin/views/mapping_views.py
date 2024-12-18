@@ -1,9 +1,9 @@
 from netbox.views import generic
 
-from ..filters import InterfaceTypeMappingFilterSet
-from ..forms import InterfaceTypeMappingFilterForm, InterfaceTypeMappingForm
-from ..models import InterfaceTypeMapping
-from ..tables import InterfaceTypeMappingTable
+from netbox_librenms_plugin.filters import InterfaceTypeMappingFilterSet
+from netbox_librenms_plugin.forms import InterfaceTypeMappingFilterForm, InterfaceTypeMappingForm
+from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.tables.mappings import InterfaceTypeMappingTable
 
 
 class InterfaceTypeMappingListView(generic.ObjectListView):
