@@ -33,9 +33,13 @@ function initializeCountdowns() {
     if (window.cableCountdownInterval) {
         clearInterval(window.cableCountdownInterval);
     }
+    if (window.ipCountdownInterval) {
+        clearInterval(window.ipCountdownInterval);
+    }
 
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
+    window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
 }
 
 
@@ -81,6 +85,7 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-interface-table');
     initializeTableCheckboxes('librenms-interface-table-vm');
     initializeTableCheckboxes('librenms-cable-table');
+    initializeTableCheckboxes('librenms-ipaddress-table');
 }
 
 // Initialize the 'Apply' button for the bulk VCMember select
@@ -306,7 +311,6 @@ function initializeFilters() {
             description: { name: 'description' }
         }
     );
-
     // Non Virtual Chassis Cable table (without 'vc-member' filter)
     initializeTableFilters(
         'librenms-cable-table',
@@ -317,7 +321,6 @@ function initializeFilters() {
             'remote-device': { name: 'remote_device' }
         }
     );
-
     // VC Cable table (with 'vc-member' filter)
     initializeTableFilters(
         'librenms-cable-table-vc',
@@ -328,6 +331,16 @@ function initializeFilters() {
             'remote-port': { name: 'remote_port' },
             'remote-device': { name: 'remote_device' }
         }
+    );
+    initializeTableFilters(
+        'librenms-ipaddress-table',
+        ['address', 'prefix', 'device', 'interface'],
+        {
+            address: { name: 'address' },
+            prefix: { name: 'prefix' },
+            device: { name: 'device' },
+            interface: { name: 'interface' }
+        }   
     );
 }
 
