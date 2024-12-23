@@ -1,0 +1,66 @@
+{% load helpers %}
+{% include 'inc/messages.html' %}
+
+<!-- IP Address Sync Table -->
+{% if ip_sync.table %}
+<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' ip_sync.object.pk %}">
+    {% csrf_token %}
+    <input type="hidden" id="selected_ip" name="select" value="">
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+        <div>
+            <button type="submit" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected IP Addresses</span>
+            </button>
+        </div>
+        {% if ip_sync.cache_expiry %}
+            <div id="ip-cache-countdown" class="me-3">
+                Cache expires in: <span id="ip-countdown-timer" data-expiry="{{ ip_sync.cache_expiry|date:'c' }}"></span>
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="row mb-3">
+        <div class="col col-md-12">
+            <div class="d-flex justify-content-end align-items-center mb-3">
+                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#ipFilterSection" aria-expanded="false" aria-controls="ipFilterSection">
+                    <i class="mdi mdi-filter"></i> Toggle Filters
+                </button>
+            </div>
+            <div class="collapse mb-3" id="ipFilterSection">
+                <div class="mb-2">
+                    <small class="text-muted">
+                        <i class="mdi mdi-information"></i> Filters apply to currently displayed IP addresses.
+                    </small>
+                </div>
+                <div class="filter-container d-flex gap-2">
+                    <input type="text" id="filter-address" placeholder="Filter by Address" class="form-control">
+                    <input type="text" id="filter-prefix" placeholder="Filter by Prefix" class="form-control">
+                    <input type="text" id="filter-device" placeholder="Filter by Device" class="form-control">
+                    <input type="text" id="filter-interface" placeholder="Filter by Interface" class="form-control">
+                </div>
+            </div>
+            <style>
+                .ts-wrapper.multi .ts-control {
+                    display: flex !important;
+                    flex-wrap: wrap;
+                    align-items: center;
+                }
+                td[data-col="device_selection"] {
+                    width: 300px;
+                    min-width: 200px;
+                }
+                td[data-col="device_selection"] .ts-wrapper {
+                    width: 100%;
+                    max-width: 100%;
+                }
+            </style>
+            <div class="card">
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table %}
+                {% include 'inc/table.html' with table=ip_sync.table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table %}
+            </div>
+        </div>
+    </div>
+</form>
+{% endif %}

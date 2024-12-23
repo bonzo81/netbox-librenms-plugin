@@ -1,2 +1,26 @@
-<h2>IP Address Sync</h2>
-<p>{{ ip_sync.ip_sync_message }}</p>
+{% load helpers %}
+{% load static %}
+
+<!-- Action Buttons -->
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>IP Address Sync</h2>
+    <div class="btn-list">
+        <form method="post">
+            {% csrf_token %}
+            {% if has_librenms_id %}
+                    <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_ipaddress_sync' pk=object.pk %}"
+                            class="btn btn-outline-primary"
+                            hx-target="#ipaddress-sync-content"
+                            hx-include="[name='interface_name_field']">
+                        Refresh IP Addresses
+                    </button>
+            {% endif %}
+        </form>
+    </div>
+</div>
+<!-- End Action Buttons -->
+
+<!-- Container for the interface sync content -->
+<div id="ipaddress-sync-content">
+    {% include 'netbox_librenms_plugin/_ipaddress_sync_content.html' %}
+</div>
