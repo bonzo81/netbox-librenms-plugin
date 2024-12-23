@@ -102,12 +102,26 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             interface_name_field = get_interface_name_field(request)
 
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
-
         last_fetched = cache.get(self.get_last_fetched_key(obj), "ports")
 
         if cached_data:
             ports_data = cached_data.get("ports", [])
-            netbox_interfaces = self.get_interfaces(obj)
+
+            # Pre-fetch all interfaces for all potential chassis members
+            interfaces_by_device = {}
+            if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                for member in obj.virtual_chassis.members.all():
+                    interfaces_by_device[member.id] = {
+                        interface.name: interface
+                        for interface in self.get_interfaces(member).select_related(
+                            "device"
+                        )
+                    }
+            else:
+                interfaces_by_device[obj.id] = {
+                    interface.name: interface
+                    for interface in self.get_interfaces(obj).select_related("device")
+                }
 
             for port in ports_data:
                 port["enabled"] = (
@@ -120,31 +134,22 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                     )
                 )
 
-                # Determine the correct chassis member based on the port description
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     chassis_member = get_virtual_chassis_member(
                         obj, port[interface_name_field]
                     )
-                    netbox_interfaces = self.get_interfaces(chassis_member)
-
+                    device_interfaces = interfaces_by_device.get(chassis_member.id, {})
                 else:
-                    chassis_member = obj  # Not part of a virtual chassis
+                    device_interfaces = interfaces_by_device[obj.id]
 
-                netbox_interface = netbox_interfaces.filter(
-                    name=port[interface_name_field]
-                ).first()
+                netbox_interface = device_interfaces.get(port[interface_name_field])
                 port["exists_in_netbox"] = bool(netbox_interface)
                 port["netbox_interface"] = netbox_interface
 
-                # Ignore when description is the same as interface name
-                if (
-                    port["ifAlias"] == port["ifDescr"]
-                    or port["ifAlias"] == port["ifName"]
-                ):
+                if port["ifAlias"] in (port["ifDescr"], port["ifName"]):
                     port["ifAlias"] = ""
 
             table = self.get_table(ports_data, obj, interface_name_field)
-
             table.configure(request)
 
         virtual_chassis_members = []
@@ -152,12 +157,13 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
         cache_ttl = cache.ttl(self.get_cache_key(obj, "ports"))
-        if cache_ttl is not None:
-            cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
-        else:
-            cache_expiry = None
+        cache_expiry = (
+            timezone.now() + timezone.timedelta(seconds=cache_ttl)
+            if cache_ttl is not None
+            else None
+        )
 
-        context = {
+        return {
             "object": obj,
             "table": table,
             "last_fetched": last_fetched,
@@ -165,5 +171,3 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             "virtual_chassis_members": virtual_chassis_members,
             "interface_name_field": interface_name_field,
         }
-
-        return context
