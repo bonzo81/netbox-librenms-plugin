@@ -17,6 +17,7 @@ from .views import (
     SingleInterfaceVerifyView,
     SingleCableVerifyView,
     SyncInterfacesView,
+    SyncIPAddressesView,
     SyncCablesView,
     SyncSiteLocationView,
     UpdateDeviceLocationView,
@@ -85,6 +86,12 @@ urlpatterns = [
         "device/<int:pk>/sync-cables/",
         SyncCablesView.as_view(),
         name="sync_device_cables",
+    ),
+    # Sync IP addresses URL
+    path(
+        "device/<int:pk>/sync-ip-addresses/",
+        SyncIPAddressesView.as_view(),
+        name="sync_device_ip_addresses",
     ),
     # Add Device to LibreNMS URLs
     path(

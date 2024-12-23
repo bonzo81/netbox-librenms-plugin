@@ -21,6 +21,7 @@ from .sync.cables_sync import SyncCablesView
 from .sync.devices_sync import AddDeviceToLibreNMSView, UpdateDeviceLocationView
 from .sync.interfaces_sync import SyncInterfacesView
 from .sync.locations_sync import SyncSiteLocationView
+from .sync.ipaddresses_sync import SyncIPAddressesView
 
 from .device_views import (
     DeviceCableTableView,
