@@ -376,3 +376,43 @@ class LibreNMSAPI:
             return True, response.json()
         except requests.exceptions.RequestException as e:
             return False, str(e)
+
+    def get_device_ips(self, device_id):
+        """
+        Fetch IP address data for a specific device from LibreNMS.
+
+        Args:
+            device_id: Device ID
+
+        Returns:
+            tuple: (success, data)
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{device_id}/ip",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            if response.status_code == 200:
+                ip_data = response.json()["addresses"]
+                return True, ip_data
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
+
+    def get_port_by_id(self, port_id):
+        """
+        Fetch specific port data from LibreNMS using port ID.
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/ports/{port_id}",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl
+            )
+            response.raise_for_status()
+            return True, response.json()
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
