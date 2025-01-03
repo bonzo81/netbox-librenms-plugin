@@ -5,7 +5,7 @@ repo_name: /netbox-librenms-plugin
 #strict: true
 nav:
   - Home: index.md
-  - Feature List:  feature_list.md
+  - Feature List: feature_list.md
   - Usage Tips: usage_tips/README.md
     - Custom Field: usage_tips/custom_field.md
     - Interface Mappings: usage_tips/interface_mappings.md
