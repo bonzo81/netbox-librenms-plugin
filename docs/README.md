@@ -28,6 +28,9 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 
 Create cable connection in NetBox from LibreNMS links data.
 
+### IP Address Sync
+Create IP address in NetBox from LibreNMS device IP data.
+
 ### Add device to LibreNMS from Netbox
 
 * Add device to LibreNMS from Netbox device page. SNMP v2c and v3 are supported.
