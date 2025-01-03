@@ -6,10 +6,11 @@ repo_name: /netbox-librenms-plugin
 nav:
   - Home: index.md
   - Feature List: feature_list.md
-  - Usage Tips: usage_tips/README.md
+  - Feature Guide: 
     - Custom Field: usage_tips/custom_field.md
-    - Interface Mappings: usage_tips/interface_mappings.md
     - Virtual Chassis: usage_tips/virtual_chassis.md
+    - Interface Mappings: usage_tips/interface_mappings.md
+  - Usage Tips: usage_tips/README.md
   - Changelog: changelog.md
   - Contributing: contributing.md
 
