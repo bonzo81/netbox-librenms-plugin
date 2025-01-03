@@ -32,6 +32,11 @@
 * Create Cable connection in NetBox from LibreNMS links data
 * Best results when the [custom field](usage_tips/custom_field.md) `librenms_id` is populated on interfaces
 
+### IP Address
+
+* Create IP address objects in Netbox from LibreNMS device IP data
+* Best results when the [custom field](usage_tips/custom_field.md) `librenms_id` is populated on interfaces
+
 ### Location
 
 * NetBox Site to LibreNMS location synchronization
