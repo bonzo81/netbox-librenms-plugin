@@ -1,8 +1,8 @@
 # NetBox LibreNMS Plugin
 
 ### Intro
-The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but 
-this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox. 
+
+The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox.
 
 This is in early development.
 
@@ -11,59 +11,65 @@ This is in early development.
 The plugin offers the following key features:
 
 ### Interface Sync
+
 Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox. The following interface attributes are synchronized:
 
-- Name
-- Description
-- Status (Enabled/Disabled)
-- Type (with [custom mapping support](interface_mappings.md))
-- Speed 
-- MTU 
-- MAC Address
+* Name
+* Description
+* Status (Enabled/Disabled)
+* Type (with [custom mapping support](usage_tips/interface_mappings.md))
+* Speed
+* MTU
+* MAC Address
 
 > Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox.
 
 ### Cable Sync
+
 Create cable connection in NetBox from LibreNMS links data.
 
 ### Add device to LibreNMS from Netbox
 
-- Add device to LibreNMS from Netbox device page. SNMP v2c and v3 are supported.
+* Add device to LibreNMS from Netbox device page. SNMP v2c and v3 are supported.
 
 ### Site & Location Sync
+
 The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 
-- Compare NetBox sites to LibreNMS location data
-- Create LibreNMS locations to match NetBox sites
-- Update existing LibreNMS locations langitude and longitude values based on NetBox data
-- Sync device site to LibreNMS location
-
+* Compare NetBox sites to LibreNMS location data
+* Create LibreNMS locations to match NetBox sites
+* Update existing LibreNMS locations langitude and longitude values based on NetBox data
+* Sync device site to LibreNMS location
 
 ### Screnshots/GIFs
+
 #### Site & Location Sync
+
 ![Site Location Sync](img/Netbox-librenms-plugin-Sites.gif)
 
 #### Sync devices and Interfaces
+
 ![Add device and interfaces](img/Netbox-librenms-plugin-interfaceadd.gif)
 
 #### Virtual Chassis Member Select
+
 ![Virtual Chassis Member Selection](img/Netbox-librenms-plugin-virtualchassis.gif)
 
 #### Interface Type Mappings
+
 ![Interfaces Type Mappings](img/Netbox-librenms-plugin-mappings.png)
 
-
-
 ## Contributing
-There's more to do! Coding is not my day job so bugs will exist and imporvements will be needed. So contributions are very welcome!  I've got more ideas for new features and imporvements but please [contribute](contributing.md) if you can!
 
-Or just share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions ).
+There's more to do! Coding is not my day job so bugs will exist and imporvements will be needed. So contributions are very welcome! I've got more ideas for new features and imporvements but please [contribute](contributing.md) if you can!
+
+Or just share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions).
 
 ## Compatibility
 
 | NetBox Version | Plugin Version |
-|----------------|----------------|
-|     4.1        |      0.2.x - 0.3.x     |
+| -------------- | -------------- |
+| 4.1            | 0.2.x - 0.3.x  |
 
 ## Installing
 
@@ -76,6 +82,7 @@ Activate your virtual environment and install the plugin:
 ```bash
 source /opt/netbox/venv/bin/activate
 ```
+
 Install with pip:
 
 ```bash
@@ -90,8 +97,7 @@ Add to your `local_requirements.txt` to ensure it is automatically reinstalled d
 
 ### Docker
 
-For adding to a NetBox Docker setup see how to create a custom Docker image.
-[the general instructions for using netbox-docker with plugins](https://github.com/netbox-community/netbox-docker/wiki/Using-Netbox-Plugins).
+For adding to a NetBox Docker setup see how to create a custom Docker image. [the general instructions for using netbox-docker with plugins](https://github.com/netbox-community/netbox-docker/wiki/Using-Netbox-Plugins).
 
 Add the plugin to `plugin_requirements.txt` (netbox-docker):
 
@@ -103,8 +109,8 @@ netbox-librenms-plugin
 ## Configuration
 
 ### 1. Enable the Plugin
-Enable the plugin in `/opt/netbox/netbox/netbox/configuration.py`,
- or if you use netbox-docker, your `/configuration/plugins.py` file :
+
+Enable the plugin in `/opt/netbox/netbox/netbox/configuration.py`, or if you use netbox-docker, your `/configuration/plugins.py` file :
 
 ```python
 PLUGINS = [
@@ -147,20 +153,21 @@ sudo systemctl restart netbox
 ```
 
 ### 5. Custom Field
+
 It is recommended (but not essential) to add a custom field `librenms_id` to the Device, Virtual Machine and Interface models in NetBox. Use the following settings:
 
-- **Object Types:** 
-    - Check **dcim > device**
-    - Check **virtualization > virtual machine**
-    - Check **dcim > interface**
-- **Name:** `librenms_id`
-- **Label:** `LibreNMS ID`
-- **Description:** (Optional) Add a description like "LibreNMS ID for LibreNMS Plugin".
-- **Type:** Integer
-- **Required:** Leave unchecked.
-- **Default Value:** Leave blank.
+* **Object Types:**
+  * Check **dcim > device**
+  * Check **virtualization > virtual machine**
+  * Check **dcim > interface**
+* **Name:** `librenms_id`
+* **Label:** `LibreNMS ID`
+* **Description:** (Optional) Add a description like "LibreNMS ID for LibreNMS Plugin".
+* **Type:** Integer
+* **Required:** Leave unchecked.
+* **Default Value:** Leave blank.
 
-For more info check out [custom field docs](custom_field.md)
+For more info check out [custom field docs](usage_tips/custom_field.md)
 
 ## Uninstall
 
@@ -170,8 +177,8 @@ See [the instructions for uninstalling plugins](https://netboxlabs.com/docs/netb
 
 Based on the NetBox plugin tutorial and docs:
 
-- [demo repository](https://github.com/netbox-community/netbox-plugin-demo)
-- [tutorial](https://github.com/netbox-community/netbox-plugin-tutorial)
-- [docs](https://netboxlabs.com/docs/netbox/en/stable/plugins/development/)
+* [demo repository](https://github.com/netbox-community/netbox-plugin-demo)
+* [tutorial](https://github.com/netbox-community/netbox-plugin-tutorial)
+* [docs](https://netboxlabs.com/docs/netbox/en/stable/plugins/development/)
 
-This package was created with [Cookiecutter](https://github.com/audreyr/cookiecutter). Thanks to the [`netbox-community/cookiecutter-netbox-plugin`](https://github.com/netbox-community/cookiecutter-netbox-plugin) for the project template. 
+This package was created with [Cookiecutter](https://github.com/audreyr/cookiecutter). Thanks to the [`netbox-community/cookiecutter-netbox-plugin`](https://github.com/netbox-community/cookiecutter-netbox-plugin) for the project template.
