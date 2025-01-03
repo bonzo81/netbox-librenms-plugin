@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.3 (2025-01-03)
+
+### New Feature
+* Add IP address synchronization
+
+### Fixes
+* Refactor librenms_id handling in SyncInterfacesView
+
+### Under the hood
+* Refactor table.py into separate modules for better maintainability
+* Enhance interface data retrieval efficiency
+
+
 ## 0.3.2 (2024-12-16)
 
 ### Fixes

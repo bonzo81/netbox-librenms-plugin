@@ -15,7 +15,7 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 - Name
 - Description
 - Status (Enabled/Disabled)
-- Type (with [custom mapping support](docs/interface_mappings.md))
+- Type (with [custom mapping support](docs/usage_tips/interface_mappings.md))
 - Speed 
 - MTU 
 - MAC Address
@@ -24,6 +24,10 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 
 ### Cable Sync
 Create cable connection in NetBox from LibreNMS links data.
+
+
+### IP Address Sync
+Create IP address in NetBox from LibreNMS device IP data.
 
 ### Add device to LibreNMS from Netbox
 
@@ -158,7 +162,7 @@ It is recommended (but not essential) to add a custom field `librenms_id` to the
 - **Required:** Leave unchecked.
 - **Default Value:** Leave blank.
 
-For more info check out [custom field docs](docs/custom_field.md)
+For more info check out [custom field docs](docs/usage_tips/custom_field.md)
 
 ## Uninstall
 
