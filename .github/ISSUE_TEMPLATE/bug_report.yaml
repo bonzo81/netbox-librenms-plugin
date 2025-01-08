@@ -30,15 +30,15 @@ body:
         - "3.9"
         - "3.10"
         - "3.11"
+        - "3.12"
+        - "3.13"
     validations:
       required: true
   - type: textarea
     attributes:
       label: Steps to Reproduce
       description: >
-        Please provide a minimal working example to demonstrate the bug. Begin with the
-        initialization of any necessary database objects and clearly enumerate each
-        operation carried out. Ensure that your example is as concise as possible
+        Please provide a minimal working example to demonstrate the bug. Ensure that your example is as concise as possible
         while adequately illustrating the issue.
 
         _Please refrain from including any confidential or sensitive
