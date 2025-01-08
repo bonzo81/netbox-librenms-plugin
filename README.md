@@ -165,7 +165,7 @@ It is recommended (but not essential) to add a custom field `librenms_id` to the
 
 For more info check out [custom field docs](docs/usage_tips/custom_field.md)
 
-## Upgrading plugin 
+## Update
 
 ```
 source /opt/netbox/venv/bin/activate
