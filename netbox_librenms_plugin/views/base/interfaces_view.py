@@ -42,6 +42,14 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         """
         raise NotImplementedError
 
+    def get_select_related_field(self, obj):
+        """
+        Determine the appropriate select_related field based on object type
+        """
+        if self.model.__name__.lower() == 'virtualmachine':
+            return 'virtual_machine'
+        return 'device'
+
     def get_table(self, data, obj, interface_name_field):
         """
         Returns the table class to use for rendering interface data.
@@ -114,13 +122,15 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                     interfaces_by_device[member.id] = {
                         interface.name: interface
                         for interface in self.get_interfaces(member).select_related(
-                            "device"
+                            self.get_select_related_field(obj)
                         )
                     }
             else:
                 interfaces_by_device[obj.id] = {
                     interface.name: interface
-                    for interface in self.get_interfaces(obj).select_related("device")
+                    for interface in self.get_interfaces(obj).select_related(
+                        self.get_select_related_field(obj)
+                    )
                 }
 
             for port in ports_data:
