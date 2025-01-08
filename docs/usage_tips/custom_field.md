@@ -34,6 +34,7 @@ Follow these steps to create the `librenms_id` custom field in NetBox:
         - Check **dcim > device**
         - Check **virtualization > virtual machine**
         - Check **dcim > interface**
+        - Check **virtualization > interfaces (optional)**
     - **Name:** `librenms_id`
     - **Label:** `LibreNMS ID`
     - **Description:** (Optional) Add a description like "LibreNMS Device ID for synchronization".

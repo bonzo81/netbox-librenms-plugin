@@ -163,6 +163,7 @@ It is recommended (but not essential) to add a custom field `librenms_id` to the
   * Check **dcim > device**
   * Check **virtualization > virtual machine**
   * Check **dcim > interface**
+  * Check **virtualization > interfaces (optional)**
 * **Name:** `librenms_id`
 * **Label:** `LibreNMS ID`
 * **Description:** (Optional) Add a description like "LibreNMS ID for LibreNMS Plugin".

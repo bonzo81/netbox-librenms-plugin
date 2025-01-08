@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4 (2025-01-08)
+
+### Fixes
+* Fix VM Interface table not dispalying
+
 ## 0.3.3 (2025-01-03)
 
 ### New Feature
