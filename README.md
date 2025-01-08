@@ -1,4 +1,4 @@
-# NetBox LibreNMS Plugin
+are# NetBox LibreNMS Plugin
 
 The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but 
 this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox. 
@@ -164,6 +164,16 @@ It is recommended (but not essential) to add a custom field `librenms_id` to the
 - **Default Value:** Leave blank.
 
 For more info check out [custom field docs](docs/usage_tips/custom_field.md)
+
+## Upgrading plugin 
+
+```
+source /opt/netbox/venv/bin/activate
+pip install -U netbox-librenms-plugin
+python manage.py migrate
+python manage.py collectstatic --no-input
+systemctl restart netbox
+```
 
 ## Uninstall
 
