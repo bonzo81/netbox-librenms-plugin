@@ -28,7 +28,9 @@ class SyncInterfacesView(CacheMixin, View):
         """
         # Use the correct URL name based on object type
         url_name = (
-            "device_librenms_sync" if object_type == "device" else "vm_librenms_sync"
+            "dcim:device_librenms_sync"
+            if object_type == "device"
+            else "plugins:netbox_librenms_plugin:vm_librenms_sync"
         )
         obj = self.get_object(object_type, object_id)
 
@@ -52,7 +54,7 @@ class SyncInterfacesView(CacheMixin, View):
 
         messages.success(request, "Selected interfaces synced successfully.")
         return redirect(
-            reverse("dcim:device_librenms_sync", kwargs={"pk": object_id})
+            reverse(url_name, kwargs={"pk": object_id})
             + f"?tab=interfaces&interface_name_field={interface_name_field}"
         )
 
