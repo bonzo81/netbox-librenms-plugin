@@ -89,7 +89,7 @@ urlpatterns = [
     ),
     # Sync IP addresses URL
     path(
-        "device/<int:pk>/sync-ip-addresses/",
+        "<str:object_type>/<int:pk>/sync-ip-addresses/",
         SyncIPAddressesView.as_view(),
         name="sync_device_ip_addresses",
     ),

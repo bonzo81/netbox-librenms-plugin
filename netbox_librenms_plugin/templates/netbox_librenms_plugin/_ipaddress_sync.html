@@ -7,14 +7,25 @@
     <div class="btn-list">
         <form method="post">
             {% csrf_token %}
-            {% if has_librenms_id %}
-                    <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_ipaddress_sync' pk=object.pk %}"
-                            class="btn btn-outline-primary"
-                            hx-target="#ipaddress-sync-content"
-                            hx-include="[name='interface_name_field']">
-                        Refresh IP Addresses
-                    </button>
-            {% endif %}
+                {% if has_librenms_id %}
+                    {% with model_name=object|meta:"model_name" %}
+                        {% if model_name == "device" %}
+                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_ipaddress_sync' pk=object.pk %}"
+                                    hx-target="#ipaddress-sync-content"
+                                    hx-include="[name='interface_name_field']"
+                                    class="btn btn-outline-primary">
+                                Refresh IP Addresses
+                            </button>
+                        {% elif model_name == "virtualmachine" %}
+                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:vm_ipaddress_sync' pk=object.pk %}"
+                                    hx-target="#ipaddress-sync-content"
+                                    hx-include="[name='interface_name_field']"
+                                    class="btn btn-outline-primary">
+                                Refresh IP Addresses
+                            </button>
+                        {% endif %}
+                    {% endwith %}
+                {% endif %}
         </form>
     </div>
 </div>

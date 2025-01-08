@@ -1,11 +1,14 @@
 from dcim.models import Device, Interface
-from ipam.models import IPAddress
 from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
+from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
+from ipam.models import IPAddress
+from virtualization.models import VirtualMachine, VMInterface
+
 from netbox_librenms_plugin.views.mixins import CacheMixin
 
 
@@ -20,28 +23,43 @@ class SyncIPAddressesView(CacheMixin, View):
             return None
         return cached_data.get("ip_addresses", [])
 
+    def get_object(self, object_type, pk):
+        """Retrieve the object (Device or VirtualMachine)"""
+        if object_type == "device":
+            return get_object_or_404(Device, pk=pk)
+        elif object_type == "virtualmachine":
+            return get_object_or_404(VirtualMachine, pk=pk)
+        else:
+            raise Http404("Invalid object type.")
+
+    def get_ip_tab_url(self, obj):
+        """Return the correct URL based on object type"""
+        if isinstance(obj, Device):
+            url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
+        else:
+            url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
+        return f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
+
     @transaction.atomic()
-    def post(self, request, pk):
-        device = get_object_or_404(Device, pk=pk)
+    def post(self, request, object_type, pk):
+        obj = self.get_object(object_type, pk)
         selected_ips = self.get_selected_ips(request)
-        cached_ips = self.get_cached_ip_data(request, device)
+        cached_ips = self.get_cached_ip_data(request, obj)
 
         if not cached_ips:
             messages.error(request, "Cache has expired. Please refresh the IP data.")
-            return redirect(self.get_ip_tab_url(device))
+            return redirect(self.get_ip_tab_url(obj))
 
         if not selected_ips:
             messages.error(request, "No IP addresses selected for synchronization.")
-            return redirect(self.get_ip_tab_url(device))
+            return redirect(self.get_ip_tab_url(obj))
 
-        results = self.sync_ip_addresses(selected_ips, cached_ips, device)
+        results = self.sync_ip_addresses(selected_ips, cached_ips, obj, object_type)
         self.display_sync_results(request, results)
 
-        return redirect(
-            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}?tab=ipaddresses"
-        )
+        return redirect(self.get_ip_tab_url(obj))
 
-    def sync_ip_addresses(self, selected_ips, cached_ips, device):
+    def sync_ip_addresses(self, selected_ips, cached_ips, obj, object_type):
         results = {"created": [], "updated": [], "unchanged": [], "failed": []}
 
         for ip_address in selected_ips:
@@ -54,7 +72,10 @@ class SyncIPAddressesView(CacheMixin, View):
                 interface = None
                 if ip_data.get("interface_url"):
                     interface_id = ip_data["interface_url"].split("/")[-2]
-                    interface = Interface.objects.get(id=interface_id)
+                    if object_type == "device":
+                        interface = Interface.objects.get(id=interface_id)
+                    else:
+                        interface = VMInterface.objects.get(id=interface_id)
 
                 # Construct CIDR notation using prefix from data
                 ip_with_mask = f"{ip_data['ipv4_address']}/{ip_data['ipv4_prefixlen']}"
@@ -100,6 +121,3 @@ class SyncIPAddressesView(CacheMixin, View):
             messages.error(
                 request, f"Failed to sync IP addresses: {', '.join(results['failed'])}"
             )
-
-    def get_ip_tab_url(self, device):
-        return f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}?tab=ipaddresses"
