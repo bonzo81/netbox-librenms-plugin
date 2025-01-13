@@ -31,7 +31,7 @@ Create IP address in NetBox from LibreNMS device IP data.
 
 ### Add device to LibreNMS from Netbox
 
-- Add device to LibreNMS from Netbox device page. Only SNMP v2c available.
+- Add device to LibreNMS from Netbox device page. SNMP v2c and v3 are supported.
 
 ### Site & Location Synchronization
 The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
