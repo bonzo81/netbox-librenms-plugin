@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5 (2025-01-13)
+
+### Fixes
+
+* Fix IP Address table not displaying for Virutal Machines
+
 ## 0.3.4 (2025-01-08)
 
 ### Fixes
