@@ -7,6 +7,7 @@ from .views import (
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceStatusListView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingChangeLogView,
     InterfaceTypeMappingCreateView,
@@ -120,6 +121,11 @@ urlpatterns = [
         "devices/<int:pk>/update-location/",
         UpdateDeviceLocationView.as_view(),
         name="update_device_location",
+    ),
+    path(
+        "device-status/",
+        DeviceStatusListView.as_view(),
+        name="device_status_list",
     ),
     # Interface type mapping URLs
     path(

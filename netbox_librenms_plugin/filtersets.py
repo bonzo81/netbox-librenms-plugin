@@ -1,5 +1,7 @@
-from django_filters import FilterSet, CharFilter
+from dcim.models import Device
 from django import forms
+from django_filters import CharFilter, FilterSet
+from netbox.filtersets import NetBoxModelFilterSet
 
 
 class SiteLocationFilterSet:
@@ -37,7 +39,6 @@ class SiteLocationFilterSet:
 
     @property
     def form(self):
-
         class FilterForm(forms.Form):
             q = forms.CharField(
                 required=False,
@@ -50,3 +51,9 @@ class SiteLocationFilterSet:
             )
 
         return FilterForm(self.form_data)
+
+
+class DeviceStatusFilterSet(NetBoxModelFilterSet):
+    class Meta:
+        model = Device
+        fields = ["site", "location", "rack", "device_type", "role"]
