@@ -15,6 +15,7 @@ class InterfaceTypeMappingListView(generic.ObjectListView):
     table = InterfaceTypeMappingTable
     filterset = InterfaceTypeMappingFilterSet
     filterset_form = InterfaceTypeMappingFilterForm
+    template_name = 'netbox_librenms_plugin/interfacetypemapping_list.html'
 
 
 class InterfaceTypeMappingCreateView(generic.ObjectEditView):
