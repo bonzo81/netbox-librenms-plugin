@@ -1,4 +1,4 @@
-from dcim.models import Device, Interface
+from dcim.models import Device, Interface, MACAddress
 from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
@@ -191,6 +191,24 @@ class SyncInterfacesView(CacheMixin, View):
 
         return mapping.netbox_type if mapping else "other"
 
+    def handle_mac_address(self, interface, ifPhysAddress):
+        """
+        Create and associate MAC address with interface.
+        """
+        if ifPhysAddress:
+            # First check if MAC already exists on this interface
+            existing_mac = interface.mac_addresses.filter(
+                mac_address=ifPhysAddress
+            ).first()
+            if existing_mac:
+                mac_obj = existing_mac
+            else:
+                # Create new MAC address if not found on interface
+                mac_obj = MACAddress.objects.create(mac_address=ifPhysAddress)
+
+            interface.mac_addresses.add(mac_obj)
+            interface.primary_mac_address = mac_obj
+
     def update_interface_attributes(
         self,
         interface,
@@ -211,7 +229,6 @@ class SyncInterfacesView(CacheMixin, View):
             "ifType": "type",
             "ifSpeed": "speed",
             "ifAlias": "description",
-            "ifPhysAddress": "mac_address",
             "ifMtu": "mtu",
         }
 
@@ -239,5 +256,9 @@ class SyncInterfacesView(CacheMixin, View):
             interface.custom_field_data["librenms_id"] = librenms_interface.get(
                 "port_id"
             )
+
+        # Handle new MAC address object in NetBox v4.2
+        ifPhysAddress = librenms_interface.get("ifPhysAddress")
+        self.handle_mac_address(interface, ifPhysAddress)
 
         interface.save()

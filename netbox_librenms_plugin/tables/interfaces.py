@@ -178,6 +178,19 @@ class LibreNMSInterfaceTable(tables.Table):
             # IDs match
             return mark_safe(f'<span class="text-success">{value}</span>')
 
+    def _compare_mac_addresses(self, librenms_mac, netbox_interface):
+        """
+        Compare LibreNMS MAC address against all MAC addresses on NetBox interface.
+        Returns True if MAC exists on interface.
+        """
+        if not netbox_interface:
+            return False
+
+        interface_macs = [
+            mac.mac_address for mac in netbox_interface.mac_addresses.all()
+        ]
+        return librenms_mac in interface_macs
+
     def _render_field(self, value, record, librenms_key, netbox_key):
         """
         Render a field value with appropriate styling based on the comparison with NetBox.
@@ -190,6 +203,12 @@ class LibreNMSInterfaceTable(tables.Table):
         netbox_interface = record.get("netbox_interface")
         if not netbox_interface:
             return mark_safe(f'<span class="text-danger">{value}</span>')
+
+        # Special handling for MAC addresses
+        if librenms_key == "ifPhysAddress":
+            mac_matches = self._compare_mac_addresses(value, netbox_interface)
+            css_class = "text-success" if mac_matches else "text-warning"
+            return mark_safe(f'<span class="{css_class}">{value}</span>')
 
         netbox_value = getattr(netbox_interface, netbox_key, None)
         librenms_value = record.get(librenms_key)
