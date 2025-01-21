@@ -1,0 +1,12 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Interface Type Mapping</h4>
+        <p>This section allows you to map LibreNMS interface types to NetBox interface types. 
+           When synchronizing interfaces from LibreNMS, these mappings will be used to ensure 
+           correct interface type assignment in NetBox.</p>
+        <p>Example: Map LibreNMS type "ethernetCsmacd" to NetBox type "1000base-t"</p>
+    </div>
+    {{ block.super }} 
+{% endblock %}
