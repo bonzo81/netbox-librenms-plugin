@@ -207,6 +207,7 @@ class SyncInterfacesView(CacheMixin, View):
                 mac_obj = MACAddress.objects.create(mac_address=ifPhysAddress)
 
             interface.mac_addresses.add(mac_obj)
+            interface.primary_mac_address = mac_obj
 
     def update_interface_attributes(
         self,
