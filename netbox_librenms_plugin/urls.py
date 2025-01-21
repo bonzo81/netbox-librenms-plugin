@@ -15,16 +15,17 @@ from .views import (
     InterfaceTypeMappingEditView,
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
-    SingleInterfaceVerifyView,
     SingleCableVerifyView,
+    SingleInterfaceVerifyView,
+    SyncCablesView,
     SyncInterfacesView,
     SyncIPAddressesView,
-    SyncCablesView,
     SyncSiteLocationView,
     UpdateDeviceLocationView,
     VMInterfaceTableView,
     VMIPAddressTableView,
     VMLibreNMSSyncView,
+    VMStatusListView,
 )
 
 urlpatterns = [
@@ -126,6 +127,11 @@ urlpatterns = [
         "device-status/",
         DeviceStatusListView.as_view(),
         name="device_status_list",
+    ),
+    path(
+        "vm-status/",
+        VMStatusListView.as_view(),
+        name="vm_status_list",
     ),
     # Interface type mapping URLs
     path(

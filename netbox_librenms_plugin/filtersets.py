@@ -1,7 +1,8 @@
 from dcim.models import Device
 from django import forms
-from django_filters import CharFilter, FilterSet
+from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
+from virtualization.models import VirtualMachine
 
 
 class SiteLocationFilterSet:
@@ -56,4 +57,34 @@ class SiteLocationFilterSet:
 class DeviceStatusFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = Device
-        fields = ["site", "location", "rack", "device_type", "role"]
+        fields = ["site", "location", "device_type", "rack", "role"]
+        search_fields = ["name", "site", "device_type", "rack", "role"]
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(name__icontains=value)
+            | Q(site__name__icontains=value)
+            | Q(device_type__model__icontains=value)
+            | Q(rack__name__icontains=value)
+            | Q(role__name__icontains=value)
+        )
+
+
+class VMStatusFilterSet(NetBoxModelFilterSet):
+    class Meta:
+        model = VirtualMachine
+        fields = ["site", "cluster", "role", "platform"]
+        search_fields = ["name", "site", "cluster", "role", "platform"]
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(name__icontains=value)
+            | Q(site__name__icontains=value)
+            | Q(cluster__name__icontains=value)
+            | Q(role__name__icontains=value)
+            | Q(platform__name__icontains=value)
+        )

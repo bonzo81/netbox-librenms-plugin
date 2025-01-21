@@ -17,8 +17,9 @@ from .mapping_views import (
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
 )
-from .device_status import (
+from .status_check import (
     DeviceStatusListView,
+    VMStatusListView,
 )
 from .sync.cables_sync import SyncCablesView
 from .sync.devices_sync import AddDeviceToLibreNMSView, UpdateDeviceLocationView

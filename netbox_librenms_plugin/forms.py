@@ -1,8 +1,9 @@
 # forms.py
-from dcim.models import Device, DeviceType, Location, Rack, Site, DeviceRole
+from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
 from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm
 from utilities.forms.fields import DynamicModelMultipleChoiceField
+from virtualization.models import Cluster, VirtualMachine
 
 from .models import InterfaceTypeMapping
 
@@ -84,6 +85,12 @@ class AddToLIbreSNMPV3(forms.Form):
 
 
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Remove the saved filter field if it exists
+        if "filter_id" in self.fields:
+            del self.fields["filter_id"]
+
     site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
     location = DynamicModelMultipleChoiceField(
         queryset=Location.objects.all(), required=False
@@ -97,4 +104,18 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = Device
-    
+
+
+class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Remove the saved filter field if it exists
+        if "filter_id" in self.fields:
+            del self.fields["filter_id"]
+
+    site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
+    cluster = DynamicModelMultipleChoiceField(
+        queryset=Cluster.objects.all(), required=False
+    )
+
+    model = VirtualMachine

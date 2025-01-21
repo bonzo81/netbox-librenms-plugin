@@ -2,7 +2,7 @@ from dcim.models import Device
 from dcim.tables import DeviceTable
 from django.urls import reverse
 from django.utils.safestring import mark_safe
-from django_tables2 import Column, TemplateColumn
+from django_tables2 import Column
 
 
 class DeviceStatusTable(DeviceTable):
@@ -10,7 +10,7 @@ class DeviceStatusTable(DeviceTable):
         verbose_name="LibreNMS Status",
         empty_values=(),
         accessor="librenms_status",
-        orderable=False,
+        orderable=True,
     )
 
     def render_librenms_status(self, value, record):
@@ -40,7 +40,6 @@ class DeviceStatusTable(DeviceTable):
                     f'<a href="{master_url}"><span class="text-info">'
                     f'<i class="mdi mdi-server-network"></i> See {vc_master.name}</span></a>'
                 )
-
         if value:
             status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>'
         elif value is False:
@@ -63,7 +62,7 @@ class DeviceStatusTable(DeviceTable):
             "role",
             "manufacturer",
             "device_type",
-            "device_role"
+            "device_role",
             "librenms_status",
         )
         default_columns = (
@@ -73,6 +72,6 @@ class DeviceStatusTable(DeviceTable):
             "location",
             "rack",
             "device_type",
-            "device_role"
+            "device_role",
             "librenms_status",
         )
