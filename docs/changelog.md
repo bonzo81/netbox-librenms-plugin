@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.6 (2025-01-21)
+
+###  NOTE
+***Netbox v4.2+ required for this release***
+
+### New Feature
+* New dedicated plugin menu item 
+* Add device and VM status pages
+
+### Fixes
+* Add description to interface mapping page  
+
+### Under the hood
+* Update to use new Mac Address object for Netbox v4.2  
+
 ## 0.3.5 (2025-01-13)
 
 ### Fixes
