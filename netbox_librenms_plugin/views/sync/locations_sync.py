@@ -15,7 +15,6 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
     """
     Provides a view for synchronizing Netbox site with LibreNMS locations.
     """
-
     table_class = SiteLocationSyncTable
     template_name = "netbox_librenms_plugin/site_location_sync.html"
     filterset = SiteLocationFilterSet
@@ -24,11 +23,13 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
     SyncData = namedtuple("SyncData", ["netbox_site", "librenms_location", "is_synced"])
 
     def get_table(self, *args, **kwargs):
+        """Configure the table with the request object."""
         table = super().get_table(*args, **kwargs)
         table.configure(self.request)
         return table
 
     def get_context_data(self, **kwargs):
+        """Add the filter form to the context."""
         context = super().get_context_data(**kwargs)
         queryset = self.get_queryset()
         context["filter_form"] = self.filterset(
@@ -37,6 +38,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         return context
 
     def get_queryset(self):
+        """Retrieve the queryset for the table."""
         netbox_sites = Site.objects.all()
         success, librenms_locations = self.get_librenms_locations()
         if not success or not isinstance(librenms_locations, list):
@@ -59,15 +61,11 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         return sync_data
 
     def get_librenms_locations(self):
-        """
-        Retrieve locations from LibreNMS.
-        """
+        """Retrieve locations from LibreNMS."""
         return self.librenms_api.get_locations()
 
     def create_sync_data(self, site, librenms_locations):
-        """
-        Create a SyncData object for a given site.
-        """
+        """Create a SyncData object for a given site."""
         matched_location = self.match_site_with_location(site, librenms_locations)
         if matched_location:
             is_synced = self.check_coordinates_match(
@@ -81,18 +79,14 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
             return self.SyncData(site, None, False)
 
     def match_site_with_location(self, site, librenms_locations):
-        """
-        Match a NetBox site with a LibreNMS location.
-        """
+        """Match a NetBox site with a LibreNMS location."""
         for location in librenms_locations:
             if location["location"].lower() == site.name.lower():
                 return location
         return None
 
     def check_coordinates_match(self, site_lat, site_lng, librenms_lat, librenms_lng):
-        """
-        Check if the coordinates of the site and LibreNMS location match.
-        """
+        """Check if the coordinates of the site and LibreNMS location match."""
         if None in (site_lat, site_lng, librenms_lat, librenms_lng):
             return False
         lat_match = (
@@ -104,9 +98,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         return lat_match and lng_match
 
     def post(self, request):
-        """
-        Handle the POST request for synchronizing Netbox site with LibreNMS locations.
-        """
+        """Handle the POST request for synchronizing Netbox site with LibreNMS locations."""
         action = request.POST.get("action")
         pk = request.POST.get("pk")
         if not pk:
@@ -127,18 +119,14 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
             return redirect("plugins:netbox_librenms_plugin:site_location_sync")
 
     def get_site_by_pk(self, pk):
-        """
-        Retrieve a Site object by its primary key.
-        """
+        """Retrieve a Site object by its primary key."""
         try:
             return Site.objects.get(pk=pk)
         except ObjectDoesNotExist:
             return None
 
     def create_librenms_location(self, request, site):
-        """
-        Create a new location in LibreNMS based on the site's coordinates.
-        """
+        """Create a new location in LibreNMS based on the site's coordinates."""
         location_data = self.build_location_data(site)
         success, message = self.librenms_api.add_location(location_data)
         if success:
@@ -153,9 +141,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         return redirect("plugins:netbox_librenms_plugin:site_location_sync")
 
     def update_librenms_location(self, request, site):
-        """
-        Update LibreNMS api with the site's updated coordinates.
-        """
+        """Update LibreNMS api with the site's updated coordinates."""
         if site.latitude is None or site.longitude is None:
             messages.warning(
                 request,
@@ -177,9 +163,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         return redirect("plugins:netbox_librenms_plugin:site_location_sync")
 
     def build_location_data(self, site, include_name=True):
-        """
-        Build the location data for a given site object.
-        """
+        """Build the location data for a given site object."""
         data = {"lat": str(site.latitude), "lng": str(site.longitude)}
         if include_name:
             data["location"] = site.name

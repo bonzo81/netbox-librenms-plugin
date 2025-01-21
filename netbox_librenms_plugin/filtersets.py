@@ -16,12 +16,14 @@ class SiteLocationFilterSet:
 
     @property
     def qs(self):
+        """Return the filtered queryset."""
         queryset = self.queryset
         if q := self.form_data.get("q"):
             return self._filter_queryset(q)
         return queryset
 
     def _filter_queryset(self, search_term):
+        """Filter queryset by search term."""
         search_term = str(search_term).lower()
         return [
             item
@@ -30,6 +32,7 @@ class SiteLocationFilterSet:
         ]
 
     def _matches_search_criteria(self, item, search_term):
+        """Check if item matches search criteria."""
         searchable_fields = [
             str(item.netbox_site.name),
             str(item.netbox_site.latitude),
@@ -41,6 +44,10 @@ class SiteLocationFilterSet:
     @property
     def form(self):
         class FilterForm(forms.Form):
+            """
+            Form to filter sites and locations by search term.
+            """
+
             q = forms.CharField(
                 required=False,
                 label="Search sites and locations",
@@ -55,12 +62,17 @@ class SiteLocationFilterSet:
 
 
 class DeviceStatusFilterSet(NetBoxModelFilterSet):
+    """
+    Filter devices by search term.
+    """
+
     class Meta:
         model = Device
         fields = ["site", "location", "device_type", "rack", "role"]
         search_fields = ["name", "site", "device_type", "rack", "role"]
 
     def search(self, queryset, name, value):
+        """Search devices by name, site, device type, rack or role."""
         if not value.strip():
             return queryset
         return queryset.filter(
@@ -73,12 +85,17 @@ class DeviceStatusFilterSet(NetBoxModelFilterSet):
 
 
 class VMStatusFilterSet(NetBoxModelFilterSet):
+    """
+    Filter virtual machines by search term.
+    """
+
     class Meta:
         model = VirtualMachine
         fields = ["site", "cluster", "role", "platform"]
         search_fields = ["name", "site", "cluster", "role", "platform"]
 
     def search(self, queryset, name, value):
+        """Search VMs by name, site, cluster, role or platform."""
         if not value.strip():
             return queryset
         return queryset.filter(

@@ -26,26 +26,25 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
     interface_name_field = get_interface_name_field()
 
     def get_object(self, pk):
+        """Retrieve the object (Device or VirtualMachine)."""
         return get_object_or_404(self.model, pk=pk)
 
     def get_ip_address(self, obj):
+        """Get the primary IP address for the object."""
         if obj.primary_ip:
             return str(obj.primary_ip.address.ip)
         return None
 
     def get_ports_data(self, obj):
-        """
-        Get ports data without affecting cache
-        """
+        """Get ports data without affecting cache"""
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
         if cached_data:
             return cached_data
+        # TODO: id 2 - Fix return to use tuple (success, data)
         return self.librenms_api.get_ports(self.librenms_id)
 
     def get_links_data(self, obj):
-        """
-        Fetch links data from LibreNMS for the device and add local port names.
-        """
+        """Fetch links data from LibreNMS for the device and add local port names."""
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
         success, data = self.librenms_api.get_device_links(self.librenms_id)
         if not success or "error" in data:
@@ -75,9 +74,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return links_data
 
     def get_device_by_id_or_name(self, remote_device_id, hostname):
-        """
-        Try to find device in NetBox first by librenms_id custom field, then by name
-        """
+        """Try to find device in NetBox first by librenms_id custom field, then by name"""
         # First try matching by LibreNMS ID
         if remote_device_id:
             try:
@@ -102,9 +99,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 return None, False
 
     def enrich_local_port(self, link, obj):
-        """
-        Add local port URL if interface exists in NetBox
-        """
+        """Add local port URL if interface exists in NetBox"""
         if local_port := link.get("local_port"):
             interface = None
             local_port_id = link.get("local_port_id")
@@ -139,9 +134,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 link["netbox_local_interface_id"] = interface.pk
 
     def enrich_remote_port(self, link, device):
-        """
-        Add remote port URL if device and interface exist in NetBox
-        """
+        """Add remote port URL if device and interface exist in NetBox"""
         if remote_port := link.get("remote_port"):
             # First try to find interface by librenms_id
             librenms_remote_port_id = link.get("remote_port_id")
@@ -167,9 +160,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return link
 
     def check_cable_status(self, link):
-        """
-        Check cable status and add cable URL if cable exists in NetBox
-        """
+        """Check cable status and add cable URL if cable exists in NetBox"""
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
 
@@ -202,9 +193,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return link
 
     def process_remote_device(self, link, remote_hostname, remote_device_id):
-        """
-        Process remote device data and add remote device URL if device exists in NetBox
-        """
+        """Process remote device data and add remote device URL if device exists in NetBox"""
         device, found = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
         if found:
             link.update(
@@ -225,9 +214,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return link
 
     def enrich_links_data(self, links_data, obj):
-        """
-        Enrich links data with local and remote port URLs and cable status.
-        """
+        """Enrich links data with local and remote port URLs and cable status."""
         for link in links_data:
             self.enrich_local_port(link, obj)
             link["device_id"] = obj.id
@@ -242,17 +229,13 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return links_data
 
     def get_table(self, data, obj):
-        """
-        Get the table instance for the view.
-        """
+        """Get the table instance for the view."""
         table = super().get_table(data, obj)
         table.htmx_url = f"{self.request.path}?tab=cables"
         return table
 
     def _prepare_context(self, request, obj, fetch_fresh=False):
-        """
-        Helper method to prepare the context data for cable sync views.
-        """
+        """Helper method to prepare the context data for cable sync views."""
         table = None
         cache_expiry = None
 
@@ -298,9 +281,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         }
 
     def get_context_data(self, request, obj):
-        """
-        Get the context data for the cable sync view.
-        """
+        """Get the context data for the cable sync view."""
         context = self._prepare_context(request, obj, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table
@@ -308,9 +289,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         return context
 
     def post(self, request, pk):
-        """
-        Handle POST request for cable sync view.
-        """
+        """Handle POST request for cable sync view."""
         obj = self.get_object(pk)
         context = self._prepare_context(request, obj, fetch_fresh=True)
 
@@ -430,7 +409,7 @@ class SingleCableVerifyView(BaseCableTableView):
 
                         if link_data.get("can_create_cable"):
                             formatted_row["actions"] = f"""
-                                <form method="post" action="{reverse('plugins:netbox_librenms_plugin:sync_device_cables', args=[selected_device.id])}">
+                                <form method="post" action="{reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[selected_device.id])}">
                                     <input type="hidden" name="select" value="{local_port}">
                                     <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
                                 </form>

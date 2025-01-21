@@ -31,10 +31,12 @@ class SiteLocationSyncTable(tables.Table):
         return self.render_coordinate(value, record.is_synced)
 
     def render_coordinate(self, value, is_synced):
+        """Render coordinate with success or danger text color."""
         css_class = "text-success" if is_synced else "text-danger"
         return format_html('<span class="{}">{}</span>', css_class, value)
 
     def render_actions(self, record):
+        """Render action buttons with styles based on sync status or action."""
         csrf_token = get_token(self.request)
         if record.is_synced:
             return mark_safe(
@@ -64,6 +66,7 @@ class SiteLocationSyncTable(tables.Table):
             )
 
     def configure(self, request):
+        """Configure the table with pagination and custom attributes."""
         paginate = {
             "paginator_class": EnhancedPaginator,
             "per_page": get_paginate_count(request),

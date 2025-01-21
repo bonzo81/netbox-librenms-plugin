@@ -23,13 +23,12 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
         return get_object_or_404(self.model, pk=pk)
 
     def get_ip_addresses(self, obj):
-        """
-        Fetch IP address data from LibreNMS for the given object.
-        """
+        """Fetch IP address data from LibreNMS for the given object."""
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
         return self.librenms_api.get_device_ips(self.librenms_id)
 
     def enrich_ip_data(self, ip_data, obj, interface_name_field):
+        """Enrich IP data with NetBox information"""
         enriched_data = []
 
         # Pre-fetch interfaces with their related data
@@ -82,12 +81,16 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
                     ip_entry["port_id"]
                 )
                 if success:
-                    port_info = port_data.get('port')[0]  # Get first port from list
+                    port_info = port_data.get("port")[0]  # Get first port from list
                     enriched_ip["interface_name"] = port_info.get(interface_name_field)
                     # Try to find interface by name in pre-fetched map
                     interface = next(
-                        (i for i in interfaces_map.values() if i.name == enriched_ip["interface_name"]),
-                        None
+                        (
+                            i
+                            for i in interfaces_map.values()
+                            if i.name == enriched_ip["interface_name"]
+                        ),
+                        None,
                     )
                     if interface:
                         enriched_ip["interface_url"] = interface.get_absolute_url()
@@ -97,17 +100,13 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
         return enriched_data
 
     def get_table(self, data, obj, request):
-        """
-        Get the table instance for the view.
-        """
+        """Get the table instance for the view."""
         table = IPAddressTable(data)
         table.htmx_url = f"{request.path}?tab=ipaddresses"
         return table
 
     def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False):
-        """
-        Helper method to prepare the context data for IP address sync views.
-        """
+        """Helper method to prepare the context data for IP address sync views."""
         table = None
         cache_expiry = None
 
@@ -156,9 +155,7 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
         }
 
     def get_context_data(self, request, obj):
-        """
-        Get the context data for the IP address sync view.
-        """
+        """Get the context data for the IP address sync view."""
         interface_name_field = get_interface_name_field(request)
         context = self._prepare_context(
             request, obj, interface_name_field, fetch_fresh=False
@@ -169,9 +166,7 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
         return context
 
     def post(self, request, pk):
-        """
-        Handle POST request for IP address sync view.
-        """
+        """Handle POST request for IP address sync view."""
         obj = self.get_object(pk)
         interface_name_field = get_interface_name_field(request)
         context = self._prepare_context(

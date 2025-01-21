@@ -11,21 +11,28 @@ from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 
 class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
+    """
+    Add a device to LibreNMS using the API.
+    """
+
     template_name = "add_device_modal.html"
     success_url = reverse_lazy("device_list")
 
     def get_form_class(self):
+        """Return the correct form class based on the SNMP version."""
         if self.request.POST.get("snmp_version") == "v2c":
             return AddToLIbreSNMPV2
         return AddToLIbreSNMPV3
 
     def get_object(self, object_id):
+        """Retrieve the object (Device or VirtualMachine)."""
         try:
             return Device.objects.get(pk=object_id)
         except Device.DoesNotExist:
             return VirtualMachine.objects.get(pk=object_id)
 
     def post(self, request, object_id):
+        """Handle the POST request to add a device to LibreNMS."""
         self.object = self.get_object(object_id)
         form_class = self.get_form_class()
         form = form_class(request.POST)
@@ -34,6 +41,7 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
         return self.form_invalid(form)
 
     def form_valid(self, form):
+        """Handle the form submission"""
         data = form.cleaned_data
         device_data = {
             "hostname": data.get("hostname"),
@@ -56,7 +64,7 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
         else:
             messages.error(self.request, "Unknown SNMP version.")
             return redirect(self.object.get_absolute_url())
-
+        # TODO: id 1 - Fix API return to use tuple (success, message)
         result = self.librenms_api.add_device(device_data)
 
         if result["success"]:
@@ -72,9 +80,7 @@ class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
     """
 
     def post(self, request, pk):
-        """
-        Handle the POST request to update the device location in LibreNMS.
-        """
+        """Handle the POST request to update the device location in LibreNMS."""
         device = get_object_or_404(Device, pk=pk)
 
         self.librenms_id = self.librenms_api.get_librenms_id(device)
