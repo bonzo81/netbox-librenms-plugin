@@ -45,7 +45,7 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 * Sync device site to LibreNMS location
 
 ### Screnshots/GIFs
-
+>Screenshots from older plugin version
 #### Site & Location Sync
 
 ![Site Location Sync](img/Netbox-librenms-plugin-Sites.gif)
@@ -64,7 +64,7 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 
 ## Contributing
 
-There's more to do! Coding is not my day job so bugs will exist and imporvements will be needed. So contributions are very welcome! I've got more ideas for new features and imporvements but please [contribute](contributing.md) if you can!
+There's more to do! Coding is not my day job so bugs will exist and imporvements will be needed. Contributions are very welcome! I've got more ideas for new features and imporvements but please [contribute](contributing.md) if you can!
 
 Or just share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions).
 
@@ -72,11 +72,11 @@ Or just share your ideas for the plugin over in [discussions](https://github.com
 
 | NetBox Version | Plugin Version |
 | -------------- | -------------- |
-| 4.1            | 0.2.x - 0.3.x  |
+| 4.1            | 0.2.x - 0.3.5  |
+| 4.2            | 0.3.6          |
 
 ## Installing
 
-Netbox 4.1+ is required.
 
 ### Standard Installation
 
