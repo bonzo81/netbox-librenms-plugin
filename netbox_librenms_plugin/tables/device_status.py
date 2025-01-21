@@ -6,6 +6,9 @@ from django_tables2 import Column
 
 
 class DeviceStatusTable(DeviceTable):
+    """
+    Table for displaying device LibreNMS status.
+    """
     librenms_status = Column(
         verbose_name="LibreNMS Status",
         empty_values=(),

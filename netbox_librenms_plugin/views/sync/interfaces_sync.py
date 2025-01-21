@@ -23,9 +23,7 @@ class SyncInterfacesView(CacheMixin, View):
     """
 
     def post(self, request, object_type, object_id):
-        """
-        Handle POST request to sync interfaces.
-        """
+        """Handle POST request to sync interfaces."""
         # Use the correct URL name based on object type
         url_name = (
             "dcim:device_librenms_sync"
@@ -59,9 +57,7 @@ class SyncInterfacesView(CacheMixin, View):
         )
 
     def get_object(self, object_type, object_id):
-        """
-        Retrieve the object (Device or VirtualMachine).
-        """
+        """Retrieve the object (Device or VirtualMachine)."""
         if object_type == "device":
             return get_object_or_404(Device, pk=object_id)
         elif object_type == "virtualmachine":
@@ -70,9 +66,7 @@ class SyncInterfacesView(CacheMixin, View):
             raise Http404("Invalid object type.")
 
     def get_selected_interfaces(self, request, interface_name_field):
-        """
-        Retrieve and validate selected interfaces from the request.
-        """
+        """Retrieve and validate selected interfaces from the request."""
         selected_interfaces = request.POST.getlist("select")
         if not selected_interfaces:
             messages.error(request, "No interfaces selected for synchronization.")
@@ -81,9 +75,7 @@ class SyncInterfacesView(CacheMixin, View):
         return selected_interfaces
 
     def get_cached_ports_data(self, request, obj):
-        """
-        Retrieve and validate cached ports data.
-        """
+        """Retrieve and validate cached ports data."""
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
         if not cached_data:
             messages.warning(
@@ -101,9 +93,7 @@ class SyncInterfacesView(CacheMixin, View):
         exclude_columns,
         interface_name_field,
     ):
-        """
-        Sync the selected interfaces.
-        """
+        """Sync the selected interfaces."""
         with transaction.atomic():
             for port in ports_data:
                 port_name = port.get(interface_name_field)
@@ -116,9 +106,7 @@ class SyncInterfacesView(CacheMixin, View):
     def sync_interface(
         self, obj, librenms_interface, exclude_columns, interface_name_field
     ):
-        """
-        Sync a single interface from LibreNMS to NetBox.
-        """
+        """Sync a single interface from LibreNMS to NetBox."""
 
         interface_name = librenms_interface.get(interface_name_field)
 
@@ -169,9 +157,7 @@ class SyncInterfacesView(CacheMixin, View):
         interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
-        """
-        Determine the NetBox interface type based on LibreNMS data and mappings.
-        """
+        """Determine the NetBox interface type based on LibreNMS data and mappings."""
         speed = convert_speed_to_kbps(librenms_interface["ifSpeed"])
         mappings = InterfaceTypeMapping.objects.filter(
             librenms_type=librenms_interface["ifType"]
@@ -192,9 +178,7 @@ class SyncInterfacesView(CacheMixin, View):
         return mapping.netbox_type if mapping else "other"
 
     def handle_mac_address(self, interface, ifPhysAddress):
-        """
-        Create and associate MAC address with interface.
-        """
+        """Create and associate MAC address with interface."""
         if ifPhysAddress:
             # First check if MAC already exists on this interface
             existing_mac = interface.mac_addresses.filter(
@@ -217,9 +201,7 @@ class SyncInterfacesView(CacheMixin, View):
         exclude_columns,
         interface_name_field,
     ):
-        """
-        Update the attributes of the NetBox interface based on LibreNMS data.
-        """
+        """Update the attributes of the NetBox interface based on LibreNMS data."""
         # Check if the interface is a Device interface or VM interface
         is_device_interface = isinstance(interface, Interface)
 

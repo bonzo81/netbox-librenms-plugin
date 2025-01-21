@@ -12,6 +12,12 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 def convert_speed_to_kbps(speed_bps: int) -> int:
     """
     Convert speed from bits per second to kilobits per second.
+
+    Args:
+        speed_bps (int): Speed in bits per second.
+
+    Returns:
+        int: Speed in kilobits per second.
     """
     if speed_bps is None:
         return None
@@ -72,6 +78,13 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
 def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     """
     Extends Netbox pagination to support multiple tables by using table-specific prefixes
+
+    Args:
+        request: HTTP request object
+        table_prefix: Prefix for the table
+
+    Returns:
+        int: Number of items to display per page
     """
     config = get_config()
     if f"{table_prefix}per_page" in request.GET:

@@ -16,10 +16,7 @@ class SyncCablesView(CacheMixin, View):
     """
 
     def get_selected_interfaces(self, request, initial_device):
-        """
-        Retrieve and validate selected interfaces from the request.
-        Returns a list of dictionaries containing device_id and interface name.
-        """
+        """Retrieve selected interfaces from the request"""
         selected_interfaces = []
         selected_data = [x for x in request.POST.getlist("select") if x]
 
@@ -35,12 +32,14 @@ class SyncCablesView(CacheMixin, View):
         return selected_interfaces
 
     def get_cached_links_data(self, request, obj):
+        """Retrieve cached links data from the request"""
         cached_data = cache.get(self.get_cache_key(obj, "links"))
         if not cached_data:
             return None
         return cached_data.get("links", [])
 
     def create_cable(self, local_interface, remote_device, remote_interface, request):
+        """Create a cable in NetBox"""
         try:
             Cable.objects.create(
                 a_terminations=[local_interface],
@@ -57,9 +56,7 @@ class SyncCablesView(CacheMixin, View):
         ).exists()
 
     def validate_prerequisites(self, cached_links, selected_interfaces, device):
-        """
-        Validates required data before processing cable creation
-        """
+        """Validates required data before processing cable creation"""
         if not cached_links:
             messages.error(
                 self.request,
@@ -86,9 +83,7 @@ class SyncCablesView(CacheMixin, View):
             return {"status": "invalid"}
 
     def verify_cable_creation_requirements(self, link_data):
-        """
-        Verify if cable can be created by checking required data exists
-        """
+        """Verify if cable can be created by checking required data exists"""
         required_fields = [
             "netbox_local_interface_id",
             "netbox_remote_device_id",
@@ -124,6 +119,7 @@ class SyncCablesView(CacheMixin, View):
 
     @transaction.atomic()
     def post(self, request, pk):
+        """Handle the POST request for cable synchronization"""
         initial_device = get_object_or_404(Device, pk=pk)
         selected_interfaces = self.get_selected_interfaces(request, initial_device)
         cached_links = self.get_cached_links_data(request, initial_device)
