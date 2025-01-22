@@ -107,7 +107,6 @@ class AddToLIbreSNMPV3(forms.Form):
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
     """
     Form for filtering device status information in NetBox.
-    Provides filtering options based on site, location, rack, device type, and role.
     """
 
     def __init__(self, *args, **kwargs):
@@ -117,6 +116,9 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
         if "filter_id" in self.fields:
             del self.fields["filter_id"]
 
+    device = DynamicModelMultipleChoiceField(
+        queryset=Device.objects.all(), required=False
+    )
     site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
     location = DynamicModelMultipleChoiceField(
         queryset=Location.objects.all(), required=False
@@ -135,7 +137,6 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
 class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
     """
     Form for filtering virtual machine status information in NetBox.
-    Provides filtering options based on site and cluster.
     """
 
     def __init__(self, *args, **kwargs):
@@ -145,6 +146,9 @@ class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
         if "filter_id" in self.fields:
             del self.fields["filter_id"]
 
+    virtualmachine = DynamicModelMultipleChoiceField(
+        queryset=VirtualMachine.objects.all(), required=False
+    )
     site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
     cluster = DynamicModelMultipleChoiceField(
         queryset=Cluster.objects.all(), required=False
