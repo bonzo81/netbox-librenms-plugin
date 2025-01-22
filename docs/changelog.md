@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.7 (2025-01-22)
+
+### Fixes
+* Fix issue with empty queryset to stop fielderror
+### Improvements
+* Enhance filtering options for devices and virtual machines
+### Under the hood
+* Review and refactor docstrings across all files
+
+
 ## 0.3.6 (2025-01-21)
 
 ###  NOTE
