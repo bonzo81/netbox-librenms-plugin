@@ -1,8 +1,9 @@
-from dcim.models import Device
+import django_filters
+from dcim.models import Device, DeviceRole, DeviceType, Platform, Site
 from django import forms
 from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
-from virtualization.models import VirtualMachine
+from virtualization.models import Cluster, VirtualMachine
 
 
 class SiteLocationFilterSet:
@@ -66,10 +67,27 @@ class DeviceStatusFilterSet(NetBoxModelFilterSet):
     Filter devices by search term.
     """
 
+    device = django_filters.ModelMultipleChoiceFilter(
+        field_name="name",
+        queryset=Device.objects.all(),
+    )
+    site = django_filters.ModelMultipleChoiceFilter(
+        field_name="site",
+        queryset=Site.objects.all(),
+    )
+    device_type = django_filters.ModelMultipleChoiceFilter(
+        field_name="device_type",
+        queryset=DeviceType.objects.all(),
+    )
+    role = django_filters.ModelMultipleChoiceFilter(
+        field_name="role",
+        queryset=DeviceRole.objects.all(),
+    )
+
     class Meta:
         model = Device
         fields = ["site", "location", "device_type", "rack", "role"]
-        search_fields = ["name", "site", "device_type", "rack", "role"]
+        search_fields = ["device", "site", "device_type", "rack", "role"]
 
     def search(self, queryset, name, value):
         """Search devices by name, site, device type, rack or role."""
@@ -89,10 +107,27 @@ class VMStatusFilterSet(NetBoxModelFilterSet):
     Filter virtual machines by search term.
     """
 
+    virtualmachine = django_filters.ModelMultipleChoiceFilter(
+        field_name="name",
+        queryset=VirtualMachine.objects.all(),
+    )
+    site = django_filters.ModelMultipleChoiceFilter(
+        field_name="site",
+        queryset=Site.objects.all(),
+    )
+    cluster = django_filters.ModelMultipleChoiceFilter(
+        field_name="cluster",
+        queryset=Cluster.objects.all(),
+    )
+    platform = django_filters.ModelMultipleChoiceFilter(
+        field_name="platform",
+        queryset=Platform.objects.all(),
+    )
+
     class Meta:
         model = VirtualMachine
-        fields = ["site", "cluster", "role", "platform"]
-        search_fields = ["name", "site", "cluster", "role", "platform"]
+        fields = ["site", "cluster", "platform"]
+        search_fields = ["virtualmachine", "site", "cluster", "platform"]
 
     def search(self, queryset, name, value):
         """Search VMs by name, site, cluster, role or platform."""
@@ -102,6 +137,5 @@ class VMStatusFilterSet(NetBoxModelFilterSet):
             Q(name__icontains=value)
             | Q(site__name__icontains=value)
             | Q(cluster__name__icontains=value)
-            | Q(role__name__icontains=value)
             | Q(platform__name__icontains=value)
         )

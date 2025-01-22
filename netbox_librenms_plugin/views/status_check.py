@@ -17,6 +17,7 @@ class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
     """
     Check the status of devices in NetBox against LibreNMS
     """
+
     queryset = Device.objects.select_related(
         "device_type__manufacturer"
     ).prefetch_related(
@@ -75,6 +76,7 @@ class VMStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
     """
     Check the status of virtual machines in NetBox against LibreNMS
     """
+
     queryset = VirtualMachine.objects.select_related("cluster", "site")
     table = VMStatusTable
     filterset = VMStatusFilterSet
