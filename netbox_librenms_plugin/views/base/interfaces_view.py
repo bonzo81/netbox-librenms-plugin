@@ -21,9 +21,11 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
     interface_name_field = None
 
     def get_object(self, pk):
+        """Retrieve the object (Device or VirtualMachine)."""
         return get_object_or_404(self.model, pk=pk)
 
     def get_ip_address(self, obj):
+        """Get the primary IP address for the object."""
         if obj.primary_ip:
             return str(obj.primary_ip.address.ip)
         return None
@@ -43,12 +45,10 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         raise NotImplementedError
 
     def get_select_related_field(self, obj):
-        """
-        Determine the appropriate select_related field based on object type
-        """
-        if self.model.__name__.lower() == 'virtualmachine':
-            return 'virtual_machine'
-        return 'device'
+        """Determine the appropriate select_related field based on object type"""
+        if self.model.__name__.lower() == "virtualmachine":
+            return "virtual_machine"
+        return "device"
 
     def get_table(self, data, obj, interface_name_field):
         """
@@ -58,9 +58,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         raise NotImplementedError("Subclasses must implement get_table()")
 
     def post(self, request, pk):
-        """
-        Handle POST request to fetch and cache LibreNMS interface data for an object.
-        """
+        """Handle POST request to fetch and cache LibreNMS interface data for an object."""
         obj = self.get_object(pk)
 
         interface_name_field = get_interface_name_field(request)
@@ -71,7 +69,8 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS.")
             return redirect(self.get_redirect_url(obj))
-
+        
+        # TODO: id 2 - Fix return to use tuple (success, data)
         librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
         if "error" in librenms_data:
@@ -100,9 +99,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         return render(request, self.partial_template_name, context)
 
     def get_context_data(self, request, obj, interface_name_field):
-        """
-        Get the context data for the interface sync view.
-        """
+        """Get the context data for the interface sync view."""
         ports_data = []
         table = None
 

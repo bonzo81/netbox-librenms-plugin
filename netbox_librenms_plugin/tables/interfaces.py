@@ -96,17 +96,23 @@ class LibreNMSInterfaceTable(tables.Table):
     )
 
     def render_speed(self, value, record):
+        """Render interface speed with appropriate styling based on comparison with NetBox"""
         kbps_value = convert_speed_to_kbps(value)
         return self._render_field(
             humanize_speed(kbps_value), record, "ifSpeed", "speed"
         )
 
     def render_name(self, value, record):
+        """Render interface name with appropriate styling based on comparison with NetBox"""
         return self._render_field(value, record, self.interface_name_field, "name")
 
     def _get_interface_status_display(self, enabled, record):
         """
         Determine interface status display and CSS class based on enabled state and NetBox comparison.
+
+        Args:
+            enabled (bool): Interface enabled state.
+            record (dict): Interface data record.
 
         Returns:
             tuple: (display_value, css_class)
@@ -132,37 +138,36 @@ class LibreNMSInterfaceTable(tables.Table):
         return bool(value)
 
     def render_enabled(self, value, record):
+        """Render interface enabled status with appropriate styling based on comparison with NetBox"""
         enabled = self._parse_enabled_status(value)
         display_value, css_class = self._get_interface_status_display(enabled, record)
         return format_html('<span class="{}">{}</span>', css_class, display_value)
 
     def render_description(self, value, record):
+        """Render interface description with appropriate styling based on comparison with NetBox"""
         return self._render_field(value, record, "ifAlias", "description")
 
     def render_mac_address(self, value, record):
+        """Render MAC address with appropriate styling based on comparison with NetBox"""
         formatted_mac = format_mac_address(value)
         return self._render_field(formatted_mac, record, "ifPhysAddress", "mac_address")
 
     def render_mtu(self, value, record):
+        """Render MTU with appropriate styling based on comparison with NetBox"""
         return self._render_field(value, record, "ifMtu", "mtu")
 
     def render_librenms_id(self, value, record):
-        """
-        Render the 'librenms_id' field with appropriate styling based on comparison with NetBox.
-        """
-        # Early return with danger styling if interface doesn't exist in NetBox
+        """Render the 'librenms_id' field with appropriate styling based on comparison with NetBox."""
+
         if not record.get("exists_in_netbox"):
             return mark_safe(f'<span class="text-danger">{value}</span>')
 
-        # Proceed only if we have a valid NetBox interface
         netbox_interface = record.get("netbox_interface")
         if not netbox_interface:
             return mark_safe(f'<span class="text-danger">{value}</span>')
 
-        # Get the 'librenms_id' from NetBox custom fields
         netbox_librenms_id = netbox_interface.custom_field_data.get("librenms_id")
 
-        # Check if the custom field exists
         if netbox_librenms_id is None:
             return mark_safe(
                 f'<span class="text-danger" title="No librenms_id custom field value found">{value}</span>'
@@ -181,7 +186,13 @@ class LibreNMSInterfaceTable(tables.Table):
     def _compare_mac_addresses(self, librenms_mac, netbox_interface):
         """
         Compare LibreNMS MAC address against all MAC addresses on NetBox interface.
-        Returns True if MAC exists on interface.
+
+        Args:
+            librenms_mac (str): MAC address from LibreNMS.
+            netbox_interface (Interface): NetBox interface record.
+
+        Returns:
+            True if MAC exists on interface.
         """
         if not netbox_interface:
             return False
@@ -192,19 +203,15 @@ class LibreNMSInterfaceTable(tables.Table):
         return librenms_mac in interface_macs
 
     def _render_field(self, value, record, librenms_key, netbox_key):
-        """
-        Render a field value with appropriate styling based on the comparison with NetBox.
-        """
-        # Early return with danger styling if interface doesn't exist in NetBox
+        """Render a field value with appropriate styling based on the comparison with NetBox."""
+
         if not record.get("exists_in_netbox"):
             return mark_safe(f'<span class="text-danger">{value}</span>')
 
-        # Only proceed with comparison if we have a valid NetBox interface
         netbox_interface = record.get("netbox_interface")
         if not netbox_interface:
             return mark_safe(f'<span class="text-danger">{value}</span>')
 
-        # Special handling for MAC addresses
         if librenms_key == "ifPhysAddress":
             mac_matches = self._compare_mac_addresses(value, netbox_interface)
             css_class = "text-success" if mac_matches else "text-warning"
@@ -222,6 +229,7 @@ class LibreNMSInterfaceTable(tables.Table):
         return mark_safe(f'<span class="text-success">{value}</span>')
 
     def render_type(self, value, record):
+        """Render interface type with appropriate styling based on comparison with NetBox"""
         speed = convert_speed_to_kbps(record.get("ifSpeed", 0))
         mapping = self.get_interface_mapping(value, speed)
         tooltip_value, icon = self.render_mapping_tooltip(value, speed, mapping)
@@ -247,9 +255,8 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html('<span class="text-danger">{}</span>', combined_display)
 
     def get_interface_mapping(self, librenms_type, speed):
-        """
-        Get interface type mapping based on type and speed
-        """
+        """Get interface type mapping based on type and speed"""
+
         # First try exact match with type and speed
         mapping = InterfaceTypeMapping.objects.filter(
             librenms_type=librenms_type, librenms_speed=speed
@@ -264,9 +271,7 @@ class LibreNMSInterfaceTable(tables.Table):
         return mapping
 
     def render_mapping_tooltip(self, value, speed, mapping):
-        """
-        Render tooltip for interface type mapping
-        """
+        """Render tooltip for interface type mapping"""
         if mapping:
             display = mapping.netbox_type
             icon = format_html(
@@ -282,9 +287,7 @@ class LibreNMSInterfaceTable(tables.Table):
         return display, icon
 
     def format_interface_data(self, port_data, device):
-        """
-        Format single interface data using table rendering logic
-        """
+        """Format single interface data using table rendering logic"""
 
         # Add NetBox interface data
         interface_name = port_data.get(self.interface_name_field)
@@ -316,6 +319,7 @@ class LibreNMSInterfaceTable(tables.Table):
         return formatted_data
 
     def configure(self, request):
+        """Configure the table with pagination and other options"""
         paginate = {
             "paginator_class": EnhancedPaginator,
             "per_page": get_table_paginate_count(request, self.prefix),

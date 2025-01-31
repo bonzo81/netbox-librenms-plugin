@@ -84,12 +84,27 @@ class LibreNMSAPI:
     def _get_cache_key(self, obj):
         """
         Generate a unique cache key for an object.
+
+        Args:
+            obj: NetBox device or VM object
+
+        Returns:
+            str: Cache key
         """
         object_type = obj._meta.model_name
         return f"librenms_device_id_{object_type}_{obj.pk}"
 
     def _store_librenms_id(self, obj, librenms_id):
-        # Store in custom field if available
+        """
+        Store in custom field if available
+
+        Args:
+            obj: NetBox device or VM object
+            librenms_id: LibreNMS device ID
+
+        Returns:
+            None
+        """
         if "librenms_id" in obj.cf:
             obj.custom_field_data["librenms_id"] = librenms_id
             obj.save()
@@ -101,6 +116,12 @@ class LibreNMSAPI:
     def get_device_id_by_ip(self, ip_address):
         """
         Retrieve the device ID using the device's IP address.
+
+        Args:
+            ip_address: Device IP address
+
+        Retruns:
+            int: LibreNMS device ID if found, None otherwise
         """
         try:
             response = requests.get(
@@ -118,6 +139,12 @@ class LibreNMSAPI:
     def get_device_id_by_hostname(self, hostname):
         """
         Retrieve the device ID using the device's hostname.
+
+        Args:
+            hostname: Device hostname
+
+        Returns:
+            int: LibreNMS device ID if found, None otherwise
         """
         try:
             response = requests.get(
@@ -135,6 +162,12 @@ class LibreNMSAPI:
     def get_device_info(self, device_id):
         """
         Fetch device information from LibreNMS using its primary IP.
+
+        Args:
+            device_id: LibreNMS device ID
+
+        Returns:
+            tuple: (success: bool, data: dict)
         """
 
         try:
@@ -152,8 +185,15 @@ class LibreNMSAPI:
             return False, None
 
     def get_ports(self, device_id):
+        # TODO: id 2 - Fix return to use tuple (success, data)
         """
         Fetch ports data from LibreNMS for a device using its primary IP.
+
+        Args:
+            device_id: LibreNMS device ID
+
+        Returns:
+            dict: Ports data
         """
         try:
             response = requests.get(
@@ -177,11 +217,15 @@ class LibreNMSAPI:
             return {"error": f"Error connecting to LibreNMS: {str(e)}"}
 
     def add_device(self, data):
+        # TODO: id 1 - Fix return to use tuple (success, message)
         """
         Add a device to LibreNMS.
 
-        :param data: Dictionary containing device data
-        :return: Dictionary with 'success' and 'message' keys
+        Args:
+            Dictionary containing device data
+
+        Returns:
+            Dictionary with 'success' and 'message' keys
         """
         payload = {
             "hostname": data["hostname"],
@@ -227,15 +271,16 @@ class LibreNMSAPI:
         """
         Update a specific field for a device in LibreNMS.
 
-        :param hostname: Device hostname as ip address
-        :param field_data: List of dictionaries containing field name and value
-        e.g field_data = {
-                "field": ["location", "override_sysLocation"],
-                "data": [device.site.name, "1"]
-            }
+        Args:
+            device_id: LibreNMS device ID
+            field_data: Dictionary containing field name and value
 
-        :return: True if successful, False otherwise
-        :return: Message indicating the result
+            e.g {
+                    "field": ["location", "override_sysLocation"],
+                    "data": [device.site.name, "1"]
+
+        Returns:
+            tuple (success: bool, message: str)
         """
         try:
             response = requests.patch(
@@ -263,6 +308,12 @@ class LibreNMSAPI:
     def get_locations(self):
         """
         Fetch locations data from LibreNMS.
+
+        Args:
+            None
+
+        Returns:
+            tuple: (success: bool, data: dict)
         """
         try:
             response = requests.get(
@@ -286,15 +337,17 @@ class LibreNMSAPI:
         """
         Add a location to LibreNMS.
 
-        :param location_data: Dictionary containing location data
-        e.g location_data = {
-                "location": site.name,
-                "lat": str(site.latitude),
-                "lng": str(site.longitude)
-            }
+        Args:
+            location_data: Dictionary containing location data
 
-        :return: True if successful, False otherwise
-        :return: Message indicating the result
+            e.g location_data = {
+                    "location": site.name,
+                    "lat": str(site.latitude),
+                    "lng": str(site.longitude)
+                }
+
+        Return:
+            tuple: (success: bool, message: str)
         """
         try:
             response = requests.post(
@@ -323,15 +376,17 @@ class LibreNMSAPI:
         """
         Update a location in LibreNMS.
 
-        :param location_name: Location name
-        :param location_data: Dictionary containing location data
-        e.g location_data = {
-                "lat": str(site.latitude),
-                "lng": str(site.longitude)
-            }
+        Args:
+            location_name: LibreNMS Location name
+            location_data: Dictionary containing location data
 
-        :return: True if successful, False otherwise
-        :return: Message indicating the result
+            e.g location_data = {
+                    "lat": str(site.latitude),
+                    "lng": str(site.longitude)
+                }
+
+        Returns:
+            tuple: (success: bool, message: str)
         """
         try:
             encoded_location_name = urllib.parse.quote(location_name)
@@ -360,10 +415,10 @@ class LibreNMSAPI:
         Get links for a specific device from LibreNMS.
 
         Args:
-            hostname: Device hostname or ID
+            hostname: LibreNMS Device ID
 
         Returns:
-            tuple: (success, data)
+            tuple: (success: bool, data: dict)
         """
         try:
             response = requests.get(
@@ -382,10 +437,10 @@ class LibreNMSAPI:
         Fetch IP address data for a specific device from LibreNMS.
 
         Args:
-            device_id: Device ID
+            device_id: LibreNMS Device ID
 
         Returns:
-            tuple: (success, data)
+            tuple: (success: bool, data: dict)
         """
         try:
             response = requests.get(
@@ -404,13 +459,19 @@ class LibreNMSAPI:
     def get_port_by_id(self, port_id):
         """
         Fetch specific port data from LibreNMS using port ID.
+
+        Args:
+            port_id: LibreNMS Port ID
+
+        Returns:
+            tuple: (success: bool, data: dict)
         """
         try:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/ports/{port_id}",
                 headers=self.headers,
                 timeout=10,
-                verify=self.verify_ssl
+                verify=self.verify_ssl,
             )
             response.raise_for_status()
             return True, response.json()

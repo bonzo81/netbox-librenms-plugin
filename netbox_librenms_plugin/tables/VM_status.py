@@ -6,6 +6,10 @@ from virtualization.tables import VirtualMachineTable
 
 
 class VMStatusTable(VirtualMachineTable):
+    """
+    Table for displaying virtual machine LibreNMS status.
+    """
+
     librenms_status = Column(
         verbose_name="LibreNMS Status",
         empty_values=(),
@@ -14,6 +18,7 @@ class VMStatusTable(VirtualMachineTable):
     )
 
     def render_librenms_status(self, value, record):
+        """Render the LibreNMS status with styles based on sync status."""
         sync_url = reverse(
             "plugins:netbox_librenms_plugin:vm_librenms_sync",
             kwargs={"pk": record.pk},

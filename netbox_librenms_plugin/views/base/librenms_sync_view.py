@@ -17,9 +17,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
     template_name = "netbox_librenms_plugin/librenms_sync_base.html"
 
     def get(self, request, pk, context=None):
-        """
-        Handle GET request for the LibreNMS sync view.
-        """
+        """Handle GET request for the LibreNMS sync view."""
         obj = get_object_or_404(self.model, pk=pk)
 
         # Get librenms_id once at the start
@@ -30,6 +28,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         return render(request, self.template_name, context)
 
     def get_context_data(self, request, obj):
+        """Get the context data for the LibreNMS sync view."""
         context = {
             "object": obj,
             "tab": self.tab,
@@ -86,6 +85,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         return context
 
     def get_librenms_device_info(self, obj):
+        """Get the LibreNMS device information for the given object."""
         found_in_librenms = False
         mismatched_device = False
         librenms_device_details = {

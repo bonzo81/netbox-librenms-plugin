@@ -64,6 +64,7 @@ class IPAddressTable(tables.Table):
     )
 
     def render_status(self, value, record):
+        """Render the status column with appropriate buttons or text styling"""
         if value == "matched":
             return format_html(
                 '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>'
@@ -83,16 +84,19 @@ class IPAddressTable(tables.Table):
         return format_html('<span class="text-muted">Missing NetBox Object</span>')
 
     def render_device(self, value, record):
+        """Render the device column with a link if available"""
         if url := record.get("device_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def render_interface_name(self, value, record):
+        """Render the interface column with a link if available"""
         if url := record.get("interface_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def configure(self, request):
+        """Configure the table"""
         paginate = {
             "paginator_class": EnhancedPaginator,
             "per_page": get_table_paginate_count(request, self.prefix),
