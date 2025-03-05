@@ -81,7 +81,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
     def match_site_with_location(self, site, librenms_locations):
         """Match a NetBox site with a LibreNMS location."""
         for location in librenms_locations:
-            if location["location"].lower() == site.name.lower():
+            if location["location"].lower() == site.name.lower() or location["location"].lower() == site.slug.lower():
                 return location
         return None
 
