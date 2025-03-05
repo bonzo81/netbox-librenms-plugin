@@ -3,6 +3,7 @@ import json
 from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
+from django.core.exceptions import MultipleObjectsReturned
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
@@ -84,19 +85,23 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 return device, True
             except Device.DoesNotExist:
                 pass
+            except MultipleObjectsReturned:
+                return None, False, f"Multiple devices found with the same LibreNMS ID: {remote_device_id}."
 
         # Fall back to name matching if no device found by ID
         try:
             device = Device.objects.get(name=hostname)
-            return device, True
+            return device, True, None
         except Device.DoesNotExist:
             # Try without domain name
             simple_hostname = hostname.split(".")[0]
             try:
                 device = Device.objects.get(name=simple_hostname)
-                return device, True
+                return device, True, None
             except Device.DoesNotExist:
-                return None, False
+                return None, False, None
+            except MultipleObjectsReturned:
+                return None, False, f"Multiple devices found with the same name: {hostname}."
 
     def enrich_local_port(self, link, obj):
         """Add local port URL if interface exists in NetBox"""
@@ -194,7 +199,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
     def process_remote_device(self, link, remote_hostname, remote_device_id):
         """Process remote device data and add remote device URL if device exists in NetBox"""
-        device, found = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
+        device, found, error_message = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
         if found:
             link.update(
                 {
@@ -207,7 +212,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         link.update(
             {
                 "remote_port_name": link["remote_port"],
-                "cable_status": "Device Not Found in NetBox",
+                "cable_status": error_message if error_message else "Device Not Found in NetBox",
                 "can_create_cable": False,
             }
         )
