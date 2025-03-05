@@ -82,7 +82,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 device = Device.objects.get(
                     custom_field_data__librenms_id=remote_device_id
                 )
-                return device, True
+                return device, True, None
             except Device.DoesNotExist:
                 pass
             except MultipleObjectsReturned:
