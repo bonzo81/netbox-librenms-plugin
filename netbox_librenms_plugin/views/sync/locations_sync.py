@@ -149,8 +149,20 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
             )
             return redirect("plugins:netbox_librenms_plugin:site_location_sync")
 
+        # Get current LibreNMS locations to find the correct name
+        success, librenms_locations = self.get_librenms_locations()
+        if not success:
+            messages.error(request, "Failed to retrieve LibreNMS locations.")
+            return redirect("plugins:netbox_librenms_plugin:site_location_sync")
+
+        # Find the actual location name in LibreNMS (could be site.name or site.slug)
+        matched_location = self.match_site_with_location(site, librenms_locations)
+        if not matched_location:
+            messages.error(request, f"Could not find matching location for site '{site.name}'")
+            return redirect("plugins:netbox_librenms_plugin:site_location_sync")
+    
         location_data = self.build_location_data(site, include_name=False)
-        success, message = self.librenms_api.update_location(site.name, location_data)
+        success, message = self.librenms_api.update_location(matched_location['location'], location_data)
         if success:
             messages.success(
                 request, f"Location '{site.name}' updated in LibreNMS successfully."
