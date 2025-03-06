@@ -44,7 +44,7 @@ class DeviceStatusTable(DeviceTable):
                     f'<i class="mdi mdi-server-network"></i> See {vc_master.name}</span></a>'
                 )
         if value:
-            status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>'
+            status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Found</span>'
         elif value is False:
             status = '<span class="text-danger"><i class="mdi mdi-close-circle"></i> Not Found</span>'
         else:
