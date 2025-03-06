@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.8 (2025-03-06)
+
+### Fixes
+* Fix cable table error when more than one remote device returned 
+* Fix cable table checkboxes controls for virtual chassis devices
+
+### Improvements
+* Add slug check to Site and Location Sync 
+
+
 ## 0.3.7 (2025-01-22)
 
 ### Fixes

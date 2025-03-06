@@ -66,7 +66,7 @@ Or just share your ideas for the plugin over in [discussions](https://github.com
 | NetBox Version | Plugin Version |
 |----------------|----------------|
 |     4.1        | 0.2.x - 0.3.5  |
-|     4.2        | 0.3.6          |
+|     4.2        | 0.3.6+          |
 ## Installing
 
 
