@@ -85,6 +85,7 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-interface-table');
     initializeTableCheckboxes('librenms-interface-table-vm');
     initializeTableCheckboxes('librenms-cable-table');
+    initializeTableCheckboxes('librenms-cable-table-vc');
     initializeTableCheckboxes('librenms-ipaddress-table');
 }
 
