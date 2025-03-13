@@ -396,7 +396,7 @@ function toggleSNMPForms() {
 
     const v2Form = document.getElementById('snmpv2-form');
     const v3Form = document.getElementById('snmpv3-form');
-
+    
     if (version === 'v2c') {
         v2Form.style.display = 'block';
         v3Form.style.display = 'none';
