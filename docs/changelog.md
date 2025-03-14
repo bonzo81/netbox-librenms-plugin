@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.9 (2025-03-14)
+
+### Fixes
+* Fix missing add_device_modal.html template and form handling
+* Fix missing interfacetypemapping template
+
+
 ## 0.3.8 (2025-03-06)
 
 ### Fixes
