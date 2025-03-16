@@ -127,7 +127,9 @@ class SyncCablesView(CacheMixin, View):
         if not self.validate_prerequisites(
             cached_links, selected_interfaces, initial_device
         ):
-            return redirect(self.get_cables_tab_url(initial_device))
+            return redirect(
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
+        )
 
         results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
 
