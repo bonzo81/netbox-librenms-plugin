@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name =  "netbox-librenms-plugin"
-version = "0.3.9"
+version = "0.3.10"
 authors = [
     {name = "Andy Norwood"},
 ]

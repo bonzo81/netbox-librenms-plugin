@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.10 (2025-03-17)
+
+### Fixes
+* Fix URL error when no interfaces are selected during sync
+* Add hidden SNMP version field to forms and update sync logic
+
 ## 0.3.9 (2025-03-14)
 
 ### Fixes
