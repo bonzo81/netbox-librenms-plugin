@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.11 (2025-03-31)
+
+### Improvements
+* Enhance remote port enrichment for virtual chassis devices
+
 ## 0.3.10 (2025-03-17)
 
 ### Fixes
