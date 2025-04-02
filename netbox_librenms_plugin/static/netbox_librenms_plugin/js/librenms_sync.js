@@ -120,6 +120,55 @@ function initializeVCMemberSelect() {
         }
     }, 100);
 }
+
+// Function to initialize VRF selects
+function initializeVRFSelects() {
+    setTimeout(() => {
+        const ipAddressTable = document.getElementById('librenms-ipaddress-table');
+        
+        if (ipAddressTable) {
+            const vrfSelects = ipAddressTable.querySelectorAll('.vrf-select.tomselected');
+            vrfSelects.forEach(select => {
+                if (select.tomselect && !select.dataset.vrfSelectInitialized) {
+                    select.dataset.vrfSelectInitialized = 'true';
+                    select.tomselect.on('change', function(value) {
+                        handleVRFChange(select, value);
+                    });
+                }
+            });
+        }
+    }, 100);
+}
+
+// Function to handle VRF change event
+function handleVRFChange(select, value) {
+    const ipAddress = select.dataset.ip;
+    const form = document.querySelector('form');
+    
+    // Create a hidden input field for the VRF selection if it doesn't exist
+    let hiddenInput = document.getElementById(`vrf_${ipAddress}`);
+    if (!hiddenInput) {
+        hiddenInput = document.createElement('input');
+        hiddenInput.type = 'hidden';
+        hiddenInput.id = `vrf_${ipAddress}`;
+        hiddenInput.name = `vrf_${ipAddress}`;
+        form.appendChild(hiddenInput);
+    }
+    
+    // Set the value of the hidden input field
+    hiddenInput.value = value;
+    console.log(`Setting VRF for ${ipAddress} to ${value}`);
+    
+    // Update the display in the table
+    const row = select.closest('tr');
+    if (row) {
+        // Update any visual indicators if needed
+        if (value === '') {
+            select.tomselect.setTextboxValue('Global');
+        }
+    }
+}
+
 // Function to handle VC member interface change event
 function handleInterfaceChange(select, value) {
     fetch('/plugins/librenms_plugin/verify-interface/', {
@@ -467,6 +516,7 @@ function setInterfaceNameFieldFromURL() {
 function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
+    initializeVRFSelects();
     initializeFilters();
     initializeCountdowns();
     initializeCheckboxListeners();

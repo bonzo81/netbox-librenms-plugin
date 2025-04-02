@@ -6,7 +6,7 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
-from ipam.models import IPAddress
+from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.views.mixins import CacheMixin
@@ -16,9 +16,23 @@ class SyncIPAddressesView(CacheMixin, View):
     """
     View for synchronizing IP addresses from LibreNMS to NetBox
     """
+
     def get_selected_ips(self, request):
         """Retrieve selected IP addresses from the request"""
         return [x for x in request.POST.getlist("select") if x]
+
+    def get_vrf_selection(self, request, ip_address):
+        """Get VRF selection for an IP address"""
+        # Try to get the VRF ID for this IP address
+        vrf_id = request.POST.get(f"vrf_{ip_address}")
+
+        if vrf_id:
+            try:
+                return VRF.objects.get(pk=vrf_id)
+            except VRF.DoesNotExist:
+                pass
+
+        return None
 
     def get_cached_ip_data(self, request, obj):
         """Retrieve cached IP data from the request"""
@@ -48,6 +62,7 @@ class SyncIPAddressesView(CacheMixin, View):
     def post(self, request, object_type, pk):
         """Handle POST request for IP address synchronization"""
         obj = self.get_object(object_type, pk)
+
         selected_ips = self.get_selected_ips(request)
         cached_ips = self.get_cached_ip_data(request, obj)
 
@@ -59,12 +74,14 @@ class SyncIPAddressesView(CacheMixin, View):
             messages.error(request, "No IP addresses selected for synchronization.")
             return redirect(self.get_ip_tab_url(obj))
 
-        results = self.sync_ip_addresses(selected_ips, cached_ips, obj, object_type)
+        results = self.sync_ip_addresses(
+            request, selected_ips, cached_ips, obj, object_type
+        )
         self.display_sync_results(request, results)
 
         return redirect(self.get_ip_tab_url(obj))
 
-    def sync_ip_addresses(self, selected_ips, cached_ips, obj, object_type):
+    def sync_ip_addresses(self, request, selected_ips, cached_ips, obj, object_type):
         """Synchronize IP addresses from LibreNMS to NetBox"""
         results = {"created": [], "updated": [], "unchanged": [], "failed": []}
 
@@ -73,6 +90,8 @@ class SyncIPAddressesView(CacheMixin, View):
                 ip_data = next(
                     ip for ip in cached_ips if ip["ipv4_address"] == ip_address
                 )
+
+                vrf = self.get_vrf_selection(request, ip_address)
 
                 # Get interface from URL
                 interface = None
@@ -86,13 +105,17 @@ class SyncIPAddressesView(CacheMixin, View):
                 # Construct CIDR notation using prefix from data
                 ip_with_mask = f"{ip_data['ipv4_address']}/{ip_data['ipv4_prefixlen']}"
 
-                # Check if IP exists
+                # Check if IP exists in any VRF
                 existing_ip = IPAddress.objects.filter(address=ip_with_mask).first()
 
                 if existing_ip:
-                    # Only update if interface assignment is different
-                    if existing_ip.assigned_object != interface:
+                    # Update if interface or VRF assignment is different
+                    if (
+                        existing_ip.assigned_object != interface
+                        or existing_ip.vrf != vrf
+                    ):
                         existing_ip.assigned_object = interface
+                        existing_ip.vrf = vrf
                         existing_ip.save()
                         results["updated"].append(ip_address)
                     else:
@@ -100,7 +123,10 @@ class SyncIPAddressesView(CacheMixin, View):
                 else:
                     # Create new IP
                     IPAddress.objects.create(
-                        address=ip_with_mask, assigned_object=interface, status="active"
+                        address=ip_with_mask,
+                        assigned_object=interface,
+                        status="active",
+                        vrf=vrf,
                     )
                     results["created"].append(ip_address)
 

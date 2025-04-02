@@ -2,6 +2,7 @@ import django_tables2 as tables
 from django.utils.html import format_html
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
+
 from netbox_librenms_plugin.utils import get_table_paginate_count
 
 
@@ -20,6 +21,7 @@ class IPAddressTable(tables.Table):
             "prefix_length",
             "device",
             "interface_name",
+            "vrf",
         ]
         attrs = {
             "class": "table table-hover object-list",
@@ -57,6 +59,20 @@ class IPAddressTable(tables.Table):
         verbose_name="Interface",
         linkify=lambda record: record.get("interface_url"),
         attrs={"td": {"data-col": "interface"}},
+    )
+    vrf = tables.TemplateColumn(
+        template_code="""
+        <select id="vrf_select_{{ record.ipv4_address|slugify }}" class="form-select vrf-select tomselected" data-ip="{{ record.ipv4_address }}" name="vrf_{{ record.ipv4_address }}">
+            <option value="">Global</option>
+            {% for vrf in record.vrfs %}
+                <option value="{{ vrf.pk }}" {% if record.vrf_id == vrf.pk %}selected{% endif %}>
+                    {{ vrf.name }}
+                </option>
+            {% endfor %}
+        </select>
+        """,
+        attrs={"td": {"data-col": "vrf"}},
+        verbose_name="VRF",
     )
     status = tables.Column(
         verbose_name="Status",
