@@ -58,7 +58,7 @@ class SyncIPAddressesView(CacheMixin, View):
             url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
         return f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
 
-    @transaction.atomic()
+
     def post(self, request, object_type, pk):
         """Handle POST request for IP address synchronization"""
         obj = self.get_object(object_type, pk)
@@ -74,66 +74,65 @@ class SyncIPAddressesView(CacheMixin, View):
             messages.error(request, "No IP addresses selected for synchronization.")
             return redirect(self.get_ip_tab_url(obj))
 
-        results = self.sync_ip_addresses(
-            request, selected_ips, cached_ips, obj, object_type
-        )
+        results = self.process_ip_sync(request, selected_ips, cached_ips, obj, object_type)
         self.display_sync_results(request, results)
 
         return redirect(self.get_ip_tab_url(obj))
 
-    def sync_ip_addresses(self, request, selected_ips, cached_ips, obj, object_type):
+    def process_ip_sync(self, request, selected_ips, cached_ips, obj, object_type):
         """Synchronize IP addresses from LibreNMS to NetBox"""
         results = {"created": [], "updated": [], "unchanged": [], "failed": []}
 
-        for ip_address in selected_ips:
-            try:
-                ip_data = next(
-                    ip for ip in cached_ips if ip["ipv4_address"] == ip_address
-                )
-
-                vrf = self.get_vrf_selection(request, ip_address)
-
-                # Get interface from URL
-                interface = None
-                if ip_data.get("interface_url"):
-                    interface_id = ip_data["interface_url"].split("/")[-2]
-                    if object_type == "device":
-                        interface = Interface.objects.get(id=interface_id)
-                    else:
-                        interface = VMInterface.objects.get(id=interface_id)
-
-                # Construct CIDR notation using prefix from data
-                ip_with_mask = f"{ip_data['ipv4_address']}/{ip_data['ipv4_prefixlen']}"
-
-                # Check if IP exists in any VRF
-                existing_ip = IPAddress.objects.filter(address=ip_with_mask).first()
-
-                if existing_ip:
-                    # Update if interface or VRF assignment is different
-                    if (
-                        existing_ip.assigned_object != interface
-                        or existing_ip.vrf != vrf
-                    ):
-                        existing_ip.assigned_object = interface
-                        existing_ip.vrf = vrf
-                        existing_ip.save()
-                        results["updated"].append(ip_address)
-                    else:
-                        results["unchanged"].append(ip_address)
-                else:
-                    # Create new IP
-                    IPAddress.objects.create(
-                        address=ip_with_mask,
-                        assigned_object=interface,
-                        status="active",
-                        vrf=vrf,
+        with transaction.atomic():
+            for ip_address in selected_ips:
+                try:
+                    ip_data = next(
+                        ip for ip in cached_ips if ip["ipv4_address"] == ip_address
                     )
-                    results["created"].append(ip_address)
 
-            except Exception as e:
-                results["failed"].append(ip_address)
+                    vrf = self.get_vrf_selection(request, ip_address)
 
-        return results
+                    # Get interface from URL
+                    interface = None
+                    if ip_data.get("interface_url"):
+                        interface_id = ip_data["interface_url"].split("/")[-2]
+                        if object_type == "device":
+                            interface = Interface.objects.get(id=interface_id)
+                        else:
+                            interface = VMInterface.objects.get(id=interface_id)
+
+                    # Construct CIDR notation using prefix from data
+                    ip_with_mask = f"{ip_data['ipv4_address']}/{ip_data['ipv4_prefixlen']}"
+
+                    # Check if IP exists in any VRF
+                    existing_ip = IPAddress.objects.filter(address=ip_with_mask).first()
+
+                    if existing_ip:
+                        # Update if interface or VRF assignment is different
+                        if (
+                            existing_ip.assigned_object != interface
+                            or existing_ip.vrf != vrf
+                        ):
+                            existing_ip.assigned_object = interface
+                            existing_ip.vrf = vrf
+                            existing_ip.save()
+                            results["updated"].append(ip_address)
+                        else:
+                            results["unchanged"].append(ip_address)
+                    else:
+                        # Create new IP
+                        IPAddress.objects.create(
+                            address=ip_with_mask,
+                            assigned_object=interface,
+                            status="active",
+                            vrf=vrf,
+                        )
+                        results["created"].append(ip_address)
+
+                except Exception as e:
+                    results["failed"].append(ip_address)
+
+            return results
 
     def display_sync_results(self, request, results):
         """Display the results of the IP address synchronization"""
