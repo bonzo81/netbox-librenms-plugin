@@ -3,12 +3,11 @@ from django.core.cache import cache
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
-
-from ipam.models import IPAddress
+from ipam.models import VRF, IPAddress
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
 from netbox_librenms_plugin.utils import get_interface_name_field
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
 
 
 class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
@@ -40,8 +39,11 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
         # Pre-fetch IP addresses with correct related fields
         ip_addresses_map = {
             str(ip.address): ip
-            for ip in IPAddress.objects.select_related("assigned_object_type")
+            for ip in IPAddress.objects.select_related("assigned_object_type", "vrf")
         }
+
+        # Get all VRFs for the dropdown
+        vrfs = list(VRF.objects.all())
 
         for ip_entry in ip_data:
             enriched_ip = {
@@ -50,6 +52,8 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
                 "port_id": ip_entry["port_id"],
                 "device": obj.name,
                 "device_url": obj.get_absolute_url(),
+                "vrf_id": None,
+                "vrfs": vrfs,
             }
 
             # Check if IP exists in NetBox using the pre-fetched map
@@ -59,6 +63,9 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
             if ip_address:
                 enriched_ip["ip_url"] = ip_address.get_absolute_url()
                 enriched_ip["exists"] = True
+                if ip_address.vrf:
+                    enriched_ip["vrf_id"] = ip_address.vrf.pk
+                    enriched_ip["vrf"] = ip_address.vrf.name
 
                 # Get interface from pre-fetched map
                 interface = interfaces_map.get(ip_entry["port_id"])
