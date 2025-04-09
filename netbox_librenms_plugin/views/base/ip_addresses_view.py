@@ -27,84 +27,170 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
         return self.librenms_api.get_device_ips(self.librenms_id)
 
     def enrich_ip_data(self, ip_data, obj, interface_name_field):
-        """Enrich IP data with NetBox information"""
+        """
+        Enrich IP data with NetBox information in a more efficient manner.
+        
+        This optimized implementation:
+        1. Caches port data to reduce API calls
+        2. Pre-loads all relevant device data
+        3. Uses dictionary lookups instead of repeated iterations
+        """
+        # Prefetch all necessary data
+        prefetched_data = self._prefetch_netbox_data(obj)
+        port_data_cache = {}  # Cache for LibreNMS port data to minimize API calls
+        
         enriched_data = []
+        
+        # Process each IP address from LibreNMS
+        for ip_entry in ip_data:
+            # Get or fetch port data (with caching)
+            port_info = self._get_port_info(ip_entry["port_id"], port_data_cache, interface_name_field)
+            
+            # Create enriched IP structure with base data
+            enriched_ip = self._create_base_ip_entry(ip_entry, obj, prefetched_data["vrfs"])
+            
+            # Get LibreNMS interface name if available
+            librenms_interface_name = None
+            if port_info:
+                librenms_interface_name = port_info.get(interface_name_field)
+                enriched_ip["interface_name"] = librenms_interface_name
+            
+            # Check if IP exists in NetBox
+            ip_with_mask = f"{ip_entry['ipv4_address']}/{ip_entry['ipv4_prefixlen']}"
+            ip_address = prefetched_data["ip_addresses_map"].get(ip_with_mask)
+            
+            if ip_address:
+                # Process existing IP
+                self._enrich_existing_ip(
+                    enriched_ip, 
+                    ip_address, 
+                    ip_entry["port_id"],
+                    librenms_interface_name,
+                    prefetched_data
+                )
+            else:
+                # New IP that doesn't exist in NetBox
+                enriched_ip["exists"] = False
+                enriched_ip["status"] = "sync"
+                
+            # Add interface information (regardless of IP status)
+            self._add_interface_info_to_ip(
+                enriched_ip,
+                ip_entry["port_id"],
+                librenms_interface_name,
+                prefetched_data
+            )
+                
+            enriched_data.append(enriched_ip)
+            
+        return enriched_data
 
-        # Pre-fetch interfaces with their related data
-        interfaces_map = {
+    def _prefetch_netbox_data(self, obj):
+        """Prefetch all necessary NetBox data to minimize database queries"""
+        # Get all interfaces for the device
+        all_interfaces = list(obj.interfaces.all())
+        
+        # Create maps for efficient lookups
+        interfaces_by_librenms_id = {
             interface.custom_field_data.get("librenms_id"): interface
-            for interface in obj.interfaces.all()
+            for interface in all_interfaces
+            if interface.custom_field_data.get("librenms_id")
         }
-
-        # Pre-fetch IP addresses with correct related fields
+        
+        interfaces_by_name = {
+            interface.name: interface
+            for interface in all_interfaces
+        }
+        
+        # Get all IP addresses
         ip_addresses_map = {
             str(ip.address): ip
             for ip in IPAddress.objects.select_related("assigned_object_type", "vrf")
         }
-
-        # Get all VRFs for the dropdown
+        
+        # Get all VRFs
         vrfs = list(VRF.objects.all())
+        
+        return {
+            "interfaces_by_librenms_id": interfaces_by_librenms_id,
+            "interfaces_by_name": interfaces_by_name,
+            "all_interfaces": all_interfaces,
+            "device": obj,
+            "ip_addresses_map": ip_addresses_map,
+            "vrfs": vrfs
+        }
 
-        for ip_entry in ip_data:
-            enriched_ip = {
-                "ipv4_address": ip_entry["ipv4_address"],
-                "ipv4_prefixlen": ip_entry["ipv4_prefixlen"],
-                "port_id": ip_entry["port_id"],
-                "device": obj.name,
-                "device_url": obj.get_absolute_url(),
-                "vrf_id": None,
-                "vrfs": vrfs,
-            }
-
-            # Check if IP exists in NetBox using the pre-fetched map
-            ip_with_mask = f"{ip_entry['ipv4_address']}/{ip_entry['ipv4_prefixlen']}"
-            ip_address = ip_addresses_map.get(ip_with_mask)
-
-            if ip_address:
-                enriched_ip["ip_url"] = ip_address.get_absolute_url()
-                enriched_ip["exists"] = True
-                if ip_address.vrf:
-                    enriched_ip["vrf_id"] = ip_address.vrf.pk
-                    enriched_ip["vrf"] = ip_address.vrf.name
-
-                # Get interface from pre-fetched map
-                interface = interfaces_map.get(ip_entry["port_id"])
-                if interface and ip_address.assigned_object == interface:
-                    enriched_ip["status"] = "matched"
-                else:
-                    enriched_ip["status"] = "update"
+    def _get_port_info(self, port_id, port_data_cache, interface_name_field):
+        """Get port info from LibreNMS with caching to minimize API calls"""
+        if port_id not in port_data_cache:
+            success, port_data = self.librenms_api.get_port_by_id(port_id)
+            if success and "port" in port_data and port_data["port"]:
+                port_data_cache[port_id] = port_data["port"][0]
             else:
-                enriched_ip["exists"] = False
-                enriched_ip["status"] = "sync"
+                port_data_cache[port_id] = None
+        
+        return port_data_cache[port_id]
 
-            # Get interface info from pre-fetched map
-            interface = interfaces_map.get(ip_entry["port_id"])
-            if interface:
-                enriched_ip["interface_name"] = interface.name
-                enriched_ip["interface_url"] = interface.get_absolute_url()
-            else:
-                # Fallback to API call only when necessary
-                success, port_data = self.librenms_api.get_port_by_id(
-                    ip_entry["port_id"]
-                )
-                if success:
-                    port_info = port_data.get("port")[0]  # Get first port from list
-                    enriched_ip["interface_name"] = port_info.get(interface_name_field)
-                    # Try to find interface by name in pre-fetched map
-                    interface = next(
-                        (
-                            i
-                            for i in interfaces_map.values()
-                            if i.name == enriched_ip["interface_name"]
-                        ),
-                        None,
-                    )
-                    if interface:
-                        enriched_ip["interface_url"] = interface.get_absolute_url()
+    def _create_base_ip_entry(self, ip_entry, obj, vrfs):
+        """Create the base data structure for an IP entry"""
+        return {
+            "ipv4_address": ip_entry["ipv4_address"],
+            "ipv4_prefixlen": ip_entry["ipv4_prefixlen"],
+            "port_id": ip_entry["port_id"],
+            "device": obj.name,
+            "device_url": obj.get_absolute_url(),
+            "vrf_id": None,
+            "vrfs": vrfs,
+        }
 
-            enriched_data.append(enriched_ip)
+    def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
+        """Add information for IP addresses that exist in NetBox"""
+        enriched_ip["ip_url"] = ip_address.get_absolute_url()
+        enriched_ip["exists"] = True
+        
+        # Add VRF info if available
+        if ip_address.vrf:
+            enriched_ip["vrf_id"] = ip_address.vrf.pk
+            enriched_ip["vrf"] = ip_address.vrf.name
+        
+        # Set initial status to update (will change to matched if criteria met)
+        enriched_ip["status"] = "update"
+        
+        # Only proceed if IP is assigned to an object
+        if not ip_address.assigned_object:
+            return
+        
+        assigned_interface = ip_address.assigned_object
+        
+        # Check if interface matches by LibreNMS ID
+        if port_id in prefetched_data["interfaces_by_librenms_id"]:
+            interface = prefetched_data["interfaces_by_librenms_id"][port_id]
+            if assigned_interface == interface:
+                enriched_ip["status"] = "matched"
+                return
+                
+        # Check if interface matches by name
+        if (librenms_interface_name and 
+                assigned_interface.name == librenms_interface_name):
+            enriched_ip["status"] = "matched"
+            # Add interface information
+            enriched_ip["interface_name"] = assigned_interface.name
+            enriched_ip["interface_url"] = assigned_interface.get_absolute_url()
 
-        return enriched_data
+    def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
+        """Add interface information to the IP entry regardless of IP status"""
+        # First try to match by LibreNMS ID (highest priority)
+        if port_id in prefetched_data["interfaces_by_librenms_id"]:
+            interface = prefetched_data["interfaces_by_librenms_id"][port_id]
+            enriched_ip["interface_name"] = interface.name
+            enriched_ip["interface_url"] = interface.get_absolute_url()
+            return
+            
+        # Then try to match by interface name
+        if librenms_interface_name and librenms_interface_name in prefetched_data["interfaces_by_name"]:
+            interface = prefetched_data["interfaces_by_name"][librenms_interface_name]
+            # Don't overwrite the interface name from LibreNMS but do add the URL
+            enriched_ip["interface_url"] = interface.get_absolute_url()
 
     def get_table(self, data, obj, request):
         """Get the table instance for the view."""
