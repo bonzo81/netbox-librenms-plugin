@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.12 (2025-04-11)
+
+### Improvements
+* Add VRF selection support to IP address table and sync
+* Implement single IP address verification and VRF assignment
+* Extend single IP verification to support Virtual Machines
+
+### Under the hood
+* Refactor cable and IP address synchronization methods for improved transaction handling
+* Refactor IP address enrichment for improved performance
+
 ## 0.3.11 (2025-03-31)
 
 ### Improvements
