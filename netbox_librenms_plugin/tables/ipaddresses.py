@@ -62,7 +62,7 @@ class IPAddressTable(tables.Table):
     )
     vrf = tables.TemplateColumn(
         template_code="""
-        <select id="vrf_select_{{ record.ipv4_address|slugify }}" class="form-select vrf-select tomselected" data-ip="{{ record.ipv4_address }}" name="vrf_{{ record.ipv4_address }}">
+        <select id="vrf_select_{{ record.ipv4_address|slugify }}" class="form-select vrf-select" data-ip="{{ record.ipv4_address }}" data-prefix="{{ record.ipv4_prefixlen }}" data-row-id="{{ record.ipv4_address }}" name="vrf_{{ record.ipv4_address }}">
             <option value="">Global</option>
             {% for vrf in record.vrfs %}
                 <option value="{{ vrf.pk }}" {% if record.vrf_id == vrf.pk %}selected{% endif %}>
@@ -81,15 +81,15 @@ class IPAddressTable(tables.Table):
 
     def render_status(self, value, record):
         """Render the status column with appropriate buttons or text styling"""
-        if value == "matched":
-            return format_html(
-                '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>'
-            )
-        elif value == "update":
+        if value == "update":
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-warning" onclick="document.getElementById(\'selected_ip\').value=\'{}\'">'
                 '<i class="mdi mdi-pencil" aria-hidden="true"></i> Update</button>',
                 record["ipv4_address"],
+            )
+        elif value == "matched":
+            return format_html(
+                '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>'
             )
         elif record.get("interface_url"):
             return format_html(

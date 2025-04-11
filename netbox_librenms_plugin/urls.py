@@ -17,6 +17,7 @@ from .views import (
     InterfaceTypeMappingView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
+    SingleIPAddressVerifyView,
     SyncCablesView,
     SyncInterfacesView,
     SyncIPAddressesView,
@@ -60,6 +61,12 @@ urlpatterns = [
         "verify-cable/",
         SingleCableVerifyView.as_view(),
         name="verify_cable",
+    ),
+    # Path for single IP address verify javascript call
+    path(
+        "verify-ipaddress/",
+        SingleIPAddressVerifyView.as_view(),
+        name="verify_ipaddress",
     ),
     # Virtual machine sync URLs
     path(
