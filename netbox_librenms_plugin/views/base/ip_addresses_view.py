@@ -1,9 +1,10 @@
 import json
 
 from dcim.models import Device
+from virtualization.models import VirtualMachine
 from django.contrib import messages
 from django.core.cache import cache
-from django.http import JsonResponse
+from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
@@ -291,6 +292,27 @@ class SingleIPAddressVerifyView(CacheMixin, View):
     View for verifying single IP address data with different VRF.
     """
 
+    def _get_object(self, object_id, object_type=None):
+        """
+        Retrieve the object (Device or VirtualMachine) based on ID and optional type.
+        If type is not provided, tries to determine it by checking both Device and VM models.
+        """
+        if object_type == "device":
+            return get_object_or_404(Device, pk=object_id)
+        elif object_type == "virtualmachine":
+            return get_object_or_404(VirtualMachine, pk=object_id)
+        else:
+            # Try to find object without knowing its type
+            obj = Device.objects.filter(pk=object_id).first()
+            if obj:
+                return obj
+            
+            obj = VirtualMachine.objects.filter(pk=object_id).first()
+            if obj:
+                return obj
+            
+            raise Http404(f"Object with ID {object_id} not found in Device or VirtualMachine models")
+        
     def _parse_ip_address(self, ip_address):
         """
         Parse IP address string into address and prefix length.
@@ -382,15 +404,24 @@ class SingleIPAddressVerifyView(CacheMixin, View):
             data = json.loads(request.body)
             ip_address = data.get("ip_address")
             vrf_id = data.get("vrf_id")
-            device_id = data.get("device_id")
+            object_id = data.get("device_id")
+            object_type = data.get("object_type")
 
             if not ip_address:
                 return JsonResponse(
                     {"status": "error", "message": "No IP address provided"}, status=400
                 )
 
-            # Get the device
-            device = get_object_or_404(Device, pk=device_id)
+            if not object_id:
+                return JsonResponse(
+                    {"status": "error", "message": "No object ID provided"}, status=400
+                )
+
+            # Get the object (Device or VirtualMachine)
+            try:
+                obj = self._get_object(object_id, object_type)
+            except Http404 as e:
+                return JsonResponse({"status": "error", "message": str(e)}, status=404)
 
             # Parse IP address
             try:
@@ -398,15 +429,15 @@ class SingleIPAddressVerifyView(CacheMixin, View):
             except ValueError as e:
                 return JsonResponse({"status": "error", "message": str(e)}, status=400)
 
-            cache_key = self._get_cache_key(device, "ip_addresses")
+            cache_key = self._get_cache_key(obj, "ip_addresses")
             cached_data = cache.get(cache_key)
 
             # Basic record with default values
             updated_record = {
                 "ipv4_address": address_no_mask,
                 "ipv4_prefixlen": prefix_len,
-                "device": device.name,
-                "device_url": device.get_absolute_url(),
+                "device": obj.name,
+                "device_url": obj.get_absolute_url(),
                 "vrf_id": vrf_id,
                 "exists": False,
                 "status": "sync",
@@ -426,7 +457,7 @@ class SingleIPAddressVerifyView(CacheMixin, View):
 
             # If no interface found in cache, use first device interface
             if original_port_id is None:
-                interface = device.interfaces.first()
+                interface = obj.interfaces.first()
                 if interface:
                     updated_record["interface_name"] = interface.name
                     updated_record["interface_url"] = interface.get_absolute_url()
