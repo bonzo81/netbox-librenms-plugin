@@ -127,12 +127,26 @@ function initializeVRFSelects() {
         const ipAddressTable = document.getElementById('librenms-ipaddress-table');
         
         if (ipAddressTable) {
-            const vrfSelects = ipAddressTable.querySelectorAll('.vrf-select.tomselected');
+            // Find VRF dropdowns - look for both plain selects and TomSelect-enhanced ones
+            const vrfSelects = ipAddressTable.querySelectorAll('.vrf-select');
+            
             vrfSelects.forEach(select => {
+                // Skip already initialized selects by checking the data attribute
                 if (select.tomselect && !select.dataset.vrfSelectInitialized) {
                     select.dataset.vrfSelectInitialized = 'true';
+                    
+                    // Add TomSelect listener
                     select.tomselect.on('change', function(value) {
                         handleVRFChange(select, value);
+                    });
+                } 
+                // For standard selects without TomSelect (fallback)
+                else if (!select.tomselect && !select.dataset.vrfSelectInitialized) {
+                    select.dataset.vrfSelectInitialized = 'true';
+                    
+                    // Add direct event listener for regular selects
+                    select.addEventListener('change', function(event) {
+                        handleVRFChange(select, this.value);
                     });
                 }
             });
@@ -143,30 +157,51 @@ function initializeVRFSelects() {
 // Function to handle VRF change event
 function handleVRFChange(select, value) {
     const ipAddress = select.dataset.ip;
-    const form = document.querySelector('form');
-    
-    // Create a hidden input field for the VRF selection if it doesn't exist
-    let hiddenInput = document.getElementById(`vrf_${ipAddress}`);
-    if (!hiddenInput) {
-        hiddenInput = document.createElement('input');
-        hiddenInput.type = 'hidden';
-        hiddenInput.id = `vrf_${ipAddress}`;
-        hiddenInput.name = `vrf_${ipAddress}`;
-        form.appendChild(hiddenInput);
+    const prefixLength = select.dataset.prefix || "";  // Get prefix length if present
+    const fullIpAddress = prefixLength ? `${ipAddress}/${prefixLength}` : ipAddress;
+
+    // Extract device ID from various URL patterns
+    let deviceId = null;
+    const deviceIdMatch = window.location.pathname.match(/\/devices\/(\d+)\//);
+    const vmIdMatch = window.location.pathname.match(/\/virtual-machines\/(\d+)\//);
+    const pluginDeviceMatch = window.location.pathname.match(/\/plugins\/librenms_plugin\/device\/(\d+)\//);
+    const pluginVMMatch = window.location.pathname.match(/\/plugins\/librenms_plugin\/vm\/(\d+)\//);
+
+    deviceId = deviceIdMatch ? deviceIdMatch[1] : 
+               vmIdMatch ? vmIdMatch[1] : 
+               pluginDeviceMatch ? pluginDeviceMatch[1] : 
+               pluginVMMatch ? pluginVMMatch[1] : null;
+
+    if (!deviceId) {
+        return;
     }
-    
-    // Set the value of the hidden input field
-    hiddenInput.value = value;
-    console.log(`Setting VRF for ${ipAddress} to ${value}`);
-    
-    // Update the display in the table
-    const row = select.closest('tr');
-    if (row) {
-        // Update any visual indicators if needed
-        if (value === '') {
-            select.tomselect.setTextboxValue('Global');
-        }
-    }
+
+    fetch('/plugins/librenms_plugin/verify-ipaddress/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+        },
+        body: JSON.stringify({
+            device_id: deviceId,
+            ip_address: fullIpAddress,  // Use full IP address with prefix
+            vrf_id: value
+        })
+    })
+        .then(response => response.json())
+        .then(data => {
+            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+
+            if (data.status === 'success' && row && data.formatted_row) {
+                const statusCell = row.querySelector('td[data-col="status"]');
+                if (statusCell) {
+                    statusCell.innerHTML = data.formatted_row.status;
+                }
+            }
+        })
+        .catch(error => {
+            console.error("Error during VRF change fetch:", error);
+        });
 }
 
 // Function to handle VC member interface change event

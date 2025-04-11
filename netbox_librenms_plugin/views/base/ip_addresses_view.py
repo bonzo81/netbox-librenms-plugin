@@ -1,5 +1,9 @@
+import json
+
+from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
@@ -280,3 +284,178 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
             self.partial_template_name,
             {"ip_sync": context},
         )
+
+
+class SingleIPAddressVerifyView(CacheMixin, View):
+    """
+    View for verifying single IP address data with different VRF.
+    """
+
+    def _parse_ip_address(self, ip_address):
+        """
+        Parse IP address string into address and prefix length.
+        """
+        ip_address_parts = ip_address.split("/")
+        address_no_mask = ip_address_parts[0].strip()
+
+        if len(ip_address_parts) > 1:
+            try:
+                prefix_len = int(ip_address_parts[1])
+                return address_no_mask, prefix_len
+            except ValueError:
+                raise ValueError(f"Invalid prefix length: {ip_address_parts[1]}")
+        else:
+            raise ValueError("Prefix length is missing from the IP address")
+
+    def _find_in_cache(self, cached_data, address, prefix_len):
+        """
+        Find IP address in cache data.
+        """
+        if not cached_data:
+            return None, None, None
+
+        for ip_entry in cached_data.get("ip_addresses", []):
+            cache_address = ip_entry.get("ipv4_address")
+            cache_prefix = ip_entry.get("ipv4_prefixlen")
+
+            if cache_address == address and str(cache_prefix) == str(prefix_len):
+                original_vrf_id = ip_entry.get("vrf_id")
+                original_port_id = ip_entry.get("port_id")
+                return ip_entry, original_vrf_id, original_port_id
+
+        return None, None, None
+
+    def _find_existing_ip(self, address_no_mask, prefix_len, vrf_id=None):
+        """
+        Find existing IP address in NetBox, optionally with specific VRF.
+        """
+        ip_with_mask = f"{address_no_mask}/{prefix_len}"
+
+        # Check if IP exists in any VRF
+        existing_ip = IPAddress.objects.filter(address=ip_with_mask).first()
+        if not existing_ip:
+            return False, False, None
+
+        # IP exists in some VRF, check if it exists in the specified VRF
+        if vrf_id is not None:
+            existing_in_vrf = IPAddress.objects.filter(
+                address=ip_with_mask, vrf__id=vrf_id
+            ).exists()
+        else:
+            # Check for global VRF (None)
+            existing_in_vrf = IPAddress.objects.filter(
+                address=ip_with_mask, vrf__isnull=True
+            ).exists()
+
+        return True, existing_in_vrf, existing_ip.get_absolute_url()
+
+    def _determine_status(
+        self, exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id
+    ):
+        """
+        Determine the status of an IP address based on existence and VRF.
+        """
+        if exists_any_vrf:
+            # IP exists in NetBox
+            if exists_specific_vrf:
+                return "matched"
+            else:
+                return "update"
+        else:
+            # IP doesn't exist in NetBox, check if restoring to original VRF
+            if original_vrf_id is not None and original_vrf_id == vrf_id:
+                return "matched"
+            else:
+                return "sync"
+
+    def _get_cache_key(self, obj, data_type):
+        """
+        Generate a cache key for the specified object and data type.
+        """
+        return f"librenms_plugin:{obj.__class__.__name__}:{obj.pk}:{data_type}"
+
+    def post(self, request):
+        """
+        POST request to return json response with formatted IP address status.
+        """
+        try:
+            data = json.loads(request.body)
+            ip_address = data.get("ip_address")
+            vrf_id = data.get("vrf_id")
+            device_id = data.get("device_id")
+
+            if not ip_address:
+                return JsonResponse(
+                    {"status": "error", "message": "No IP address provided"}, status=400
+                )
+
+            # Get the device
+            device = get_object_or_404(Device, pk=device_id)
+
+            # Parse IP address
+            try:
+                address_no_mask, prefix_len = self._parse_ip_address(ip_address)
+            except ValueError as e:
+                return JsonResponse({"status": "error", "message": str(e)}, status=400)
+
+            cache_key = self._get_cache_key(device, "ip_addresses")
+            cached_data = cache.get(cache_key)
+
+            # Basic record with default values
+            updated_record = {
+                "ipv4_address": address_no_mask,
+                "ipv4_prefixlen": prefix_len,
+                "device": device.name,
+                "device_url": device.get_absolute_url(),
+                "vrf_id": vrf_id,
+                "exists": False,
+                "status": "sync",
+            }
+
+            # Try to find the IP in cache data
+            cache_entry, original_vrf_id, original_port_id = self._find_in_cache(
+                cached_data, address_no_mask, prefix_len
+            )
+
+            # Update record with cache data if found
+            if cache_entry:
+                # Update with all fields except vrf_id and status
+                for key, value in cache_entry.items():
+                    if key not in ["vrf_id", "status"]:
+                        updated_record[key] = value
+
+            # If no interface found in cache, use first device interface
+            if original_port_id is None:
+                interface = device.interfaces.first()
+                if interface:
+                    updated_record["interface_name"] = interface.name
+                    updated_record["interface_url"] = interface.get_absolute_url()
+
+            # Check if IP exists in NetBox
+            exists_any_vrf, exists_specific_vrf, ip_url = self._find_existing_ip(
+                address_no_mask, prefix_len, vrf_id
+            )
+
+            if exists_any_vrf:
+                updated_record["exists"] = True
+                updated_record["ip_url"] = ip_url
+
+            # Determine status based on existence and VRF
+            updated_record["status"] = self._determine_status(
+                exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id
+            )
+
+            # Render status HTML
+            table = IPAddressTable(data=[])
+            status_html = table.render_status(updated_record["status"], updated_record)
+
+            return JsonResponse(
+                {
+                    "status": "success",
+                    "ip_address": ip_address,
+                    "formatted_row": {"status": status_html},
+                }
+            )
+
+        except Exception as e:
+            return JsonResponse({"status": "error", "message": str(e)}, status=500)
