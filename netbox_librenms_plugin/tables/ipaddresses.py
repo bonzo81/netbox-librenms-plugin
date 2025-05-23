@@ -28,25 +28,25 @@ class IPAddressTable(tables.Table):
             "id": "librenms-ipaddress-table",
         }
         row_attrs = {
-            "data-interface": lambda record: record["ipv4_address"],
-            "data-name": lambda record: record["ipv4_address"],
+            "data-interface": lambda record: record["ip_address"],
+            "data-name": lambda record: record["ip_address"],
         }
 
     selection = ToggleColumn(
         orderable=False,
         visible=True,
         attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
-        accessor="ipv4_address",
+        accessor="ip_address",
     )
 
     address = tables.Column(
-        accessor="ipv4_address",
+        accessor="ip_address",
         verbose_name="IP Address",
         linkify=lambda record: record.get("ip_url"),
         attrs={"td": {"data-col": "address"}},
     )
     prefix_length = tables.Column(
-        accessor="ipv4_prefixlen",
+        accessor="prefix_length",
         verbose_name="Prefix Length",
         attrs={"td": {"data-col": "prefix"}},
     )
@@ -62,7 +62,7 @@ class IPAddressTable(tables.Table):
     )
     vrf = tables.TemplateColumn(
         template_code="""
-        <select id="vrf_select_{{ record.ipv4_address|slugify }}" class="form-select vrf-select" data-ip="{{ record.ipv4_address }}" data-prefix="{{ record.ipv4_prefixlen }}" data-row-id="{{ record.ipv4_address }}" name="vrf_{{ record.ipv4_address }}">
+        <select id="vrf_select_{{ record.ip_address|slugify }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.ip_address }}" name="vrf_{{ record.ip_address }}">
             <option value="">Global</option>
             {% for vrf in record.vrfs %}
                 <option value="{{ vrf.pk }}" {% if record.vrf_id == vrf.pk %}selected{% endif %}>
@@ -85,7 +85,7 @@ class IPAddressTable(tables.Table):
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-warning" onclick="document.getElementById(\'selected_ip\').value=\'{}\'">'
                 '<i class="mdi mdi-pencil" aria-hidden="true"></i> Update</button>',
-                record["ipv4_address"],
+                record["ip_address"],
             )
         elif value == "matched":
             return format_html(
@@ -95,7 +95,7 @@ class IPAddressTable(tables.Table):
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-primary" onclick="document.getElementById(\'selected_ip\').value=\'{}\'">'
                 '<i class="mdi mdi-plus-thick" aria-hidden="true"></i> Create</button>',
-                record["ipv4_address"],
+                record["ip_address"],
             )
         return format_html('<span class="text-muted">Missing NetBox Object</span>')
 
