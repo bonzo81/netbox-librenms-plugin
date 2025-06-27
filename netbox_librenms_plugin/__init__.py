@@ -1,7 +1,7 @@
 from netbox.plugins import PluginConfig
 
 __author__ = "Andy Norwood"
-__version__ = "0.3.12"
+__version__ = "0.3.13"
 
 
 class LibreNMSSyncConfig(PluginConfig):
