@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.13 (2025-06=27)
+
+### New Feature
+* Add support for IPv6 handling in IP address synchronization
+
+### Documentation
+* Add basic development documentation
+
 ## 0.3.12 (2025-04-11)
 
 ### Improvements
