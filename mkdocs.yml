@@ -4,13 +4,19 @@ repo_url: https://github.com/bonzo81/netbox-librenms-plugin
 repo_name: /netbox-librenms-plugin
 #strict: true
 nav:
-  - Home: index.md
+  - Home: README.md
   - Feature List: feature_list.md
   - Feature Guide: 
     - Custom Field: usage_tips/custom_field.md
     - Virtual Chassis: usage_tips/virtual_chassis.md
     - Interface Mappings: usage_tips/interface_mappings.md
   - Usage Tips: usage_tips/README.md
+  - Development Guide:
+    - Overview: development/README.md
+    - Project Structure: development/structure.md
+    - Views & Inheritance: development/views.md
+    - Mixins: development/mixins.md
+    - Templates: development/templates.md
   - Changelog: changelog.md
   - Contributing: contributing.md
 
@@ -45,10 +51,12 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.details
   - admonition
+  - pymdownx.escapeall:
+      hardbreak: true
+      nbsp: true
   - toc:
       baselevel: 2
       permalink: true
-      slugify: !!python/name:markdown.extensions.toc.slugify
   - meta
 plugins:
   - include-markdown
