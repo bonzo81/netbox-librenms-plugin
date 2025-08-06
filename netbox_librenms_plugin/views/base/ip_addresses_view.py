@@ -48,6 +48,14 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
 
         # Process each IP address from LibreNMS
         for ip_entry in ip_data:
+            # Skip invalid entries that are not dictionaries
+            if not isinstance(ip_entry, dict):
+                continue
+
+            # Skip entries missing required fields
+            if "port_id" not in ip_entry:
+                continue
+
             # Get or fetch port data (with caching)
             port_info = self._get_port_info(
                 ip_entry["port_id"], port_data_cache, interface_name_field
