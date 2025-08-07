@@ -2,10 +2,54 @@
 from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
 from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm
+from netbox.plugins import get_plugin_config
 from utilities.forms.fields import DynamicModelMultipleChoiceField
 from virtualization.models import Cluster, VirtualMachine
 
-from .models import InterfaceTypeMapping
+from .models import InterfaceTypeMapping, LibreNMSSettings
+
+
+class LibreNMSSettingsForm(NetBoxModelForm):
+    """
+    Form for selecting the active LibreNMS server from configured servers.
+    """
+
+    selected_server = forms.ChoiceField(
+        label="LibreNMS Server",
+        help_text="Select which LibreNMS server to use for synchronization operations",
+    )
+
+    class Meta:
+        model = LibreNMSSettings
+        fields = ["selected_server"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Get available servers from configuration
+        self.fields["selected_server"].choices = self._get_server_choices()
+
+    def _get_server_choices(self):
+        """Get server choices from plugin configuration."""
+        choices = []
+
+        # Try to get multi-server configuration
+        servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
+
+        if servers_config and isinstance(servers_config, dict):
+            # Multi-server configuration
+            for key, config in servers_config.items():
+                display_name = config.get("display_name", key)
+                url = config.get("librenms_url", "Unknown URL")
+                choices.append((key, f"{display_name} ({url})"))
+        else:
+            # Legacy single-server configuration
+            legacy_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
+            if legacy_url:
+                choices.append(("default", f"Default Server ({legacy_url})"))
+            else:
+                choices.append(("default", "Default Server"))
+
+        return choices
 
 
 class InterfaceTypeMappingForm(NetBoxModelForm):

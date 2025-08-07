@@ -10,18 +10,85 @@ class LibreNMSAPI:
     Client to interact with the LibreNMS API and retrieve interface data for devices.
     """
 
-    def __init__(self):
-        self.librenms_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
-        self.api_token = get_plugin_config("netbox_librenms_plugin", "api_token")
-        self.cache_timeout = get_plugin_config(
-            "netbox_librenms_plugin", "cache_timeout", 300
-        )
-        self.verify_ssl = get_plugin_config("netbox_librenms_plugin", "verify_ssl")
+    def __init__(self, server_key=None):
+        """
+        Initialize LibreNMS API client with support for multiple servers.
+
+        Args:
+            server_key: Key for specific server configuration. If None, uses selected server or default.
+        """
+        # If no server_key is provided, try to get the selected server from settings
+        if not server_key:
+            try:
+                from netbox_librenms_plugin.models import LibreNMSSettings
+
+                settings = LibreNMSSettings.objects.first()
+                if settings:
+                    server_key = settings.selected_server
+            except (ImportError, AttributeError):
+                pass
+
+        # Default to 'default' if still no server_key
+        server_key = server_key or "default"
+        self.server_key = server_key
+
+        # Get server configuration
+        servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
+
+        if (
+            servers_config
+            and isinstance(servers_config, dict)
+            and server_key in servers_config
+        ):
+            # Multi-server configuration
+            config = servers_config[server_key]
+            self.librenms_url = config["librenms_url"]
+            self.api_token = config["api_token"]
+            self.cache_timeout = config.get("cache_timeout", 300)
+            self.verify_ssl = config.get("verify_ssl", True)
+        else:
+            # Fallback to legacy single-server configuration
+            self.librenms_url = get_plugin_config(
+                "netbox_librenms_plugin", "librenms_url"
+            )
+            self.api_token = get_plugin_config("netbox_librenms_plugin", "api_token")
+            self.cache_timeout = get_plugin_config(
+                "netbox_librenms_plugin", "cache_timeout", 300
+            )
+            self.verify_ssl = get_plugin_config(
+                "netbox_librenms_plugin", "verify_ssl", True
+            )
 
         if not self.librenms_url or not self.api_token:
-            raise ValueError("LibrenMS URL or API token is not configured.")
+            raise ValueError(
+                f"LibreNMS URL or API token is not configured for server '{server_key}'."
+            )
 
         self.headers = {"X-Auth-Token": self.api_token}
+
+    @classmethod
+    def get_available_servers(cls):
+        """
+        Get list of available server configurations.
+
+        Returns:
+            dict: Dictionary of server keys and their display names
+        """
+        servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
+
+        if servers_config and isinstance(servers_config, dict):
+            # Multi-server configuration
+            result = {}
+            for key, config in servers_config.items():
+                display_name = config.get("display_name", key)
+                result[key] = display_name
+            return result
+        else:
+            # Legacy single-server configuration
+            legacy_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
+            if legacy_url:
+                return {"default": f"Default Server ({legacy_url})"}
+            return {"default": "Default Server"}
 
     def get_librenms_id(self, obj):
         """
@@ -92,7 +159,8 @@ class LibreNMSAPI:
             str: Cache key
         """
         object_type = obj._meta.model_name
-        return f"librenms_device_id_{object_type}_{obj.pk}"
+        server_key = getattr(self, "server_key", "default")
+        return f"librenms_device_id_{object_type}_{obj.pk}_{server_key}"
 
     def _store_librenms_id(self, obj, librenms_id):
         """

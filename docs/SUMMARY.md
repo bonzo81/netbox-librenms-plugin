@@ -6,6 +6,7 @@
   * [Using the librenms\_id Custom Field](usage_tips/custom_field.md)
   * [interface\_mappings](usage_tips/interface_mappings.md)
   * [Virtual Chassis Support](usage_tips/virtual_chassis.md)
+  * [Multi Server Configuration](usage_tips/multi_server_configuration.md)
 * [Development Guide](development/README.md)
   * [Project Structure](development/structure.md)
   * [Views & Inheritance](development/views.md)

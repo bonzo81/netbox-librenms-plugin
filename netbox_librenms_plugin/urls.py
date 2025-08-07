@@ -16,6 +16,7 @@ from .views import (
     InterfaceTypeMappingEditView,
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
+    LibreNMSSettingsView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleIPAddressVerifyView,
@@ -146,6 +147,12 @@ urlpatterns = [
         "vm-status/",
         VMStatusListView.as_view(),
         name="vm_status_list",
+    ),
+    # Settings URL
+    path(
+        "settings/",
+        LibreNMSSettingsView.as_view(),
+        name="settings",
     ),
     # Interface type mapping URLs
     path(

@@ -1,0 +1,94 @@
+{% extends 'generic/object_edit.html' %}
+{% load form_helpers %}
+
+{% block title %}LibreNMS Settings{% endblock %}
+
+{% block content %}
+<div class="container-xl">
+    <!-- Settings Form Section -->
+    <div class="row">
+        <div class="col-lg-6 col-md-8">
+            <form action="" method="post" class="form" enctype="multipart/form-data">
+                {% csrf_token %}
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="ti ti-server-2 me-2"></i>
+                            LibreNMS Server Settings
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <p class="text-muted mb-3">
+                                Configure which LibreNMS server to use for synchronization operations.
+                                Multiple servers can be configured in the NetBox configuration file.
+                            </p>
+                            {% render_field form.selected_server %}
+                        </div>
+                        <div class="text-end">
+                            <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}"
+                                class="btn btn-outline-secondary me-2">
+                                <i class="ti ti-x me-1"></i> Cancel
+                            </a>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="ti ti-check me-1"></i> Save Settings
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Spacing between sections -->
+    <div class="my-4"></div>
+
+    <!-- Configuration Example Section -->
+    <div class="row">
+        <div class="col-lg-10 col-xl-8">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">
+                        <i class="ti ti-code me-2"></i>
+                        Configuration Example
+                    </h3>
+                </div>
+                <div class="card-body">
+                    <p class="mb-3">To configure multiple LibreNMS servers, update your NetBox
+                        <code>configuration.py</code>:
+                    </p>
+                    <div class="highlight">
+                        <pre class="mb-3"><code>PLUGINS_CONFIG = {
+    'netbox_librenms_plugin': {
+        'servers': {
+            'production': {
+                'display_name': 'Production LibreNMS',
+                'librenms_url': 'https://librenms-prod.example.com',
+                'api_token': 'your_production_token',
+                'cache_timeout': 300,
+                'verify_ssl': True,
+                'interface_name_field': 'ifDescr'
+            },
+            'testing': {
+                'display_name': 'Test LibreNMS',
+                'librenms_url': 'https://librenms-test.example.com',
+                'api_token': 'your_test_token',
+                'cache_timeout': 300,
+                'verify_ssl': False,
+                'interface_name_field': 'ifName'
+            }
+        }
+    }
+}</code></pre>
+                    </div>
+                    <div class="alert alert-info">
+                        <i class="ti ti-info-circle me-2"></i>
+                        <strong>Note:</strong> For backward compatibility, the legacy single-server configuration
+                        is still supported if no "servers" configuration is provided.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
