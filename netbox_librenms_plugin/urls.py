@@ -3,6 +3,7 @@ from django.urls import include, path
 from .models import InterfaceTypeMapping
 from .views import (
     AddDeviceToLibreNMSView,
+    DeleteNetBoxInterfacesView,
     DeviceCableTableView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
@@ -89,6 +90,12 @@ urlpatterns = [
         "<str:object_type>/<int:object_id>/sync-interfaces/",
         SyncInterfacesView.as_view(),
         name="sync_selected_interfaces",
+    ),
+    # Delete NetBox-only interfaces URL
+    path(
+        "<str:object_type>/<int:object_id>/delete-netbox-interfaces/",
+        DeleteNetBoxInterfacesView.as_view(),
+        name="delete_netbox_interfaces",
     ),
     # Sync cables URL
     path(
