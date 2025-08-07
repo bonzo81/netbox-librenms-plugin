@@ -6,7 +6,7 @@
 
 {% with model_name=interface_sync.object|meta:"model_name" %}
 <form method="post"
-action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
+    action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
     {% endwith %}
     {% csrf_token %}
     {% block table_actions %}
@@ -25,27 +25,33 @@ action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_
                 <h6 class="mb-0">Exclude from Sync:</h6>
                 <div class="d-flex align-items-center m-0">
                     <span class="small me-1">Type</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="type" id="excludeType">
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
+                        value="type" id="excludeType">
                 </div>
                 <div class="d-flex align-items-center m-1">
                     <span class="small me-1">Speed</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="speed" id="excludeSpeed">
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
+                        value="speed" id="excludeSpeed">
                 </div>
                 <div class="d-flex align-items-center m-1">
                     <span class="small me-1">MAC</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="mac_address" id="excludeMACAddress">
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
+                        value="mac_address" id="excludeMACAddress">
                 </div>
                 <div class="d-flex align-items-center m-1">
                     <span class="small me-1">MTU</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="mtu" id="excludeMTU">
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
+                        value="mtu" id="excludeMTU">
                 </div>
                 <div class="d-flex align-items-center m-1">
                     <span class="small me-1">Enabled</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="enabled" id="excludeEnabled">
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
+                        value="enabled" id="excludeEnabled">
                 </div>
                 <div class="d-flex align-items-center m-1">
                     <span class="small me-1">Description</span>
-                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns" value="description" id="excludeDescription">
+                    <input class="form-check-input form-check-input-sm" type="checkbox" name="exclude_columns"
+                        value="description" id="excludeDescription">
                 </div>
             </div>
         </div>
@@ -58,9 +64,18 @@ action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <div>
                     {% if interface_sync.object.virtual_chassis %}
-                        <button type="button" class="btn btn-secondary" id="bulk-vc-member-button" data-bs-toggle="modal" data-bs-target="#bulkVCMemberModal" disabled>
-                            Bulk Edit VC Member
-                        </button>
+                    <button type="button" class="btn btn-secondary" id="bulk-vc-member-button" data-bs-toggle="modal"
+                        data-bs-target="#bulkVCMemberModal" disabled>
+                        Bulk Edit VC Member
+                    </button>
+                    {% endif %}
+                    {% if interface_sync.netbox_only_interfaces %}
+                    <a href="#" class="ms-2 text-warning text-decoration-none netbox-only-link" data-bs-toggle="modal"
+                        data-bs-target="#netboxOnlyInterfacesModal"
+                        title="Click to view and delete NetBox-only interfaces">
+                        <i class="mdi mdi-alert-circle-outline me-1"></i>
+                        {{interface_sync.netbox_only_interfaces|length}} NetBox only interfaces
+                    </a>
                     {% endif %}
                 </div>
                 <div class="ms-auto d-flex align-items-center">
@@ -69,7 +84,7 @@ action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_
                         Cache expires in: <span id="countdown-timer"
                             data-expiry="{{ interface_sync.cache_expiry|date:'c' }}"></span>
                     </div>
-        
+
                     {% endif %}
                     <div class="color-key me-3">
                         <span class="badge text-success text-white">Matching values</span>
@@ -77,21 +92,24 @@ action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_
                         <span class="badge text-danger text-white">Not present in NetBox</span>
                     </div>
                 </div>
-                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#interfaceFilterSection" aria-expanded="false" aria-controls="interfaceFilterSection">
+                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse"
+                    data-bs-target="#interfaceFilterSection" aria-expanded="false"
+                    aria-controls="interfaceFilterSection">
                     <i class="mdi mdi-filter"></i> Toggle Filters
                 </button>
             </div>
             <div class="collapse mb-3" id="interfaceFilterSection">
                 <div class="mb-2">
                     <small class="text-muted">
-                        <i class="mdi mdi-information"></i> Filters apply to currently displayed interfaces. Adjust the "per page" setting to apply the filters to more interfaces.
+                        <i class="mdi mdi-information"></i> Filters apply to currently displayed interfaces. Adjust the
+                        "per page" setting to apply the filters to more interfaces.
                     </small>
                 </div>
                 <div class="filter-container d-flex gap-2">
                     <input type="text" id="filter-name" placeholder="Filter by Name" class="form-control">
                     {% if interface_sync.table.attrs.id == 'librenms-interface-table' %}
-                        <input type="text" id="filter-type" placeholder="Filter by Type" class="form-control">
-                        <input type="text" id="filter-speed" placeholder="Filter by Speed" class="form-control">
+                    <input type="text" id="filter-type" placeholder="Filter by Type" class="form-control">
+                    <input type="text" id="filter-speed" placeholder="Filter by Speed" class="form-control">
                     {% endif %}
                     <input type="text" id="filter-mac" placeholder="Filter by MAC" class="form-control">
                     <input type="text" id="filter-mtu" placeholder="Filter by MTU" class="form-control">
@@ -106,14 +124,27 @@ action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_
                     flex-wrap: wrap;
                     align-items: center;
                 }
+
                 /* Updated rules using min-width */
                 td[data-col="device_selection"] {
                     width: 300px;
                     min-width: 200px;
                 }
+
                 td[data-col="device_selection"] .ts-wrapper {
                     width: 100%;
                     max-width: 100%;
+                }
+
+                /* NetBox-only interfaces link styling */
+                .netbox-only-link {
+                    cursor: pointer;
+                    transition: opacity 0.2s ease;
+                }
+
+                .netbox-only-link:hover {
+                    opacity: 0.8;
+                    text-decoration: underline !important;
                 }
             </style>
 
@@ -161,7 +192,8 @@ action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_
 </div>
 
 <!-- Bulk VC Member Selection Modal -->
-<div class="modal fade" id="bulkVCMemberModal" tabindex="-1" aria-labelledby="bulkVCMemberModalLabel" aria-hidden="true">
+<div class="modal fade" id="bulkVCMemberModal" tabindex="-1" aria-labelledby="bulkVCMemberModalLabel"
+    aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
@@ -173,13 +205,92 @@ action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_
                 <select id="bulk-vc-member-select" class="form-select">
                     {% for member in interface_sync.virtual_chassis_members %}
                     {{ member.name }}
-                        <option value="{{ member.id }}">{{ member.name }}</option>
+                    <option value="{{ member.id }}">{{ member.name }}</option>
                     {% endfor %}
                 </select>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-primary" id="apply-bulk-vc-member" data-bs-dismiss="modal">Apply</button>
                 <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- NetBox-only Interfaces Modal -->
+<div class="modal fade" id="netboxOnlyInterfacesModal" tabindex="-1" aria-labelledby="netboxOnlyInterfacesModalLabel"
+    aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="netboxOnlyInterfacesModalLabel">
+                    NetBox-only Interfaces - {{ interface_sync.object.name }}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning">
+                    <i class="mdi mdi-alert me-2"></i>
+                    <strong>Warning:</strong> The following interfaces exist in NetBox but are not found in the LibreNMS
+                    data.
+                    Deleting these interfaces will permanently remove them from NetBox. This action cannot be undone.
+                </div>
+
+                {% if interface_sync.netbox_only_interfaces %}
+                <form id="delete-netbox-interfaces-form">
+                    {% csrf_token %}
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>
+                                        <input type="checkbox" id="select-all-netbox-interfaces"
+                                            class="form-check-input">
+                                    </th>
+                                    <th>Interface Name</th>
+                                    <th>Type</th>
+                                    <th>Status</th>
+                                    <th>Description</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for interface in interface_sync.netbox_only_interfaces %}
+                                <tr>
+                                    <td>
+                                        <input type="checkbox" name="interface_ids" value="{{ interface.id }}"
+                                            class="form-check-input netbox-interface-checkbox">
+                                    </td>
+                                    <td>
+                                        <a href="{{ interface.url }}" target="_blank">{{ interface.name }}</a>
+                                    </td>
+                                    <td>{{ interface.type }}</td>
+                                    <td>
+                                        {% if interface.enabled %}
+                                        <span class="text-success">Enabled</span>
+                                        {% else %}
+                                        <span class="text-danger">Disabled</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ interface.description|default:"-" }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </form>
+                {% else %}
+                <div class="alert alert-info">
+                    <i class="mdi mdi-information me-2"></i>
+                    No interfaces found that exist only in NetBox.
+                </div>
+                {% endif %}
+            </div>
+            <div class="modal-footer">
+                {% if interface_sync.netbox_only_interfaces %}
+                <button type="button" class="btn btn-danger" id="confirm-delete-interfaces">
+                    <i class="mdi mdi-delete"></i> Delete Selected Interfaces
+                </button>
+                {% endif %}
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
             </div>
         </div>
     </div>

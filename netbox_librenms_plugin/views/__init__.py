@@ -22,6 +22,7 @@ from .status_check import (
     VMStatusListView,
 )
 from .sync.cables_sync import SyncCablesView
+from .sync.cleanup_interfaces import DeleteNetBoxInterfacesView
 from .sync.devices_sync import AddDeviceToLibreNMSView, UpdateDeviceLocationView
 from .sync.interfaces_sync import SyncInterfacesView
 from .sync.locations_sync import SyncSiteLocationView

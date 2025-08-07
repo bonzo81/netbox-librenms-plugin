@@ -125,27 +125,27 @@ function initializeVCMemberSelect() {
 function initializeVRFSelects() {
     setTimeout(() => {
         const ipAddressTable = document.getElementById('librenms-ipaddress-table');
-        
+
         if (ipAddressTable) {
             // Find VRF dropdowns - look for both plain selects and TomSelect-enhanced ones
             const vrfSelects = ipAddressTable.querySelectorAll('.vrf-select');
-            
+
             vrfSelects.forEach(select => {
                 // Skip already initialized selects by checking the data attribute
                 if (select.tomselect && !select.dataset.vrfSelectInitialized) {
                     select.dataset.vrfSelectInitialized = 'true';
-                    
+
                     // Add TomSelect listener
-                    select.tomselect.on('change', function(value) {
+                    select.tomselect.on('change', function (value) {
                         handleVRFChange(select, value);
                     });
-                } 
+                }
                 // For standard selects without TomSelect (fallback)
                 else if (!select.tomselect && !select.dataset.vrfSelectInitialized) {
                     select.dataset.vrfSelectInitialized = 'true';
-                    
+
                     // Add direct event listener for regular selects
-                    select.addEventListener('change', function(event) {
+                    select.addEventListener('change', function (event) {
                         handleVRFChange(select, this.value);
                     });
                 }
@@ -167,10 +167,10 @@ function handleVRFChange(select, value) {
     const pluginDeviceMatch = window.location.pathname.match(/\/plugins\/librenms_plugin\/device\/(\d+)\//);
     const pluginVMMatch = window.location.pathname.match(/\/plugins\/librenms_plugin\/vm\/(\d+)\//);
 
-    deviceId = deviceIdMatch ? deviceIdMatch[1] : 
-               vmIdMatch ? vmIdMatch[1] : 
-               pluginDeviceMatch ? pluginDeviceMatch[1] : 
-               pluginVMMatch ? pluginVMMatch[1] : null;
+    deviceId = deviceIdMatch ? deviceIdMatch[1] :
+        vmIdMatch ? vmIdMatch[1] :
+            pluginDeviceMatch ? pluginDeviceMatch[1] :
+                pluginVMMatch ? pluginVMMatch[1] : null;
 
     if (!deviceId) {
         return;
@@ -289,8 +289,22 @@ function initializeBulkEditApply() {
             });
 
             // Close the modal on 'Apply'
-            const bulkModal = bootstrap.Modal.getInstance(document.getElementById('bulkVCMemberModal'));
-            bulkModal.hide();
+            const bulkModal = document.getElementById('bulkVCMemberModal');
+            if (bulkModal) {
+                bulkModal.classList.remove('show');
+                bulkModal.style.display = 'none';
+                bulkModal.setAttribute('aria-hidden', 'true');
+                bulkModal.removeAttribute('aria-modal');
+
+                const backdrop = document.querySelector('.modal-backdrop');
+                if (backdrop) {
+                    backdrop.remove();
+                }
+
+                document.body.classList.remove('modal-open');
+                document.body.style.removeProperty('padding-right');
+                document.body.style.removeProperty('overflow');
+            }
 
         });
     }
@@ -425,7 +439,7 @@ function initializeFilters() {
             prefix: { name: 'prefix' },
             device: { name: 'device' },
             interface: { name: 'interface' }
-        }   
+        }
     );
 }
 
@@ -480,7 +494,7 @@ function toggleSNMPForms() {
 
     const v2Form = document.getElementById('snmpv2-form');
     const v3Form = document.getElementById('snmpv3-form');
-    
+
     if (version === 'v2c') {
         v2Form.style.display = 'block';
         v3Form.style.display = 'none';
@@ -512,8 +526,20 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // Function to open the bulk VC modal
 function openBulkVCModal() {
-    const modal = new bootstrap.Modal(document.getElementById('bulkVCMemberModal'));
-    modal.show();
+    const modal = document.getElementById('bulkVCMemberModal');
+    if (modal) {
+        modal.classList.add('show');
+        modal.style.display = 'block';
+        modal.setAttribute('aria-modal', 'true');
+        modal.removeAttribute('aria-hidden');
+
+        // Add backdrop
+        const backdrop = document.createElement('div');
+        backdrop.className = 'modal-backdrop fade show';
+        document.body.appendChild(backdrop);
+
+        document.body.classList.add('modal-open');
+    }
 }
 
 // Function to update the interface_name_field radio button
@@ -547,6 +573,176 @@ function setInterfaceNameFieldFromURL() {
     }
 }
 
+
+// NetBox-only interfaces functionality
+function initializeNetBoxOnlyInterfaces() {
+    // Select all checkbox functionality
+    const selectAllCheckbox = document.getElementById('select-all-netbox-interfaces');
+    const interfaceCheckboxes = document.querySelectorAll('.netbox-interface-checkbox');
+
+    if (selectAllCheckbox) {
+        selectAllCheckbox.addEventListener('change', function () {
+            interfaceCheckboxes.forEach(checkbox => {
+                checkbox.checked = this.checked;
+            });
+        });
+    }
+
+    // Update select all checkbox when individual checkboxes change
+    interfaceCheckboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', function () {
+            const checkedCount = document.querySelectorAll('.netbox-interface-checkbox:checked').length;
+            const totalCount = interfaceCheckboxes.length;
+
+            if (selectAllCheckbox) {
+                selectAllCheckbox.checked = checkedCount === totalCount;
+                selectAllCheckbox.indeterminate = checkedCount > 0 && checkedCount < totalCount;
+            }
+        });
+    });
+
+    // Delete interfaces functionality
+    const deleteButton = document.getElementById('confirm-delete-interfaces');
+
+    if (deleteButton) {
+        deleteButton.addEventListener('click', function () {
+            const selectedCheckboxes = document.querySelectorAll('.netbox-interface-checkbox:checked');
+
+            if (selectedCheckboxes.length === 0) {
+                return;
+            }
+
+            const interfaceNames = Array.from(selectedCheckboxes).map(cb => {
+                const row = cb.closest('tr');
+                return row.querySelector('td:nth-child(2) a').textContent;
+            });
+
+            deleteSelectedInterfaces(selectedCheckboxes);
+        });
+    }
+}
+
+
+function deleteSelectedInterfaces(selectedCheckboxes) {
+    const interfaceIds = Array.from(selectedCheckboxes).map(cb => cb.value);
+
+    const formData = new FormData();
+
+    // Add CSRF token
+    const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
+
+    if (!csrfToken) {
+        console.error('CSRF token not found. Please refresh the page and try again.');
+        return;
+    }
+
+    formData.append('csrfmiddlewaretoken', csrfToken);
+
+    // Add interface IDs
+    interfaceIds.forEach(id => {
+        formData.append('interface_ids', id);
+    });
+
+    // Get the current URL to construct the delete URL
+    const currentPath = window.location.pathname;
+    const pathParts = currentPath.split('/');
+
+    // Extract object type and ID from the path
+    // Expected path formats: 
+    // /dcim/devices/{id}/librenms-sync/
+    // /dcim/virtual-machines/{id}/librenms-sync/
+    // /plugins/librenms_plugin/device/{id}/librenms-sync/
+    // /plugins/librenms_plugin/virtual-machines/{id}/librenms-sync/
+    let objectType, objectId;
+
+    const deviceIndex = pathParts.indexOf('devices');
+    const vmIndex = pathParts.indexOf('virtual-machines');
+    const pluginDeviceIndex = pathParts.indexOf('device');
+    const pluginVMIndex = pathParts.indexOf('virtualmachine');
+
+    if (deviceIndex !== -1 && deviceIndex + 1 < pathParts.length) {
+        objectType = 'device';
+        objectId = pathParts[deviceIndex + 1];
+    } else if (vmIndex !== -1 && vmIndex + 1 < pathParts.length) {
+        objectType = 'virtualmachine';
+        objectId = pathParts[vmIndex + 1];
+    } else if (pluginDeviceIndex !== -1 && pluginDeviceIndex + 1 < pathParts.length) {
+        objectType = 'device';
+        objectId = pathParts[pluginDeviceIndex + 1];
+    } else if (pluginVMIndex !== -1 && pluginVMIndex + 1 < pathParts.length) {
+        objectType = 'virtualmachine';
+        objectId = pathParts[pluginVMIndex + 1];
+    }
+
+    if (!objectType || !objectId) {
+        console.error('Could not determine object type and ID');
+        return;
+    }
+
+    const deleteUrl = `/plugins/librenms_plugin/${objectType}/${objectId}/delete-netbox-interfaces/`;
+
+    // Show loading state
+    const deleteButton = document.getElementById('confirm-delete-interfaces');
+    const originalText = deleteButton.innerHTML;
+    deleteButton.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Deleting...';
+    deleteButton.disabled = true;
+
+    fetch(deleteUrl, {
+        method: 'POST',
+        body: formData,
+        headers: {
+            'X-CSRFToken': csrfToken
+        }
+    })
+        .then(response => {
+            return response.json();
+        })
+        .then(data => {
+            if (data.status === 'success') {
+                // Close modal using native DOM methods
+                const modalElement = document.getElementById('netboxOnlyInterfacesModal');
+                if (modalElement) {
+                    // Hide the modal
+                    modalElement.classList.remove('show');
+                    modalElement.style.display = 'none';
+                    modalElement.setAttribute('aria-hidden', 'true');
+                    modalElement.removeAttribute('aria-modal');
+
+                    // Remove backdrop
+                    const backdrop = document.querySelector('.modal-backdrop');
+                    if (backdrop) {
+                        backdrop.remove();
+                    }
+
+                    // Clean up body classes and styles
+                    document.body.classList.remove('modal-open');
+                    document.body.style.removeProperty('padding-right');
+                    document.body.style.removeProperty('overflow');
+                }
+
+                // Refresh the interface data by triggering the refresh button
+                const refreshButton = document.querySelector('[hx-post*="interface-sync"]');
+                if (refreshButton) {
+                    refreshButton.click();
+                } else {
+                    // Fallback: reload the page
+                    window.location.reload();
+                }
+            } else {
+                console.error('Error:', data.error || 'Unknown error occurred');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+        })
+        .finally(() => {
+            // Restore button state
+            deleteButton.innerHTML = originalText;
+            deleteButton.disabled = false;
+        });
+}
+
+
 // Function to initialize all necessary scripts
 function initializeScripts() {
     initializeCheckboxes();
@@ -558,7 +754,8 @@ function initializeScripts() {
     initializeBulkEditApply();
     updateInterfaceNameField();
     setInterfaceNameFieldFromURL();
-    initializeTabs()
+    initializeTabs();
+    initializeNetBoxOnlyInterfaces();
 }
 
 
