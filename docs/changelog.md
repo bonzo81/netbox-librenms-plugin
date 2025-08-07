@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.14 (2025-07-08)
+
+### Fixes
+* Filter out invalid IP entries in BaseIPAddressTableView 
+
+### New Features
+* View/Delete NetBox-only (unmatched) interfaces
+* Add multi LibreNMS server configuration support for LibreNMS plugin 
+
+### Documentation
+* Add page for multi server configuration instructions and example
+
+
 ## 0.3.13 (2025-06=27)
 
 ### New Feature
