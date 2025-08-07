@@ -29,11 +29,17 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
     def get_context_data(self, request, obj):
         """Get the context data for the LibreNMS sync view."""
-        context = {
-            "object": obj,
-            "tab": self.tab,
-            "has_librenms_id": bool(self.librenms_id),
-        }
+        # Get context from parent classes (including LibreNMSAPIMixin)
+        context = super().get_context_data()
+
+        # Add our specific context
+        context.update(
+            {
+                "object": obj,
+                "tab": self.tab,
+                "has_librenms_id": bool(self.librenms_id),
+            }
+        )
 
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             vc_master = obj.virtual_chassis.master

@@ -11,6 +11,11 @@
     - Create specific mappings for your network equipment types
     - Pay attention to speed-based mappings for accurate interface types
 
+3. [Multi Server Configuration](multi_server_configuration.md)
+    - Configure multiple LibreNMS instances in your NetBox configuration
+    - Switch between different LibreNMS servers through the web interface
+    - Maintain backward compatibility with single-server configurations
+
 ## Device Synchronization
 
 ### Devices

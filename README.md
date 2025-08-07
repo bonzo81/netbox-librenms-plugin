@@ -38,6 +38,10 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 - Update existing LibreNMS locations langitude and longitude values based on NetBox data
 - Sync device site to LibreNMS location
 
+### Multi LibreNMS Server Configuration
+- Configure multiple LibreNMS instances in your NetBox configuration
+- Switch between different LibreNMS servers through the web interface
+- Maintain backward compatibility with single-server configurations
 
 ## Screenshots/GIFs
 >Screenshots from older plugin version
