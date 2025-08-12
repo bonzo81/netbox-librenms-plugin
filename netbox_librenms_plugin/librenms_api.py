@@ -66,6 +66,47 @@ class LibreNMSAPI:
 
         self.headers = {"X-Auth-Token": self.api_token}
 
+    def test_connection(self):
+        """
+        Test connection to LibreNMS server by calling the /system endpoint.
+        
+        Returns:
+            dict: System information if successful, error dict if failed
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/system",
+                headers=self.headers,
+                verify=self.verify_ssl,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "ok" and data.get("system"):
+                    return data["system"][0] if data["system"] else None
+            
+            # Handle different HTTP status codes with user-friendly messages
+            if response.status_code == 401:
+                return {'error': True, 'message': 'Authentication failed - check API token'}
+            elif response.status_code == 403:
+                return {'error': True, 'message': 'Access forbidden - check API token permissions'}
+            elif response.status_code == 404:
+                return {'error': True, 'message': 'API endpoint not found - check LibreNMS URL'}
+            elif response.status_code >= 500:
+                return {'error': True, 'message': 'LibreNMS server error - check server status'}
+            else:
+                return {'error': True, 'message': f'HTTP {response.status_code} - unexpected server response'}
+            
+        except requests.exceptions.SSLError:
+            return {'error': True, 'message': 'SSL certificate verification failed - try setting verify_ssl to false'}
+        except requests.exceptions.ConnectionError:
+            return {'error': True, 'message': 'Connection failed - check server URL and network connectivity'}
+        except requests.exceptions.Timeout:
+            return {'error': True, 'message': 'Connection timeout - server may be slow or unreachable'}
+        except Exception as e:
+            return {'error': True, 'message': f'Unexpected error: {str(e)}'}
+
     @classmethod
     def get_available_servers(cls):
         """

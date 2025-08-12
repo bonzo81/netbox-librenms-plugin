@@ -1,36 +1,29 @@
 {% extends 'generic/object_edit.html' %}
 {% load form_helpers %}
-
 {% block title %}LibreNMS Settings{% endblock %}
-
 {% block content %}
-<div class="container-xl">
     <!-- Settings Form Section -->
-    <div class="row">
-        <div class="col-lg-6 col-md-8">
-            <form action="" method="post" class="form" enctype="multipart/form-data">
+    <div class="row justify-content-start">
+        <div class="col-lg-5 col-xl-4">
+            <form action="" method="post" class="form h-100" enctype="multipart/form-data">
                 {% csrf_token %}
-                <div class="card">
+                <div class="card h-100">
                     <div class="card-header">
                         <h3 class="card-title">
                             <i class="ti ti-server-2 me-2"></i>
                             LibreNMS Server Settings
                         </h3>
                     </div>
-                    <div class="card-body">
-                        <div class="mb-3">
+                    <div class="card-body d-flex flex-column">
+                        <div class="mb-3 flex-grow-1">
                             <p class="text-muted mb-3">
                                 Configure which LibreNMS server to use for synchronization operations.
                                 Multiple servers can be configured in the NetBox configuration file.
                             </p>
                             {% render_field form.selected_server %}
                         </div>
-                        <div class="text-end">
-                            <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}"
-                                class="btn btn-outline-secondary me-2">
-                                <i class="ti ti-x me-1"></i> Cancel
-                            </a>
-                            <button type="submit" class="btn btn-primary">
+                        <div class="text-end mt-auto">
+                            <button type="submit" id="save-settings-btn" class="btn btn-primary" disabled>
                                 <i class="ti ti-check me-1"></i> Save Settings
                             </button>
                         </div>
@@ -38,11 +31,32 @@
                 </div>
             </form>
         </div>
+        <!-- Connection Test Card -->
+        <div class="col-lg-5 col-xl-4">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h3 class="card-title">
+                        <i class="ti ti-network me-2"></i>
+                        Connection Test
+                    </h3>
+                </div>
+                <div class="card-body d-flex flex-column">
+                    <div class="flex-grow-1">
+                        <p class="text-muted mb-3">Test the connection to the selected LibreNMS server to verify configuration.</p>
+                        <button type="button"
+                                id="test-connection-btn"
+                                class="btn btn-outline-info w-100">
+                            <i class="ti ti-network me-1"></i> Test Connection
+                        </button>
+                        <!-- Test result area -->
+                        <div id="test-result" class="mt-3 d-none"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
-
     <!-- Spacing between sections -->
     <div class="my-4"></div>
-
     <!-- Configuration Example Section -->
     <div class="row">
         <div class="col-lg-10 col-xl-8">
@@ -54,7 +68,8 @@
                     </h3>
                 </div>
                 <div class="card-body">
-                    <p class="mb-3">To configure multiple LibreNMS servers, update your NetBox
+                    <p class="mb-3">
+                        To configure multiple LibreNMS servers, update your NetBox
                         <code>configuration.py</code>:
                     </p>
                     <div class="highlight">
@@ -90,5 +105,91 @@
             </div>
         </div>
     </div>
-</div>
+    <script>
+document.addEventListener('DOMContentLoaded', function() {
+    const testBtn = document.getElementById('test-connection-btn');
+    const testResult = document.getElementById('test-result');
+    const serverSelect = document.getElementById('id_selected_server');
+    const saveBtn = document.getElementById('save-settings-btn');
+    
+    // Store the initial value to detect changes
+    const initialValue = serverSelect.value;
+    
+    // Enable/disable save button based on changes
+    function updateSaveButton() {
+        const hasChanges = serverSelect.value !== initialValue;
+        saveBtn.disabled = !hasChanges;
+        
+        if (hasChanges) {
+            saveBtn.classList.remove('btn-secondary');
+            saveBtn.classList.add('btn-primary');
+        } else {
+            saveBtn.classList.remove('btn-primary');
+            saveBtn.classList.add('btn-secondary');
+        }
+    }
+    
+    // Listen for changes on the server select
+    serverSelect.addEventListener('change', updateSaveButton);
+    
+    // Initialize button state
+    updateSaveButton();
+    
+    testBtn.addEventListener('click', function() {
+        const selectedServer = serverSelect.value;
+        
+        if (!selectedServer) {
+            showTestResult('error', 'Please select a server first.');
+            return;
+        }
+        
+        // Disable button and show loading state
+        testBtn.disabled = true;
+        testBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span> Testing...';
+        
+        // Clear previous results
+        testResult.classList.add('d-none');
+        
+        // Make AJAX request
+        fetch('{% url "plugins:netbox_librenms_plugin:test_connection" %}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            body: JSON.stringify({
+                'server_key': selectedServer
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                let message = `<strong>Connection successful!</strong><br>`;
+                if (data.system_info) {
+                    message += `LibreNMS Version: ${data.system_info.version}<br>`;
+                    message += `Database: ${data.system_info.database}<br>`;
+                    message += `PHP Version: ${data.system_info.php_version}`;
+                }
+                showTestResult('success', message);
+            } else {
+                showTestResult('error', `<strong>Connection failed:</strong><br>${data.error || 'Unknown error'}`);
+            }
+        })
+        .catch(error => {
+            showTestResult('error', `<strong>Network error:</strong><br>${error.message}`);
+        })
+        .finally(() => {
+            // Re-enable button
+            testBtn.disabled = false;
+            testBtn.innerHTML = '<i class="ti ti-network me-1"></i> Test Connection';
+        });
+    });
+    
+    function showTestResult(type, message) {
+        testResult.className = `mt-2 alert alert-${type === 'success' ? 'success' : 'danger'}`;
+        testResult.innerHTML = message;
+        testResult.classList.remove('d-none');
+    }
+});
+    </script>
 {% endblock %}
