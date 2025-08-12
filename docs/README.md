@@ -157,7 +157,7 @@ PLUGINS_CONFIG = {
 }
 ```
 
-The use the original single server confiig example:
+Or use the original single server confiig example:
 
 ```python
 PLUGINS_CONFIG = {
