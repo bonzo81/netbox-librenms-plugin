@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.15 (2025-07-12)
+
+### Improvements
+* Improve multi-server configuration handling and add connection testing
+
+
 ## 0.3.14 (2025-07-08)
 
 ### Fixes
