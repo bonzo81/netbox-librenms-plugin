@@ -37,4 +37,4 @@ from .device_views import (
 )
 
 from .vm_views import VMInterfaceTableView, VMIPAddressTableView, VMLibreNMSSyncView
-from .settings_views import LibreNMSSettingsView
+from .settings_views import LibreNMSSettingsView, TestLibreNMSConnectionView

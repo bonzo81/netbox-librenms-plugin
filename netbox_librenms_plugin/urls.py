@@ -24,6 +24,7 @@ from .views import (
     SyncInterfacesView,
     SyncIPAddressesView,
     SyncSiteLocationView,
+    TestLibreNMSConnectionView,
     UpdateDeviceLocationView,
     VMInterfaceTableView,
     VMIPAddressTableView,
@@ -153,6 +154,12 @@ urlpatterns = [
         "settings/",
         LibreNMSSettingsView.as_view(),
         name="settings",
+    ),
+    # Test LibreNMS connection endpoint
+    path(
+        "settings/test-connection/",
+        TestLibreNMSConnectionView.as_view(),
+        name="test_connection",
     ),
     # Interface type mapping URLs
     path(
