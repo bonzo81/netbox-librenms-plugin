@@ -9,11 +9,12 @@ class DeviceStatusTable(DeviceTable):
     """
     Table for displaying device LibreNMS status.
     """
+
     librenms_status = Column(
         verbose_name="LibreNMS Status",
         empty_values=(),
         accessor="librenms_status",
-        orderable=True,
+        orderable=False,
     )
 
     def render_librenms_status(self, value, record):
@@ -36,7 +37,7 @@ class DeviceStatusTable(DeviceTable):
                 )
             if vc_master and record.pk != vc_master.pk:
                 master_url = reverse(
-                    f"plugins:netbox_librenms_plugin:device_librenms_sync",
+                    "plugins:netbox_librenms_plugin:device_librenms_sync",
                     kwargs={"pk": vc_master.pk},
                 )
                 return mark_safe(
