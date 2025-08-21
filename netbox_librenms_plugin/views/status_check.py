@@ -69,7 +69,9 @@ class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
 
             return queryset
 
-        return Device.objects.none()
+        return Device.objects.none().annotate(
+            librenms_status=Value(None, output_field=BooleanField())
+        )
 
 
 class VMStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
@@ -116,4 +118,6 @@ class VMStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
 
             return queryset
 
-        return VirtualMachine.objects.none()
+        return VirtualMachine.objects.none().annotate(
+            librenms_status=Value(None, output_field=BooleanField())
+        )

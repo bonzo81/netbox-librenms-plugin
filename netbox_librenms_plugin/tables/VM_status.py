@@ -14,7 +14,7 @@ class VMStatusTable(VirtualMachineTable):
         verbose_name="LibreNMS Status",
         empty_values=(),
         accessor="librenms_status",
-        orderable=True,
+        orderable=False,
     )
 
     def render_librenms_status(self, value, record):
