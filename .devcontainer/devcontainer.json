@@ -1,0 +1,74 @@
+{
+  "name": "NetBox LibreNMS Plugin Dev",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "devcontainer",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "forwardPorts": [
+    8000
+  ],
+  "portsAttributes": {
+    "8000": {
+      "label": "NetBox Web Interface",
+      "protocol": "http",
+      "requireLocalPort": false,
+      "elevateIfNeeded": false
+    }
+  },
+  "otherPortsAttributes": {
+    "onAutoForward": "ignore"
+  },
+  "hostRequirements": {
+    "memory": "4gb",
+    "storage": "32gb"
+  },
+  "containerEnv": {
+    "NETBOX_VERSION": "${localEnv:NETBOX_VERSION:latest}",
+    "DEBUG": "${localEnv:DEBUG:True}",
+    "DB_HOST": "${localEnv:DB_HOST:postgres}",
+    "DB_NAME": "${localEnv:DB_NAME:netbox}",
+    "DB_USER": "${localEnv:DB_USER:netbox}",
+    "DB_PASSWORD": "${localEnv:DB_PASSWORD:netbox}",
+    "REDIS_HOST": "${localEnv:REDIS_HOST:redis}",
+    "REDIS_PASSWORD": "${localEnv:REDIS_PASSWORD:}",
+    "SUPERUSER_NAME": "${localEnv:SUPERUSER_NAME:admin}",
+    "SUPERUSER_EMAIL": "${localEnv:SUPERUSER_EMAIL:admin@example.com}",
+    "SUPERUSER_PASSWORD": "${localEnv:SUPERUSER_PASSWORD:admin}",
+    "SKIP_SUPERUSER": "${localEnv:SKIP_SUPERUSER:false}"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "ms-vscode.vscode-json",
+        "ms-vscode-remote.remote-containers"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/netbox/venv/bin/python",
+        "python.linting.enabled": false,
+        "python.formatting.provider": "none",
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit",
+            "source.fixAll.ruff": "explicit"
+          }
+        },
+        "ruff.organizeImports": true,
+        "ruff.fixAll": true,
+        "editor.formatOnSave": true,
+        "files.trimTrailingWhitespace": true,
+        "editor.rulers": [
+          88
+        ]
+      }
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/scripts/setup.sh",
+  "postAttachCommand": "bash .devcontainer/scripts/welcome.sh",
+  "remoteUser": "root"
+}

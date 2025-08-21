@@ -1,0 +1,49 @@
+# Example: Extra NetBox Configuration
+# Copy to 'extra-configuration.py' and customize
+
+import os
+
+# Example: Custom logging configuration
+# LOGGING = {
+#     'version': 1,
+#     'disable_existing_loggers': False,
+#     'handlers': {
+#         'file': {
+#             'level': 'INFO',
+#             'class': 'logging.FileHandler',
+#             'filename': '/opt/netbox/logs/netbox.log',
+#         },
+#     },
+#     'loggers': {
+#         'netbox_librenms_plugin': {
+#             'handlers': ['file'],
+#             'level': 'DEBUG',
+#             'propagate': True,
+#         },
+#     },
+# }
+
+# Example: Time zone
+# TIME_ZONE = os.environ.get('TIME_ZONE', 'UTC')
+
+# Example: Auth backends
+# AUTHENTICATION_BACKENDS = [
+#     'django.contrib.auth.backends.RemoteUserBackend',
+#     'django.contrib.auth.backends.ModelBackend',
+# ]
+
+# Example: Paths
+# MEDIA_ROOT = '/opt/netbox/netbox/media'
+# STATIC_ROOT = '/opt/netbox/netbox/static'
+
+# Dev banners
+BANNER_TOP = "Development Environment"
+BANNER_BOTTOM = "NetBox LibreNMS Plugin Dev Container"
+BANNER_LOGIN = "NetBox LibreNMS Plugin Development access only"
+
+# Plugin-specific configuration
+# PLUGINS_CONFIG = {
+#     'netbox_librenms_plugin': {
+#         'debug_logging': True,
+#     },
+# }
