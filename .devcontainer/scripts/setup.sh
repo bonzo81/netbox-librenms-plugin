@@ -190,6 +190,22 @@ alias dev-help='echo "🎯 NetBox LibreNMS Plugin Development Commands:"; echo "
 bash $PLUGIN_DIR/.devcontainer/scripts/welcome.sh
 EOF
 
+# Fix Git remote URLs for dev container compatibility
+echo "🔧 Checking Git remote configuration..."
+cd "$PLUGIN_WS_DIR"
+CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
+if [[ "$CURRENT_REMOTE" == git@github.com:* ]]; then
+  # Convert SSH URL to HTTPS for dev container compatibility
+  HTTPS_URL=$(echo "$CURRENT_REMOTE" | sed 's|git@github.com:|https://github.com/|')
+  git remote set-url origin "$HTTPS_URL"
+  echo "✅ Converted Git remote from SSH to HTTPS: $HTTPS_URL"
+  echo "   This ensures compatibility with GitHub CLI authentication in dev containers"
+elif [[ "$CURRENT_REMOTE" == https://github.com/* ]]; then
+  echo "✅ Git remote already uses HTTPS: $CURRENT_REMOTE"
+else
+  echo "ℹ️  Git remote URL: $CURRENT_REMOTE (no changes needed)"
+fi
+
 # Final validation
 cd /opt/netbox/netbox
 if python -c "import netbox_librenms_plugin; print('✅ Plugin import successful')" 2>/dev/null | grep -q "✅ Plugin import successful"; then

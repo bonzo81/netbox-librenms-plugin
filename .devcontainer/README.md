@@ -157,7 +157,22 @@ After any `.env` change, rebuild the dev container to apply environment updates.
 
 ## 🔧 Git Setup
 
-The dev container includes Git and GitHub CLI pre-installed. You'll need to configure authentication for commits and pushes:
+The dev container includes Git and GitHub CLI pre-installed. You'll need to configure authentication for commits and pushes.
+
+### Important: SSH vs HTTPS Remote URLs
+
+**Common Issue**: If you cloned this repository using SSH (`git@github.com:...`), you may encounter authentication errors when pushing changes. This is because:
+- Dev containers don't have SSH keys by default
+- GitHub CLI authentication uses HTTPS protocol
+
+**Solution**: The setup script automatically converts SSH remote URLs to HTTPS. If you encounter issues, manually fix with:
+```bash
+# Check current remote URL
+git remote -v
+
+# If it shows git@github.com:..., convert to HTTPS
+git remote set-url origin https://github.com/bonzo81/netbox-librenms-plugin.git
+```
 
 ### Recommended: GitHub CLI (Easiest)
 ```bash
@@ -229,6 +244,35 @@ cat ~/.ssh/id_ed25519.pub
 - `ruff-check|format|fix` - Ruff helpers
 
 ## 🐛 Troubleshooting
+
+### Git Authentication Issues
+
+**Problem**: `Permission denied (publickey)` or authentication errors when pushing
+```
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+```
+
+**Solutions**:
+1. **Check remote URL** - should use HTTPS, not SSH:
+   ```bash
+   git remote -v
+   # Should show: https://github.com/bonzo81/netbox-librenms-plugin.git
+   # NOT: git@github.com:bonzo81/netbox-librenms-plugin.git
+   ```
+
+2. **Fix SSH remote URL**:
+   ```bash
+   git remote set-url origin https://github.com/bonzo81/netbox-librenms-plugin.git
+   ```
+
+3. **Authenticate with GitHub CLI**:
+   ```bash
+   gh auth login
+   gh auth setup-git  # Optional: explicitly setup Git integration
+   ```
+
+### Other Issues
 
 - Rebuild container if setup fails (Ctrl+Shift+P → Rebuild Container)
 - Check logs `docker-compose logs postgres redis devcontainer`
