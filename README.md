@@ -1,7 +1,7 @@
 # NetBox LibreNMS Plugin
 
-The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but 
-this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox. 
+The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but
+this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox.
 
 
 ## Features
@@ -15,8 +15,8 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 - Description
 - Status (Enabled/Disabled)
 - Type (with [custom mapping support](docs/usage_tips/interface_mappings.md))
-- Speed 
-- MTU 
+- Speed
+- MTU
 - MAC Address
 
 > Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox.
@@ -62,7 +62,16 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 ## Contributing
 There's more to do! Coding is not my day job. Bugs will exist and imporvements will be needed. Contributions are very welcome!  I've got more ideas for new features and imporvements but please [contribute](docs/contributing.md) if you can!
 
-Or just share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions ).
+### Development Environment
+An easy way to get started with development is to use the included **development container**:
+
+- **Local Development**: Open the project in VS Code and choose "Reopen in Container"
+- **GitHub Codespaces**: Click "Code" → "Create codespace" in the GitHub repository
+- **Ready in 5 minutes**: A complete NetBox environment with PostgreSQL, Redis, and the plugin pre-installed
+
+📖 **[See the Dev Container README](.devcontainer/README.md)** for detailed setup instructions, available commands, and troubleshooting.
+
+Alternatively, share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions ).
 
 ## Compatibility
 
@@ -220,4 +229,4 @@ Based on the NetBox plugin tutorial and docs:
 - [tutorial](https://github.com/netbox-community/netbox-plugin-tutorial)
 - [docs](https://netboxlabs.com/docs/netbox/en/stable/plugins/development/)
 
-This package was created with [Cookiecutter](https://github.com/audreyr/cookiecutter). Thanks to the [`netbox-community/cookiecutter-netbox-plugin`](https://github.com/netbox-community/cookiecutter-netbox-plugin) for the project template. 
+This package was created with [Cookiecutter](https://github.com/audreyr/cookiecutter). Thanks to the [`netbox-community/cookiecutter-netbox-plugin`](https://github.com/netbox-community/cookiecutter-netbox-plugin) for the project template.

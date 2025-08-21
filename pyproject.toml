@@ -26,6 +26,13 @@ classifiers=[
 
 requires-python = ">=3.10.0"
 
+# New: Restrict package discovery to our plugin only
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["netbox_librenms_plugin*"]
+exclude = ["site*", "tests*"]
 
 [tool.setuptools.package-data]
 netbox_librenms_plugin = ["templates/**"]
