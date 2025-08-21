@@ -63,7 +63,7 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 There's more to do! Coding is not my day job. Bugs will exist and imporvements will be needed. Contributions are very welcome!  I've got more ideas for new features and imporvements but please [contribute](docs/contributing.md) if you can!
 
 ### Development Environment
-An easy way to get started with development is to tuse the included **development container**:
+An easy way to get started with development is to use the included **development container**:
 
 - **Local Development**: Open the project in VS Code and choose "Reopen in Container"
 - **GitHub Codespaces**: Click "Code" → "Create codespace" in the GitHub repository
