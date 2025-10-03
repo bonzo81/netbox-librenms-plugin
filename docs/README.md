@@ -4,8 +4,6 @@
 
 The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox.
 
-This is in early development.
-
 ## Features
 
 The plugin offers the following key features:
@@ -29,6 +27,7 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 Create cable connection in NetBox from LibreNMS links data.
 
 ### IP Address Sync
+
 Create IP address in NetBox from LibreNMS device IP data.
 
 ### Add device to LibreNMS from Netbox
@@ -45,7 +44,9 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 * Sync device site to LibreNMS location
 
 ### Screnshots/GIFs
->Screenshots from older plugin version
+
+> Screenshots from older plugin version
+
 #### Site & Location Sync
 
 ![Site Location Sync](img/Netbox-librenms-plugin-Sites.gif)
@@ -76,7 +77,6 @@ Or just share your ideas for the plugin over in [discussions](https://github.com
 | 4.2            | 0.3.6          |
 
 ## Installing
-
 
 ### Standard Installation
 
@@ -124,6 +124,7 @@ PLUGINS = [
 ### 2. Apply the plugin configuration
 
 Multi server example:
+
 ```python
 PLUGINS_CONFIG = {
     'netbox_librenms_plugin': {
