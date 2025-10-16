@@ -3,6 +3,7 @@ from django.urls import include, path
 from .models import InterfaceTypeMapping
 from .views import (
     AddDeviceToLibreNMSView,
+    DeleteNetBoxInterfacesView,
     DeviceCableTableView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
@@ -15,12 +16,15 @@ from .views import (
     InterfaceTypeMappingEditView,
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
+    LibreNMSSettingsView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
+    SingleIPAddressVerifyView,
     SyncCablesView,
     SyncInterfacesView,
     SyncIPAddressesView,
     SyncSiteLocationView,
+    TestLibreNMSConnectionView,
     UpdateDeviceLocationView,
     VMInterfaceTableView,
     VMIPAddressTableView,
@@ -61,6 +65,12 @@ urlpatterns = [
         SingleCableVerifyView.as_view(),
         name="verify_cable",
     ),
+    # Path for single IP address verify javascript call
+    path(
+        "verify-ipaddress/",
+        SingleIPAddressVerifyView.as_view(),
+        name="verify_ipaddress",
+    ),
     # Virtual machine sync URLs
     path(
         "virtual-machines/<int:pk>/interface-sync/",
@@ -82,6 +92,12 @@ urlpatterns = [
         "<str:object_type>/<int:object_id>/sync-interfaces/",
         SyncInterfacesView.as_view(),
         name="sync_selected_interfaces",
+    ),
+    # Delete NetBox-only interfaces URL
+    path(
+        "<str:object_type>/<int:object_id>/delete-netbox-interfaces/",
+        DeleteNetBoxInterfacesView.as_view(),
+        name="delete_netbox_interfaces",
     ),
     # Sync cables URL
     path(
@@ -132,6 +148,18 @@ urlpatterns = [
         "vm-status/",
         VMStatusListView.as_view(),
         name="vm_status_list",
+    ),
+    # Settings URL
+    path(
+        "settings/",
+        LibreNMSSettingsView.as_view(),
+        name="settings",
+    ),
+    # Test LibreNMS connection endpoint
+    path(
+        "settings/test-connection/",
+        TestLibreNMSConnectionView.as_view(),
+        name="test_connection",
     ),
     # Interface type mapping URLs
     path(

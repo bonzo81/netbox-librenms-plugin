@@ -117,7 +117,17 @@ class SyncCablesView(CacheMixin, View):
         except (Device.DoesNotExist, Interface.DoesNotExist):
             return {"status": "missing_remote", "interface": interface["interface"]}
 
-    @transaction.atomic()
+    def process_interface_sync(self, selected_interfaces, cached_links):
+        """Process all interfaces inside a transaction"""
+        results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
+        
+        with transaction.atomic():
+            for interface in selected_interfaces:
+                result = self.process_single_interface(interface, cached_links)
+                results[result["status"]].append(result.get("interface", ""))
+                
+        return results
+
     def post(self, request, pk):
         """Handle the POST request for cable synchronization"""
         initial_device = get_object_or_404(Device, pk=pk)
@@ -127,13 +137,11 @@ class SyncCablesView(CacheMixin, View):
         if not self.validate_prerequisites(
             cached_links, selected_interfaces, initial_device
         ):
-            return redirect(self.get_cables_tab_url(initial_device))
+            return redirect(
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
+        )
 
-        results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
-
-        for interface in selected_interfaces:
-            result = self.process_single_interface(interface, cached_links)
-            results[result["status"]].append(result.get("interface", ""))
+        results = self.process_interface_sync(selected_interfaces, cached_links)
 
         self.display_sync_results(request, results)
 

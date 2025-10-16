@@ -10,13 +10,10 @@ from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 
-class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
+class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
     """
     Add a device to LibreNMS using the API.
     """
-
-    template_name = "add_device_modal.html"
-    success_url = reverse_lazy("device_list")
 
     def get_form_class(self):
         """Return the correct form class based on the SNMP version."""
@@ -38,7 +35,12 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
         form = form_class(request.POST)
         if form.is_valid():
             return self.form_valid(form)
-        return self.form_invalid(form)
+        else:
+            # Handle form validation errors
+            for field, errors in form.errors.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}")
+            return redirect(self.object.get_absolute_url())
 
     def form_valid(self, form):
         """Handle the form submission"""
@@ -47,7 +49,6 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, FormView):
             "hostname": data.get("hostname"),
             "snmp_version": data.get("snmp_version"),
         }
-
         if device_data["snmp_version"] == "v2c":
             device_data["community"] = data.get("community")
         elif device_data["snmp_version"] == "v3":

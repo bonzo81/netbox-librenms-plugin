@@ -3,6 +3,7 @@ import json
 from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
+from django.core.exceptions import MultipleObjectsReturned
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
@@ -81,22 +82,26 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 device = Device.objects.get(
                     custom_field_data__librenms_id=remote_device_id
                 )
-                return device, True
+                return device, True, None
             except Device.DoesNotExist:
                 pass
+            except MultipleObjectsReturned:
+                return None, False, f"Multiple devices found with the same LibreNMS ID: {remote_device_id}."
 
         # Fall back to name matching if no device found by ID
         try:
             device = Device.objects.get(name=hostname)
-            return device, True
+            return device, True, None
         except Device.DoesNotExist:
             # Try without domain name
             simple_hostname = hostname.split(".")[0]
             try:
                 device = Device.objects.get(name=simple_hostname)
-                return device, True
+                return device, True, None
             except Device.DoesNotExist:
-                return None, False
+                return None, False, None
+            except MultipleObjectsReturned:
+                return None, False, f"Multiple devices found with the same name: {hostname}."
 
     def enrich_local_port(self, link, obj):
         """Add local port URL if interface exists in NetBox"""
@@ -136,19 +141,38 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
     def enrich_remote_port(self, link, device):
         """Add remote port URL if device and interface exist in NetBox"""
         if remote_port := link.get("remote_port"):
-            # First try to find interface by librenms_id
-            librenms_remote_port_id = link.get("remote_port_id")
             netbox_remote_interface = None
-            if librenms_remote_port_id:
-                netbox_remote_interface = device.interfaces.filter(
-                    custom_field_data__librenms_id=librenms_remote_port_id
-                ).first()
-
-            # If not found by librenms_id, fall back to name matching
-            if not netbox_remote_interface:
-                netbox_remote_interface = device.interfaces.filter(
-                    name=remote_port
-                ).first()
+            librenms_remote_port_id = link.get("remote_port_id")
+            
+            # Handle virtual chassis case
+            if hasattr(device, "virtual_chassis") and device.virtual_chassis:
+                # Get the appropriate chassis member based on the port name
+                chassis_member = get_virtual_chassis_member(device, remote_port)
+                
+                # First try to find interface by librenms_id
+                if librenms_remote_port_id:
+                    netbox_remote_interface = chassis_member.interfaces.filter(
+                        custom_field_data__librenms_id=librenms_remote_port_id
+                    ).first()
+                
+                # If not found by librenms_id, fall back to name matching on the correct chassis member
+                if not netbox_remote_interface:
+                    netbox_remote_interface = chassis_member.interfaces.filter(
+                        name=remote_port
+                    ).first()
+            else:
+                # Non-virtual chassis case
+                # First try to find interface by librenms_id
+                if librenms_remote_port_id:
+                    netbox_remote_interface = device.interfaces.filter(
+                        custom_field_data__librenms_id=librenms_remote_port_id
+                    ).first()
+                    
+                # If not found by librenms_id, fall back to name matching
+                if not netbox_remote_interface:
+                    netbox_remote_interface = device.interfaces.filter(
+                        name=remote_port
+                    ).first()
 
             if netbox_remote_interface:
                 link["remote_port_url"] = reverse(
@@ -157,7 +181,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                 link["netbox_remote_interface_id"] = netbox_remote_interface.pk
                 link["remote_port_name"] = netbox_remote_interface.name
 
-        return link
+            return link
 
     def check_cable_status(self, link):
         """Check cable status and add cable URL if cable exists in NetBox"""
@@ -194,7 +218,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
     def process_remote_device(self, link, remote_hostname, remote_device_id):
         """Process remote device data and add remote device URL if device exists in NetBox"""
-        device, found = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
+        device, found, error_message = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
         if found:
             link.update(
                 {
@@ -207,7 +231,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         link.update(
             {
                 "remote_port_name": link["remote_port"],
-                "cable_status": "Device Not Found in NetBox",
+                "cable_status": error_message if error_message else "Device Not Found in NetBox",
                 "can_create_cable": False,
             }
         )
@@ -267,7 +291,6 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
         if cache_ttl is not None:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
-
         # Generate the table
         table = self.get_table(links_data, obj)
 

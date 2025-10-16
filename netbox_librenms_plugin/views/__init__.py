@@ -5,7 +5,7 @@ Module for initializing views for the NetBox LibreNMS plugin.
 # Import views as needed
 from .base.cables_view import BaseCableTableView, SingleCableVerifyView
 from .base.interfaces_view import BaseInterfaceTableView
-from .base.ip_addresses_view import BaseIPAddressTableView
+from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView
 from .base.librenms_sync_view import BaseLibreNMSSyncView
 
 from .mapping_views import (
@@ -22,6 +22,7 @@ from .status_check import (
     VMStatusListView,
 )
 from .sync.cables_sync import SyncCablesView
+from .sync.cleanup_interfaces import DeleteNetBoxInterfacesView
 from .sync.devices_sync import AddDeviceToLibreNMSView, UpdateDeviceLocationView
 from .sync.interfaces_sync import SyncInterfacesView
 from .sync.locations_sync import SyncSiteLocationView
@@ -36,3 +37,4 @@ from .device_views import (
 )
 
 from .vm_views import VMInterfaceTableView, VMIPAddressTableView, VMLibreNMSSyncView
+from .settings_views import LibreNMSSettingsView, TestLibreNMSConnectionView

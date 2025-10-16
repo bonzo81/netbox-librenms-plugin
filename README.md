@@ -1,9 +1,8 @@
 # NetBox LibreNMS Plugin
 
-The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but 
-this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox. 
+The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but
+this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox.
 
-This is in early development.
 
 ## Features
 
@@ -16,8 +15,8 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 - Description
 - Status (Enabled/Disabled)
 - Type (with [custom mapping support](docs/usage_tips/interface_mappings.md))
-- Speed 
-- MTU 
+- Speed
+- MTU
 - MAC Address
 
 > Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox.
@@ -39,6 +38,10 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 - Update existing LibreNMS locations langitude and longitude values based on NetBox data
 - Sync device site to LibreNMS location
 
+### Multi LibreNMS Server Configuration
+- Configure multiple LibreNMS instances in your NetBox configuration
+- Switch between different LibreNMS servers through the web interface
+- Maintain backward compatibility with single-server configurations
 
 ## Screenshots/GIFs
 >Screenshots from older plugin version
@@ -59,14 +62,23 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 ## Contributing
 There's more to do! Coding is not my day job. Bugs will exist and imporvements will be needed. Contributions are very welcome!  I've got more ideas for new features and imporvements but please [contribute](docs/contributing.md) if you can!
 
-Or just share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions ).
+### Development Environment
+An easy way to get started with development is to use the included **development container**:
+
+- **Local Development**: Open the project in VS Code and choose "Reopen in Container"
+- **GitHub Codespaces**: Click "Code" → "Create codespace" in the GitHub repository
+- **Ready in 5 minutes**: A complete NetBox environment with PostgreSQL, Redis, and the plugin pre-installed
+
+📖 **[See the Dev Container README](.devcontainer/README.md)** for detailed setup instructions, available commands, and troubleshooting.
+
+Alternatively, share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions ).
 
 ## Compatibility
 
 | NetBox Version | Plugin Version |
 |----------------|----------------|
 |     4.1        | 0.2.x - 0.3.5  |
-|     4.2        | 0.3.6          |
+|     4.2        | 0.3.6+          |
 ## Installing
 
 
@@ -104,14 +116,54 @@ netbox-librenms-plugin
 ## Configuration
 
 ### 1. Enable the Plugin
-Enable the plugin in `/opt/netbox/netbox/netbox/configuration.py`,
- or if you use netbox-docker, your `/configuration/plugins.py` file :
+
+Enable the plugin in `/opt/netbox/netbox/netbox/configuration.py`, or if you use netbox-docker, your `/configuration/plugins.py` file :
 
 ```python
 PLUGINS = [
     'netbox_librenms_plugin'
 ]
+```
 
+### 2. Apply the plugin configuration
+
+Multi server example:
+```python
+PLUGINS_CONFIG = {
+    'netbox_librenms_plugin': {
+        'servers': {
+            'production': {
+                'display_name': 'Production LibreNMS',
+                'librenms_url': 'https://librenms-prod.example.com',
+                'api_token': 'your_production_token',
+                'cache_timeout': 300,
+                'verify_ssl': True,
+                'interface_name_field': 'ifDescr'
+            },
+            'testing': {
+                'display_name': 'Test LibreNMS',
+                'librenms_url': 'https://librenms-test.example.com',
+                'api_token': 'your_test_token',
+                'cache_timeout': 300,
+                'verify_ssl': False,
+                'interface_name_field': 'ifName'
+            },
+            'development': {
+                'display_name': 'Dev LibreNMS',
+                'librenms_url': 'https://librenms-dev.example.com',
+                'api_token': 'your_dev_token',
+                'cache_timeout': 180,
+                'verify_ssl': False,
+                'interface_name_field': 'ifDescr'
+            }
+        }
+    }
+}
+```
+
+Or use the original single server confiig example:
+
+```python
 PLUGINS_CONFIG = {
     'netbox_librenms_plugin': {
         'librenms_url': 'https://your-librenms-instance.com',
@@ -123,7 +175,7 @@ PLUGINS_CONFIG = {
 }
 ```
 
-### 2. Apply Database Migrations
+### 3. Apply Database Migrations
 
 Apply database migrations with Netbox `manage.py`:
 
@@ -131,7 +183,7 @@ Apply database migrations with Netbox `manage.py`:
 (venv) $ python manage.py migrate
 ```
 
-### 3. Collect Static Files
+### 4. Collect Static Files
 
 The plugin includes static files that need to be collected by NetBox. Run the following command to collect static files:
 
@@ -139,7 +191,7 @@ The plugin includes static files that need to be collected by NetBox. Run the fo
 (venv) $ python manage.py collectstatic --no-input
 ```
 
-### 4. Restart Netbox
+### 5. Restart Netbox
 
 Restart the Netbox service to apply changes:
 
@@ -147,32 +199,23 @@ Restart the Netbox service to apply changes:
 sudo systemctl restart netbox
 ```
 
-### 5. Custom Field
+### 6. Custom Field
+
 It is recommended (but not essential) to add a custom field `librenms_id` to the Device, Virtual Machine and Interface models in NetBox. Use the following settings:
 
-- **Object Types:** 
-    - Check **dcim > device**
-    - Check **virtualization > virtual machine**
-    - Check **dcim > interface**
-    - Check **virtualization > interfaces (optional)**
-- **Name:** `librenms_id`
-- **Label:** `LibreNMS ID`
-- **Description:** (Optional) Add a description like "LibreNMS ID for LibreNMS Plugin".
-- **Type:** Integer
-- **Required:** Leave unchecked.
-- **Default Value:** Leave blank.
+* **Object Types:**
+  * Check **dcim > device**
+  * Check **virtualization > virtual machine**
+  * Check **dcim > interface**
+  * Check **virtualization > interfaces (optional)**
+* **Name:** `librenms_id`
+* **Label:** `LibreNMS ID`
+* **Description:** (Optional) Add a description like "LibreNMS ID for LibreNMS Plugin".
+* **Type:** Integer
+* **Required:** Leave unchecked.
+* **Default Value:** Leave blank.
 
-For more info check out [custom field docs](docs/usage_tips/custom_field.md)
-
-## Update
-
-```
-source /opt/netbox/venv/bin/activate
-pip install -U netbox-librenms-plugin
-python manage.py migrate
-python manage.py collectstatic --no-input
-systemctl restart netbox
-```
+For more info check out [custom field docs](usage_tips/custom_field.md)
 
 ## Uninstall
 
@@ -186,4 +229,4 @@ Based on the NetBox plugin tutorial and docs:
 - [tutorial](https://github.com/netbox-community/netbox-plugin-tutorial)
 - [docs](https://netboxlabs.com/docs/netbox/en/stable/plugins/development/)
 
-This package was created with [Cookiecutter](https://github.com/audreyr/cookiecutter). Thanks to the [`netbox-community/cookiecutter-netbox-plugin`](https://github.com/netbox-community/cookiecutter-netbox-plugin) for the project template. 
+This package was created with [Cookiecutter](https://github.com/audreyr/cookiecutter). Thanks to the [`netbox-community/cookiecutter-netbox-plugin`](https://github.com/netbox-community/cookiecutter-netbox-plugin) for the project template.

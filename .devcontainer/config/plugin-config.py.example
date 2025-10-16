@@ -1,0 +1,46 @@
+"""
+Default plugin configuration for the NetBox LibreNMS Plugin in the dev container.
+
+- This file is an example of Plugin configuration
+- Copy this file to .devcontainer/plugin-config.py
+- Edit values as needed.
+
+- Add config for all other plugins here if any. 
+"""
+
+# Ensure our plugin is enabled in dev (the loader sets this as a default too)
+PLUGINS = [
+    "netbox_librenms_plugin",
+]
+
+# Sample configuration with three example servers
+PLUGINS_CONFIG = {
+    "netbox_librenms_plugin": {
+        "servers": {
+            "production": {
+                "display_name": "Production LibreNMS",
+                "librenms_url": "https://librenms-prod.exampel.com",
+                "api_token": "your-prod-token",
+                "cache_timeout": 300,
+                "verify_ssl": True,
+                "interface_name_field": "ifDescr",
+            },
+            "testing": {
+                "display_name": "Test LibreNMS",
+                "librenms_url": "https://librenms-test.example.com",
+                "api_token": "your_test_token",
+                "cache_timeout": 300,
+                "verify_ssl": False,
+                "interface_name_field": "ifName",
+            },
+            "development": {
+                "display_name": "Dev LibreNMS",
+                "librenms_url": "https://librenms-dev.example.com",
+                "api_token": "your_dev_token",
+                "cache_timeout": 180,
+                "verify_ssl": False,
+                "interface_name_field": "ifDescr",
+            },
+        }
+    }
+}

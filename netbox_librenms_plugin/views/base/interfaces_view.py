@@ -69,7 +69,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS.")
             return redirect(self.get_redirect_url(obj))
-        
+
         # TODO: id 2 - Fix return to use tuple (success, data)
         librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
@@ -102,6 +102,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
         """Get the context data for the interface sync view."""
         ports_data = []
         table = None
+        netbox_only_interfaces = []
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request)
@@ -159,6 +160,41 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             table = self.get_table(ports_data, obj, interface_name_field)
             table.configure(request)
 
+            # Identify NetBox-only interfaces (interfaces in NetBox but not in LibreNMS)
+            librenms_interface_names = {
+                port.get(interface_name_field)
+                for port in ports_data
+                if port.get(interface_name_field)
+            }
+
+            netbox_only_interfaces = []
+            for device_id, device_interfaces in interfaces_by_device.items():
+                for interface_name, interface in device_interfaces.items():
+                    if interface_name not in librenms_interface_names:
+                        # Get device name for the interface
+                        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                            device = obj.virtual_chassis.members.get(id=device_id)
+                            device_name = device.name
+                        else:
+                            device_name = obj.name
+
+                        netbox_only_interfaces.append(
+                            {
+                                "id": interface.id,
+                                "name": interface.name,
+                                "device_name": device_name,
+                                "device_id": device_id,
+                                "type": str(interface.type)
+                                if hasattr(interface, "type") and interface.type
+                                else "Virtual"
+                                if hasattr(interface, "virtual_machine")
+                                else "Unknown",
+                                "enabled": interface.enabled,
+                                "description": interface.description or "",
+                                "url": interface.get_absolute_url(),
+                            }
+                        )
+
         virtual_chassis_members = []
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             virtual_chassis_members = obj.virtual_chassis.members.all()
@@ -177,4 +213,5 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             "cache_expiry": cache_expiry,
             "virtual_chassis_members": virtual_chassis_members,
             "interface_name_field": interface_name_field,
+            "netbox_only_interfaces": netbox_only_interfaces,
         }

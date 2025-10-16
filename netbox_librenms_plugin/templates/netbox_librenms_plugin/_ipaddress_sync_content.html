@@ -48,13 +48,21 @@
                     flex-wrap: wrap;
                     align-items: center;
                 }
-                td[data-col="device_selection"] {
-                    width: 300px;
-                    min-width: 200px;
+                
+                /* VRF dropdown styles */
+                td[data-col="vrf"] {
+                    width: 250px;
+                    min-width: 180px;
                 }
-                td[data-col="device_selection"] .ts-wrapper {
+                td[data-col="vrf"] .ts-wrapper {
                     width: 100%;
                     max-width: 100%;
+                }
+                
+                /* Ensure select elements in VRF column maintain consistent width */
+                td[data-col="vrf"] select.form-select {
+                    width: 100%;
+                    min-width: 160px;
                 }
             </style>
             <div class="card">

@@ -28,6 +28,28 @@
 
 {% block content %}
 
+<!-- LibreNMS Server Information -->
+{% if librenms_server_info %}
+<div class="alert alert-info mb-3" role="alert">
+    <div class="d-flex justify-content-between align-items-center">
+        <div>
+            <i class="mdi mdi-server-network"></i>
+            <strong>Active LibreNMS Server:</strong>
+            {% if librenms_server_info.is_legacy %}
+            {{ librenms_server_info.url }}
+            {% else %}
+            {{ librenms_server_info.display_name }} ({{ librenms_server_info.url }})
+            {% endif %}
+        </div>
+        {% if not librenms_server_info.is_legacy %}
+        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary">
+            <i class="mdi mdi-cog"></i> Change Server
+        </a>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <!-- Device Status and LibreNMS Information -->
 <div class="d-flex justify-content-between align-items-center mb-1">
     <div class="card">
@@ -106,78 +128,50 @@
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
         <li class="nav-item" role="presentation">
-            <button class="nav-link"
-                    id="interfaces-tab"
-                    data-tab="interfaces"
-                    data-bs-toggle="tab"
-                    data-bs-target="#interfaces"
-                    type="button"
-                    role="tab"
-                    aria-controls="interfaces">
+            <button class="nav-link" id="interfaces-tab" data-tab="interfaces" data-bs-toggle="tab"
+                data-bs-target="#interfaces" type="button" role="tab" aria-controls="interfaces">
                 Interfaces
             </button>
         </li>
         {% if cable_sync %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link"
-                    id="cables-tab"
-                    data-tab="cables"
-                    data-bs-toggle="tab"
-                    data-bs-target="#cables"
-                    type="button"
-                    role="tab"
-                    aria-controls="cables">
+            <button class="nav-link" id="cables-tab" data-tab="cables" data-bs-toggle="tab" data-bs-target="#cables"
+                type="button" role="tab" aria-controls="cables">
                 Cables
             </button>
         </li>
         {% endif %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link"
-                    id="ipaddresses-tab"
-                    data-tab="ipaddresses"
-                    data-bs-toggle="tab"
-                    data-bs-target="#ipaddresses"
-                    type="button"
-                    role="tab"
-                    aria-controls="ipaddresses">
+            <button class="nav-link" id="ipaddresses-tab" data-tab="ipaddresses" data-bs-toggle="tab"
+                data-bs-target="#ipaddresses" type="button" role="tab" aria-controls="ipaddresses">
                 IP Addresses
             </button>
         </li>
     </ul>
-    <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top" 
-         title="Select preferred interface name field">
-        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifDescr" id="ifDescr" 
-               {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
+    <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top"
+        title="Select preferred interface name field">
+        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifDescr"
+            id="ifDescr" {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
         <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
-        
-        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifName" id="ifName" 
-               {% if interface_name_field == 'ifName' %}checked{% endif %}>
+
+        <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifName"
+            id="ifName" {% if interface_name_field == 'ifName' %}checked{% endif %}>
         <label class="btn btn-outline-primary" for="ifName">ifName</label>
     </div>
 </div>
 <!-- Tab Content -->
 <div class="tab-content mt-3" id="librenmsTabContent">
-    <div class="tab-pane fade" 
-         id="interfaces" 
-         role="tabpanel" 
-         aria-labelledby="interfaces-tab"
-         data-tab-id="interfaces">
+    <div class="tab-pane fade" id="interfaces" role="tabpanel" aria-labelledby="interfaces-tab"
+        data-tab-id="interfaces">
         {% include 'netbox_librenms_plugin/_interface_sync.html' %}
     </div>
 
-    <div class="tab-pane fade" 
-         id="cables" 
-         role="tabpanel" 
-         aria-labelledby="cables-tab"
-         data-tab-id="cables">
+    <div class="tab-pane fade" id="cables" role="tabpanel" aria-labelledby="cables-tab" data-tab-id="cables">
         {% include 'netbox_librenms_plugin/_cable_sync.html' %}
     </div>
 
-    <div class="tab-pane fade" 
-         id="ipaddresses" 
-         role="tabpanel" 
-         aria-labelledby="ipaddresses-tab"
-         data-tab-id="ipaddresses">
+    <div class="tab-pane fade" id="ipaddresses" role="tabpanel" aria-labelledby="ipaddresses-tab"
+        data-tab-id="ipaddresses">
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
 </div>
@@ -197,7 +191,7 @@
                     <li>NetBox Name: {{ object.name }}</li>
                     <li>Primary IP: {{ object.primary_ip.address.ip|default:'-' }}</li>
                     <li>Primary IP DNS Name: {{ object.primary_ip.dns_name|default:'-' }}</li>
-                    
+
                 </ul>
                 LibreNMS Device with ID <code>{{ librenms_device_id }}</code>:
                 <ul class="mb-1">
@@ -243,7 +237,8 @@
 </div>
 {% elif is_vc_member and has_vc_primary_ip %}
 <div class="alert alert-info">
-    LibreNMS sync is managed by virtual chassis member <a href="{{ vc_primary_device.get_absolute_url }}">{{ vc_primary_device }}</a>
+    LibreNMS sync is managed by virtual chassis member <a href="{{ vc_primary_device.get_absolute_url }}">{{
+        vc_primary_device }}</a>
 </div>
 {% elif not found_in_librenms %}
 <div class="alert alert-warning">
@@ -286,11 +281,11 @@
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
                     id="snmpv2-form">
                     {% csrf_token %}
+                    <input type="hidden" name="snmp_version" value="v2c">
                     <div class="mb-3">
                         {{ v2form.hostname.label_tag }}
                         {{ v2form.hostname }}
                     </div>
-                    {{ v2form.snmp_version }}
                     <div class="mb-3">
                         {{ v2form.community.label_tag }}
                         {{ v2form.community }}
@@ -302,13 +297,13 @@
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
                     id="snmpv3-form" style="display: none;">
                     {% csrf_token %}
+                    <input type="hidden" name="snmp_version" value="v3">
                     <div class="mb-3">
                         {{ v3form.hostname.label_tag }}
                         {{ v3form.hostname }}
                     </div>
-                    {{ v3form.snmp_version }}
                     {% for field in v3form %}
-                    {% if field.name != 'hostname' and field.name != 'snmp_version' %}
+                    {% if field.name != 'hostname' %}
                     <div class="mb-3">
                         {{ field.label_tag }}
                         {{ field }}

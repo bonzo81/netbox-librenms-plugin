@@ -4,8 +4,6 @@
 
 The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allowing you to leverage data from both systems. NetBox remains the Source of Truth (SoT) for you network, but this plugin allows you to easily onboard device objects from existing data in LibreNMS. The plugin does not automatically create objects in NetBox to ensure only verified data is used to populate NetBox.
 
-This is in early development.
-
 ## Features
 
 The plugin offers the following key features:
@@ -29,6 +27,7 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 Create cable connection in NetBox from LibreNMS links data.
 
 ### IP Address Sync
+
 Create IP address in NetBox from LibreNMS device IP data.
 
 ### Add device to LibreNMS from Netbox
@@ -45,7 +44,9 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 * Sync device site to LibreNMS location
 
 ### Screnshots/GIFs
->Screenshots from older plugin version
+
+> Screenshots from older plugin version
+
 #### Site & Location Sync
 
 ![Site Location Sync](img/Netbox-librenms-plugin-Sites.gif)
@@ -76,7 +77,6 @@ Or just share your ideas for the plugin over in [discussions](https://github.com
 | 4.2            | 0.3.6          |
 
 ## Installing
-
 
 ### Standard Installation
 
@@ -119,7 +119,48 @@ Enable the plugin in `/opt/netbox/netbox/netbox/configuration.py`, or if you use
 PLUGINS = [
     'netbox_librenms_plugin'
 ]
+```
 
+### 2. Apply the plugin configuration
+
+Multi server example:
+
+```python
+PLUGINS_CONFIG = {
+    'netbox_librenms_plugin': {
+        'servers': {
+            'production': {
+                'display_name': 'Production LibreNMS',
+                'librenms_url': 'https://librenms-prod.example.com',
+                'api_token': 'your_production_token',
+                'cache_timeout': 300,
+                'verify_ssl': True,
+                'interface_name_field': 'ifDescr'
+            },
+            'testing': {
+                'display_name': 'Test LibreNMS',
+                'librenms_url': 'https://librenms-test.example.com',
+                'api_token': 'your_test_token',
+                'cache_timeout': 300,
+                'verify_ssl': False,
+                'interface_name_field': 'ifName'
+            },
+            'development': {
+                'display_name': 'Dev LibreNMS',
+                'librenms_url': 'https://librenms-dev.example.com',
+                'api_token': 'your_dev_token',
+                'cache_timeout': 180,
+                'verify_ssl': False,
+                'interface_name_field': 'ifDescr'
+            }
+        }
+    }
+}
+```
+
+Or use the original single server confiig example:
+
+```python
 PLUGINS_CONFIG = {
     'netbox_librenms_plugin': {
         'librenms_url': 'https://your-librenms-instance.com',
@@ -131,7 +172,7 @@ PLUGINS_CONFIG = {
 }
 ```
 
-### 2. Apply Database Migrations
+### 3. Apply Database Migrations
 
 Apply database migrations with Netbox `manage.py`:
 
@@ -139,7 +180,7 @@ Apply database migrations with Netbox `manage.py`:
 (venv) $ python manage.py migrate
 ```
 
-### 3. Collect Static Files
+### 4. Collect Static Files
 
 The plugin includes static files that need to be collected by NetBox. Run the following command to collect static files:
 
@@ -147,7 +188,7 @@ The plugin includes static files that need to be collected by NetBox. Run the fo
 (venv) $ python manage.py collectstatic --no-input
 ```
 
-### 4. Restart Netbox
+### 5. Restart Netbox
 
 Restart the Netbox service to apply changes:
 
@@ -155,7 +196,7 @@ Restart the Netbox service to apply changes:
 sudo systemctl restart netbox
 ```
 
-### 5. Custom Field
+### 6. Custom Field
 
 It is recommended (but not essential) to add a custom field `librenms_id` to the Device, Virtual Machine and Interface models in NetBox. Use the following settings:
 

@@ -1,0 +1,28 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <table class="table table-hover attr-table">
+        <thead>
+          <tr>
+            <th>LibreNMS Type</th>
+            <th>LibreNMS Speed (Kbps)</th>
+            <th>NetBox Type</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{{ object.librenms_type }}</td>
+            <td>{{ object.librenms_speed }}</td>
+            <td>{{ object.get_netbox_type_display }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div> 
+{% endblock %}

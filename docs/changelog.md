@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.3.15 (2025-07-12)
+
+### Improvements
+* Improve multi-server configuration handling and add connection testing
+
+
+## 0.3.14 (2025-07-08)
+
+### Fixes
+* Filter out invalid IP entries in BaseIPAddressTableView 
+
+### New Features
+* View/Delete NetBox-only (unmatched) interfaces
+* Add multi LibreNMS server configuration support for LibreNMS plugin 
+
+### Documentation
+* Add page for multi server configuration instructions and example
+
+
+## 0.3.13 (2025-06=27)
+
+### New Feature
+* Add support for IPv6 handling in IP address synchronization
+
+### Documentation
+* Add basic development documentation
+
+## 0.3.12 (2025-04-11)
+
+### Improvements
+* Add VRF selection support to IP address table and sync
+* Implement single IP address verification and VRF assignment
+* Extend single IP verification to support Virtual Machines
+
+### Under the hood
+* Refactor cable and IP address synchronization methods for improved transaction handling
+* Refactor IP address enrichment for improved performance
+
+## 0.3.11 (2025-03-31)
+
+### Improvements
+* Enhance remote port enrichment for virtual chassis devices
+
+## 0.3.10 (2025-03-17)
+
+### Fixes
+* Fix URL error when no interfaces are selected during sync
+* Add hidden SNMP version field to forms and update sync logic
+
+## 0.3.9 (2025-03-14)
+
+### Fixes
+* Fix missing add_device_modal.html template and form handling
+* Fix missing interfacetypemapping template
+
+
+## 0.3.8 (2025-03-06)
+
+### Fixes
+* Fix cable table error when more than one remote device returned 
+* Fix cable table checkboxes controls for virtual chassis devices
+
+### Improvements
+* Add slug check to Site and Location Sync 
+
+
 ## 0.3.7 (2025-01-22)
 
 ### Fixes

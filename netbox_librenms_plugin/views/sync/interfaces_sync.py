@@ -40,11 +40,17 @@ class SyncInterfacesView(CacheMixin, View):
         exclude_columns = request.POST.getlist("exclude_columns")
 
         if selected_interfaces is None:
-            return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
+            return redirect(
+                reverse(url_name, kwargs={"pk": object_id})
+                + f"?tab=interfaces&interface_name_field={interface_name_field}"
+            )
 
         ports_data = self.get_cached_ports_data(request, obj)
         if ports_data is None:
-            return redirect(f"plugins:netbox_librenms_plugin:{url_name}", pk=object_id)
+            return redirect(
+                reverse(url_name, kwargs={"pk": object_id})
+                + f"?tab=interfaces&interface_name_field={interface_name_field}"
+            )
 
         self.sync_selected_interfaces(
             obj, selected_interfaces, ports_data, exclude_columns, interface_name_field

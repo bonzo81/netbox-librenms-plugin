@@ -9,6 +9,11 @@ menu = PluginMenu(
             "Settings",
             (
                 PluginMenuItem(
+                    link="plugins:netbox_librenms_plugin:settings",
+                    link_text="Server Settings",
+                    permissions=["netbox_librenms_plugin.view_librenmssettings"],
+                ),
+                PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:interfacetypemapping_list",
                     link_text="Interface Mappings",
                     buttons=(

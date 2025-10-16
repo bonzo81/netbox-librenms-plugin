@@ -278,3 +278,10 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 .vscode/settings.json
+
+# Dev Container files
+.devcontainer/.env
+.devcontainer/extra-requirements.txt
+.devcontainer/config/plugin-config.py
+.devcontainer/config/extra-configuration.py
+.devcontainer/config/extra-plugins.py
