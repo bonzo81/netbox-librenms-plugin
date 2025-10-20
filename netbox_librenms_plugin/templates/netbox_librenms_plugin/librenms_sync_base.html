@@ -230,7 +230,16 @@
 </div>
 {% endif %}
 {% else %}
-{% if is_vc_member and not has_vc_primary_ip %}
+{% if is_vc_member and vc_has_librenms %}
+<div class="alert alert-info">
+    {% if vc_primary_device %}
+    LibreNMS sync is managed by virtual chassis member <a href="{{ vc_primary_device.get_absolute_url }}">{{
+        vc_primary_device }}</a>
+    {% else %}
+    LibreNMS sync is managed by the virtual chassis primary device
+    {% endif %}
+</div>
+{% elif is_vc_member and not has_vc_primary_ip %}
 <div class="alert alert-warning">
     {% if vc_primary_device %}
     Virtual chassis primary device <a href="{{ vc_primary_device.get_absolute_url }}">{{ vc_primary_device }}</a>

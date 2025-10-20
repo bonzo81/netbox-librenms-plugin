@@ -71,10 +71,13 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             
             # For display purposes, prefer the master with librenms_id even without primary IP
             # This allows showing a link to the primary device that has LibreNMS configured
+            vc_has_librenms = False  # Track if VC master has LibreNMS configured
+            
             if vc_master and vc_master.cf.get("librenms_id"):
-                # Master has librenms_id, use it for display even without primary IP
+                # Master has librenms_id - LibreNMS sync is available there
                 vc_primary_device = vc_master
                 has_vc_primary_ip = bool(vc_master.primary_ip)
+                vc_has_librenms = True  # Master has LibreNMS configured
             elif not vc_master or not vc_master.primary_ip:
                 # If no master or master has no primary IP (and no librenms_id), 
                 # find first member with primary IP
@@ -98,6 +101,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                     "is_vc_member": True,
                     "has_vc_primary_ip": has_vc_primary_ip,
                     "vc_primary_device": vc_primary_device,
+                    "vc_has_librenms": vc_has_librenms,
                 }
             )
 
