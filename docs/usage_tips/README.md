@@ -26,12 +26,13 @@
 2. The plugin will populate the `librenms_id` custom field if the device is found in LibreNMS
 
 ### Virtual Chassis
-1. Master or first member with primary IP is used for LibreNMS Sync
-2. When possible chassis member position should match interface names 
+1. The plugin automatically selects a sync device using priority: `librenms_id` → master with IP → any member with IP → lowest position
+2. Only the sync device should have the `librenms_id` custom field set
+3. When possible, chassis member position should match interface names 
     
-    *e.g. swtich 1 = eth1/0/1, switch 2 = eth2/0/1*
+    *e.g. switch 1 = eth1/0/1, switch 2 = eth2/0/1*
 
-3. Verify member selection before bulk synchronization
+4. Verify member selection before bulk synchronization
 
 ## Interface Management
 

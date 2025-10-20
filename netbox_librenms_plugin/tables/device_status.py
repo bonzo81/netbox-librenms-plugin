@@ -4,6 +4,8 @@ from django.urls import reverse
 from django.utils.safestring import mark_safe
 from django_tables2 import Column
 
+from netbox_librenms_plugin.utils import get_librenms_sync_device
+
 
 class DeviceStatusTable(DeviceTable):
     """
@@ -23,26 +25,17 @@ class DeviceStatusTable(DeviceTable):
             kwargs={"pk": record.pk},
         )
 
-        # Check if device is VC member and get master if applicable
+        # Check if device is VC member and redirect to sync device if different
         if hasattr(record, "virtual_chassis") and record.virtual_chassis:
-            vc_master = record.virtual_chassis.master
-            if not vc_master or not vc_master.primary_ip:
-                vc_master = next(
-                    (
-                        member
-                        for member in record.virtual_chassis.members.all()
-                        if member.primary_ip
-                    ),
-                    None,
-                )
-            if vc_master and record.pk != vc_master.pk:
-                master_url = reverse(
+            sync_device = get_librenms_sync_device(record)
+            if sync_device and record.pk != sync_device.pk:
+                sync_device_url = reverse(
                     "plugins:netbox_librenms_plugin:device_librenms_sync",
-                    kwargs={"pk": vc_master.pk},
+                    kwargs={"pk": sync_device.pk},
                 )
                 return mark_safe(
-                    f'<a href="{master_url}"><span class="text-info">'
-                    f'<i class="mdi mdi-server-network"></i> See {vc_master.name}</span></a>'
+                    f'<a href="{sync_device_url}"><span class="text-info">'
+                    f'<i class="mdi mdi-server-network"></i> See {sync_device.name}</span></a>'
                 )
         if value:
             status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Found</span>'
