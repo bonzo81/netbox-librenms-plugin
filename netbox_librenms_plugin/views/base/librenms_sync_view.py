@@ -4,7 +4,10 @@ from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
-from netbox_librenms_plugin.utils import get_interface_name_field
+from netbox_librenms_plugin.utils import (
+    get_interface_name_field,
+    get_librenms_sync_device,
+)
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 
@@ -22,28 +25,17 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         """Handle GET request for the LibreNMS sync view."""
         obj = get_object_or_404(self.model, pk=pk)
 
-        # For Virtual Chassis members, try to use the primary device's LibreNMS ID
-        # if this device doesn't have its own
+        # For Virtual Chassis members, determine which device should handle LibreNMS sync
+        # NOTE: VC members should NOT have their own librenms_id - LibreNMS only tracks
+        # one logical device per VC
         librenms_lookup_device = obj
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             # Check if this device has its own librenms_id
             if not obj.cf.get("librenms_id"):
-                # Try to find the VC primary/master device
-                vc_master = obj.virtual_chassis.master
-                if not vc_master or not vc_master.primary_ip:
-                    # If no master or master has no primary IP, find first member with primary IP
-                    vc_master = next(
-                        (
-                            member
-                            for member in obj.virtual_chassis.members.all()
-                            if member.primary_ip
-                        ),
-                        None,
-                    )
-                
-                # Use the master device for LibreNMS ID lookup if it has one
-                if vc_master and vc_master.cf.get("librenms_id"):
-                    librenms_lookup_device = vc_master
+                # Use helper function to determine the sync device
+                sync_device = get_librenms_sync_device(obj)
+                if sync_device:
+                    librenms_lookup_device = sync_device
 
         # Get librenms_id using the determined lookup device
         self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
@@ -67,41 +59,25 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         )
 
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            vc_master = obj.virtual_chassis.master
-            
-            # For display purposes, prefer the master with librenms_id even without primary IP
-            # This allows showing a link to the primary device that has LibreNMS configured
-            vc_has_librenms = False  # Track if VC master has LibreNMS configured
-            
-            if vc_master and vc_master.cf.get("librenms_id"):
-                # Master has librenms_id - LibreNMS sync is available there
-                vc_primary_device = vc_master
-                has_vc_primary_ip = bool(vc_master.primary_ip)
-                vc_has_librenms = True  # Master has LibreNMS configured
-            elif not vc_master or not vc_master.primary_ip:
-                # If no master or master has no primary IP (and no librenms_id), 
-                # find first member with primary IP
-                vc_master = next(
-                    (
-                        member
-                        for member in obj.virtual_chassis.members.all()
-                        if member.primary_ip
-                    ),
-                    None,
+            # Use helper function to determine the sync device
+            librenms_sync_device = get_librenms_sync_device(obj)
+
+            # Determine sync device status
+            sync_device_has_librenms_id = False
+            sync_device_has_primary_ip = False
+
+            if librenms_sync_device:
+                sync_device_has_librenms_id = bool(
+                    librenms_sync_device.cf.get("librenms_id")
                 )
-                vc_primary_device = vc_master
-                has_vc_primary_ip = bool(vc_master.primary_ip if vc_master else False)
-            else:
-                # Master exists with primary IP
-                vc_primary_device = vc_master
-                has_vc_primary_ip = True
+                sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
 
             context.update(
                 {
                     "is_vc_member": True,
-                    "has_vc_primary_ip": has_vc_primary_ip,
-                    "vc_primary_device": vc_primary_device,
-                    "vc_has_librenms": vc_has_librenms,
+                    "sync_device_has_primary_ip": sync_device_has_primary_ip,
+                    "librenms_sync_device": librenms_sync_device,
+                    "sync_device_has_librenms_id": sync_device_has_librenms_id,
                 }
             )
 
@@ -180,15 +156,32 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 # Check hostname match with normalization for VC suffixes
                 elif netbox_host and librenms_host:
                     # Normalize NetBox hostname by removing VC member suffixes like ' (1)', ' (2)', etc.
-                    netbox_host_normalized = re.sub(r'\s*\(\d+\)$', '', netbox_host)
-                    
+                    netbox_host_normalized = re.sub(r"\s*\(\d+\)$", "", netbox_host)
+
                     if netbox_host_normalized == librenms_host:
                         found_in_librenms = True
-                    # For VC members with explicit librenms_id, be more lenient
-                    elif hasattr(obj, 'virtual_chassis') and obj.virtual_chassis and obj.cf.get("librenms_id"):
-                        # If librenms_id is explicitly set and base hostnames are similar, trust it
-                        # This handles cases where VC members in NetBox point to the primary device in LibreNMS
-                        found_in_librenms = True
+                    # For VC members with explicit librenms_id, validate hostname similarity
+                    elif (
+                        hasattr(obj, "virtual_chassis")
+                        and obj.virtual_chassis
+                        and obj.cf.get("librenms_id")
+                    ):
+                        # Extract base hostname (before any VC numbering like -1, -2, etc.)
+                        # This handles cases where VC members in NetBox (e.g., "switch-1 (1)")
+                        # point to the primary device in LibreNMS (e.g., "switch-1")
+                        netbox_base = re.sub(r"[-_]?\d+$", "", netbox_host_normalized)
+                        librenms_base = re.sub(r"[-_]?\d+$", "", librenms_host)
+
+                        if (
+                            netbox_base
+                            and librenms_base
+                            and netbox_base == librenms_base
+                        ):
+                            # Base hostnames match (e.g., "switch" matches "switch")
+                            found_in_librenms = True
+                        else:
+                            # Hostnames don't match even after normalization
+                            mismatched_device = True
                     else:
                         mismatched_device = True
                 else:
