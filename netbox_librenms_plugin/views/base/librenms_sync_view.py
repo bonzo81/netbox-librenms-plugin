@@ -1,3 +1,5 @@
+import re
+
 from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
@@ -162,7 +164,6 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 # Check hostname match with normalization for VC suffixes
                 elif netbox_host and librenms_host:
                     # Normalize NetBox hostname by removing VC member suffixes like ' (1)', ' (2)', etc.
-                    import re
                     netbox_host_normalized = re.sub(r'\s*\(\d+\)$', '', netbox_host)
                     
                     if netbox_host_normalized == librenms_host:
