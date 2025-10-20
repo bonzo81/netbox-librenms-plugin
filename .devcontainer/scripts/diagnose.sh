@@ -30,7 +30,7 @@ echo "  - Plugin directory: $(test -d /workspaces/netbox-librenms-plugin && echo
 echo "  - Setup script: $(test -f /workspaces/netbox-librenms-plugin/.devcontainer/scripts/setup.sh && echo 'Exists' || echo 'Missing')"
 echo "  - Start script: $(test -f /workspaces/netbox-librenms-plugin/.devcontainer/scripts/start-netbox.sh && echo 'Exists' || echo 'Missing')"
 echo "  - Start script executable: $(test -x /workspaces/netbox-librenms-plugin/.devcontainer/scripts/start-netbox.sh && echo 'Yes' || echo 'No')"
-echo "  - Plugin config: $(test -f /workspaces/netbox-librenms-plugin/.devcontainer/plugin-config.py && echo 'Found' || echo 'Missing (using defaults)')"
+echo "  - Plugin config: $(test -f /workspaces/netbox-librenms-plugin/.devcontainer/config/plugin-config.py && echo 'Found' || echo 'Missing (using defaults)')"
 echo "  - NetBox config path: /opt/netbox/netbox/netbox/configuration.py"
 
 echo ""

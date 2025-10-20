@@ -3,6 +3,24 @@
 echo ""
 echo "🎯 NetBox LibreNMS Plugin Development Environment"
 
+# Check for pending migrations and apply them automatically
+if [ -d "/opt/netbox/netbox" ]; then
+  cd /opt/netbox/netbox
+  source /opt/netbox/venv/bin/activate 2>/dev/null || true
+  
+  # Check if there are pending migrations (suppress all output, just check exit code)
+  if python manage.py migrate --check 2>/dev/null; then
+    # No pending migrations
+    true
+  else
+    # Pending migrations found
+    echo ""
+    echo "🗃️  Pending database migrations detected - applying automatically..."
+    python manage.py migrate 2>&1 | grep -E "(Operations to perform|Running migrations|Apply all migrations|No migrations to apply|\s+Applying|\s+OK|Applying)" || true
+    echo "✅ Migrations applied"
+  fi
+fi
+
 if [ ! -f "/workspaces/netbox-librenms-plugin/.devcontainer/config/plugin-config.py" ]; then
   echo ""
   echo "⚠️  Plugin configuration not found: .devcontainer/config/plugin-config.py"
