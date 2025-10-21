@@ -37,6 +37,57 @@ Example:
 * Select the Netbox interface type from the dropdown
 * Click `Create` to save the mapping
 
+#### Bulk Importing Mappings:
+
+The plugin supports NetBox's standard bulk import feature for interface mappings. Click the **Import** button on the Interface Mappings page to access the import interface.
+
+**YAML Example:**
+
+```yaml
+---
+- librenms_type: ethernetCsmacd
+  librenms_speed: 10000000
+  netbox_type: 10gbase-t
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 1000000
+  netbox_type: 1000base-t
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 100000
+  netbox_type: 100base-tx
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: null
+  netbox_type: other
+
+- librenms_type: propVirtual
+  librenms_speed: null
+  netbox_type: virtual
+
+- librenms_type: softwareLoopback
+  librenms_speed: null
+  netbox_type: virtual
+
+- librenms_type: l2vlan
+  librenms_speed: null
+  netbox_type: lag
+
+- librenms_type: ieee8023adLag
+  librenms_speed: null
+  netbox_type: lag
+
+- librenms_type: tunnel
+  librenms_speed: null
+  netbox_type: virtual
+```
+
+**Notes:**
+
+* `librenms_speed` is optional - use `null` or omit for type-only mappings
+* The combination of `librenms_type` and `librenms_speed` must be unique
+* Supports CSV, JSON, and YAML formats
+
 #### Editing Existing Mappings:
 
 ![](../img/interface_mappings/editmapping.png){ width="50" }

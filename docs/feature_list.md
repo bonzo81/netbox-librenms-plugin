@@ -46,3 +46,5 @@
 
 * Customizable LibreNMS to NetBox interface type mappings
 * Interface Speed-based mapping rules
+* Bulk import support
+
