@@ -1,7 +1,12 @@
 from netbox.views import generic
+from utilities.views import register_model_view
 
 from netbox_librenms_plugin.filters import InterfaceTypeMappingFilterSet
-from netbox_librenms_plugin.forms import InterfaceTypeMappingFilterForm, InterfaceTypeMappingForm
+from netbox_librenms_plugin.forms import (
+    InterfaceTypeMappingFilterForm,
+    InterfaceTypeMappingForm,
+    InterfaceTypeMappingImportForm,
+)
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tables.mappings import InterfaceTypeMappingTable
 
@@ -25,6 +30,17 @@ class InterfaceTypeMappingCreateView(generic.ObjectEditView):
 
     queryset = InterfaceTypeMapping.objects.all()
     form = InterfaceTypeMappingForm
+
+
+@register_model_view(InterfaceTypeMapping, 'bulk_import', path='import', detail=False)
+class InterfaceTypeMappingBulkImportView(generic.BulkImportView):
+    """
+    Provides a view for bulk importing `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
+    Supports three import methods: direct import, file upload, and data file.
+    """
+
+    queryset = InterfaceTypeMapping.objects.all()
+    model_form = InterfaceTypeMappingImportForm
 
 
 class InterfaceTypeMappingView(generic.ObjectView):

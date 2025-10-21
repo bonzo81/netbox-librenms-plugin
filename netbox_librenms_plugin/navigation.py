@@ -1,4 +1,3 @@
-from netbox.choices import ButtonColorChoices
 from netbox.plugins import PluginMenu, PluginMenuButton, PluginMenuItem
 
 menu = PluginMenu(
@@ -21,7 +20,11 @@ menu = PluginMenu(
                             link="plugins:netbox_librenms_plugin:interfacetypemapping_add",
                             title="Add",
                             icon_class="mdi mdi-plus-thick",
-                            color=ButtonColorChoices.GRAY,
+                        ),
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:interfacetypemapping_bulk_import",
+                            title="Import",
+                            icon_class="mdi mdi-upload",
                         ),
                     ),
                 ),

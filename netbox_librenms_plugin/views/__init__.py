@@ -10,6 +10,7 @@ from .base.librenms_sync_view import BaseLibreNMSSyncView
 
 from .mapping_views import (
     InterfaceTypeMappingBulkDeleteView,
+    InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
     InterfaceTypeMappingCreateView,
     InterfaceTypeMappingDeleteView,

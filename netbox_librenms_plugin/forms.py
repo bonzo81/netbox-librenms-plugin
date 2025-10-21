@@ -2,9 +2,10 @@
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
-from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm
+from django.utils.translation import gettext_lazy as _
+from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm, NetBoxModelImportForm
 from netbox.plugins import get_plugin_config
-from utilities.forms.fields import DynamicModelMultipleChoiceField
+from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
 from virtualization.models import Cluster, VirtualMachine
 
 from .models import InterfaceTypeMapping, LibreNMSSettings
@@ -58,6 +59,23 @@ class InterfaceTypeMappingForm(NetBoxModelForm):
     Form for creating and editing interface type mappings between LibreNMS and NetBox.
     Allows mapping of LibreNMS interface types and speeds to NetBox interface types.
     """
+
+    class Meta:
+        model = InterfaceTypeMapping
+        fields = ["librenms_type", "librenms_speed", "netbox_type"]
+
+
+class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
+    """
+    Form for bulk importing interface type mappings from CSV/JSON/YAML.
+    Supports importing LibreNMS interface type and speed mappings to NetBox interface types.
+    """
+
+    netbox_type = CSVChoiceField(
+        label=_("NetBox Type"),
+        choices=InterfaceTypeChoices,
+        help_text=_("NetBox interface type"),
+    )
 
     class Meta:
         model = InterfaceTypeMapping
