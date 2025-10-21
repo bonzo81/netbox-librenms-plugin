@@ -122,7 +122,40 @@
 <span class="fs-5 mt-2 text-muted">Last data updated: {{ last_fetched|date:"Y-m-d H:i" }}</span>
 {% endif %}
 
-{% if librenms_device_id %}
+{% if is_vc_member and not object.cf.librenms_id %}
+<!-- VC Member Message - Non-sync members redirect to the designated sync device -->
+    {% if sync_device_has_librenms_id %}
+    <!-- A VC member already has librenms_id configured -->
+    <div class="alert alert-info">
+        {% if librenms_sync_device %}
+        <i class="mdi mdi-information-outline"></i>
+        LibreNMS sync for this virtual chassis is managed by <a href="{{ librenms_sync_device.get_absolute_url }}">{{ librenms_sync_device }}</a>
+        {% else %}
+        LibreNMS sync for this virtual chassis is managed by another member
+        {% endif %}
+    </div>
+    {% elif sync_device_has_primary_ip %}
+    <!-- Sync device has primary IP and is ready for LibreNMS configuration -->
+    <div class="alert alert-info">
+        {% if librenms_sync_device %}
+        <i class="mdi mdi-information-outline"></i>
+        LibreNMS sync for this virtual chassis should be configured on <a href="{{ librenms_sync_device.get_absolute_url }}">{{ librenms_sync_device }}</a>
+        {% else %}
+        LibreNMS sync for this virtual chassis should be configured on the designated sync device
+        {% endif %}
+    </div>
+    {% else %}
+    <!-- No member has a primary IP configured - cannot proceed with LibreNMS sync -->
+    <div class="alert alert-warning">
+        {% if librenms_sync_device %}
+        <i class="mdi mdi-alert"></i>
+        Virtual chassis sync device <a href="{{ librenms_sync_device.get_absolute_url }}">{{ librenms_sync_device }}</a> requires either a primary IP or a LibreNMS ID (custom field) for sync operations
+        {% else %}
+        Virtual chassis requires at least one member with a primary IP or LibreNMS ID configured for sync operations
+        {% endif %}
+    </div>
+    {% endif %}
+{% elif librenms_device_id %}
 {% if found_in_librenms %}
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
@@ -214,14 +247,20 @@
         <i class="mdi mdi-alert me-2"></i>
         <div>
             <strong>Device not found:</strong>
-            Device has custom field 'librenms_id' set to <code>{{ librenms_device_id }}</code> but was not found in
-            LibreNMS.
+            Device has custom field <code>librenms_id</code> set to <code>{{ librenms_device_id }}</code> but was not found in LibreNMS.
             <hr class="my-2">
             <span class="text-muted">
-                Options:
-                <ul class="mb-0">
-                    <li>Remove custom field value and let LibreNMS plugin try to find it</li>
-                    <li>Manually enter the correct LibreNMS device ID</li>
+                <strong>Options to resolve:</strong>
+                <ul class="mb-2">
+                    <li><strong>Remove the custom field value</strong> to enable automatic matching. The plugin will attempt to find the device using:
+                        <ul>
+                            <li>Primary IP address</li>
+                            <li>Primary IP DNS name (FQDN)</li>
+                            <li>Device name</li>
+                        </ul>
+                    </li>
+                    <li><strong>Update the custom field</strong> with the correct LibreNMS device ID</li>
+                    <li><strong>Verify the device exists</strong> in LibreNMS at the configured server</li>
                 </ul>
             </span>
         </div>
@@ -230,27 +269,19 @@
 </div>
 {% endif %}
 {% else %}
-{% if is_vc_member and not has_vc_primary_ip %}
 <div class="alert alert-warning">
-    Virtual chassis primary device <a href="{{ vc_primary_device.get_absolute_url }}">{{ vc_primary_device }}</a>
-    requires a primary IP for LibreNMS sync
-</div>
-{% elif is_vc_member and has_vc_primary_ip %}
-<div class="alert alert-info">
-    LibreNMS sync is managed by virtual chassis member <a href="{{ vc_primary_device.get_absolute_url }}">{{
-        vc_primary_device }}</a>
-</div>
-{% elif not found_in_librenms %}
-<div class="alert alert-warning">
-    To match a device with LibreNMS, one of these identifiers must match the LibreNMS hostname/IP:
+    <strong>Device not found in LibreNMS.</strong> To match a device, use one of these methods:
     <ul>
-        <li>Primary IP address</li>
-        <li>Primary IP DNS name (FQDN)</li>
-        <li>Device name</li>
+        <li><strong>Automatic matching:</strong> Ensure one of these identifiers matches the LibreNMS hostname/IP:
+            <ul>
+                <li>Primary IP address</li>
+                <li>Primary IP DNS name (FQDN)</li>
+                <li>Device name</li>
+            </ul>
+        </li>
+        <li><strong>Manual matching:</strong> Set the <code>librenms_id</code> custom field with the device ID from LibreNMS</li>
     </ul>
 </div>
-
-{% endif %}
 {% endif %}
 <!-- End Tab Content -->
 

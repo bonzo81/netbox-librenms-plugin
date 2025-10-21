@@ -10,6 +10,7 @@ from .views import (
     DeviceLibreNMSSyncView,
     DeviceStatusListView,
     InterfaceTypeMappingBulkDeleteView,
+    InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
     InterfaceTypeMappingCreateView,
     InterfaceTypeMappingDeleteView,
@@ -176,6 +177,11 @@ urlpatterns = [
         "interface-type-mappings/add/",
         InterfaceTypeMappingCreateView.as_view(),
         name="interfacetypemapping_add",
+    ),
+    path(
+        "interface-type-mappings/import/",
+        InterfaceTypeMappingBulkImportView.as_view(),
+        name="interfacetypemapping_bulk_import",
     ),
     path(
         "interface-type-mappings/<int:pk>/delete/",

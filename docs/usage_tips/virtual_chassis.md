@@ -2,9 +2,15 @@
 
 ## Overview
 
-On the LibreNMS Sync page it is possible to synchronize interfaces to the specific virtual chassis members.
+The plugin automatically detects Virtual Chassis configurations and displays all VC interfaces on the LibreNMS Sync page of the designated sync device.
 
-All virtual chassis interfaces are dispalyed on the LibreNMS Sync tab on either the Virtual Chassis master, or the first member with a Primary IP.
+**LibreNMS Sync Device Selection Priority:**
+1. Member with `librenms_id` custom field (highest priority)
+2. Master device with primary IP
+3. Any member with primary IP
+4. Member with lowest VC position
+
+> **Note:** LibreNMS treats a Virtual Chassis as a single logical device. Only one member (the sync device) should have the `librenms_id` custom field set.
 
 ## How It Works
 

@@ -37,6 +37,77 @@ Example:
 * Select the Netbox interface type from the dropdown
 * Click `Create` to save the mapping
 
+#### Bulk Importing Mappings:
+
+The plugin supports NetBox's standard bulk import feature for interface mappings. Click the **Import** button on the Interface Mappings page to access the import interface.
+
+**YAML Example:**
+
+```yaml
+---
+- librenms_type: ethernetCsmacd
+  librenms_speed: 1000000
+  netbox_type: 1000base-t
+  description: "Standard Gigabit Ethernet ports"
+
+- librenms_type: propVirtual
+  librenms_speed: 1000000
+  netbox_type: virtual
+  description: "Virtual interfaces with 1G speed"
+
+- librenms_type: softwareLoopback
+  librenms_speed: 8000000
+  netbox_type: virtual
+  description: "Loopback interfaces"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 10000000
+  netbox_type: 10gbase-t
+  description: "10 Gigabit Ethernet copper connections"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 100000
+  netbox_type: 100base-tx
+  description: "Fast Ethernet 100Mbps ports"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: null
+  netbox_type: 1000base-t
+  description: "Default mapping for Ethernet without speed detection"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 40000000
+  netbox_type: 40gbase-x-qsfpp
+  description: "40 Gigabit QSFP+ interfaces"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 25000000
+  netbox_type: 25gbase-x-sfp28
+  description: "25 Gigabit SFP28 interfaces"
+
+- librenms_type: propVirtual
+  librenms_speed: null
+  netbox_type: virtual
+  description: "Generic virtual interfaces"
+
+- librenms_type: ieee8023adLag
+  librenms_speed: null
+  netbox_type: lag
+  description: "Link aggregation groups (port channels)"
+
+- librenms_type: softwareLoopback
+  librenms_speed: null
+  netbox_type: virtual
+  description: "Software loopback interfaces"
+```
+
+**Notes:**
+
+* `librenms_speed` is optional - use `null` or omit for type-only mappings
+* `description` is optional - provides context for each mapping
+* The combination of `librenms_type` and `librenms_speed` must be unique
+* Supports CSV, JSON, and YAML formats
+
 #### Editing Existing Mappings:
 
 ![](../img/interface_mappings/editmapping.png){ width="50" }

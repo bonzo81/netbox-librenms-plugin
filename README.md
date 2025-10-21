@@ -215,7 +215,18 @@ It is recommended (but not essential) to add a custom field `librenms_id` to the
 * **Required:** Leave unchecked.
 * **Default Value:** Leave blank.
 
-For more info check out [custom field docs](usage_tips/custom_field.md)
+For more info check out [custom field docs](docs/usage_tips/custom_field.md)
+
+## Update
+
+```
+source /opt/netbox/venv/bin/activate
+pip install -U netbox-librenms-plugin
+python manage.py migrate
+python manage.py collectstatic --no-input
+systemctl restart netbox
+```
+
 
 ## Uninstall
 

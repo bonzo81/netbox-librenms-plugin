@@ -1,9 +1,15 @@
 # forms.py
+from dcim.choices import InterfaceTypeChoices
 from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
-from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm
+from django.utils.translation import gettext_lazy as _
+from netbox.forms import (
+    NetBoxModelFilterSetForm,
+    NetBoxModelForm,
+    NetBoxModelImportForm,
+)
 from netbox.plugins import get_plugin_config
-from utilities.forms.fields import DynamicModelMultipleChoiceField
+from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
 from virtualization.models import Cluster, VirtualMachine
 
 from .models import InterfaceTypeMapping, LibreNMSSettings
@@ -60,18 +66,50 @@ class InterfaceTypeMappingForm(NetBoxModelForm):
 
     class Meta:
         model = InterfaceTypeMapping
-        fields = ["librenms_type", "librenms_speed", "netbox_type"]
+        fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
 
 
-class InterfaceTypeMappingFilterForm(NetBoxModelForm):
+class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
+    """
+    Form for bulk importing interface type mappings from CSV/JSON/YAML.
+    Supports importing LibreNMS interface type and speed mappings to NetBox interface types.
+    """
+
+    netbox_type = CSVChoiceField(
+        label=_("NetBox Type"),
+        choices=InterfaceTypeChoices,
+        help_text=_("NetBox interface type"),
+    )
+
+    class Meta:
+        model = InterfaceTypeMapping
+        fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
+
+
+class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     """
     Form for filtering interface type mappings based on LibreNMS and NetBox attributes.
     Provides filtering options for LibreNMS type, speed, and NetBox type.
     """
 
-    class Meta:
-        model = InterfaceTypeMapping
-        fields = ["librenms_type", "librenms_speed", "netbox_type"]
+    librenms_type = forms.CharField(required=False, label="LibreNMS Type")
+    librenms_speed = forms.IntegerField(
+        required=False,
+        label="LibreNMS Speed (Kbps)",
+        help_text="Filter by interface speed in Kbps",
+    )
+    netbox_type = forms.ChoiceField(
+        required=False,
+        label="NetBox Type",
+        choices=[("", "---------")] + list(InterfaceTypeChoices),
+    )
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = InterfaceTypeMapping
 
 
 class AddToLIbreSNMPV2(forms.Form):

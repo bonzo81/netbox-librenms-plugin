@@ -12,6 +12,7 @@
             <th>LibreNMS Type</th>
             <th>LibreNMS Speed (Kbps)</th>
             <th>NetBox Type</th>
+            <th>Description</th>
           </tr>
         </thead>
         <tbody>
@@ -19,10 +20,11 @@
             <td>{{ object.librenms_type }}</td>
             <td>{{ object.librenms_speed }}</td>
             <td>{{ object.get_netbox_type_display }}</td>
+            <td>{{ object.description|default:"—" }}</td>
           </tr>
         </tbody>
       </table>
     </div>
   </div>
-</div> 
+</div>
 {% endblock %}

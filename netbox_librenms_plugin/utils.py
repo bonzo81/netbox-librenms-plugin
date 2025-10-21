@@ -71,8 +71,55 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
         # Get the port number and use it
         vc_position = int(match.group(1))
         return device.virtual_chassis.members.get(vc_position=vc_position)
-    except (re.error, ValueError, ObjectDoesNotExist) as e:
+    except (re.error, ValueError, ObjectDoesNotExist):
         return device
+
+
+def get_librenms_sync_device(device: Device) -> Optional[Device]:
+    """
+    Determine which Virtual Chassis member should handle LibreNMS sync operations.
+
+    LibreNMS treats a Virtual Chassis as a single logical device, so only one member
+    should have the librenms_id custom field set and be used for sync operations.
+
+    Priority order for selecting the sync device:
+    1. Any member with librenms_id custom field set (highest priority - already configured)
+    2. Master device with primary IP (if master is designated)
+    3. Any member with primary IP (fallback when no master or master lacks IP)
+    4. Member with lowest vc_position (for error messages when no IPs configured)
+
+    Args:
+        device (Device): Any device in the virtual chassis.
+
+    Returns:
+        Optional[Device]: The device that should handle LibreNMS sync, or None if
+                         the device is not in a virtual chassis.
+    """
+    if not hasattr(device, "virtual_chassis") or not device.virtual_chassis:
+        return device
+
+    vc = device.virtual_chassis
+    all_members = vc.members.all()
+
+    # Priority 1: Check if ANY member has librenms_id configured
+    for member in all_members:
+        if member.cf.get("librenms_id"):
+            return member
+
+    # Priority 2: Use master device if it has primary IP
+    if vc.master and vc.master.primary_ip:
+        return vc.master
+
+    # Priority 3: Find any member with primary IP
+    for member in all_members:
+        if member.primary_ip:
+            return member
+
+    # Priority 4: Use member with lowest vc_position as fallback
+    try:
+        return min(all_members, key=lambda m: m.vc_position, default=None)
+    except (ValueError, TypeError):
+        return None
 
 
 def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:

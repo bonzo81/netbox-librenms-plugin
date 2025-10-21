@@ -12,16 +12,25 @@ class InterfaceTypeMappingTable(NetBoxTable):
     librenms_type = tables.Column(verbose_name="LibreNMS Type")
     librenms_speed = tables.Column(verbose_name="LibreNMS Speed (Kbps)")
     netbox_type = tables.Column(verbose_name="NetBox Type")
+    description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
     class Meta:
         model = InterfaceTypeMapping
-        fields = ("id", "librenms_type", "librenms_speed", "netbox_type", "actions")
+        fields = (
+            "id",
+            "librenms_type",
+            "librenms_speed",
+            "netbox_type",
+            "description",
+            "actions",
+        )
         default_columns = (
             "id",
             "librenms_type",
             "librenms_speed",
             "netbox_type",
+            "description",
             "actions",
         )
         attrs = {"class": "table table-hover table-headings table-striped"}
