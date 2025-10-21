@@ -35,6 +35,10 @@ class InterfaceTypeMapping(NetBoxModel):
         default=InterfaceTypeChoices.TYPE_OTHER,
     )
     librenms_speed = models.BigIntegerField(null=True, blank=True)
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this interface type mapping",
+    )
 
     def get_absolute_url(self):
         return reverse(

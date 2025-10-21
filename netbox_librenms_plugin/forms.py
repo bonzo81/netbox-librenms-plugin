@@ -3,7 +3,11 @@ from dcim.choices import InterfaceTypeChoices
 from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
 from django.utils.translation import gettext_lazy as _
-from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm, NetBoxModelImportForm
+from netbox.forms import (
+    NetBoxModelFilterSetForm,
+    NetBoxModelForm,
+    NetBoxModelImportForm,
+)
 from netbox.plugins import get_plugin_config
 from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
 from virtualization.models import Cluster, VirtualMachine
@@ -62,7 +66,7 @@ class InterfaceTypeMappingForm(NetBoxModelForm):
 
     class Meta:
         model = InterfaceTypeMapping
-        fields = ["librenms_type", "librenms_speed", "netbox_type"]
+        fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
 
 
 class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
@@ -79,7 +83,7 @@ class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
 
     class Meta:
         model = InterfaceTypeMapping
-        fields = ["librenms_type", "librenms_speed", "netbox_type"]
+        fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
 
 
 class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
@@ -88,19 +92,21 @@ class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     Provides filtering options for LibreNMS type, speed, and NetBox type.
     """
 
-    librenms_type = forms.CharField(
-        required=False,
-        label="LibreNMS Type"
-    )
+    librenms_type = forms.CharField(required=False, label="LibreNMS Type")
     librenms_speed = forms.IntegerField(
         required=False,
         label="LibreNMS Speed (Kbps)",
-        help_text="Filter by interface speed in Kbps"
+        help_text="Filter by interface speed in Kbps",
     )
     netbox_type = forms.ChoiceField(
         required=False,
         label="NetBox Type",
         choices=[("", "---------")] + list(InterfaceTypeChoices),
+    )
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
     )
 
     model = InterfaceTypeMapping
