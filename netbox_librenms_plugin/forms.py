@@ -1,4 +1,5 @@
 # forms.py
+from dcim.choices import InterfaceTypeChoices
 from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
 from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm
@@ -63,15 +64,28 @@ class InterfaceTypeMappingForm(NetBoxModelForm):
         fields = ["librenms_type", "librenms_speed", "netbox_type"]
 
 
-class InterfaceTypeMappingFilterForm(NetBoxModelForm):
+class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     """
     Form for filtering interface type mappings based on LibreNMS and NetBox attributes.
     Provides filtering options for LibreNMS type, speed, and NetBox type.
     """
 
-    class Meta:
-        model = InterfaceTypeMapping
-        fields = ["librenms_type", "librenms_speed", "netbox_type"]
+    librenms_type = forms.CharField(
+        required=False,
+        label="LibreNMS Type"
+    )
+    librenms_speed = forms.IntegerField(
+        required=False,
+        label="LibreNMS Speed (Kbps)",
+        help_text="Filter by interface speed in Kbps"
+    )
+    netbox_type = forms.ChoiceField(
+        required=False,
+        label="NetBox Type",
+        choices=[("", "---------")] + list(InterfaceTypeChoices),
+    )
+
+    model = InterfaceTypeMapping
 
 
 class AddToLIbreSNMPV2(forms.Form):
