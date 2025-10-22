@@ -30,92 +30,309 @@
 
 <!-- LibreNMS Server Information -->
 {% if librenms_server_info %}
-<div class="alert alert-info mb-3" role="alert">
-    <div class="d-flex justify-content-between align-items-center">
-        <div>
-            <i class="mdi mdi-server-network"></i>
-            <strong>Active LibreNMS Server:</strong>
-            {% if librenms_server_info.is_legacy %}
-            {{ librenms_server_info.url }}
-            {% else %}
-            {{ librenms_server_info.display_name }} ({{ librenms_server_info.url }})
+<div class="card mb-3">
+    <div class="card-body p-2">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <i class="mdi mdi-server-network text-primary"></i>
+                <strong>Active LibreNMS Server:</strong>
+                {% if librenms_server_info.is_legacy %}
+                {{ librenms_server_info.url }}
+                {% else %}
+                {{ librenms_server_info.display_name }} ({{ librenms_server_info.url }})
+                {% endif %}
+            </div>
+            {% if not librenms_server_info.is_legacy %}
+            <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary ms-3">
+                <i class="mdi mdi-cog"></i> Change Server
+            </a>
             {% endif %}
         </div>
-        {% if not librenms_server_info.is_legacy %}
-        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary">
-            <i class="mdi mdi-cog"></i> Change Server
-        </a>
-        {% endif %}
     </div>
 </div>
 {% endif %}
 
-<!-- Device Status and LibreNMS Information -->
-<div class="d-flex justify-content-between align-items-center mb-1">
-    <div class="card">
-        <h5 class="card-header">Device Status</h5>
-        <div class="card-body">
-            <table class="table table-hover attr-table">
-                <tbody>
-                    <tr>
-                        <th scope="row">Status</th>
-                        <td>
-                            <span class="{% if has_librenms_id %}text-success{% else %}text-danger{% endif %}">
-                                {% if found_in_librenms %}
-                                <a href="{{ librenms_device_url }}" target="_blank">Found in LibreNMS</a>
-                                {% else %}
-                                Not found in LibreNMS
-                                <div class="m-2"><button type="button" class="btn btn-primary" data-bs-toggle="modal"
-                                        data-bs-target="#add-device-modal">
-                                        Add to LibreNMS
-                                    </button>
-                                </div>
-                                {% endif %}
-                            </span>
-                        </td>
-                    </tr>
-                    {% if found_in_librenms %}
-                    <tr>
-                        <th scope="row">LibreNMS ID</th>
-                        <td>{{ librenms_device_id }}</td>
-                    </tr>
-                    {% with model_name=object|meta:"model_name" %}
-                    {% if model_name == "device" %}
-                    <tr>
-                        <th scope="row">Device Type</th>
-                        <td>{{ librenms_device_hardware }}</td>
-                    </tr>
-                    <tr>
-                        <th scope="row">LibreNMS Location</th>
-                        <td>
-                            <div class="d-flex justify-content-between align-items-center">
-                                <span>{{ librenms_device_location }}</span>
-                                <form method="post"
-                                    action="{% url 'plugins:netbox_librenms_plugin:update_device_location' pk=object.pk %}">
-                                    {% csrf_token %}
-                                    {% if librenms_device_location != object.site.name %}
-                                    <button type="submit" class="btn btn-primary"
-                                        title="Sync LibreNMS location with NetBox Site: {{ object.site.name }}">
-                                        <i class="mdi mdi-sync"></i>
-                                    </button>
+<!-- Only show Device Status and Sync Cards if NOT a VC member OR if this device IS the sync device -->
+{% if not is_vc_member or object.pk == librenms_sync_device.pk %}
+<!-- Device Status and Sync Cards Side by Side -->
+<div class="row mb-3">
+    <!-- Left: Device Status Card (Smaller) -->
+    <div class="col-md-3">
+        <div class="card">
+            <h5 class="card-header">LibreNMS Status</h5>
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover attr-table mb-0">
+                    <tbody>
+                        <!-- Status Row -->
+                        <tr>
+                            <th scope="row" style="width: 40%; padding-left: 1rem;">Status</th>
+                            <td>
+                                <span class="{% if has_librenms_id %}text-success{% else %}text-danger{% endif %}">
+                                    {% if found_in_librenms %}
+                                    <i class="mdi mdi-check-circle"></i> Found
                                     {% else %}
-                                    <span class="text-success" title="LibreNMS location matches NetBox site">
-                                        <i class="ms-1 mdi mdi-check-circle"></i>
-                                    </span>
+                                    <i class="mdi mdi-close-circle"></i> Not found
                                     {% endif %}
-                                </form>
-                            </div>
-                        </td>
-                    </tr>
-                    {% endif %}
-                    {% endwith %}
-                    {% endif %}
-                </tbody>
-            </table>
+                                </span>
+                            </td>
+                        </tr>
+
+                        {% if found_in_librenms %}
+                        <!-- LibreNMS ID Row -->
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">ID</th>
+                            <td>{{ librenms_device_id }}</td>
+                        </tr>
+
+                        <!-- OS Version Row -->
+                        {% with model_name=object|meta:"model_name" %}
+                        {% if model_name == "device" %}
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">OS Version</th>
+                            <td>
+                                {% if platform_info.librenms_version and platform_info.librenms_version != "-" %}
+                                    {{ platform_info.librenms_version }}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endif %}
+                        {% endwith %}
+
+                        <!-- LibreNMS URL Row -->
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">LibreNMS Link</th>
+                            <td>
+                                <a href="{{ librenms_device_url }}" target="_blank">
+                                    <i class="mdi mdi-open-in-new"></i> View
+                                </a>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <!-- Add to LibreNMS -->
+                        <tr>
+                            <th scope="row">Action</th>
+                            <td>
+                                <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal"
+                                        data-bs-target="#add-device-modal">
+                                    <i class="mdi mdi-plus"></i> Add to LibreNMS
+                                </button>
+                            </td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
-</div> <!-- End Device LibreNMS Status -->
 
+    {% if found_in_librenms %}
+    <!-- Right: Device Information Sync Card (Larger) -->
+    <div class="col-md-9">
+        <div class="card">
+            <h5 class="card-header">Device Information Sync</h5>
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th style="width: 20%; padding-left: 1rem;">Field</th>
+                            <th style="width: 40%;">NetBox Value</th>
+                            <th style="width: 40%;">LibreNMS Value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% with model_name=object|meta:"model_name" %}
+                        {% if model_name == "device" %}
+
+                        <!-- Device Type Row -->
+                        <tr>
+                            <td style="padding-left: 1rem;">Device Type</td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div>
+                                        {% if object.device_type %}
+                                            <a href="{{ object.device_type.get_absolute_url }}">{{ object.device_type }}</a>
+                                        {% else %}
+                                            <span class="text-muted">Not set</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="ms-3">
+                                        {% if librenms_device_hardware_match.matched %}
+                                            {% if not object.device_type or object.device_type.pk != librenms_device_hardware_match.device_type.pk %}
+                                            <form method="post"
+                                                  action="{% url 'plugins:netbox_librenms_plugin:update_device_type' pk=object.pk %}"
+                                                  style="display: inline;">
+                                                {% csrf_token %}
+                                                <button type="submit" class="btn btn-sm btn-outline-primary"
+                                                        title="Sync to {{ librenms_device_hardware_match.device_type }}">
+                                                    <i class="mdi mdi-sync"></i> Sync to NetBox
+                                                </button>
+                                            </form>
+                                            {% else %}
+                                            <span class="text-success" title="Synced with LibreNMS">
+                                                <i class="mdi mdi-check-circle"></i>
+                                            </span>
+                                            {% endif %}
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                {{ librenms_device_hardware }}
+                                {% if not librenms_device_hardware_match.matched and librenms_device_hardware != "-" %}
+                                    <a href="{% url 'dcim:devicetype_list' %}" class="btn btn-sm btn-outline-secondary ms-2"
+                                       title="View DeviceTypes to create matching type" target="_blank">
+                                        <i class="mdi mdi-open-in-new"></i> DeviceTypes
+                                    </a>
+                                {% endif %}
+                            </td>
+                        </tr>
+
+                        <!-- Serial Number Row -->
+                        <tr>
+                            <td style="padding-left: 1rem;">
+                                Serial Number
+                                {% if object.virtual_chassis and vc_inventory_serials %}
+                                    <span class="badge bg-secondary text-white ms-2">{{ vc_inventory_serials|length }}</span>
+                                {% endif %}
+                            </th>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div>
+                                        {% if object.serial %}
+                                            {{ object.serial }}
+                                        {% else %}
+                                            <span class="text-muted">Not set</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="ms-3">
+                                        {% if object.virtual_chassis and vc_inventory_serials %}
+                                            <button type="button" class="btn btn-sm btn-outline-info"
+                                                    data-bs-toggle="modal" data-bs-target="#vc-serials-modal"
+                                                    title="View VC member serials from inventory">
+                                                <i class="mdi mdi-server-network"></i> VC Serials
+                                            </button>
+                                        {% else %}
+                                            {% if librenms_device_serial != "-" %}
+                                                {% if object.serial != librenms_device_serial %}
+                                                <form method="post"
+                                                      action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
+                                                      style="display: inline;">
+                                                    {% csrf_token %}
+                                                    <button type="submit" class="btn btn-sm btn-outline-primary"
+                                                            title="Sync serial from LibreNMS: {{ librenms_device_serial }}">
+                                                        <i class="mdi mdi-sync"></i> Sync to NetBox
+                                                    </button>
+                                                </form>
+                                                {% else %}
+                                                <span class="text-success" title="Synced with LibreNMS">
+                                                    <i class="mdi mdi-check-circle"></i>
+                                                </span>
+                                                {% endif %}
+                                            {% endif %}
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                {{ librenms_device_serial }}
+                            </td>
+                        </tr>
+
+                        <!-- Platform / OS Row -->
+                        <tr>
+                            <td style="padding-left: 1rem;">Platform</td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div>
+                                        {% if platform_info.netbox_platform %}
+                                            <a href="{{ platform_info.netbox_platform.get_absolute_url }}">
+                                                {{ platform_info.netbox_platform }}
+                                            </a>
+                                        {% else %}
+                                            <span class="text-muted">Not set</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="ms-3">
+                                        {% if platform_info.librenms_os and platform_info.librenms_os != "-" %}
+                                            {% if platform_info.platform_exists %}
+                                                {% if not platform_info.netbox_platform or platform_info.netbox_platform.pk != platform_info.matching_platform.pk %}
+                                                <form method="post"
+                                                      action="{% url 'plugins:netbox_librenms_plugin:update_device_platform' pk=object.pk %}"
+                                                      style="display: inline;">
+                                                    {% csrf_token %}
+                                                    <button type="submit" class="btn btn-sm btn-outline-primary"
+                                                            title="Set platform to {{ platform_info.matching_platform }}">
+                                                        <i class="mdi mdi-sync"></i> Sync to NetBox
+                                                    </button>
+                                                </form>
+                                                {% else %}
+                                                <span class="text-success" title="Synced with LibreNMS">
+                                                    <i class="mdi mdi-check-circle"></i>
+                                                </span>
+                                                {% endif %}
+                                            {% else %}
+                                                <button type="button" class="btn btn-sm btn-warning"
+                                                        data-bs-toggle="modal" data-bs-target="#create-platform-modal"
+                                                        title="Platform doesn't exist - create and sync">
+                                                    <i class="mdi mdi-plus"></i> Create & Sync
+                                                </button>
+                                            {% endif %}
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <span>{{ platform_info.librenms_os }}</span>
+                                    {% if not platform_info.platform_exists and platform_info.librenms_os and platform_info.librenms_os != "-" %}
+                                        <span class="badge bg-warning bg-opacity-75 ms-2" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
+                                            <i class="mdi mdi-alert"></i> Not in NetBox
+                                        </span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                        </tr>
+
+                        <!-- Location Row -->
+                        <tr>
+                            <td style="padding-left: 1rem;">Location</td>
+                            <td>{{ object.site.name }}</td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div>{{ librenms_device_location }}</div>
+                                    <div class="ms-3">
+                                        {% if librenms_device_location != object.site.name %}
+                                        <form method="post"
+                                              action="{% url 'plugins:netbox_librenms_plugin:update_device_location' pk=object.pk %}"
+                                              style="display: inline;">
+                                            {% csrf_token %}
+                                            <button type="submit" class="btn btn-sm btn-outline-primary"
+                                                    title="Update LibreNMS location to match NetBox site: {{ object.site.name }}">
+                                                <i class="mdi mdi-sync"></i> Sync to LibreNMS
+                                            </button>
+                                        </form>
+                                        {% else %}
+                                        <span class="text-success" title="Synced with NetBox">
+                                            <i class="mdi mdi-check-circle"></i>
+                                        </span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+
+                        {% endif %}
+                        {% endwith %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div> <!-- End Device Status and Sync Cards Row -->
+{% endif %} <!-- End conditional for showing cards -->
 
 <!-- Last Updated Information and Cache Countdown -->
 {% if last_fetched %}
@@ -347,5 +564,131 @@
         </div>
     </div>
 </div>
+
+{% if object.virtual_chassis and vc_inventory_serials %}
+<!-- VC Member Serials Modal -->
+<div class="modal fade" id="vc-serials-modal" tabindex="-1" aria-labelledby="vcSerialsModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="vcSerialsModalLabel">
+                    <i class="mdi mdi-server-network"></i> Virtual Chassis Member Serial Numbers
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted">
+                    Serial numbers retrieved from LibreNMS inventory API.
+                    Select which Virtual Chassis member each serial number should be assigned to, then click "Sync All" to save.
+                </p>
+                <form method="post" id="vc-serials-form"
+                      action="{% url 'plugins:netbox_librenms_plugin:assign_vc_serial' pk=object.pk %}">
+                    {% csrf_token %}
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th style="width: 25%;">Hardware Model</th>
+                                <th style="width: 20%;">Serial Number</th>
+                                <th style="width: 20%;">Currently Assigned</th>
+                                <th style="width: 35%;">Assign To</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in vc_inventory_serials %}
+                            <tr>
+                                <td>{{ item.model }}</td>
+                                <td><code>{{ item.serial }}</code></td>
+                                <td>
+                                    {% if item.assigned_member %}
+                                        <a href="{{ item.assigned_member.get_absolute_url }}" target="_blank">
+                                            {{ item.assigned_member }}
+                                        </a>
+                                        <span class="text-success ms-1" title="Already assigned">
+                                            <i class="mdi mdi-check-circle"></i>
+                                        </span>
+                                    {% else %}
+                                        <span class="text-muted">-</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <input type="hidden" name="serial_{{ forloop.counter }}" value="{{ item.serial }}">
+                                    <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
+                                        <option value="">Select member...</option>
+                                        {% for member in object.virtual_chassis.members.all %}
+                                        <option value="{{ member.pk }}" {% if item.assigned_member and item.assigned_member.pk == member.pk %}selected{% endif %}>
+                                            {{ member.name }}
+                                        </option>
+                                        {% endfor %}
+                                    </select>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="submit" form="vc-serials-form" class="btn btn-primary">
+                    <i class="mdi mdi-sync"></i> Sync All
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if not platform_info.platform_exists and platform_info.platform_name and found_in_librenms %}
+<!-- Create Platform Modal -->
+<div class="modal fade" id="create-platform-modal" tabindex="-1" aria-labelledby="createPlatformModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="createPlatformModalLabel">
+                    <i class="mdi mdi-alert"></i> Create New Platform
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="post" action="{% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk %}">
+                {% csrf_token %}
+                <div class="modal-body">
+                    <div class="alert alert-warning">
+                        <i class="mdi mdi-information"></i>
+                        The platform <strong>{{ platform_info.platform_name }}</strong> does not exist in NetBox.
+                    </div>
+                    <p>This will:</p>
+                    <ol>
+                        <li>Create a new Platform named <strong>{{ platform_info.platform_name }}</strong></li>
+                        <li>Assign it to this device</li>
+                    </ol>
+                    <div class="mb-3">
+                        <label for="platform_name" class="form-label">Platform Name</label>
+                        <input type="text" class="form-control" id="platform_name" name="platform_name"
+                               value="{{ platform_info.platform_name }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="manufacturer" class="form-label">Manufacturer (optional)</label>
+                        <select name="manufacturer" class="form-select">
+                            <option value="">Select manufacturer...</option>
+                            {% for manufacturer in manufacturers %}
+                            <option value="{{ manufacturer.pk }}" {% if object.device_type and object.device_type.manufacturer.pk == manufacturer.pk %}selected{% endif %}>
+                                {{ manufacturer }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <small class="form-text text-muted">Optionally associate with device manufacturer</small>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="mdi mdi-plus"></i> Create & Assign
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
 
 {% endblock %} <!-- End content -->

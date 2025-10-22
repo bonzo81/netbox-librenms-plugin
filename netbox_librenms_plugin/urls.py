@@ -3,6 +3,8 @@ from django.urls import include, path
 from .models import InterfaceTypeMapping
 from .views import (
     AddDeviceToLibreNMSView,
+    AssignVCSerialView,
+    CreateAndAssignPlatformView,
     DeleteNetBoxInterfacesView,
     DeviceCableTableView,
     DeviceInterfaceTableView,
@@ -27,6 +29,9 @@ from .views import (
     SyncSiteLocationView,
     TestLibreNMSConnectionView,
     UpdateDeviceLocationView,
+    UpdateDevicePlatformView,
+    UpdateDeviceSerialView,
+    UpdateDeviceTypeView,
     VMInterfaceTableView,
     VMIPAddressTableView,
     VMLibreNMSSyncView,
@@ -139,6 +144,32 @@ urlpatterns = [
         "devices/<int:pk>/update-location/",
         UpdateDeviceLocationView.as_view(),
         name="update_device_location",
+    ),
+    # Update device field URLs (serial, device type, platform)
+    path(
+        "devices/<int:pk>/update-serial/",
+        UpdateDeviceSerialView.as_view(),
+        name="update_device_serial",
+    ),
+    path(
+        "devices/<int:pk>/update-device-type/",
+        UpdateDeviceTypeView.as_view(),
+        name="update_device_type",
+    ),
+    path(
+        "devices/<int:pk>/update-platform/",
+        UpdateDevicePlatformView.as_view(),
+        name="update_device_platform",
+    ),
+    path(
+        "devices/<int:pk>/create-and-assign-platform/",
+        CreateAndAssignPlatformView.as_view(),
+        name="create_and_assign_platform",
+    ),
+    path(
+        "devices/<int:pk>/assign-vc-serial/",
+        AssignVCSerialView.as_view(),
+        name="assign_vc_serial",
     ),
     path(
         "device-status/",
