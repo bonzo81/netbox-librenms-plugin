@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.16 (2025-10-24)
+
+### New Features
+* Add device field synchronization (serial number, device type, platform)
+* Add virtual chassis inventory support with serial assignment to individual members
+* Add VM information display in LibreNMS status card
+* Add bulk interface mapping import functionality
+
+### Improvements
+* Improve virtual chassis device matching with LibreNMS for devices with VC member suffixes
+* Enhance virtual chassis logic and member selection
+
+### Development
+* Add GitHub DevContainer setup for easier development environment
+
+### Fixes
+* Fix FieldError for librenms_status on device/VM status pages
+
+### Documentation
+* Update README with device field sync details
+* Improve virtual chassis documentation
+* Added example Interface Mapping YAML for bulk import
+
 ## 0.3.15 (2025-07-12)
 
 ### Improvements
@@ -9,11 +32,11 @@
 ## 0.3.14 (2025-07-08)
 
 ### Fixes
-* Filter out invalid IP entries in BaseIPAddressTableView 
+* Filter out invalid IP entries in BaseIPAddressTableView
 
 ### New Features
 * View/Delete NetBox-only (unmatched) interfaces
-* Add multi LibreNMS server configuration support for LibreNMS plugin 
+* Add multi LibreNMS server configuration support for LibreNMS plugin
 
 ### Documentation
 * Add page for multi server configuration instructions and example
@@ -59,11 +82,11 @@
 ## 0.3.8 (2025-03-06)
 
 ### Fixes
-* Fix cable table error when more than one remote device returned 
+* Fix cable table error when more than one remote device returned
 * Fix cable table checkboxes controls for virtual chassis devices
 
 ### Improvements
-* Add slug check to Site and Location Sync 
+* Add slug check to Site and Location Sync
 
 
 ## 0.3.7 (2025-01-22)
@@ -82,14 +105,14 @@
 ***Netbox v4.2+ required for this release***
 
 ### New Feature
-* New dedicated plugin menu item 
+* New dedicated plugin menu item
 * Add device and VM status pages
 
 ### Fixes
-* Add description to interface mapping page  
+* Add description to interface mapping page
 
 ### Under the hood
-* Update to use new Mac Address object for Netbox v4.2  
+* Update to use new Mac Address object for Netbox v4.2
 
 ## 0.3.5 (2025-01-13)
 
@@ -118,9 +141,9 @@
 ## 0.3.2 (2024-12-16)
 
 ### Fixes
-* Refactor tab handling for interface and cable views 
-* Fix Duplicate ID in SNMP forms 
-* Refactor cable link processing and fix CSRF token error. 
+* Refactor tab handling for interface and cable views
+* Fix Duplicate ID in SNMP forms
+* Refactor cable link processing and fix CSRF token error.
 * Generate unique base ID for TomSelect components in VCInterfaceTable
 * Add countdown interval variable to initializeCountdown function
 ## 0.3.1 (2024-12-13)
@@ -155,7 +178,7 @@ Add static include in MANIFEST.in for pypi release
 
 ## 0.2.8 (2024-11-29)
 ### Use of Custom Field
-This release introduces the option of using a custom field `librenms_id` (integer) to device and virtual machine objects in NetBox. The plugin will work without it but it is recommended for LibreNMS API lookups especially if no primary IP or FQDN available. 
+This release introduces the option of using a custom field `librenms_id` (integer) to device and virtual machine objects in NetBox. The plugin will work without it but it is recommended for LibreNMS API lookups especially if no primary IP or FQDN available.
 
 **Note: New static javascript file requires running collectstatic after update**
 
@@ -167,37 +190,37 @@ This release introduces the option of using a custom field `librenms_id` (intege
 ### New Features
 * Add device to LibreNMS using SNMPv3
 * Create cable connection from LIbreNMS links data31
-* Plugin can now use primary IP, hostname or Primary IP DNS Name to identify device in LibreNMS 
-* Exclude specific columns when syncing data 
-* Filter interface and cable tables 
+* Plugin can now use primary IP, hostname or Primary IP DNS Name to identify device in LibreNMS
+* Exclude specific columns when syncing data
+* Filter interface and cable tables
 * Bulk edit Virtual Chassis members
 
 
 
 ### Improvements
 * Add pagination to SiteLocationSyncTable
-* Add site location filtering functionality and update template for search 
-* Refactor LibreNMSAPI to enhance device ID retrieval logic and include DNS name handling 
+* Add site location filtering functionality and update template for search
+* Refactor LibreNMSAPI to enhance device ID retrieval logic and include DNS name handling
 * Enhance cable sync with device ID handling and user guidance modal
-* Add device mismatch check and user feedback 
+* Add device mismatch check and user feedback
 * Add check for empty MAC address in format_mac_address function
-* Increase API request timeout to 20 seconds 
-* Fix dropdown menu size issue on click 
+* Increase API request timeout to 20 seconds
+* Fix dropdown menu size issue on click
 
 
 ### Under the hood
 
-* Refactor interface enabled status logic 
+* Refactor interface enabled status logic
 * Fix handling of data-enabled attribute in interface table
 * Improve interface mapping logic for speed matchingpull/24
 * Refactor cable context handling and improve data rendering in cable tables
-* Refactor Javascript into single file. Add cable sync filters and countdown timer 
+* Refactor Javascript into single file. Add cable sync filters and countdown timer
 * Refactor device addition and enhance SNMP v3 support
 
 
 ## 0.2.7 (2024-11-11)
 ### What's Changed
-* Add new interface table logic to handle virtual chassis member selection 
+* Add new interface table logic to handle virtual chassis member selection
 * Update LibreNMS plugin configuration to allow disabling of SSL verification
 
 ### Interface name change
@@ -226,7 +249,7 @@ Bug fix release:
 * Add mac_address, MTU to interface sync
 * Enable select all and shift click on interface sync page rows, and other improvements
 * Interface mapping now accounts for speed of interface
-    > Update to Interface mapping modal may require recreation of existing mapping. 
+    > Update to Interface mapping modal may require recreation of existing mapping.
 * Updated LibreNMS Sync page layout to prepare for new features
 ### Under the hood
 * Refactor all views to be class-based
