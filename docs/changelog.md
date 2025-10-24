@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.17 (2025-10-24)
+
+### Improvements
+* Improve device type matching with prioritized matching strategy
+* Centralize device type matching logic in utils.py (DRY principle)
+* Add word boundary detection for more precise substring matches
+
+
 ## 0.3.16 (2025-10-24)
 
 ### New Features

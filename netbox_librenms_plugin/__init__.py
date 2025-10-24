@@ -2,7 +2,7 @@ from django.core.exceptions import ImproperlyConfigured
 from netbox.plugins import PluginConfig
 
 __author__ = "Andy Norwood"
-__version__ = "0.3.16"
+__version__ = "0.3.17"
 
 
 class LibreNMSSyncConfig(PluginConfig):
