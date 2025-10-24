@@ -8,6 +8,13 @@ this plugin allows you to easily onboard device objects from existing data in Li
 
 The plugin offers the following key features:
 
+### Device Field Sync
+Synchronize device information from LibreNMS to NetBox. The following device fields can be synchronized:
+
+- Serial Number (including virtual chassis members)
+- Device Type
+- Platform
+
 ### Interface Sync
 Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox. The following interface attributes are synchronized:
 
@@ -35,7 +42,7 @@ Create IP address in NetBox from LibreNMS device IP data.
 The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 - Compare NetBox sites to LibreNMS location data
 - Create LibreNMS locations to match NetBox sites
-- Update existing LibreNMS locations langitude and longitude values based on NetBox data
+- Update existing LibreNMS locations latitude and longitude values based on NetBox data ⚠️ *(currently not working due to LibreNMS API issue)*
 - Sync device site to LibreNMS location
 
 ### Multi LibreNMS Server Configuration
