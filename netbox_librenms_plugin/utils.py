@@ -162,3 +162,97 @@ def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
 
     # Fall back to plugin config
     return get_plugin_config("netbox_librenms_plugin", "interface_name_field")
+
+
+def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
+    """
+    Match LibreNMS hardware string to a NetBox DeviceType.
+    
+    This function implements a prioritized matching strategy to find the best
+    DeviceType match for a given LibreNMS hardware value.
+    
+    Matching Priority:
+    1. Part number exact match (case-insensitive) - Most specific identifier
+    2. Model name contains hardware value (case-insensitive) - Handles vendor prefixes
+    3. Model name exact match (case-insensitive) - Direct model name match
+    4. Slug match - Fallback using slugified hardware name
+
+    Args:
+        hardware_name (str): Hardware string from LibreNMS API (e.g., 'C9200L-48P-4X')
+
+    Returns:
+        dict: Dictionary containing:
+            - matched (bool): Whether a match was found
+            - device_type (DeviceType|None): The matched DeviceType object
+            - match_type (str|None): How the match was found
+              ('part_number', 'contains', 'exact', 'slug', or None)
+            
+    Examples:
+        >>> result = match_librenms_hardware_to_device_type('C9200L-48P-4X')
+        >>> if result['matched']:
+        ...     print(f"Matched via {result['match_type']}: {result['device_type']}")
+        Matched via part_number: Catalyst 9200L-48P-4X
+        
+        >>> result = match_librenms_hardware_to_device_type('NonExistent')
+        >>> result['matched']
+        False
+    """
+    from dcim.models import DeviceType
+    from django.utils.text import slugify
+
+    if not hardware_name or hardware_name == "-":
+        return {"matched": False, "device_type": None, "match_type": None}
+
+    # 1. Try part number exact match (highest priority)
+    try:
+        device_type = DeviceType.objects.get(part_number__iexact=hardware_name)
+        return {"matched": True, "device_type": device_type, "match_type": "part_number"}
+    except DeviceType.DoesNotExist:
+        pass
+    except DeviceType.MultipleObjectsReturned:
+        # If multiple matches, return the first one
+        device_type = DeviceType.objects.filter(part_number__iexact=hardware_name).first()
+        return {"matched": True, "device_type": device_type, "match_type": "part_number"}
+
+    # 2. Try model name contains hardware value
+    # (for cases like 'C9200L-48P-4X' in 'Catalyst 9200L-48P-4X')
+    try:
+        device_types = DeviceType.objects.filter(model__icontains=hardware_name)
+        if device_types.count() == 1:
+            return {"matched": True, "device_type": device_types.first(), "match_type": "contains"}
+        # If multiple matches, prefer exact word match or shorter model name
+        elif device_types.count() > 1:
+            # Try to find one where hardware_name is a complete word in the model
+            for dt in device_types:
+                # Check if hardware_name appears as a standalone part (separated by spaces or hyphens)
+                pattern = r'\b' + re.escape(hardware_name) + r'\b'
+                if re.search(pattern, dt.model, re.IGNORECASE):
+                    return {"matched": True, "device_type": dt, "match_type": "contains"}
+            # If no exact word match, return the shortest model name (likely most specific)
+            device_type = min(device_types, key=lambda x: len(x.model))
+            return {"matched": True, "device_type": device_type, "match_type": "contains"}
+    except DeviceType.DoesNotExist:
+        pass
+
+    # 3. Try exact model match (case-insensitive)
+    try:
+        device_type = DeviceType.objects.get(model__iexact=hardware_name)
+        return {"matched": True, "device_type": device_type, "match_type": "exact"}
+    except DeviceType.DoesNotExist:
+        pass
+    except DeviceType.MultipleObjectsReturned:
+        device_type = DeviceType.objects.filter(model__iexact=hardware_name).first()
+        return {"matched": True, "device_type": device_type, "match_type": "exact"}
+
+    # 4. Try slug match (lowest priority)
+    hardware_slug = slugify(hardware_name)
+    try:
+        device_type = DeviceType.objects.get(slug=hardware_slug)
+        return {"matched": True, "device_type": device_type, "match_type": "slug"}
+    except DeviceType.DoesNotExist:
+        pass
+    except DeviceType.MultipleObjectsReturned:
+        device_type = DeviceType.objects.filter(slug=hardware_slug).first()
+        return {"matched": True, "device_type": device_type, "match_type": "slug"}
+
+    return {"matched": False, "device_type": None, "match_type": None}
