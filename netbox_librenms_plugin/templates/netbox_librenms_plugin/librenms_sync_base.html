@@ -84,14 +84,56 @@
                             <td>{{ librenms_device_id }}</td>
                         </tr>
 
-                        <!-- OS Version Row -->
                         {% with model_name=object|meta:"model_name" %}
                         {% if model_name == "device" %}
+                        <!-- OS Version Row (Devices Only) -->
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">OS Version</th>
                             <td>
                                 {% if platform_info.librenms_version and platform_info.librenms_version != "-" %}
                                     {{ platform_info.librenms_version }}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% elif model_name == "virtualmachine" %}
+                        <!-- Virtual Machine Information Rows -->
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">OS</th>
+                            <td>
+                                {% if platform_info.librenms_os and platform_info.librenms_os != "-" %}
+                                    {{ platform_info.librenms_os }}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">Version</th>
+                            <td>
+                                {% if platform_info.librenms_version and platform_info.librenms_version != "-" %}
+                                    {{ platform_info.librenms_version }}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">Hardware</th>
+                            <td>
+                                {% if librenms_device_hardware and librenms_device_hardware != "-" %}
+                                    {{ librenms_device_hardware }}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">Features</th>
+                            <td>
+                                {% if librenms_device_features and librenms_device_features != "-" %}
+                                    {{ librenms_device_features }}
                                 {% else %}
                                     <span class="text-muted">-</span>
                                 {% endif %}
@@ -128,7 +170,9 @@
     </div>
 
     {% if found_in_librenms %}
-    <!-- Right: Device Information Sync Card (Larger) -->
+    {% with model_name=object|meta:"model_name" %}
+    {% if model_name == "device" %}
+    <!-- Right: Device Information Sync Card (Larger) - Devices Only -->
     <div class="col-md-9">
         <div class="card">
             <h5 class="card-header">Device Information Sync</h5>
@@ -330,6 +374,8 @@
             </div>
         </div>
     </div>
+    {% endif %}
+    {% endwith %}
     {% endif %}
 </div> <!-- End Device Status and Sync Cards Row -->
 {% endif %} <!-- End conditional for showing cards -->

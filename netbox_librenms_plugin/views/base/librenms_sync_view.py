@@ -130,6 +130,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             "librenms_device_serial": "-",
             "librenms_device_os": "-",
             "librenms_device_version": "-",
+            "librenms_device_features": "-",
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
             "vc_inventory_serials": [],
@@ -151,6 +152,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 serial = device_info.get("serial", "-")
                 os_name = device_info.get("os", "-")
                 version = device_info.get("version", "-")
+                features = device_info.get("features", "-")
 
                 # Try to match hardware to NetBox DeviceType
                 hardware_match = self._match_device_type(hardware)
@@ -163,6 +165,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                         "librenms_device_serial": serial,
                         "librenms_device_os": os_name,
                         "librenms_device_version": version,
+                        "librenms_device_features": features,
                         "librenms_device_location": device_info.get("location", "-"),
                         "librenms_device_ip": librenms_ip,
                         "sysName": librenms_hostname,
