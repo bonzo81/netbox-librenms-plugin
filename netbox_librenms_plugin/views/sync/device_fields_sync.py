@@ -1,8 +1,9 @@
-from dcim.models import Device, DeviceType, Manufacturer, Platform
+from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 
+from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 
@@ -93,10 +94,10 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Try to match device type
-        device_type = self._match_device_type(hardware)
-
-        if not device_type:
+        # Try to match device type using utility function
+        match_result = match_librenms_hardware_to_device_type(hardware)
+        
+        if not match_result['matched']:
             messages.error(
                 request,
                 f"No matching DeviceType found for hardware '{hardware}'",
@@ -106,6 +107,7 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
             )
 
         # Update device type
+        device_type = match_result['device_type']
         old_device_type = device.device_type
         device.device_type = device_type
         device.save()
@@ -116,25 +118,6 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
         )
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-
-    def _match_device_type(self, hardware_name):
-        """Try to match hardware string to DeviceType."""
-        from django.utils.text import slugify
-
-        # Try exact match
-        try:
-            return DeviceType.objects.get(model__iexact=hardware_name)
-        except DeviceType.DoesNotExist:
-            pass
-
-        # Try slug match
-        hardware_slug = slugify(hardware_name)
-        try:
-            return DeviceType.objects.get(slug=hardware_slug)
-        except DeviceType.DoesNotExist:
-            pass
-
-        return None
 
 
 class UpdateDevicePlatformView(LibreNMSAPIMixin, View):

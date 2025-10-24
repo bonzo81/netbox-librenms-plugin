@@ -7,6 +7,7 @@ from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_sync_device,
+    match_librenms_hardware_to_device_type,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
@@ -155,7 +156,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 features = device_info.get("features", "-")
 
                 # Try to match hardware to NetBox DeviceType
-                hardware_match = self._match_device_type(hardware)
+                hardware_match = match_librenms_hardware_to_device_type(hardware)
 
                 # Update device details regardless of match
                 librenms_device_details.update(
@@ -252,43 +253,6 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         Subclasses should override this method.
         """
         return None
-
-    def _match_device_type(self, hardware_name):
-        """
-        Try to match LibreNMS hardware string to NetBox DeviceType.
-
-        Args:
-            hardware_name: Hardware string from LibreNMS
-
-        Returns:
-            dict: {
-                'matched': bool,
-                'device_type': DeviceType object or None,
-                'match_type': 'exact'|'slug'|None
-            }
-        """
-        from dcim.models import DeviceType
-        from django.utils.text import slugify
-
-        if not hardware_name or hardware_name == "-":
-            return {"matched": False, "device_type": None, "match_type": None}
-
-        # Try exact name match
-        try:
-            device_type = DeviceType.objects.get(model__iexact=hardware_name)
-            return {"matched": True, "device_type": device_type, "match_type": "exact"}
-        except DeviceType.DoesNotExist:
-            pass
-
-        # Try slug match
-        hardware_slug = slugify(hardware_name)
-        try:
-            device_type = DeviceType.objects.get(slug=hardware_slug)
-            return {"matched": True, "device_type": device_type, "match_type": "slug"}
-        except DeviceType.DoesNotExist:
-            pass
-
-        return {"matched": False, "device_type": None, "match_type": None}
 
     def _get_vc_inventory_serials(self, obj):
         """
