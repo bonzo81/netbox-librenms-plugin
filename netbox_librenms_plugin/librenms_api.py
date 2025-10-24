@@ -69,7 +69,7 @@ class LibreNMSAPI:
     def test_connection(self):
         """
         Test connection to LibreNMS server by calling the /system endpoint.
-        
+
         Returns:
             dict: System information if successful, error dict if failed
         """
@@ -78,34 +78,58 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/system",
                 headers=self.headers,
                 verify=self.verify_ssl,
-                timeout=10
+                timeout=10,
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 if data.get("status") == "ok" and data.get("system"):
                     return data["system"][0] if data["system"] else None
-            
+
             # Handle different HTTP status codes with user-friendly messages
             if response.status_code == 401:
-                return {'error': True, 'message': 'Authentication failed - check API token'}
+                return {
+                    "error": True,
+                    "message": "Authentication failed - check API token",
+                }
             elif response.status_code == 403:
-                return {'error': True, 'message': 'Access forbidden - check API token permissions'}
+                return {
+                    "error": True,
+                    "message": "Access forbidden - check API token permissions",
+                }
             elif response.status_code == 404:
-                return {'error': True, 'message': 'API endpoint not found - check LibreNMS URL'}
+                return {
+                    "error": True,
+                    "message": "API endpoint not found - check LibreNMS URL",
+                }
             elif response.status_code >= 500:
-                return {'error': True, 'message': 'LibreNMS server error - check server status'}
+                return {
+                    "error": True,
+                    "message": "LibreNMS server error - check server status",
+                }
             else:
-                return {'error': True, 'message': f'HTTP {response.status_code} - unexpected server response'}
-            
+                return {
+                    "error": True,
+                    "message": f"HTTP {response.status_code} - unexpected server response",
+                }
+
         except requests.exceptions.SSLError:
-            return {'error': True, 'message': 'SSL certificate verification failed - try setting verify_ssl to false'}
+            return {
+                "error": True,
+                "message": "SSL certificate verification failed - try setting verify_ssl to false",
+            }
         except requests.exceptions.ConnectionError:
-            return {'error': True, 'message': 'Connection failed - check server URL and network connectivity'}
+            return {
+                "error": True,
+                "message": "Connection failed - check server URL and network connectivity",
+            }
         except requests.exceptions.Timeout:
-            return {'error': True, 'message': 'Connection timeout - server may be slow or unreachable'}
+            return {
+                "error": True,
+                "message": "Connection timeout - server may be slow or unreachable",
+            }
         except Exception as e:
-            return {'error': True, 'message': f'Unexpected error: {str(e)}'}
+            return {"error": True, "message": f"Unexpected error: {str(e)}"}
 
     @classmethod
     def get_available_servers(cls):
@@ -584,5 +608,43 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
             return True, response.json()
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
+
+    def get_device_inventory(self, device_id):
+        """
+        Fetch complete inventory for a device from LibreNMS.
+        Useful for getting component details like chassis serial numbers for Virtual Chassis.
+
+        Route: /api/v0/inventory/{device_id}/all
+
+        Args:
+            device_id: LibreNMS device ID
+
+        Returns:
+            tuple: (success: bool, data: list)
+
+        Example inventory item:
+            {
+                "entPhysicalDescr": "Chassis Component",
+                "entPhysicalClass": "chassis",
+                "entPhysicalSerialNum": "ABC123456",
+                "entPhysicalModelName": "EX4300-48P",
+                ...
+            }
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/inventory/{device_id}/all",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            if response.status_code == 200:
+                inventory_data = response.json()
+                return True, inventory_data.get("inventory", [])
+            return False, []
         except requests.exceptions.RequestException as e:
             return False, str(e)

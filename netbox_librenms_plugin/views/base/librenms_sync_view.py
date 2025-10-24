@@ -89,6 +89,14 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
 
         interface_name_field = get_interface_name_field(request)
 
+        # Get platform info for display and sync
+        platform_info = self._get_platform_info(librenms_info, obj)
+
+        # Get manufacturers for platform creation modal
+        from dcim.models import Manufacturer
+
+        manufacturers = Manufacturer.objects.all().order_by("name")
+
         context.update(
             {
                 "interface_sync": interface_context,
@@ -102,6 +110,11 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 "mismatched_device": librenms_info.get("mismatched_device"),
                 **librenms_info["librenms_device_details"],
                 "interface_name_field": interface_name_field,
+                "platform_info": platform_info,
+                "vc_inventory_serials": librenms_info["librenms_device_details"].get(
+                    "vc_inventory_serials", []
+                ),
+                "manufacturers": manufacturers,
             }
         )
 
@@ -114,7 +127,13 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
+            "librenms_device_serial": "-",
+            "librenms_device_os": "-",
+            "librenms_device_version": "-",
+            "librenms_device_features": "-",
             "librenms_device_location": "-",
+            "librenms_device_hardware_match": None,
+            "vc_inventory_serials": [],
         }
 
         if self.librenms_id:
@@ -128,16 +147,36 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 librenms_hostname = device_info.get("sysName")
                 librenms_ip = device_info.get("ip")
 
+                # Extract new fields
+                hardware = device_info.get("hardware", "-")
+                serial = device_info.get("serial", "-")
+                os_name = device_info.get("os", "-")
+                version = device_info.get("version", "-")
+                features = device_info.get("features", "-")
+
+                # Try to match hardware to NetBox DeviceType
+                hardware_match = self._match_device_type(hardware)
+
                 # Update device details regardless of match
                 librenms_device_details.update(
                     {
                         "librenms_device_url": f"{self.librenms_api.librenms_url}/device/device={self.librenms_id}/",
-                        "librenms_device_hardware": device_info.get("hardware", "-"),
+                        "librenms_device_hardware": hardware,
+                        "librenms_device_serial": serial,
+                        "librenms_device_os": os_name,
+                        "librenms_device_version": version,
+                        "librenms_device_features": features,
                         "librenms_device_location": device_info.get("location", "-"),
                         "librenms_device_ip": librenms_ip,
                         "sysName": librenms_hostname,
+                        "librenms_device_hardware_match": hardware_match,
                     }
                 )
+
+                # For Virtual Chassis, fetch inventory
+                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                    vc_serials = self._get_vc_inventory_serials(obj)
+                    librenms_device_details["vc_inventory_serials"] = vc_serials
 
                 # Get just the hostname part from LibreNMS FQDN if present
                 librenms_host = (
@@ -213,3 +252,145 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         Subclasses should override this method.
         """
         return None
+
+    def _match_device_type(self, hardware_name):
+        """
+        Try to match LibreNMS hardware string to NetBox DeviceType.
+
+        Args:
+            hardware_name: Hardware string from LibreNMS
+
+        Returns:
+            dict: {
+                'matched': bool,
+                'device_type': DeviceType object or None,
+                'match_type': 'exact'|'slug'|None
+            }
+        """
+        from dcim.models import DeviceType
+        from django.utils.text import slugify
+
+        if not hardware_name or hardware_name == "-":
+            return {"matched": False, "device_type": None, "match_type": None}
+
+        # Try exact name match
+        try:
+            device_type = DeviceType.objects.get(model__iexact=hardware_name)
+            return {"matched": True, "device_type": device_type, "match_type": "exact"}
+        except DeviceType.DoesNotExist:
+            pass
+
+        # Try slug match
+        hardware_slug = slugify(hardware_name)
+        try:
+            device_type = DeviceType.objects.get(slug=hardware_slug)
+            return {"matched": True, "device_type": device_type, "match_type": "slug"}
+        except DeviceType.DoesNotExist:
+            pass
+
+        return {"matched": False, "device_type": None, "match_type": None}
+
+    def _get_vc_inventory_serials(self, obj):
+        """
+        Fetch inventory serials for Virtual Chassis members.
+
+        Args:
+            obj: NetBox device object (VC member)
+
+        Returns:
+            list: [
+                {
+                    'description': 'Chassis component description',
+                    'serial': 'serial number',
+                    'model': 'model name',
+                    'assigned_member': Device object or None (if serial matches existing assignment)
+                }
+            ]
+        """
+        success, inventory = self.librenms_api.get_device_inventory(self.librenms_id)
+        if not success:
+            return []
+
+        # Filter for chassis components
+        chassis_components = [
+            item for item in inventory if item.get("entPhysicalClass") == "chassis"
+        ]
+
+        # Get all VC members
+        vc_members = obj.virtual_chassis.members.all()
+
+        result = []
+        for component in chassis_components:
+            serial = component.get("entPhysicalSerialNum", "-")
+            if not serial or serial == "-":
+                continue
+
+            # Check if this serial is already assigned to a VC member
+            assigned_member = None
+            for member in vc_members:
+                if member.serial and member.serial.strip() == serial.strip():
+                    assigned_member = member
+                    break
+
+            result.append(
+                {
+                    "description": component.get("entPhysicalDescr", "-"),
+                    "serial": serial,
+                    "model": component.get("entPhysicalModelName", "-"),
+                    "assigned_member": assigned_member,
+                }
+            )
+
+        return result
+
+    def _get_platform_info(self, librenms_info, obj):
+        """
+        Get platform information from LibreNMS.
+
+        Platform matching is based on OS name only (not version).
+        Version is displayed separately as informational data.
+
+        Args:
+            librenms_info: Dictionary with LibreNMS device info
+            obj: NetBox device object
+
+        Returns:
+            dict: {
+                'netbox_platform': Platform object or None,
+                'librenms_os': str (OS name),
+                'librenms_version': str (OS version),
+                'platform_exists': bool (whether OS platform exists in NetBox),
+                'platform_name': str (OS name for platform matching),
+                'matching_platform': Platform object or None
+            }
+        """
+        from dcim.models import Platform
+
+        librenms_os = librenms_info["librenms_device_details"].get(
+            "librenms_device_os", "-"
+        )
+        librenms_version = librenms_info["librenms_device_details"].get(
+            "librenms_device_version", "-"
+        )
+
+        # Platform name is just the OS (not OS + version)
+        platform_name = librenms_os if librenms_os != "-" else None
+
+        # Check if platform exists (match by OS name only)
+        platform_exists = False
+        matching_platform = None
+        if platform_name:
+            try:
+                matching_platform = Platform.objects.get(name__iexact=platform_name)
+                platform_exists = True
+            except Platform.DoesNotExist:
+                pass
+
+        return {
+            "netbox_platform": obj.platform,
+            "librenms_os": librenms_os,
+            "librenms_version": librenms_version,
+            "platform_exists": platform_exists,
+            "platform_name": platform_name,
+            "matching_platform": matching_platform,
+        }
