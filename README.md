@@ -85,7 +85,7 @@ Alternatively, share your ideas for the plugin over in [discussions](https://git
 | NetBox Version | Plugin Version |
 |----------------|----------------|
 |     4.1        | 0.2.x - 0.3.5  |
-|     4.2        | 0.3.6+          |
+|     4.2 - 4.4       | 0.3.6+          |
 ## Installing
 
 
