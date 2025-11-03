@@ -128,6 +128,80 @@ class AddToLIbreSNMPV2(forms.Form):
         widget=forms.HiddenInput(attrs={"id": "id_snmp_version_v2"})
     )
     community = forms.CharField(label="SNMP Community", max_length=255, required=True)
+    port = forms.IntegerField(
+        label="SNMP Port",
+        required=False,
+        help_text="Leave blank to use default SNMP port (161)",
+        widget=forms.NumberInput(attrs={"placeholder": "161"}),
+    )
+    transport = forms.ChoiceField(
+        label="Transport",
+        choices=[
+            ("udp", "UDP"),
+            ("tcp", "TCP"),
+            ("udp6", "UDP6"),
+            ("tcp6", "TCP6"),
+        ],
+        required=False,
+        initial="udp",
+    )
+    port_association_mode = forms.ChoiceField(
+        label="Port Association Mode",
+        choices=[
+            ("ifIndex", "ifIndex"),
+            ("ifName", "ifName"),
+            ("ifDescr", "ifDescr"),
+            ("ifAlias", "ifAlias"),
+        ],
+        required=False,
+        initial="ifIndex",
+        help_text="Method to identify ports",
+    )
+    poller_group = forms.ChoiceField(
+        label="Poller Group",
+        required=False,
+        help_text="Poller group for distributed poller setup",
+    )
+    force_add = forms.BooleanField(
+        label="Force Add",
+        required=False,
+        initial=False,
+        help_text="Skip duplicate device and SNMP reachability checks (hostname must still be unique)",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Populate poller groups from LibreNMS API
+        self.fields["poller_group"].choices = self._get_poller_group_choices()
+
+    def _get_poller_group_choices(self):
+        """Get poller group choices from LibreNMS API."""
+        from .librenms_api import LibreNMSAPI
+
+        choices = [("0", "Default (0)")]
+
+        try:
+            api = LibreNMSAPI()
+            success, poller_groups = api.get_poller_groups()
+
+            if success and poller_groups:
+                for group in poller_groups:
+                    group_id = str(group.get("id", ""))
+                    group_name = group.get("group_name", "")
+                    group_descr = group.get("descr", "")
+
+                    if group_id:
+                        # Format: "Group Name (ID)" or "Group Name - Description (ID)"
+                        if group_descr and group_descr != group_name:
+                            label = f"{group_name} - {group_descr} ({group_id})"
+                        else:
+                            label = f"{group_name} ({group_id})"
+                        choices.append((group_id, label))
+        except Exception:
+            # If API call fails, just use default option
+            pass
+
+        return choices
 
 
 class AddToLIbreSNMPV3(forms.Form):
@@ -184,6 +258,80 @@ class AddToLIbreSNMPV3(forms.Form):
         choices=[("AES", "AES"), ("DES", "DES")],
         required=True,
     )
+    port = forms.IntegerField(
+        label="SNMP Port",
+        required=False,
+        help_text="Leave blank to use default SNMP port (161)",
+        widget=forms.NumberInput(attrs={"placeholder": "161"}),
+    )
+    transport = forms.ChoiceField(
+        label="Transport",
+        choices=[
+            ("udp", "UDP"),
+            ("tcp", "TCP"),
+            ("udp6", "UDP6"),
+            ("tcp6", "TCP6"),
+        ],
+        required=False,
+        initial="udp",
+    )
+    port_association_mode = forms.ChoiceField(
+        label="Port Association Mode",
+        choices=[
+            ("ifIndex", "ifIndex"),
+            ("ifName", "ifName"),
+            ("ifDescr", "ifDescr"),
+            ("ifAlias", "ifAlias"),
+        ],
+        required=False,
+        initial="ifIndex",
+        help_text="Method to identify ports",
+    )
+    poller_group = forms.ChoiceField(
+        label="Poller Group",
+        required=False,
+        help_text="Poller group for distributed poller setup",
+    )
+    force_add = forms.BooleanField(
+        label="Force Add",
+        required=False,
+        initial=False,
+        help_text="Skip duplicate device and SNMP reachability checks (hostname must still be unique)",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Populate poller groups from LibreNMS API
+        self.fields["poller_group"].choices = self._get_poller_group_choices()
+
+    def _get_poller_group_choices(self):
+        """Get poller group choices from LibreNMS API."""
+        from .librenms_api import LibreNMSAPI
+
+        choices = [("0", "Default (0)")]
+
+        try:
+            api = LibreNMSAPI()
+            success, poller_groups = api.get_poller_groups()
+
+            if success and poller_groups:
+                for group in poller_groups:
+                    group_id = str(group.get("id", ""))
+                    group_name = group.get("group_name", "")
+                    group_descr = group.get("descr", "")
+
+                    if group_id:
+                        # Format: "Group Name (ID)" or "Group Name - Description (ID)"
+                        if group_descr and group_descr != group_name:
+                            label = f"{group_name} - {group_descr} ({group_id})"
+                        else:
+                            label = f"{group_name} ({group_id})"
+                        choices.append((group_id, label))
+        except Exception:
+            # If API call fails, just use default option
+            pass
+
+        return choices
 
 
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
