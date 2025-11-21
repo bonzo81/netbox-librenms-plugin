@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.18 (2025-11-21)
+
+### Improvements
+* Add all LibreNMS SNMP fields to add device form
+
 ## 0.3.17 (2025-10-24)
 
 ### Improvements
