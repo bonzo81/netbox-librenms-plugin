@@ -555,7 +555,7 @@
 
 <!-- Add to LibreNMS Modal -->
 <div class="modal fade" id="add-device-modal" tabindex="-1" aria-labelledby="addDeviceModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
+    <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="addDeviceModalLabel">Add Device to LibreNMS</h5>
@@ -584,6 +584,30 @@
                         {{ v2form.community.label_tag }}
                         {{ v2form.community }}
                     </div>
+                    <div class="mb-3">
+                        {{ v2form.port.label_tag }}
+                        {{ v2form.port }}
+                        <div class="form-text">{{ v2form.port.help_text }}</div>
+                    </div>
+                    <div class="mb-3">
+                        {{ v2form.transport.label_tag }}
+                        {{ v2form.transport }}
+                    </div>
+                    <div class="mb-3">
+                        {{ v2form.port_association_mode.label_tag }}
+                        {{ v2form.port_association_mode }}
+                        <div class="form-text">{{ v2form.port_association_mode.help_text }}</div>
+                    </div>
+                    <div class="mb-3">
+                        {{ v2form.poller_group.label_tag }}
+                        {{ v2form.poller_group }}
+                        <div class="form-text">{{ v2form.poller_group.help_text }}</div>
+                    </div>
+                    <div class="mb-3 form-check">
+                        {{ v2form.force_add }}
+                        {{ v2form.force_add.label_tag }}
+                        <div class="form-text">{{ v2form.force_add.help_text }}</div>
+                    </div>
                     <button type="submit" class="btn btn-primary">Add Device</button>
                 </form>
 
@@ -592,18 +616,53 @@
                     id="snmpv3-form" style="display: none;">
                     {% csrf_token %}
                     <input type="hidden" name="snmp_version" value="v3">
-                    <div class="mb-3">
-                        {{ v3form.hostname.label_tag }}
-                        {{ v3form.hostname }}
+
+                    <div class="row">
+                        <!-- Left Column: Common fields (same as SNMPv2c) -->
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                {{ v3form.hostname.label_tag }}
+                                {{ v3form.hostname }}
+                            </div>
+                            <div class="mb-3">
+                                {{ v3form.port.label_tag }}
+                                {{ v3form.port }}
+                                <div class="form-text">{{ v3form.port.help_text }}</div>
+                            </div>
+                            <div class="mb-3">
+                                {{ v3form.transport.label_tag }}
+                                {{ v3form.transport }}
+                            </div>
+                            <div class="mb-3">
+                                {{ v3form.port_association_mode.label_tag }}
+                                {{ v3form.port_association_mode }}
+                                <div class="form-text">{{ v3form.port_association_mode.help_text }}</div>
+                            </div>
+                            <div class="mb-3">
+                                {{ v3form.poller_group.label_tag }}
+                                {{ v3form.poller_group }}
+                                <div class="form-text">{{ v3form.poller_group.help_text }}</div>
+                            </div>
+                            <div class="mb-3 form-check">
+                                {{ v3form.force_add }}
+                                {{ v3form.force_add.label_tag }}
+                                <div class="form-text">{{ v3form.force_add.help_text }}</div>
+                            </div>
+                        </div>
+
+                        <!-- Right Column: SNMPv3-specific fields -->
+                        <div class="col-md-6">
+                            {% for field in v3form %}
+                            {% if field.name not in 'hostname,snmp_version,port,transport,port_association_mode,poller_group,force_add' %}
+                            <div class="mb-3">
+                                {{ field.label_tag }}
+                                {{ field }}
+                            </div>
+                            {% endif %}
+                            {% endfor %}
+                        </div>
                     </div>
-                    {% for field in v3form %}
-                    {% if field.name != 'hostname' %}
-                    <div class="mb-3">
-                        {{ field.label_tag }}
-                        {{ field }}
-                    </div>
-                    {% endif %}
-                    {% endfor %}
+
                     <button type="submit" class="btn btn-primary">Add Device</button>
                 </form>
             </div>

@@ -355,7 +355,16 @@ class LibreNMSAPI:
         Add a device to LibreNMS.
 
         Args:
-            Dictionary containing device data
+            Dictionary containing device data including:
+                - hostname: Device hostname or IP
+                - snmp_version: SNMP version (v2c or v3)
+                - force_add: Skip checks for duplicate device and SNMP reachability (optional, default False)
+                - port: SNMP port (optional, defaults to config value)
+                - transport: SNMP transport protocol (optional: udp, tcp, udp6, tcp6)
+                - port_association_mode: Port identification method (optional: ifIndex, ifName, ifDescr, ifAlias)
+                - poller_group: Poller group ID (optional, defaults to 0)
+                - community: SNMP community string (for v2c)
+                - authlevel, authname, authpass, authalgo, cryptopass, cryptoalgo: SNMP v3 parameters
 
         Returns:
             Dictionary with 'success' and 'message' keys
@@ -363,8 +372,18 @@ class LibreNMSAPI:
         payload = {
             "hostname": data["hostname"],
             "snmpver": data["snmp_version"],
-            "force_add": False,
+            "force_add": data.get("force_add", False),
         }
+
+        # Add optional common fields if provided
+        if data.get("port"):
+            payload["port"] = data["port"]
+        if data.get("transport"):
+            payload["transport"] = data["transport"]
+        if data.get("port_association_mode"):
+            payload["port_association_mode"] = data["port_association_mode"]
+        if data.get("poller_group") is not None:
+            payload["poller_group"] = data["poller_group"]
 
         if data["snmp_version"] == "v2c":
             payload["community"] = data["community"]
@@ -645,6 +664,39 @@ class LibreNMSAPI:
             if response.status_code == 200:
                 inventory_data = response.json()
                 return True, inventory_data.get("inventory", [])
+            return False, []
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
+
+    def get_poller_groups(self):
+        """
+        Fetch all poller groups from LibreNMS.
+
+        Route: /api/v0/poller_group
+
+        Returns:
+            tuple: (success: bool, data: list)
+
+        Example poller group:
+            {
+                "id": 1,
+                "group_name": "test",
+                "descr": "test group"
+            }
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/poller_group",
+                headers=self.headers,
+                timeout=10,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("status") == "ok":
+                    return True, result.get("get_poller_group", [])
             return False, []
         except requests.exceptions.RequestException as e:
             return False, str(e)

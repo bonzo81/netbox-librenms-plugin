@@ -1,9 +1,7 @@
 from dcim.models import Device
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect
-from django.urls import reverse_lazy
 from django.views import View
-from django.views.generic import FormView
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
@@ -48,7 +46,23 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
         device_data = {
             "hostname": data.get("hostname"),
             "snmp_version": data.get("snmp_version"),
+            "force_add": data.get("force_add", False),
         }
+
+        # Add optional common fields if provided
+        if data.get("port"):
+            device_data["port"] = data.get("port")
+        if data.get("transport"):
+            device_data["transport"] = data.get("transport")
+        if data.get("port_association_mode"):
+            device_data["port_association_mode"] = data.get("port_association_mode")
+        if data.get("poller_group"):
+            # Convert poller_group string to integer for LibreNMS API
+            try:
+                device_data["poller_group"] = int(data.get("poller_group"))
+            except (ValueError, TypeError):
+                pass  # Skip if conversion fails
+
         if device_data["snmp_version"] == "v2c":
             device_data["community"] = data.get("community")
         elif device_data["snmp_version"] == "v3":
