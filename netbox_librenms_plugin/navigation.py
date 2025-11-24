@@ -15,6 +15,7 @@ menu = PluginMenu(
                 PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:interfacetypemapping_list",
                     link_text="Interface Mappings",
+                    permissions=["netbox_librenms_plugin.view_interfacetypemapping"],
                     buttons=(
                         PluginMenuButton(
                             link="plugins:netbox_librenms_plugin:interfacetypemapping_add",
