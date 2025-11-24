@@ -19,6 +19,7 @@ from .views import (
     InterfaceTypeMappingEditView,
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
+    LibreNMSImportView,
     LibreNMSSettingsView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -36,6 +37,16 @@ from .views import (
     VMIPAddressTableView,
     VMLibreNMSSyncView,
     VMStatusListView,
+)
+from .views.device_import_views import (
+    DeviceClusterUpdateView,
+    DeviceImportExecuteView,
+    DeviceImportPreviewView,
+    DeviceRoleUpdateView,
+    DeviceValidationDetailsView,
+)
+from .views.import_views import (
+    BulkImportDevicesView,
 )
 
 urlpatterns = [
@@ -175,6 +186,42 @@ urlpatterns = [
         "device-status/",
         DeviceStatusListView.as_view(),
         name="device_status_list",
+    ),
+    path(
+        "librenms-import/",
+        LibreNMSImportView.as_view(),
+        name="librenms_import",
+    ),
+    # Device import URLs (HTMX-powered)
+    path(
+        "device-import/execute/<str:device_id>/",
+        DeviceImportExecuteView.as_view(),
+        name="device_import_execute",
+    ),
+    path(
+        "device-import/bulk/",
+        BulkImportDevicesView.as_view(),
+        name="bulk_import_devices",
+    ),
+    path(
+        "device-import/preview/<str:device_id>/",
+        DeviceImportPreviewView.as_view(),
+        name="device_import_preview",
+    ),
+    path(
+        "device-import/validation/<str:device_id>/",
+        DeviceValidationDetailsView.as_view(),
+        name="device_validation_details",
+    ),
+    path(
+        "device-import/role-update/<str:device_id>/",
+        DeviceRoleUpdateView.as_view(),
+        name="device_role_update",
+    ),
+    path(
+        "device-import/cluster-update/<str:device_id>/",
+        DeviceClusterUpdateView.as_view(),
+        name="device_cluster_update",
     ),
     path(
         "vm-status/",

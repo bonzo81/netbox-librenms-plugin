@@ -1,0 +1,64 @@
+{# Success message for single device import #}
+<div class="modal-header bg-success text-white">
+    <h5 class="modal-title">
+        <i class="mdi mdi-check-circle"></i> Import Successful
+    </h5>
+    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+</div>
+<div class="modal-body">
+    <div class="alert alert-success mb-3">
+        <h6 class="alert-heading">
+            <i class="mdi mdi-check-decagram"></i> {{ message }}
+        </h6>
+    </div>
+
+    {% if device %}
+    <div class="card">
+        <div class="card-header">
+            <strong>Imported Device Details</strong>
+        </div>
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Device:</dt>
+                <dd class="col-sm-9">
+                    <a href="{% url 'dcim:device' pk=device.pk %}" class="btn btn-sm btn-primary">
+                        <i class="mdi mdi-open-in-new"></i> {{ device.name }}
+                    </a>
+                </dd>
+
+                <dt class="col-sm-3">Site:</dt>
+                <dd class="col-sm-9">{{ device.site|default:"—" }}</dd>
+
+                <dt class="col-sm-3">Device Type:</dt>
+                <dd class="col-sm-9">{{ device.device_type|default:"—" }}</dd>
+
+                <dt class="col-sm-3">Role:</dt>
+                <dd class="col-sm-9">{{ device.device_role|default:"—" }}</dd>
+
+                {% if synced %}
+                <dt class="col-sm-3">Synced Data:</dt>
+                <dd class="col-sm-9">
+                    {% if synced.interfaces %}
+                        <span class="badge bg-info">{{ synced.interfaces }} Interfaces</span>
+                    {% endif %}
+                    {% if synced.cables %}
+                        <span class="badge bg-info">{{ synced.cables }} Cables</span>
+                    {% endif %}
+                    {% if synced.ips %}
+                        <span class="badge bg-info">{{ synced.ips }} IP Addresses</span>
+                    {% endif %}
+                </dd>
+                {% endif %}
+            </dl>
+        </div>
+    </div>
+    {% endif %}
+</div>
+<div class="modal-footer">
+    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+    {% if device %}
+    <a href="{% url 'dcim:device' pk=device.pk %}" class="btn btn-primary">
+        <i class="mdi mdi-arrow-right"></i> View Device
+    </a>
+    {% endif %}
+</div>

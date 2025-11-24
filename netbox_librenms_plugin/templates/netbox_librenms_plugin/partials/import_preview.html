@@ -1,0 +1,144 @@
+{# Preview modal for device import #}
+<div class="modal-header">
+    <h5 class="modal-title">
+        <i class="mdi mdi-eye"></i> Import Preview: {{ device.hostname }}
+    </h5>
+    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+</div>
+<div class="modal-body">
+    {# LibreNMS Device Info #}
+    <div class="card mb-3">
+        <div class="card-header bg-light">
+            <strong><i class="mdi mdi-server"></i> LibreNMS Device</strong>
+        </div>
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Hostname:</dt>
+                <dd class="col-sm-9"><code>{{ device.hostname }}</code></dd>
+
+                <dt class="col-sm-3">IP Address:</dt>
+                <dd class="col-sm-9">{{ device.ip|default:"—" }}</dd>
+
+                <dt class="col-sm-3">Location:</dt>
+                <dd class="col-sm-9">{{ device.location|default:"—" }}</dd>
+
+                <dt class="col-sm-3">Hardware:</dt>
+                <dd class="col-sm-9">{{ device.hardware|default:"—" }}</dd>
+
+                <dt class="col-sm-3">OS:</dt>
+                <dd class="col-sm-9">{{ device.os|default:"—" }}</dd>
+
+                <dt class="col-sm-3">Status:</dt>
+                <dd class="col-sm-9">
+                    {% if device.status == 1 %}
+                        <span class="badge bg-success">Active</span>
+                    {% else %}
+                        <span class="badge bg-secondary">Disabled</span>
+                    {% endif %}
+                </dd>
+            </dl>
+        </div>
+    </div>
+
+    {# NetBox Mappings #}
+    <div class="card mb-3">
+        <div class="card-header bg-light">
+            <strong><i class="mdi mdi-database"></i> NetBox Mappings</strong>
+        </div>
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Site:</dt>
+                <dd class="col-sm-9">
+                    {% if validation.suggested.site %}
+                        {{ validation.suggested.site.name }}
+                    {% else %}
+                        <span class="text-danger">Not found</span>
+                    {% endif %}
+                </dd>
+
+                <dt class="col-sm-3">Device Type:</dt>
+                <dd class="col-sm-9">
+                    {% if validation.suggested.device_type %}
+                        {{ validation.suggested.device_type.manufacturer.name }} {{ validation.suggested.device_type.model }}
+                    {% else %}
+                        <span class="text-danger">Not found</span>
+                    {% endif %}
+                </dd>
+
+                <dt class="col-sm-3">Device Role:</dt>
+                <dd class="col-sm-9">
+                    {% if validation.suggested.device_role %}
+                        {{ validation.suggested.device_role.name }}
+                    {% else %}
+                        <span class="text-danger">Not found</span>
+                    {% endif %}
+                </dd>
+
+                <dt class="col-sm-3">Platform:</dt>
+                <dd class="col-sm-9">
+                    {% if validation.suggested.platform %}
+                        {{ validation.suggested.platform.name }}
+                    {% else %}
+                        <span class="text-muted">Not matched</span>
+                    {% endif %}
+                </dd>
+            </dl>
+        </div>
+    </div>
+
+    {# What will be synced #}
+    <div class="card">
+        <div class="card-header bg-light">
+            <strong><i class="mdi mdi-sync"></i> Data to Sync</strong>
+        </div>
+        <div class="card-body">
+            <div class="row text-center">
+                <div class="col-4">
+                    <div class="h2 mb-0">{{ counts.interfaces }}</div>
+                    <div class="text-muted">Interfaces</div>
+                </div>
+                <div class="col-4">
+                    <div class="h2 mb-0">{{ counts.cables }}</div>
+                    <div class="text-muted">Cables</div>
+                </div>
+                <div class="col-4">
+                    <div class="h2 mb-0">{{ counts.ips }}</div>
+                    <div class="text-muted">IP Addresses</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {# Validation warnings #}
+    {% if validation.warnings %}
+    <div class="alert alert-warning mt-3">
+        <strong><i class="mdi mdi-alert"></i> Warnings:</strong>
+        <ul class="mb-0 mt-2">
+            {% for warning in validation.warnings %}
+                <li>{{ warning }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</div>
+<div class="modal-footer">
+    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+    {% if validation.is_ready %}
+        <button type="button" class="btn btn-success"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:import_single_device' device_id=device.device_id %}"
+                hx-target="#import-preview-content"
+                hx-swap="innerHTML">
+            <i class="mdi mdi-download"></i> Import Now
+        </button>
+    {% else %}
+        <button type="button" class="btn btn-primary"
+                hx-get="{% url 'plugins:netbox_librenms_plugin:device_import_configure' device_id=device.device_id %}"
+                hx-target="#configure-import-content"
+                hx-swap="innerHTML"
+                data-bs-toggle="modal"
+                data-bs-target="#configure-import-modal"
+                data-bs-dismiss="modal">
+            <i class="mdi mdi-cog"></i> Configure Mappings
+        </button>
+    {% endif %}
+</div>

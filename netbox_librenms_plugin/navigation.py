@@ -44,6 +44,11 @@ menu = PluginMenu(
                     permissions=["dcim.view_device"],
                 ),
                 PluginMenuItem(
+                    link="plugins:netbox_librenms_plugin:librenms_import",
+                    link_text="LibreNMS Import",
+                    permissions=["dcim.view_device"],
+                ),
+                PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:vm_status_list",
                     link_text="VM Status",
                     permissions=["virtualization.view_virtualmachine"],

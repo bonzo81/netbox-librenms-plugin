@@ -1,3 +1,5 @@
+import logging
+
 from dcim.models import Device
 from django.db.models import BooleanField, Case, Value, When
 from netbox.views import generic
@@ -12,19 +14,16 @@ from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
+logger = logging.getLogger(__name__)
+
 
 class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
     """
-    Check the status of devices in NetBox against LibreNMS
+    Check the status of NetBox devices in LibreNMS.
+    Shows NetBox devices with their LibreNMS status.
     """
 
-    queryset = Device.objects.select_related(
-        "device_type__manufacturer"
-    ).prefetch_related(
-        "site",
-        "location",
-        "rack",
-    )
+    queryset = Device.objects.none()  # Start with empty queryset
     table = DeviceStatusTable
     filterset = DeviceStatusFilterSet
     filterset_form = DeviceStatusFilterForm
@@ -33,6 +32,10 @@ class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
     title = "Device LibreNMS Status"
 
     def get_queryset(self, request):
+        """
+        Override get_queryset to return filtered devices and check LibreNMS status
+        """
+        # Only get devices if filters are applied
         if self.request.GET:
             queryset = Device.objects.select_related(
                 "device_type__manufacturer"
@@ -42,7 +45,7 @@ class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
                 "rack",
             )
 
-            # Create device status mapping
+            # Create a list to store device IDs and their status
             device_status_map = {}
 
             # Apply filters
@@ -69,9 +72,7 @@ class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
 
             return queryset
 
-        return Device.objects.none().annotate(
-            librenms_status=Value(None, output_field=BooleanField())
-        )
+        return Device.objects.none()
 
 
 class VMStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
@@ -118,6 +119,4 @@ class VMStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
 
             return queryset
 
-        return VirtualMachine.objects.none().annotate(
-            librenms_status=Value(None, output_field=BooleanField())
-        )
+        return VirtualMachine.objects.none()

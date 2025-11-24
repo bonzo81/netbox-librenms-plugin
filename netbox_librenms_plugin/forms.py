@@ -122,11 +122,8 @@ class AddToLIbreSNMPV2(forms.Form):
         label="Hostname/IP",
         max_length=255,
         required=True,
-        widget=forms.TextInput(attrs={"id": "id_hostname_v2"}),
     )
-    snmp_version = forms.CharField(
-        widget=forms.HiddenInput(attrs={"id": "id_snmp_version_v2"})
-    )
+    snmp_version = forms.CharField(widget=forms.HiddenInput())
     community = forms.CharField(label="SNMP Community", max_length=255, required=True)
     port = forms.IntegerField(
         label="SNMP Port",
@@ -214,11 +211,8 @@ class AddToLIbreSNMPV3(forms.Form):
         label="Hostname/IP",
         max_length=255,
         required=True,
-        widget=forms.TextInput(attrs={"id": "id_hostname_v3"}),
     )
-    snmp_version = forms.CharField(
-        widget=forms.HiddenInput(attrs={"id": "id_snmp_version_v3"}), initial="v3"
-    )
+    snmp_version = forms.CharField(widget=forms.HiddenInput(), initial="v3")
     authlevel = forms.ChoiceField(
         label="Auth Level",
         choices=[
@@ -336,19 +330,15 @@ class AddToLIbreSNMPV3(forms.Form):
 
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
     """
-    Form for filtering device status information in NetBox.
+    Filter form for Device Status view - shows NetBox devices and their LibreNMS status.
     """
 
     def __init__(self, *args, **kwargs):
-        """Initialize the form and remove the filter_id field if it exists."""
         super().__init__(*args, **kwargs)
         # Remove the saved filter field if it exists
         if "filter_id" in self.fields:
             del self.fields["filter_id"]
 
-    device = DynamicModelMultipleChoiceField(
-        queryset=Device.objects.all(), required=False
-    )
     site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
     location = DynamicModelMultipleChoiceField(
         queryset=Location.objects.all(), required=False
@@ -362,6 +352,124 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = Device
+
+
+class LibreNMSImportFilterForm(forms.Form):
+    """
+    Filter form for LibreNMS Import view - shows LibreNMS devices for import.
+    Uses a simple Django form instead of NetBox model forms.
+    """
+
+    # LibreNMS filters
+    librenms_location = forms.ChoiceField(
+        required=False,
+        label="LibreNMS Location",
+        choices=[("", "All Locations")],  # Default, will be populated in __init__
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    librenms_type = forms.ChoiceField(
+        required=False,
+        label="LibreNMS Type",
+        choices=[
+            ("", "All Types"),
+            ("network", "Network"),
+            ("server", "Server"),
+            ("storage", "Storage"),
+            ("wireless", "Wireless"),
+            ("firewall", "Firewall"),
+            ("power", "Power"),
+            ("appliance", "Appliance"),
+            ("printer", "Printer"),
+            ("loadbalancer", "Load Balancer"),
+            ("other", "Other"),
+        ],
+    )
+    librenms_os = forms.CharField(
+        required=False,
+        label="Operating System",
+        widget=forms.TextInput(attrs={"placeholder": "e.g., ios, linux, junos"}),
+    )
+    librenms_hostname = forms.CharField(
+        required=False,
+        label="LibreNMS Hostname",
+        widget=forms.TextInput(attrs={"placeholder": "Partial hostname match"}),
+        help_text="IP address or DNS name used to add device to LibreNMS",
+    )
+    librenms_sysname = forms.CharField(
+        required=False,
+        label="LibreNMS System Name",
+        widget=forms.TextInput(attrs={"placeholder": "Exact or partial sysName match"}),
+        help_text="SNMP sysName of the device (exact match only; combine with another filter for partial matching)",
+    )
+    show_disabled = forms.BooleanField(
+        required=False,
+        initial=False,
+        label="Include Disabled Devices",
+        help_text="Check to include disabled devices from LibreNMS",
+    )
+    validation_status = forms.ChoiceField(
+        required=False,
+        label="Import Status",
+        choices=[
+            ("", "All"),
+            ("ready", "Ready to Import"),
+            ("needs_review", "Needs Review"),
+            ("cannot_import", "Cannot Import"),
+            ("exists", "Already Exists"),
+        ],
+        help_text="Filter by import readiness status",
+    )
+
+    def __init__(self, *args, **kwargs):
+        """Initialize the form and populate dynamic choices."""
+        super().__init__(*args, **kwargs)
+        # Populate LibreNMS location choices dynamically
+        self._populate_librenms_locations()
+
+    def _populate_librenms_locations(self):
+        """Fetch and populate LibreNMS locations in the dropdown."""
+        import logging
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            # Use caching to avoid repeated API calls
+            cache_key = "librenms_locations_choices"
+            cached_choices = cache.get(cache_key)
+
+            if cached_choices:
+                self.fields["librenms_location"].choices = cached_choices
+                return
+
+            # Fetch locations from LibreNMS
+            api = LibreNMSAPI()
+            success, locations = api.get_locations()
+
+            if success and locations:
+                # Build choices list: (id, "name (id)")
+                choices = [("", "All Locations")]
+                for loc in locations:
+                    loc_id = str(loc.get("id", ""))
+                    loc_name = loc.get("location", f"Location {loc_id}")
+                    choices.append((loc_id, f"{loc_name} (ID: {loc_id})"))
+
+                # Sort by name
+                choices[1:] = sorted(choices[1:], key=lambda x: x[1])
+
+                self.fields["librenms_location"].choices = choices
+
+                # Cache for 5 minutes
+                cache.set(cache_key, choices, timeout=300)
+                logger.info(f"Loaded {len(choices) - 1} LibreNMS locations")
+            else:
+                logger.warning(f"Failed to load LibreNMS locations: {locations}")
+        except Exception as e:
+            logger.exception(f"Error loading LibreNMS locations: {e}")
+            # Keep default choices on error
 
 
 class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
@@ -385,3 +493,132 @@ class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = VirtualMachine
+
+
+class DeviceImportConfigForm(forms.Form):
+    """
+    Form for configuring import of LibreNMS devices with missing prerequisites.
+    Allows user to manually map LibreNMS device data to NetBox objects.
+    """
+
+    device_id = forms.IntegerField(widget=forms.HiddenInput(), required=True)
+    hostname = forms.CharField(disabled=True, required=False, label="Device Hostname")
+    hardware = forms.CharField(disabled=True, required=False, label="Hardware")
+    librenms_location = forms.CharField(
+        disabled=True, required=False, label="LibreNMS Location"
+    )
+
+    # Required mappings
+    site = forms.ModelChoiceField(
+        queryset=Site.objects.all(),
+        required=True,
+        label="NetBox Site",
+        help_text="Select the NetBox site for this device",
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    device_type = forms.ModelChoiceField(
+        queryset=DeviceType.objects.all(),
+        required=True,
+        label="Device Type",
+        help_text="Select the NetBox device type",
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    device_role = forms.ModelChoiceField(
+        queryset=DeviceRole.objects.all(),
+        required=True,
+        label="Device Role",
+        help_text="Select the device role",
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    # Optional mappings
+    platform = forms.ModelChoiceField(
+        queryset=None,
+        required=False,
+        label="Platform",
+        help_text="Select platform (optional)",
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    # Sync options
+    sync_interfaces = forms.BooleanField(
+        initial=True,
+        required=False,
+        label="Sync Interfaces",
+        help_text="Automatically sync interfaces from LibreNMS after import",
+    )
+    sync_cables = forms.BooleanField(
+        initial=True,
+        required=False,
+        label="Sync Cables",
+        help_text="Automatically sync cable connections from LibreNMS after import",
+    )
+    sync_ips = forms.BooleanField(
+        initial=True,
+        required=False,
+        label="Sync IP Addresses",
+        help_text="Automatically sync IP addresses from LibreNMS after import",
+    )
+
+    def __init__(self, *args, **kwargs):
+        """
+        Initialize form with LibreNMS device data and validation results.
+
+        Accepts additional kwargs:
+        - libre_device: LibreNMS device dictionary
+        - validation: Validation result dictionary
+        - suggested_site: Pre-selected site
+        - suggested_device_type: Pre-selected device type
+        - suggested_role: Pre-selected device role
+        """
+        # Extract custom kwargs
+        libre_device = kwargs.pop("libre_device", {})
+        validation = kwargs.pop("validation", {})
+        suggested_site = kwargs.pop("suggested_site", None)
+        suggested_device_type = kwargs.pop("suggested_device_type", None)
+        suggested_role = kwargs.pop("suggested_role", None)
+
+        super().__init__(*args, **kwargs)
+
+        # Import Platform here to avoid circular imports
+        from dcim.models import Platform
+
+        self.fields["platform"].queryset = Platform.objects.all()
+
+        # Set initial values from LibreNMS device
+        if libre_device:
+            self.fields["device_id"].initial = libre_device.get("device_id")
+            self.fields["hostname"].initial = libre_device.get("hostname", "")
+            self.fields["hardware"].initial = libre_device.get("hardware", "")
+            self.fields["librenms_location"].initial = libre_device.get("location", "")
+
+        # Set suggested values from validation
+        if suggested_site:
+            self.fields["site"].initial = suggested_site
+        elif validation and validation.get("site", {}).get("site"):
+            self.fields["site"].initial = validation["site"]["site"]
+
+        if suggested_device_type:
+            self.fields["device_type"].initial = suggested_device_type
+        elif validation and validation.get("device_type", {}).get("device_type"):
+            self.fields["device_type"].initial = validation["device_type"][
+                "device_type"
+            ]
+
+        if suggested_role:
+            self.fields["device_role"].initial = suggested_role
+        elif validation and validation.get("device_role", {}).get("role"):
+            self.fields["device_role"].initial = validation["device_role"]["role"]
+
+        if validation and validation.get("platform", {}).get("platform"):
+            self.fields["platform"].initial = validation["platform"]["platform"]
+
+        # Filter device types by suggestions if available
+        if validation and validation.get("device_type", {}).get("suggestions"):
+            suggestions = validation["device_type"]["suggestions"]
+            if suggestions:
+                # Include suggested device types first, then all others
+                suggested_ids = [s["device_type"].id for s in suggestions]
+                self.fields["device_type"].queryset = DeviceType.objects.filter(
+                    id__in=suggested_ids
+                ) | DeviceType.objects.exclude(id__in=suggested_ids)

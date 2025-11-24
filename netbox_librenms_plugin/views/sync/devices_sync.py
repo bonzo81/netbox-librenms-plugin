@@ -15,7 +15,14 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
 
     def get_form_class(self):
         """Return the correct form class based on the SNMP version."""
-        if self.request.POST.get("snmp_version") == "v2c":
+        snmp_version = self.request.POST.get("snmp_version")
+        # Handle both prefixed and non-prefixed versions for backwards compatibility
+        if not snmp_version:
+            snmp_version = self.request.POST.get(
+                "v2-snmp_version"
+            ) or self.request.POST.get("v3-snmp_version")
+
+        if snmp_version == "v2c":
             return AddToLIbreSNMPV2
         return AddToLIbreSNMPV3
 
@@ -30,7 +37,16 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
         """Handle the POST request to add a device to LibreNMS."""
         self.object = self.get_object(object_id)
         form_class = self.get_form_class()
-        form = form_class(request.POST)
+
+        # Determine which prefix to use based on the SNMP version
+        snmp_version = (
+            request.POST.get("snmp_version")
+            or request.POST.get("v2-snmp_version")
+            or request.POST.get("v3-snmp_version")
+        )
+        prefix = "v2" if snmp_version == "v2c" else "v3"
+
+        form = form_class(request.POST, prefix=prefix)
         if form.is_valid():
             return self.form_valid(form)
         else:

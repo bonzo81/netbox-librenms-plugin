@@ -1,0 +1,197 @@
+{# Detailed validation information modal #}
+<div class="modal-header">
+    <h5 class="modal-title">
+        <i class="mdi mdi-information"></i> Validation Details: {{ device.hostname }}
+    </h5>
+    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+</div>
+<div class="modal-body">
+    {# Overall Status #}
+    <div class="card mb-3">
+        <div class="card-header">
+            <strong>Import Status</strong>
+        </div>
+        <div class="card-body">
+            {% if validation.existing_device %}
+                <div class="alert alert-info mb-0">
+                    <i class="mdi mdi-check-decagram"></i>
+                    <strong>Already Exists</strong> — This device is already imported in NetBox.
+                    {% if validation.existing_device %}
+                        <a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" class="alert-link">
+                            View Device
+                        </a>
+                    {% endif %}
+                </div>
+            {% elif validation.is_ready %}
+                <div class="alert alert-success mb-0">
+                    <i class="mdi mdi-check-circle"></i>
+                    <strong>Ready to Import</strong> — All requirements are met.
+                </div>
+            {% elif validation.can_import %}
+                <div class="alert alert-warning mb-0">
+                    <i class="mdi mdi-alert"></i>
+                    <strong>Needs Review</strong> — Can be imported but has warnings.
+                </div>
+            {% else %}
+                <div class="alert alert-danger mb-0">
+                    <i class="mdi mdi-close-circle"></i>
+                    <strong>Cannot Import</strong> — Missing required mappings.
+                </div>
+            {% endif %}
+        </div>
+    </div>
+
+    {# LibreNMS Device Info #}
+    <div class="card mb-3">
+        <div class="card-header">
+            <strong><i class="mdi mdi-server"></i> LibreNMS Device</strong>
+        </div>
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Device ID:</dt>
+                <dd class="col-sm-9"><code>{{ device.device_id }}</code></dd>
+
+                <dt class="col-sm-3">Hostname:</dt>
+                <dd class="col-sm-9"><code>{{ device.hostname }}</code></dd>
+
+                <dt class="col-sm-3">IP Address:</dt>
+                <dd class="col-sm-9">{{ device.ip|default:"—" }}</dd>
+
+                <dt class="col-sm-3">Location:</dt>
+                <dd class="col-sm-9">{{ device.location|default:"—" }}</dd>
+
+                <dt class="col-sm-3">Hardware:</dt>
+                <dd class="col-sm-9">{{ device.hardware|default:"—" }}</dd>
+
+                <dt class="col-sm-3">OS:</dt>
+                <dd class="col-sm-9">{{ device.os|default:"—" }}</dd>
+
+                <dt class="col-sm-3">Status:</dt>
+                <dd class="col-sm-9">
+                    {% if device.status == 1 %}
+                        <span class="badge bg-success">Active</span>
+                    {% else %}
+                        <span class="badge bg-secondary">Disabled</span>
+                    {% endif %}
+                </dd>
+            </dl>
+        </div>
+    </div>
+
+    {# Suggested Mappings #}
+    <div class="card mb-3">
+        <div class="card-header">
+            <strong><i class="mdi mdi-auto-fix"></i> Suggested NetBox Mappings</strong>
+        </div>
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Site:</dt>
+                <dd class="col-sm-9">
+                    {% if validation.suggested.site %}
+                        <span class="badge bg-success">
+                            <i class="mdi mdi-check"></i> {{ validation.suggested.site.name }}
+                        </span>
+                    {% else %}
+                        <span class="badge bg-danger"><i class="mdi mdi-close"></i> Not found</span>
+                    {% endif %}
+                </dd>
+
+                <dt class="col-sm-3">Device Type:</dt>
+                <dd class="col-sm-9">
+                    {% if validation.suggested.device_type %}
+                        <span class="badge bg-success">
+                            <i class="mdi mdi-check"></i> {{ validation.suggested.device_type.manufacturer.name }} {{ validation.suggested.device_type.model }}
+                        </span>
+                    {% else %}
+                        <span class="badge bg-danger"><i class="mdi mdi-close"></i> Not found</span>
+                    {% endif %}
+                </dd>
+
+                <dt class="col-sm-3">Device Role:</dt>
+                <dd class="col-sm-9">
+                    {% if validation.device_role.found and validation.device_role.role %}
+                        <span class="badge bg-success">
+                            <i class="mdi mdi-check"></i> {{ validation.device_role.role.name }}
+                        </span>
+                    {% else %}
+                        <span class="badge bg-danger"><i class="mdi mdi-close"></i> Not found</span>
+                    {% endif %}
+                </dd>
+
+                <dt class="col-sm-3">Platform:</dt>
+                <dd class="col-sm-9">
+                    {% if validation.suggested.platform %}
+                        <span class="badge bg-success">
+                            <i class="mdi mdi-check"></i> {{ validation.suggested.platform.name }}
+                        </span>
+                    {% else %}
+                        <span class="badge bg-secondary"><i class="mdi mdi-minus"></i> None</span>
+                        <small class="text-muted">(optional)</small>
+                    {% endif %}
+                </dd>
+            </dl>
+        </div>
+    </div>
+
+    {# Issues #}
+    {% if validation.issues %}
+    <div class="card mb-3 border-danger">
+        <div class="card-header bg-danger text-white">
+            <strong><i class="mdi mdi-alert-circle"></i> Issues ({{ validation.issues|length }})</strong>
+        </div>
+        <div class="card-body">
+            <ul class="mb-0">
+                {% for issue in validation.issues %}
+                    <li class="text-danger">{{ issue }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endif %}
+
+    {# Warnings #}
+    {% if validation.warnings %}
+    <div class="card mb-3 border-warning">
+        <div class="card-header bg-warning">
+            <strong><i class="mdi mdi-alert"></i> Warnings ({{ validation.warnings|length }})</strong>
+        </div>
+        <div class="card-body">
+            <ul class="mb-0">
+                {% for warning in validation.warnings %}
+                    <li class="text-warning">{{ warning }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endif %}
+
+    {# No issues or warnings #}
+    {% if not validation.issues and not validation.warnings and not validation.existing_device %}
+    <div class="alert alert-success">
+        <i class="mdi mdi-check-all"></i> No issues or warnings found. This device is ready to import.
+    </div>
+    {% endif %}
+</div>
+<div class="modal-footer">
+    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+    {% if not validation.existing_device %}
+        {% if validation.is_ready %}
+            <button type="button" class="btn btn-success"
+                    hx-post="{% url 'plugins:netbox_librenms_plugin:import_single_device' device_id=device.device_id %}"
+                    hx-target="#validation-detail-content"
+                    hx-swap="innerHTML">
+                <i class="mdi mdi-download"></i> Import Now
+            </button>
+        {% else %}
+            <button type="button" class="btn btn-primary"
+                    hx-get="{% url 'plugins:netbox_librenms_plugin:device_import_configure' device_id=device.device_id %}"
+                    hx-target="#configure-import-content"
+                    hx-swap="innerHTML"
+                    data-bs-toggle="modal"
+                    data-bs-target="#configure-import-modal"
+                    data-bs-dismiss="modal">
+                <i class="mdi mdi-cog"></i> Configure Import
+            </button>
+        {% endif %}
+    {% endif %}
+</div>

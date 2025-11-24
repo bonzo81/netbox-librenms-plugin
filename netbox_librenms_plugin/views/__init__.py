@@ -14,6 +14,7 @@ from .device_views import (
     DeviceLibreNMSSyncView,
     SingleInterfaceVerifyView,
 )
+from .librenms_import_views import LibreNMSImportView
 from .mapping_views import (
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
