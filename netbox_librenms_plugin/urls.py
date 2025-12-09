@@ -4,13 +4,20 @@ from .models import InterfaceTypeMapping
 from .views import (
     AddDeviceToLibreNMSView,
     AssignVCSerialView,
+    BulkImportConfirmView,
+    BulkImportDevicesView,
     CreateAndAssignPlatformView,
     DeleteNetBoxInterfacesView,
     DeviceCableTableView,
+    DeviceClusterUpdateView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceRackUpdateView,
+    DeviceRoleUpdateView,
     DeviceStatusListView,
+    DeviceValidationDetailsView,
+    DeviceVCDetailsView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -37,16 +44,6 @@ from .views import (
     VMIPAddressTableView,
     VMLibreNMSSyncView,
     VMStatusListView,
-)
-from .views.device_import_views import (
-    DeviceClusterUpdateView,
-    DeviceImportExecuteView,
-    DeviceImportPreviewView,
-    DeviceRoleUpdateView,
-    DeviceValidationDetailsView,
-)
-from .views.import_views import (
-    BulkImportDevicesView,
 )
 
 urlpatterns = [
@@ -192,26 +189,25 @@ urlpatterns = [
         LibreNMSImportView.as_view(),
         name="librenms_import",
     ),
-    # Device import URLs (HTMX-powered)
-    path(
-        "device-import/execute/<str:device_id>/",
-        DeviceImportExecuteView.as_view(),
-        name="device_import_execute",
-    ),
     path(
         "device-import/bulk/",
         BulkImportDevicesView.as_view(),
         name="bulk_import_devices",
     ),
     path(
-        "device-import/preview/<str:device_id>/",
-        DeviceImportPreviewView.as_view(),
-        name="device_import_preview",
+        "device-import/bulk/confirm/",
+        BulkImportConfirmView.as_view(),
+        name="bulk_import_confirm",
     ),
     path(
         "device-import/validation/<str:device_id>/",
         DeviceValidationDetailsView.as_view(),
         name="device_validation_details",
+    ),
+    path(
+        "device-import/vc-details/<str:device_id>/",
+        DeviceVCDetailsView.as_view(),
+        name="device_vc_details",
     ),
     path(
         "device-import/role-update/<str:device_id>/",
@@ -222,6 +218,11 @@ urlpatterns = [
         "device-import/cluster-update/<str:device_id>/",
         DeviceClusterUpdateView.as_view(),
         name="device_cluster_update",
+    ),
+    path(
+        "device-import/rack-update/<str:device_id>/",
+        DeviceRackUpdateView.as_view(),
+        name="device_rack_update",
     ),
     path(
         "vm-status/",

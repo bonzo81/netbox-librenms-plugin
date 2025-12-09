@@ -271,6 +271,27 @@
             </td>
           </tr>
 
+          {% if not validation.import_as_vm %}
+          <tr>
+            <td><strong>Rack:</strong></td>
+            <td>
+              {% if validation.rack.rack %}
+                <i class="mdi mdi-check-circle text-success"></i>
+                <span class="badge bg-success text-white">
+                  {% if validation.rack.rack.location %}
+                    {{ validation.rack.rack.location.name }} - {{ validation.rack.rack.name }}
+                  {% else %}
+                    {{ validation.rack.rack.name }}
+                  {% endif %}
+                </span>
+              {% else %}
+                <i class="mdi mdi-information-outline text-secondary"></i>
+                <span class="text-secondary">Optional - not assigned</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
+
           <tr>
             <td><strong>Primary IP:</strong></td>
             <td>

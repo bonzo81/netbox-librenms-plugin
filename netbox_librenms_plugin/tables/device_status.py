@@ -1,9 +1,13 @@
+import json
+
 import django_tables2 as tables
 from dcim.models import Device
 from dcim.tables import DeviceTable
 from django.urls import reverse
+from django.utils.html import escape
 from django.utils.safestring import mark_safe
 from django_tables2 import Column
+from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.utils import get_librenms_sync_device
 
@@ -84,6 +88,15 @@ class DeviceImportTable(tables.Table):
 
     name = "DeviceImportTable"  # Required by NetBox table utilities
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Cache querysets to avoid N queries per render
+        from dcim.models import DeviceRole
+        from virtualization.models import Cluster
+
+        self._cached_clusters = list(Cluster.objects.all().order_by("name"))
+        self._cached_roles = list(DeviceRole.objects.all().order_by("name"))
+
     # Selection checkbox
     selection = Column(
         verbose_name="",
@@ -95,11 +108,8 @@ class DeviceImportTable(tables.Table):
     # LibreNMS device fields
     hostname = Column(verbose_name="Hostname", accessor="hostname", orderable=True)
     sysname = Column(verbose_name="System Name", accessor="sysName", orderable=True)
-    device_id = Column(verbose_name="LibreNMS ID", accessor="device_id", orderable=True)
     location = Column(verbose_name="Location", accessor="location", orderable=True)
     hardware = Column(verbose_name="Hardware", accessor="hardware", orderable=True)
-    ip = Column(verbose_name="IP Address", accessor="ip", orderable=True)
-    os = Column(verbose_name="OS", accessor="os", orderable=True)
 
     # Cluster selection - if selected, import as VM; otherwise import as Device
     netbox_cluster = Column(
@@ -112,6 +122,22 @@ class DeviceImportTable(tables.Table):
     # NetBox role selection (for devices only)
     netbox_role = Column(
         verbose_name="NetBox Role",
+        empty_values=(),
+        orderable=False,
+        accessor="device_id",
+    )
+
+    # NetBox rack selection (for devices only, optional)
+    netbox_rack = Column(
+        verbose_name="NetBox Rack",
+        empty_values=(),
+        orderable=False,
+        accessor="device_id",
+    )
+
+    # Virtual Chassis detection column
+    virtual_chassis = Column(
+        verbose_name="Virtual Chassis",
         empty_values=(),
         orderable=False,
         accessor="device_id",
@@ -159,14 +185,13 @@ class DeviceImportTable(tables.Table):
         If a cluster is selected, the device will be imported as a VM.
         If no cluster is selected, the device will be imported as a Device.
         """
-        from virtualization.models import Cluster
-
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
         existing = validation.get("existing_device")
 
-        # If VM already exists, show its cluster
-        if existing and hasattr(existing, "cluster") and existing.cluster:
+        # Check if existing object is a VM
+        if existing and isinstance(existing, VirtualMachine):
+            # VM already exists - show its cluster (cluster is required for VMs)
             cluster = existing.cluster
             return mark_safe(
                 f'<span class="badge bg-info text-white">{cluster.name}</span>'
@@ -176,8 +201,8 @@ class DeviceImportTable(tables.Table):
         if existing:
             return mark_safe('<span class="text-muted small">Device (not VM)</span>')
 
-        # Get all available clusters
-        clusters = Cluster.objects.all().order_by("name")
+        # Use cached clusters to avoid N queries
+        clusters = self._cached_clusters
 
         # Check if a cluster has been selected (from validation)
         selected_cluster_id = None
@@ -209,8 +234,8 @@ class DeviceImportTable(tables.Table):
             f'hx-post="{update_url}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
-            f'hx-include="[name=role_{device_id}]" '
-            f'style="min-width: 180px;">'
+            f'hx-include="[name=role_{device_id}], [name=rack_{device_id}]" '
+            f'style="width: 180px;">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -223,8 +248,6 @@ class DeviceImportTable(tables.Table):
         For Devices: Role is required
         For VMs: Role is optional
         """
-        from dcim.models import DeviceRole
-
         device_id = record.get("device_id")
         validation = record.get("_validation", {})
         is_vm = validation.get("import_as_vm", False)
@@ -240,8 +263,8 @@ class DeviceImportTable(tables.Table):
                 f"{role.name}</span>"
             )
 
-        # Get all available roles
-        roles = DeviceRole.objects.all().order_by("name")
+        # Use cached roles to avoid N queries
+        roles = self._cached_roles
 
         # Check if a role has been selected (from validation)
         selected_role_id = None
@@ -276,8 +299,81 @@ class DeviceImportTable(tables.Table):
             f'hx-post="{update_url}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
-            f'hx-include="[name=cluster_{device_id}]" '
-            f'style="min-width: 150px;">'
+            f'hx-include="[name=cluster_{device_id}], [name=rack_{device_id}]" '
+            f'style="width: 150px;">'
+            f"{''.join(options)}"
+            f"</select>"
+        )
+
+        return mark_safe(select_html)
+
+    def render_netbox_rack(self, value, record):
+        """
+        Render rack selection dropdown (optional).
+        Shows racks for the matched site in "Location - Rack" format.
+        Only shown for devices (not VMs) and when site is matched.
+        """
+        device_id = record.get("device_id")
+        validation = record.get("_validation", {})
+        is_vm = validation.get("import_as_vm", False)
+        existing = validation.get("existing_device")
+
+        # Don't show rack dropdown for VMs
+        if is_vm:
+            return mark_safe('<span class="text-muted small">N/A (VM)</span>')
+
+        # If device already exists, show its rack
+        if existing and hasattr(existing, "rack") and existing.rack:
+            rack = existing.rack
+            location_name = rack.location.name if rack.location else "No Location"
+            return mark_safe(
+                f'<span class="badge bg-info text-white">{location_name} - {rack.name}</span>'
+            )
+
+        # If device exists but no rack assigned
+        if existing:
+            return mark_safe('<span class="text-muted small">No rack</span>')
+
+        # Check if site is matched - rack selection only available when site is known
+        site_found = validation.get("site", {}).get("found", False)
+        if not site_found:
+            return mark_safe('<span class="text-muted small">--</span>')
+
+        # Get available racks from validation (cached)
+        available_racks = validation.get("rack", {}).get("available_racks", [])
+
+        # Check if a rack has been selected
+        selected_rack_id = None
+        if validation.get("rack", {}).get("rack"):
+            selected_rack_id = validation["rack"]["rack"].pk
+
+        # Build dropdown with HTMX attributes
+        options = ['<option value="">--</option>']
+        for rack in available_racks:
+            location_name = rack.location.name if rack.location else "No Location"
+            display_text = f"{location_name} - {rack.name}"
+            selected = " selected" if rack.pk == selected_rack_id else ""
+            options.append(
+                f'<option value="{rack.pk}"{selected}>{escape(display_text)}</option>'
+            )
+
+        # Add HTMX attributes to update the entire row when rack is selected
+        from django.urls import reverse
+
+        update_url = reverse(
+            "plugins:netbox_librenms_plugin:device_rack_update",
+            kwargs={"device_id": device_id},
+        )
+
+        select_html = (
+            f'<select class="form-select form-select-sm rack-select" '
+            f'name="rack_{device_id}" '
+            f'data-device-id="{device_id}" '
+            f'hx-post="{update_url}" '
+            f'hx-trigger="change" '
+            f'hx-swap="none" '
+            f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
+            f'style="width: 200px;">'
             f"{''.join(options)}"
             f"</select>"
         )
@@ -295,51 +391,33 @@ class DeviceImportTable(tables.Table):
         can_import = validation.get("can_import", False)
         existing = validation.get("existing_device")
 
+        vc_attributes = self._build_vc_attributes(validation, record)
+
         buttons = []
 
         if existing:
-            # Link to existing device in NetBox
-            device_url = reverse("dcim:device", kwargs={"pk": existing.pk})
+            # Link to existing device/VM in NetBox
+            if isinstance(existing, VirtualMachine):
+                url_name = "virtualization:virtualmachine"
+                title = "View VM in NetBox"
+            else:
+                url_name = "dcim:device"
+                title = "View Device in NetBox"
+
+            device_url = reverse(url_name, kwargs={"pk": existing.pk})
             buttons.append(
                 f'<a href="{device_url}" class="btn btn-sm btn-secondary" '
-                f'title="View in NetBox"><i class="mdi mdi-open-in-new"></i></a>'
+                f'title="{title}"><i class="mdi mdi-open-in-new"></i></a>'
             )
         elif is_ready:
             # Ready to import - show Import and Details buttons
-            import_url = reverse(
-                "plugins:netbox_librenms_plugin:device_import_execute",
-                kwargs={"device_id": device_id},
-            )
-            details_url = reverse(
-                "plugins:netbox_librenms_plugin:device_validation_details",
-                kwargs={"device_id": device_id},
-            )
-
-            # Build query params for details URL based on import type
-            params = []
-
-            # Add cluster_id if this is a VM import
-            if validation.get("cluster", {}).get("found") and validation.get(
-                "cluster", {}
-            ).get("cluster"):
-                cluster_id = validation["cluster"]["cluster"].id
-                params.append(f"cluster_id={cluster_id}")
-            # Add role_id if device role is found
-            elif validation.get("device_role", {}).get("found") and validation.get(
-                "device_role", {}
-            ).get("role"):
-                role_id = validation["device_role"]["role"].id
-                params.append(f"role_id={role_id}")
-
-            if params:
-                details_url += "?" + "&".join(params)
+            details_url = self._build_validation_details_url(device_id, validation)
 
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm btn-success device-import-btn device-ready" '
                 f'data-device-id="{device_id}" '
-                f'data-import-url="{import_url}" '
-                f'data-ready="true" '
+                f'data-import-mode="single"{vc_attributes} '
                 f'title="Import this device">'
                 f'<i class="mdi mdi-download"></i> Import</button>'
             )
@@ -347,7 +425,7 @@ class DeviceImportTable(tables.Table):
                 f'<button type="button" '
                 f'class="btn btn-sm btn-outline-primary" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
+                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}]" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="View details">'
@@ -355,35 +433,13 @@ class DeviceImportTable(tables.Table):
             )
         elif can_import:
             # Has warnings - show Review button with Details
-            details_url = reverse(
-                "plugins:netbox_librenms_plugin:device_validation_details",
-                kwargs={"device_id": device_id},
-            )
-
-            # Build query params for details URL based on import type
-            params = []
-
-            # Add cluster_id if this is a VM import
-            if validation.get("cluster", {}).get("found") and validation.get(
-                "cluster", {}
-            ).get("cluster"):
-                cluster_id = validation["cluster"]["cluster"].id
-                params.append(f"cluster_id={cluster_id}")
-            # Add role_id if device role is found
-            elif validation.get("device_role", {}).get("found") and validation.get(
-                "device_role", {}
-            ).get("role"):
-                role_id = validation["device_role"]["role"].id
-                params.append(f"role_id={role_id}")
-
-            if params:
-                details_url += "?" + "&".join(params)
+            details_url = self._build_validation_details_url(device_id, validation)
 
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm btn-warning" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
+                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}]" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="Review and import">'
@@ -391,40 +447,13 @@ class DeviceImportTable(tables.Table):
             )
         else:
             # Cannot import (usually missing role) - show Import button (disabled until role selected) and Details
-            import_url = reverse(
-                "plugins:netbox_librenms_plugin:device_import_execute",
-                kwargs={"device_id": device_id},
-            )
-            details_url = reverse(
-                "plugins:netbox_librenms_plugin:device_validation_details",
-                kwargs={"device_id": device_id},
-            )
-
-            # Build query params for details URL based on import type
-            params = []
-
-            # Add cluster_id if this is a VM import
-            if validation.get("cluster", {}).get("found") and validation.get(
-                "cluster", {}
-            ).get("cluster"):
-                cluster_id = validation["cluster"]["cluster"].id
-                params.append(f"cluster_id={cluster_id}")
-            # Add role_id if device role is found
-            elif validation.get("device_role", {}).get("found") and validation.get(
-                "device_role", {}
-            ).get("role"):
-                role_id = validation["device_role"]["role"].id
-                params.append(f"role_id={role_id}")
-
-            if params:
-                details_url += "?" + "&".join(params)
+            details_url = self._build_validation_details_url(device_id, validation)
 
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm btn-success device-import-btn" '
                 f'data-device-id="{device_id}" '
-                f'data-import-url="{import_url}" '
-                f"disabled "
+                f"disabled{vc_attributes} "
                 f'title="Select a role to enable import">'
                 f'<i class="mdi mdi-download"></i> Import</button>'
             )
@@ -432,7 +461,7 @@ class DeviceImportTable(tables.Table):
                 f'<button type="button" '
                 f'class="btn btn-sm btn-outline-danger" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
+                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}]" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="View validation details">'
@@ -441,6 +470,121 @@ class DeviceImportTable(tables.Table):
 
         return mark_safe(
             '<div class="btn-group btn-group-sm">' + " ".join(buttons) + "</div>"
+        )
+
+    def render_virtual_chassis(self, value, record):
+        """Render Virtual Chassis status and details button."""
+        validation = record.get("_validation", {})
+        if validation.get("_vc_detection_skipped"):
+            return mark_safe('<span class="text-muted">Not requested</span>')
+        vc_data = validation.get("virtual_chassis", {})
+        device_id = record.get("device_id")
+
+        # Show dash for non-VC or single member stacks
+        if not vc_data.get("is_stack") or vc_data.get("member_count", 0) <= 1:
+            return mark_safe('<span class="text-muted">—</span>')
+
+        vc_url = reverse(
+            "plugins:netbox_librenms_plugin:device_vc_details",
+            kwargs={"device_id": device_id},
+        )
+
+        # Show error button if detection failed
+        if vc_data.get("detection_error"):
+            return mark_safe(
+                f'<button type="button" '
+                f'class="btn btn-sm btn-outline-warning" '
+                f'hx-get="{vc_url}" '
+                f'hx-target="#htmx-modal-content" '
+                f'hx-swap="innerHTML" '
+                f'title="View virtual chassis error details">'
+                f'<i class="mdi mdi-alert"></i> Error</button>'
+            )
+
+        # Show member count button for valid multi-member stacks
+        member_count = vc_data.get("member_count", 0)
+        return mark_safe(
+            f'<button type="button" '
+            f'class="btn btn-sm btn-outline-info" '
+            f'hx-get="{vc_url}" '
+            f'hx-target="#htmx-modal-content" '
+            f'hx-swap="innerHTML" '
+            f'title="View virtual chassis details">'
+            f'<i class="mdi mdi-server-network"></i> {member_count} members</button>'
+        )
+
+    @staticmethod
+    def _build_validation_details_url(device_id: int, validation: dict) -> str:
+        """
+        Build validation details URL with appropriate query parameters.
+
+        Constructs the URL for the device validation details modal, adding
+        cluster_id or role_id as query parameters based on validation state.
+
+        Args:
+            device_id: LibreNMS device ID
+            validation: Validation dict from validate_device_for_import()
+
+        Returns:
+            str: Complete URL with query parameters
+        """
+        details_url = reverse(
+            "plugins:netbox_librenms_plugin:device_validation_details",
+            kwargs={"device_id": device_id},
+        )
+
+        # Build query params based on import type
+        params = []
+
+        # Add cluster_id if this is a VM import
+        if validation.get("cluster", {}).get("found") and validation.get(
+            "cluster", {}
+        ).get("cluster"):
+            cluster_id = validation["cluster"]["cluster"].id
+            params.append(f"cluster_id={cluster_id}")
+        # Add role_id if device role is found
+        elif validation.get("device_role", {}).get("found") and validation.get(
+            "device_role", {}
+        ).get("role"):
+            role_id = validation["device_role"]["role"].id
+            params.append(f"role_id={role_id}")
+
+        if params:
+            details_url += "?" + "&".join(params)
+
+        return details_url
+
+    @staticmethod
+    def _build_vc_attributes(validation: dict, record: dict) -> str:
+        vc_data = validation.get("virtual_chassis") or {}
+        if not vc_data.get("is_stack"):
+            return ' data-vc-is-stack="false"'
+
+        members_payload = []
+        for member in vc_data.get("members", []):
+            members_payload.append(
+                {
+                    "position": member.get("position"),
+                    "serial": member.get("serial"),
+                    "suggested_name": member.get("suggested_name"),
+                }
+            )
+
+        payload = {
+            "member_count": vc_data.get("member_count", len(members_payload)),
+            "members": members_payload,
+            "detection_error": vc_data.get("detection_error"),
+        }
+
+        payload_json = escape(json.dumps(payload))
+        master_name = record.get("hostname") or record.get("sysName") or ""
+        master_value = escape(master_name)
+
+        return (
+            ' data-vc-is-stack="true"'
+            f' data-vc-member-count="{payload["member_count"]}"'
+            f' data-vc-info="{payload_json}"'
+            f' data-vc-master="{master_value}"'
         )
 
     class Meta:
@@ -456,26 +600,24 @@ class DeviceImportTable(tables.Table):
             "selection",
             "hostname",
             "sysname",
-            "device_id",
             "location",
             "hardware",
-            "ip",
-            "os",
             "netbox_cluster",
             "netbox_role",
+            "netbox_rack",
+            "virtual_chassis",
             "actions",
         )
         sequence = (
             "selection",
             "hostname",
             "sysname",
-            "device_id",
             "location",
             "hardware",
-            "ip",
-            "os",
             "netbox_cluster",
             "netbox_role",
+            "netbox_rack",
+            "virtual_chassis",
             "actions",
         )
         default_columns = fields

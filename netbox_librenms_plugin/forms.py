@@ -25,9 +25,38 @@ class LibreNMSSettingsForm(NetBoxModelForm):
         help_text="Select which LibreNMS server to use for synchronization operations",
     )
 
+    vc_member_name_pattern = forms.CharField(
+        label="Virtual Chassis Member Naming Pattern",
+        max_length=100,
+        required=False,
+        strip=False,  # Preserve leading/trailing whitespace
+        widget=forms.TextInput(
+            attrs={
+                "placeholder": "-M{position}",
+            }
+        ),
+    )
+
+    use_sysname_default = forms.BooleanField(
+        label="Use sysName",
+        required=False,
+        help_text="Use SNMP sysName instead of LibreNMS hostname when importing devices",
+    )
+
+    strip_domain_default = forms.BooleanField(
+        label="Strip domain",
+        required=False,
+        help_text="Remove domain suffix from device names during import",
+    )
+
     class Meta:
         model = LibreNMSSettings
-        fields = ["selected_server"]
+        fields = [
+            "selected_server",
+            "vc_member_name_pattern",
+            "use_sysname_default",
+            "strip_domain_default",
+        ]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -56,6 +85,15 @@ class LibreNMSSettingsForm(NetBoxModelForm):
                 choices.append(("default", "Default Server"))
 
         return choices
+
+    def clean_vc_member_name_pattern(self):
+        """Validate that the VC member name pattern includes the {position} placeholder."""
+        pattern = self.cleaned_data.get("vc_member_name_pattern")
+        if pattern and "{position}" not in pattern:
+            raise forms.ValidationError(
+                "The naming pattern must include the {position} placeholder to ensure unique member names."
+            )
+        return pattern
 
 
 class InterfaceTypeMappingForm(NetBoxModelForm):
@@ -406,6 +444,21 @@ class LibreNMSImportFilterForm(forms.Form):
         initial=False,
         label="Include Disabled Devices",
         help_text="Check to include disabled devices from LibreNMS",
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+    )
+    enable_vc_detection = forms.BooleanField(
+        required=False,
+        initial=False,
+        label="Include Virtual Chassis Detection",
+        help_text="Run stack checks during the search when you need VC data. Leave unchecked for faster lookups.",
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+    )
+    clear_cache = forms.BooleanField(
+        required=False,
+        initial=False,
+        label="Clear cache before search",
+        help_text="By default, search results are cached for 5 minutes to speed up repeats. Check this to discard the cache and pull fresh data.",
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
     validation_status = forms.ChoiceField(
         required=False,
@@ -425,6 +478,26 @@ class LibreNMSImportFilterForm(forms.Form):
         super().__init__(*args, **kwargs)
         # Populate LibreNMS location choices dynamically
         self._populate_librenms_locations()
+
+    def clean(self):
+        cleaned_data = super().clean()
+
+        # Only enforce filter requirement when the user explicitly submits the form
+        if self.data.get("apply_filters"):
+            filter_fields = (
+                "librenms_location",
+                "librenms_type",
+                "librenms_os",
+                "librenms_hostname",
+                "librenms_sysname",
+            )
+
+            if not any(cleaned_data.get(field) for field in filter_fields):
+                raise forms.ValidationError(
+                    "Please select at least one LibreNMS filter before applying the search."
+                )
+
+        return cleaned_data
 
     def _populate_librenms_locations(self):
         """Fetch and populate LibreNMS locations in the dropdown."""
@@ -462,8 +535,8 @@ class LibreNMSImportFilterForm(forms.Form):
 
                 self.fields["librenms_location"].choices = choices
 
-                # Cache for 5 minutes
-                cache.set(cache_key, choices, timeout=300)
+                # Cache using configured timeout (default 300s)
+                cache.set(cache_key, choices, timeout=api.cache_timeout)
                 logger.info(f"Loaded {len(choices) - 1} LibreNMS locations")
             else:
                 logger.warning(f"Failed to load LibreNMS locations: {locations}")

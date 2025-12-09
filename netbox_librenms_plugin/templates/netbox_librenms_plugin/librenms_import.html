@@ -26,6 +26,9 @@
 
 {% block content %}
 
+  {# Display Django messages #}
+  {% include 'inc/messages.html' %}
+
   {# Collapsible Filter Section #}
   {% if filter_form %}
     <div class="card mb-3">
@@ -45,26 +48,174 @@
           <div class="row">
             {# Instructions column #}
             <div class="col-md-4">
-              <h6><i class="mdi mdi-information-outline"></i> Quick Guide</h6>
-              <p class="mb-2">Search for devices in LibreNMS and import them into NetBox. At least one filter is required to begin your search.</p>
+              <h6 class="mb-2"><i class="mdi mdi-information-outline"></i> Filter Requirements</h6>
+              <p class="mb-3"><strong>At least one filter is required</strong> to search LibreNMS devices.</p>
 
-              <p class="mb-1"><strong>How Filters Work:</strong></p>
-              <ul class="mb-2" style="padding-left: 1.2rem;">
-                  <li><strong>Location/Type/OS:</strong> Exact match using LibreNMS API</li>
-                  <li><strong>Hostname:</strong> Partial match when used alone or combined with other filters</li>
-                  <li><strong>System Name:</strong> Exact match when used alone; partial match when combined with other filters</li>
+              <p class="mb-1"><strong>Filter Types:</strong></p>
+              <ul class="mb-3" style="padding-left: 1.2rem; font-size: 0.9rem;">
+                  <li><strong>Location/Type/OS:</strong> Exact match</li>
+                  <li><strong>Hostname:</strong> Partial match</li>
+                  <li><strong>System Name:</strong> Exact match (partial when combined)</li>
               </ul>
 
-              <p class="mb-1"><strong>LibreNMS API Limitations:</strong></p>
-              <p class="mb-2">The LibreNMS API only supports one filter type per request. When you combine multiple filters, a single filter queries the API and additional filters are applied client-side for more specific results.</p>
-
-              <p class="mb-0 text-muted">
-                  <i class="mdi mdi-lightbulb-on-outline"></i> <strong>Best Practice:</strong> Start with a broad filter (Location or Type) to fetch a manageable subset of devices, then refine using Hostname or System Name for more specific results.
+              <p class="mb-0 text-muted small">
+                  <i class="mdi mdi-lightbulb-on-outline"></i> Start with Location or Type, then refine with Hostname or System Name.
               </p>
+              <div class="alert alert-info small mt-3 mb-0" role="status">
+                <strong>Cache tip:</strong> Search results are cached for 5 minutes to speed up repeat lookups. Initial searches against large LibreNMS datasets can take a while, but you can force a refresh using the "Clear cache before search" option below.
+              </div>
             </div>
             {# Filters column #}
             <div class="col-md-8">
-              <form method="get" class="form">
+              <form method="get" class="form" id="librenms-import-filter-form">
+                <input type="hidden" name="apply_filters" value="1">
+                <!-- Filter submission with proper cancellation support -->
+                <script>
+    // AbortController for cancelling the filter request
+    let currentAbortController = null;
+
+    document.getElementById('librenms-import-filter-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+
+      // Cancel any existing request before starting a new one
+      if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+      }
+
+      // Create new AbortController for this request
+      currentAbortController = new AbortController();
+
+      // Show filter processing modal
+      const filterModal = document.getElementById('filter-processing-modal');
+      let modalInstance;
+
+      if (filterModal) {
+        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+          modalInstance = new bootstrap.Modal(filterModal);
+          modalInstance.show();
+        } else {
+          // Fallback for manual modal display
+          filterModal.classList.add('show');
+          filterModal.style.display = 'block';
+          filterModal.setAttribute('aria-modal', 'true');
+          filterModal.removeAttribute('aria-hidden');
+          document.body.classList.add('modal-open');
+
+          // Add backdrop
+          const backdrop = document.createElement('div');
+          backdrop.className = 'modal-backdrop fade show';
+          backdrop.id = 'filter-modal-backdrop';
+          document.body.appendChild(backdrop);
+        }
+      }
+
+      // Handle cancel button - actually abort the request
+      const cancelBtn = document.getElementById('cancel-filter-btn');
+      if (cancelBtn) {
+        cancelBtn.onclick = function() {
+          // Abort the fetch request
+          if (currentAbortController) {
+            currentAbortController.abort();
+            currentAbortController = null;
+          }
+
+          // Hide modal
+          if (modalInstance) {
+            modalInstance.hide();
+          } else {
+            // Fallback manual hide
+            filterModal.classList.remove('show');
+            filterModal.style.display = 'none';
+            filterModal.removeAttribute('aria-modal');
+            filterModal.setAttribute('aria-hidden', 'true');
+            document.body.classList.remove('modal-open');
+            const backdrop = document.getElementById('filter-modal-backdrop');
+            if (backdrop) {
+              backdrop.remove();
+            }
+          }
+        };
+      }
+
+      // Build completely clean URL parameters from current form state only
+      const params = new URLSearchParams();
+      // Add all text/select fields with non-empty values
+      const inputs = this.querySelectorAll('input:not([type="checkbox"]), select');
+      inputs.forEach(input => {
+        if (input.name && input.value) {
+          params.append(input.name, input.value);
+        }
+      });
+
+      // Explicitly add ONLY currently checked checkboxes
+      const checkboxes = ['id_enable_vc_detection', 'id_clear_cache', 'id_show_disabled'];
+      checkboxes.forEach(id => {
+        const checkbox = document.getElementById(id);
+        if (checkbox?.checked && checkbox.name) {
+          params.set(checkbox.name, 'on');
+        }
+      });
+
+      // Strip any existing query parameters from the action URL
+      const baseUrl = this.action.split('?')[0];
+
+      // Build final URL
+      const finalUrl = baseUrl + '?' + params.toString();
+      console.log('Fetching filtered results:', finalUrl);
+
+      // Use fetch with AbortController instead of window.location
+      fetch(finalUrl, {
+        method: 'GET',
+        signal: currentAbortController.signal,
+        headers: {
+          'Accept': 'text/html'
+        }
+      })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.text();
+      })
+      .then(html => {
+        // Replace the entire page content with the returned HTML
+        document.open();
+        document.write(html);
+        document.close();
+        currentAbortController = null;
+      })
+      .catch(error => {
+        if (error.name === 'AbortError') {
+          console.log('Filter request was cancelled by user');
+        } else {
+          console.error('Error fetching filtered results:', error);
+          alert('Error loading filtered results. Please try again.');
+        }
+        
+        // Hide modal on error
+        if (modalInstance) {
+          modalInstance.hide();
+        } else {
+          filterModal.classList.remove('show');
+          filterModal.style.display = 'none';
+          document.body.classList.remove('modal-open');
+          const backdrop = document.getElementById('filter-modal-backdrop');
+          if (backdrop) {
+            backdrop.remove();
+          }
+        }
+        currentAbortController = null;
+      });
+    });
+</script>
+                {% if show_filter_warning %}
+                  <div class="alert alert-warning alert-dismissible fade show border-warning" role="alert" style="border-left: 4px solid #ffc107;">
+                    <i class="mdi mdi-alert text-warning"></i>
+                    <strong>Filter Required:</strong> {{ filter_warning }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                  </div>
+                {% endif %}
                 <div class="row mb-3">
                   <div class="col-md-6">
                     <label for="{{ filter_form.librenms_location.id_for_label }}" class="form-label">{{ filter_form.librenms_location.label }}</label>
@@ -118,6 +269,24 @@
                         <small class="form-text text-muted d-block">{{ filter_form.show_disabled.help_text }}</small>
                       {% endif %}
                     </div>
+                    <div class="form-check mt-2">
+                      {{ filter_form.enable_vc_detection }}
+                      <label class="form-check-label" for="{{ filter_form.enable_vc_detection.id_for_label }}">
+                        {{ filter_form.enable_vc_detection.label }}
+                      </label>
+                      {% if filter_form.enable_vc_detection.help_text %}
+                        <small class="form-text text-muted d-block">{{ filter_form.enable_vc_detection.help_text }}</small>
+                      {% endif %}
+                    </div>
+                    <div class="form-check mt-2">
+                      {{ filter_form.clear_cache }}
+                      <label class="form-check-label" for="{{ filter_form.clear_cache.id_for_label }}">
+                        {{ filter_form.clear_cache.label }}
+                      </label>
+                      {% if filter_form.clear_cache.help_text %}
+                        <small class="form-text text-muted d-block">{{ filter_form.clear_cache.help_text }}</small>
+                      {% endif %}
+                    </div>
                   </div>
                 </div>
                 <div class="text-end">
@@ -158,7 +327,7 @@
             <div class="d-flex align-items-center gap-3">
                 <strong class="me-2">Import Settings:</strong>
                 <div class="form-check form-switch mb-0">
-                    <input class="form-check-input" type="checkbox" id="use-sysname-toggle" checked
+                    <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if settings.use_sysname_default %}checked{% endif %}
                            data-bs-toggle="tooltip"
                            title="Use SNMP sysName instead of LibreNMS hostname">
                     <label class="form-check-label small" for="use-sysname-toggle">
@@ -166,7 +335,7 @@
                     </label>
                 </div>
                 <div class="form-check form-switch mb-0">
-                    <input class="form-check-input" type="checkbox" id="strip-domain-toggle"
+                    <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if settings.strip_domain_default %}checked{% endif %}
                            data-bs-toggle="tooltip"
                            title="Remove domain suffix (e.g., 'switch01.example.com' → 'switch01'). IP addresses preserved.">
                     <label class="form-check-label small" for="strip-domain-toggle">
@@ -177,10 +346,23 @@
         </div>
     </div>
 
+    {% if vc_detection_skipped %}
+      <div class="alert alert-info mb-3">
+        <i class="mdi mdi-progress-clock"></i>
+        Virtual chassis detection is disabled for this search (default). Selecting a role from the drop down will trigger a virtual chassis check for that device.
+      </div>
+    {% endif %}
+    {% if cache_cleared %}
+      <div class="alert alert-success mb-3">
+        <i class="mdi mdi-refresh"></i>
+        Cache cleared before this search. Results were pulled directly from LibreNMS and will be cached again for 5 minutes.
+      </div>
+    {% endif %}
+
     {# Bulk import toolbar #}
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-        <div class="d-flex align-items-center gap-2 flex-wrap">
-            <button type="button" class="btn btn-outline-primary" id="select-all-ready">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <button type="button" class="btn btn-outline-primary" id="select-all-ready">
                 <i class="mdi mdi-checkbox-multiple-marked"></i> Select All Ready
             </button>
             <button type="button" class="btn btn-outline-secondary" id="select-none">
@@ -190,13 +372,21 @@
                 <i class="mdi mdi-information"></i> 0 devices selected
             </span>
         </div>
-        <button type="button" class="btn btn-success" id="bulk-import-btn" disabled>
-            <i class="mdi mdi-download"></i> Import Selected (<span id="import-count">0</span>)
-        </button>
+      <button type="button" class="btn btn-success" id="bulk-import-btn" disabled
+          hx-post="{% url 'plugins:netbox_librenms_plugin:bulk_import_confirm' %}"
+          hx-target="#htmx-modal-content"
+          hx-swap="innerHTML"
+          hx-include="#import-selection-form, #use-sysname-toggle, #strip-domain-toggle">
+        <span class="d-inline-flex align-items-center gap-1">
+          <i class="mdi mdi-download"></i>
+          <span>Import Selected (<span id="import-count">0</span>)</span>
+        </span>
+        <span class="spinner-border spinner-border-sm ms-2 htmx-indicator" role="status" aria-hidden="true" style="display: none;"></span>
+      </button>
     </div>
   {% endif %}
 
-  <form method="post" class="form form-horizontal">
+    <form method="post" class="form form-horizontal" id="import-selection-form">
     {% csrf_token %}
     <input type="hidden" name="return_url" value="{% if return_url %}{{ return_url }}{% else %}{{ request.path }}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}{% endif %}" />
 
@@ -216,81 +406,6 @@
 
   </form>
 
-  {# Modal for bulk import results #}
-  <div class="modal fade" id="import-results-modal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content" id="import-results-modal-content">
-                {# HTMX will populate this #}
-            </div>
-        </div>
-    </div>
-
-    {# Modal for import preview #}
-    <div class="modal fade" id="import-preview-modal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content" id="import-preview-content">
-                {# HTMX will populate this #}
-            </div>
-        </div>
-    </div>
-
-    {# Modal for validation details #}
-    <div class="modal fade" id="validation-detail-modal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content" id="validation-detail-content">
-                {# HTMX will populate this #}
-            </div>
-        </div>
-    </div>
-
-    {# Modal for import configuration #}
-    <div class="modal fade" id="configure-import-modal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content" id="configure-import-content">
-                {# HTMX will populate this #}
-            </div>
-        </div>
-    </div>
-
-  {# Confirmation Modal for Import #}
-  <div class="modal fade" id="import-confirm-modal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title">
-            <i class="mdi mdi-download"></i> Confirm Import
-          </h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body" id="import-confirm-body">
-          {# Action buttons #}
-          <div class="d-flex gap-2 mb-3">
-            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
-              <i class="mdi mdi-close"></i> Cancel
-            </button>
-            <button type="button" class="btn btn-success" id="confirm-import-btn">
-              <span class="import-btn-content">
-                <i class="mdi mdi-download"></i> Import
-              </span>
-              <span class="import-btn-spinner d-none">
-                <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
-                Importing...
-              </span>
-            </button>
-          </div>
-
-          {# Device list section #}
-          <div>
-            <p class="fw-bold" id="import-confirm-message">Are you sure you want to import this device?</p>
-            <div id="import-device-list"></div>
-          </div>
-        </div>
-      </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
   {# JavaScript for import functionality #}
   <script>
   // Configure HTMX to include CSRF token in all requests
@@ -305,33 +420,6 @@
     const modalElement = document.getElementById('htmx-modal');
     const modalContent = document.getElementById('htmx-modal-content');
     let fallbackBackdrop = null;
-
-    // Helper function to check if a string is an IP address
-    function isIPAddress(str) {
-      try {
-        // Simple regex check for IPv4
-        const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
-        if (ipv4Regex.test(str)) {
-          const parts = str.split('.');
-          return parts.every(part => parseInt(part) >= 0 && parseInt(part) <= 255);
-        }
-        // IPv6 contains colons
-        return str.includes(':');
-      } catch (e) {
-        return false;
-      }
-    }
-
-    // Helper function to process device name based on toggle states
-    function processDeviceName(hostname, sysName, useSysName, stripDomain) {
-      let name = useSysName ? (sysName || hostname) : hostname;
-
-      if (stripDomain && name && name.includes('.') && !isIPAddress(name)) {
-        name = name.split('.')[0];
-      }
-
-      return name;
-    }
 
     // Initialize Bootstrap tooltips
     if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
@@ -455,30 +543,6 @@
         if (modalElement.contains(dismissTrigger)) {
           hideModal();
         }
-
-        // Check if it's in the confirmation modal
-        const confirmModal = document.getElementById('import-confirm-modal');
-        if (confirmModal && confirmModal.contains(dismissTrigger)) {
-          if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-            const modalInstance = bootstrap.Modal.getInstance(confirmModal);
-            if (modalInstance) {
-              modalInstance.hide();
-            }
-          } else if (typeof $ !== 'undefined' && $.fn.modal) {
-            $(confirmModal).modal('hide');
-          } else {
-            confirmModal.classList.remove('show', 'd-block');
-            confirmModal.style.display = '';
-            confirmModal.setAttribute('aria-hidden', 'true');
-            confirmModal.removeAttribute('aria-modal');
-
-            const backdrop = document.getElementById('import-confirm-backdrop');
-            if (backdrop) {
-              backdrop.remove();
-            }
-            document.body.classList.remove('modal-open');
-          }
-        }
       }
     });
 
@@ -489,67 +553,47 @@
       }
     });
 
-    // Handle backdrop clicks for confirmation modal
-    const confirmModalElement = document.getElementById('import-confirm-modal');
-    confirmModalElement?.addEventListener('click', function(event) {
-      if (event.target === confirmModalElement) {
-        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-          const modalInstance = bootstrap.Modal.getInstance(confirmModalElement);
-          if (modalInstance) {
-            modalInstance.hide();
-          }
-        } else if (typeof $ !== 'undefined' && $.fn.modal) {
-          $(confirmModalElement).modal('hide');
-        } else {
-          confirmModalElement.classList.remove('show', 'd-block');
-          confirmModalElement.style.display = '';
-          confirmModalElement.setAttribute('aria-hidden', 'true');
-          confirmModalElement.removeAttribute('aria-modal');
-
-          const backdrop = document.getElementById('import-confirm-backdrop');
-          if (backdrop) {
-            backdrop.remove();
-          }
-          document.body.classList.remove('modal-open');
-        }
-      }
-    });
-
     document.addEventListener('keydown', function(event) {
       if (event.key === 'Escape') {
         if (modalElement?.classList.contains('show')) {
           hideModal();
         }
-        if (confirmModalElement?.classList.contains('show')) {
-          if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-            const modalInstance = bootstrap.Modal.getInstance(confirmModalElement);
-            if (modalInstance) {
-              modalInstance.hide();
-            }
-          } else if (typeof $ !== 'undefined' && $.fn.modal) {
-            $(confirmModalElement).modal('hide');
-          } else {
-            confirmModalElement.classList.remove('show', 'd-block');
-            confirmModalElement.style.display = '';
-            confirmModalElement.setAttribute('aria-hidden', 'true');
-            confirmModalElement.removeAttribute('aria-modal');
-
-            const backdrop = document.getElementById('import-confirm-backdrop');
-            if (backdrop) {
-              backdrop.remove();
-            }
-            document.body.classList.remove('modal-open');
-          }
-        }
       }
+    });
+
+    // Listen for HTMX closeModal trigger to close the modal programmatically
+    document.body.addEventListener('closeModal', function() {
+      hideModal();
     });
 
     const bulkImportBtn = document.getElementById('bulk-import-btn');
     const selectionCount = document.getElementById('selection-count');
     const importCount = document.getElementById('import-count');
+    let pendingRowImport = null;
 
     function getCheckboxes() {
       return document.querySelectorAll('input[name="select"]');
+    }
+
+    function captureSelectionState() {
+      return Array.from(getCheckboxes()).map(cb => ({
+        value: cb.value,
+        checked: cb.checked,
+      }));
+    }
+
+    function restoreSelectionState(state) {
+      if (!state) {
+        return;
+      }
+      const checkboxes = getCheckboxes();
+      state.forEach(saved => {
+        const checkbox = Array.from(checkboxes).find(cb => cb.value === saved.value);
+        if (checkbox) {
+          checkbox.checked = saved.checked;
+        }
+      });
+      updateSelectionDisplay();
     }
 
     function updateSelectionDisplay() {
@@ -600,87 +644,44 @@
       }
     });
 
-    // Bulk import button handler
-    if (bulkImportBtn) {
-      bulkImportBtn.addEventListener('click', function() {
-        const selectedCheckboxes = Array.from(getCheckboxes()).filter(cb => cb.checked);
+    document.body.addEventListener('click', function(event) {
+      const rowButton = event.target.closest('.device-import-btn.device-ready');
+      if (!rowButton || rowButton.disabled) {
+        return;
+      }
 
-        if (selectedCheckboxes.length === 0) {
-          return;
-        }
+      if (!bulkImportBtn || pendingRowImport) {
+        return;
+      }
 
-        // Collect device info for confirmation modal
-        const deviceInfoList = selectedCheckboxes.map(cb => {
-          const row = cb.closest('tr');
-          const deviceId = cb.value;
+      const deviceId = rowButton.dataset.deviceId;
+      if (!deviceId) {
+        return;
+      }
 
-          // Get hostname and sysName from data attributes
-          const hostname = cb.dataset.hostname || 'Unknown';
-          const sysName = cb.dataset.sysname || hostname;
+      event.preventDefault();
 
-          let roleText = null;
-          let roleId = null;
+      const previousSelections = captureSelectionState();
+      pendingRowImport = { previousSelections };
 
-          if (row) {
-            const roleSelect = row.querySelector('select[name^="role_"]');
-            if (roleSelect && roleSelect.value) {
-              roleId = roleSelect.value;
-              roleText = roleSelect.options[roleSelect.selectedIndex].text;
-            }
-          }
-
-          return { id: deviceId, hostname, sysName, roleText, roleId };
-        });
-
-        // Store for confirmation
-        pendingImportData = {
-          url: '{% url "plugins:netbox_librenms_plugin:bulk_import_devices" %}',
-          isBulk: true,
-          devices: deviceInfoList
-        };
-
-        // Update modal content for bulk import
-        const confirmMessage = document.getElementById('import-confirm-message');
-        confirmMessage.textContent = `Are you sure you want to import ${deviceInfoList.length} device${deviceInfoList.length > 1 ? 's' : ''}?`;
-
-        // Get toggle values and render device list
-        const useSysName = document.getElementById('use-sysname-toggle').checked;
-        const stripDomain = document.getElementById('strip-domain-toggle').checked;
-
-        const deviceListHTML = deviceInfoList.map(dev => {
-          const displayName = processDeviceName(dev.hostname, dev.sysName, useSysName, stripDomain);
-          return `
-            <div class="alert alert-info mb-2">
-              <div><strong><i class="mdi mdi-server"></i> ${displayName}</strong></div>
-              ${dev.roleText ? `<small class="text-muted">Role: ${dev.roleText}</small>` : ''}
-            </div>
-          `;
-        }).join('');
-
-        deviceList.innerHTML = deviceListHTML;
-
-        // Show the confirmation modal
-        if (confirmModal) {
-          if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-            const modalInstance = bootstrap.Modal.getOrCreateInstance(confirmModal);
-            modalInstance.show();
-          } else if (typeof $ !== 'undefined' && $.fn.modal) {
-            $(confirmModal).modal('show');
-          } else {
-            confirmModal.classList.add('show', 'd-block');
-            confirmModal.style.display = 'block';
-            confirmModal.setAttribute('aria-modal', 'true');
-            confirmModal.removeAttribute('aria-hidden');
-
-            const backdrop = document.createElement('div');
-            backdrop.className = 'modal-backdrop fade show';
-            backdrop.id = 'import-confirm-backdrop';
-            document.body.appendChild(backdrop);
-            document.body.classList.add('modal-open');
-          }
-        }
+      const checkboxes = getCheckboxes();
+      checkboxes.forEach(cb => {
+        cb.checked = false;
       });
-    }
+
+      const targetCheckbox = Array.from(checkboxes).find(cb => cb.value === deviceId);
+      if (!targetCheckbox) {
+        restoreSelectionState(previousSelections);
+        pendingRowImport = null;
+        console.warn('Unable to locate selection checkbox for device', deviceId);
+        return;
+      }
+
+      targetCheckbox.checked = true;
+      updateSelectionDisplay();
+
+      bulkImportBtn.click();
+    });
 
     document.body.addEventListener('htmx:afterSwap', function(event) {
       if (event.detail.target.tagName === 'TR') {
@@ -704,6 +705,20 @@
       }
     });
 
+    document.body.addEventListener('htmx:afterRequest', function(event) {
+      if (event.target === bulkImportBtn && pendingRowImport) {
+        restoreSelectionState(pendingRowImport.previousSelections);
+        pendingRowImport = null;
+      }
+    });
+
+    document.body.addEventListener('htmx:responseError', function(event) {
+      if (event.target === bulkImportBtn && pendingRowImport) {
+        restoreSelectionState(pendingRowImport.previousSelections);
+        pendingRowImport = null;
+      }
+    });
+
     const currentUrl = window.location.href;
     const lastUrl = sessionStorage.getItem('last_import_url');
 
@@ -717,243 +732,6 @@
 
     sessionStorage.setItem('last_import_url', currentUrl);
 
-    // Import confirmation modal handling
-    const confirmModal = document.getElementById('import-confirm-modal');
-    const confirmBtn = document.getElementById('confirm-import-btn');
-    const confirmBody = document.getElementById('import-confirm-body');
-    const deviceList = document.getElementById('import-device-list');
-    let pendingImportData = null;
-
-    document.body.addEventListener('click', function(event) {
-      const importBtn = event.target.closest('.device-import-btn');
-
-      if (!importBtn) {
-        return;
-      }
-
-      if (importBtn.disabled) {
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-
-      const deviceId = importBtn.dataset.deviceId;
-      const importUrl = importBtn.dataset.importUrl;
-
-      // Try multiple selectors to find the hostname
-      let hostname = 'this device';
-      const row = importBtn.closest('tr');
-      if (row) {
-        const hostnameCell = row.querySelector('td:nth-child(2)');
-        if (hostnameCell) {
-          const strongTag = hostnameCell.querySelector('strong');
-          hostname = strongTag ? strongTag.textContent.trim() : hostnameCell.textContent.trim();
-        }
-      }
-
-      const roleSelect = document.querySelector(`[name="role_${deviceId}"]`);
-      const clusterSelect = document.querySelector(`[name="cluster_${deviceId}"]`);
-
-      // Determine if importing as VM based on cluster selection
-      const isVM = clusterSelect && clusterSelect.value;
-
-      // Store the import data for confirmation
-      pendingImportData = {
-        url: importUrl,
-        deviceId: deviceId,
-        hostname: hostname,
-        sysName: hostname, // For now use hostname as sysName (backend will use correct value)
-        roleId: roleSelect ? roleSelect.value : null,
-        roleText: roleSelect && roleSelect.value ? roleSelect.options[roleSelect.selectedIndex].text : null,
-        clusterId: clusterSelect ? clusterSelect.value : null,
-        clusterText: clusterSelect && clusterSelect.value ? clusterSelect.options[clusterSelect.selectedIndex].text : null,
-        isVM: isVM
-      };
-
-      // Update modal content
-      const confirmMessage = document.getElementById('import-confirm-message');
-      confirmMessage.textContent = `Are you sure you want to import the following ${isVM ? 'Virtual Machine' : 'Device'}?`;
-
-      // Get toggle values and render device
-      const useSysName = document.getElementById('use-sysname-toggle').checked;
-      const stripDomain = document.getElementById('strip-domain-toggle').checked;
-      const displayName = processDeviceName(pendingImportData.hostname, pendingImportData.sysName, useSysName, stripDomain);
-
-      let typeIcon = isVM ? 'mdi-cloud' : 'mdi-server';
-      let typeLabel = isVM ? 'Virtual Machine' : 'Device';
-      let typeBadge = isVM ? 'bg-info' : 'bg-primary';
-
-      deviceList.innerHTML = `
-        <div class="alert alert-info mb-0">
-          <div><strong><i class="mdi ${typeIcon}"></i> ${displayName}</strong> <span class="badge ${typeBadge} ms-2">${typeLabel}</span></div>
-          ${pendingImportData.clusterText ? `<small class="text-muted">Cluster: ${pendingImportData.clusterText}</small><br>` : ''}
-          ${pendingImportData.roleText ? `<small class="text-muted">Role: ${pendingImportData.roleText}</small>` : ''}
-        </div>
-      `;
-
-      // Show the confirmation modal using Bootstrap or Tabler
-      if (confirmModal) {
-        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-          const modalInstance = bootstrap.Modal.getOrCreateInstance(confirmModal);
-          modalInstance.show();
-        } else if (typeof $ !== 'undefined' && $.fn.modal) {
-          $(confirmModal).modal('show');
-        } else {
-          // Fallback manual show
-          confirmModal.classList.add('show', 'd-block');
-          confirmModal.style.display = 'block';
-          confirmModal.setAttribute('aria-modal', 'true');
-          confirmModal.removeAttribute('aria-hidden');
-
-          const backdrop = document.createElement('div');
-          backdrop.className = 'modal-backdrop fade show';
-          backdrop.id = 'import-confirm-backdrop';
-          document.body.appendChild(backdrop);
-          document.body.classList.add('modal-open');
-        }
-      }
-    });
-
-    confirmBtn.addEventListener('click', function() {
-      if (!pendingImportData) {
-        return;
-      }
-
-      // Show spinner and disable button
-      const btnContent = confirmBtn.querySelector('.import-btn-content');
-      const btnSpinner = confirmBtn.querySelector('.import-btn-spinner');
-      btnContent.classList.add('d-none');
-      btnSpinner.classList.remove('d-none');
-      confirmBtn.disabled = true;
-
-      // Prepare form data
-      const formData = new FormData();
-
-      // Get the name options toggle values
-      const useSysName = document.getElementById('use-sysname-toggle').checked;
-      const stripDomain = document.getElementById('strip-domain-toggle').checked;
-      formData.append('use_sysname', useSysName ? 'true' : 'false');
-      formData.append('strip_domain', stripDomain ? 'true' : 'false');
-
-      if (pendingImportData.isBulk) {
-        // Bulk import - add all device IDs and their roles
-        pendingImportData.devices.forEach(dev => {
-          formData.append('select', dev.id);
-          if (dev.roleId) {
-            formData.append(`role_${dev.id}`, dev.roleId);
-          }
-          if (dev.clusterId) {
-            formData.append(`cluster_${dev.id}`, dev.clusterId);
-          }
-        });
-      } else {
-        // Single import - add role and cluster if present
-        if (pendingImportData.roleId) {
-          formData.append(`role_${pendingImportData.deviceId}`, pendingImportData.roleId);
-        }
-        if (pendingImportData.clusterId) {
-          formData.append(`cluster_${pendingImportData.deviceId}`, pendingImportData.clusterId);
-        }
-      }
-
-      // Execute the import
-      fetch(pendingImportData.url, {
-        method: 'POST',
-        headers: {
-          'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
-          'HX-Request': 'true'
-        },
-        body: formData
-      })
-      .then(response => {
-        // Get response text first to handle both success and error cases
-        return response.text().then(text => {
-          return { ok: response.ok, status: response.status, text: text };
-        });
-      })
-      .then(result => {
-        if (result.ok) {
-          // Close modal
-          if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-            const modalInstance = bootstrap.Modal.getInstance(confirmModal);
-            if (modalInstance) {
-              modalInstance.hide();
-            }
-          } else if (typeof $ !== 'undefined' && $.fn.modal) {
-            $(confirmModal).modal('hide');
-          } else {
-            // Fallback manual hide
-            confirmModal.classList.remove('show', 'd-block');
-            confirmModal.style.display = '';
-            confirmModal.setAttribute('aria-hidden', 'true');
-            confirmModal.removeAttribute('aria-modal');
-
-            const backdrop = document.getElementById('import-confirm-backdrop');
-            if (backdrop) {
-              backdrop.remove();
-            }
-            document.body.classList.remove('modal-open');
-          }
-
-          // For bulk imports, reload the page to show results
-          // For single imports, trigger table refresh
-          if (pendingImportData.isBulk) {
-            window.location.reload();
-          } else {
-            // Trigger table refresh for single device import
-            document.body.dispatchEvent(new CustomEvent('deviceImported'));
-
-            // Show success message for single device
-            const messages = document.createElement('div');
-            messages.className = 'alert alert-success alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3';
-            messages.style.zIndex = '9999';
-
-            messages.innerHTML = `
-              <i class="mdi mdi-check-circle"></i> Successfully imported ${pendingImportData.hostname}
-              <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            `;
-            document.body.appendChild(messages);
-            setTimeout(() => messages.remove(), 5000);
-          }
-        } else {
-          throw new Error(`Import failed: ${result.status}`);
-        }
-      })
-      .catch(error => {
-        // Hide spinner and re-enable button on error
-        const btnContent = confirmBtn.querySelector('.import-btn-content');
-        const btnSpinner = confirmBtn.querySelector('.import-btn-spinner');
-        btnSpinner.classList.add('d-none');
-        btnContent.classList.remove('d-none');
-        confirmBtn.disabled = false;
-
-        const messages = document.createElement('div');
-        messages.className = 'alert alert-danger alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3';
-        messages.style.zIndex = '9999';
-
-        const errorMsg = pendingImportData.isBulk
-          ? `Failed to import ${pendingImportData.devices.length} device${pendingImportData.devices.length > 1 ? 's' : ''}`
-          : `Failed to import ${pendingImportData.hostname}`;
-
-        messages.innerHTML = `
-          <i class="mdi mdi-alert-circle"></i> ${errorMsg}
-          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        `;
-        document.body.appendChild(messages);
-        setTimeout(() => messages.remove(), 5000);
-      })
-      .finally(() => {
-        // Reset button state
-        const btnContent = confirmBtn.querySelector('.import-btn-content');
-        const btnSpinner = confirmBtn.querySelector('.import-btn-spinner');
-        btnSpinner.classList.add('d-none');
-        btnContent.classList.remove('d-none');
-        confirmBtn.disabled = false;
-
-        pendingImportData = null;
-      });
-    });
   });
   </script>
 
@@ -966,6 +744,24 @@
           <div class="spinner-border" role="status">
             <span class="visually-hidden">Loading...</span>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Filter Processing Modal #}
+  <div class="modal fade" id="filter-processing-modal" tabindex="-1" aria-labelledby="filterProcessingLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-body text-center py-4">
+          <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+          <h5 class="mb-2">Applying Filters</h5>
+          <p class="text-muted mb-3">Fetching LibreNMS data and processing filters...</p>
+          <button type="button" class="btn btn-secondary btn-sm" id="cancel-filter-btn">
+            <i class="mdi mdi-close"></i> Cancel
+          </button>
         </div>
       </div>
     </div>

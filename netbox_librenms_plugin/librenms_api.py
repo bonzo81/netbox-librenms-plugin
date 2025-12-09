@@ -5,6 +5,10 @@ import requests
 from django.core.cache import cache
 from netbox.plugins import get_plugin_config
 
+# HTTP request timeout constants (in seconds)
+DEFAULT_API_TIMEOUT = 10
+EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device listing)
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,7 +85,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/system",
                 headers=self.headers,
                 verify=self.verify_ssl,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
             )
 
             if response.status_code == 200:
@@ -261,9 +265,9 @@ class LibreNMSAPI:
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/devices/{ip_address}",
+                f"{self.librenms_url}/api/v0/resources/fdb/{mac_address}",
                 headers=self.headers,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -284,9 +288,9 @@ class LibreNMSAPI:
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/devices/{hostname}",
+                f"{self.librenms_url}/api/v0/devices/{hostname}/oxidized",
                 headers=self.headers,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -310,7 +314,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}",
                 headers=self.headers,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             if response.status_code == 200:
@@ -321,7 +325,6 @@ class LibreNMSAPI:
             return False, None
 
     def get_ports(self, device_id):
-        # TODO: id 2 - Fix return to use tuple (success, data)
         """
         Fetch ports data from LibreNMS for a device using its primary IP.
 
@@ -329,7 +332,7 @@ class LibreNMSAPI:
             device_id: LibreNMS device ID
 
         Returns:
-            dict: Ports data
+            tuple: (success: bool, data: dict)
         """
         try:
             response = requests.get(
@@ -338,22 +341,20 @@ class LibreNMSAPI:
                 params={
                     "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu"
                 },
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
             data = response.json()
-
-            return data
+            return True, data
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
-                return {"error": "Device not found in LibreNMS"}
-            raise
+                return False, "Device not found in LibreNMS"
+            return False, f"HTTP error: {str(e)}"
         except requests.exceptions.RequestException as e:
-            return {"error": f"Error connecting to LibreNMS: {str(e)}"}
+            return False, f"Error connecting to LibreNMS: {str(e)}"
 
     def add_device(self, data):
-        # TODO: id 1 - Fix return to use tuple (success, message)
         """
         Add a device to LibreNMS.
 
@@ -370,7 +371,7 @@ class LibreNMSAPI:
                 - authlevel, authname, authpass, authalgo, cryptopass, cryptoalgo: SNMP v3 parameters
 
         Returns:
-            Dictionary with 'success' and 'message' keys
+            tuple: (success: bool, message: str)
         """
         payload = {
             "hostname": data["hostname"],
@@ -407,20 +408,17 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
                 json=payload,
-                timeout=20,
+                timeout=EXTENDED_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
             result = response.json()
             if result.get("status") == "ok":
-                return {"success": True, "message": "Device added successfully."}
+                return True, "Device added successfully."
             else:
-                return {
-                    "success": False,
-                    "message": result.get("message", "Unknown error."),
-                }
+                return False, result.get("message", "Unknown error.")
         except requests.exceptions.RequestException as e:
-            return {"success": False, "message": str(e)}
+            return False, str(e)
 
     def update_device_field(self, device_id, field_data):
         """
@@ -442,7 +440,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/devices/{device_id}",
                 headers=self.headers,
                 json=field_data,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -472,9 +470,9 @@ class LibreNMSAPI:
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/resources/locations/",
+                f"{self.librenms_url}/api/v0/resources/locations",
                 headers=self.headers,
-                timeout=10,
+                timeout=EXTENDED_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -509,7 +507,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/locations",
                 headers=self.headers,
                 json=location_data,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -549,7 +547,7 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/locations/{encoded_location_name}",
                 headers=self.headers,
                 json=location_data,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -579,7 +577,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/links",
                 headers=self.headers,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -601,7 +599,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/ip",
                 headers=self.headers,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -623,9 +621,9 @@ class LibreNMSAPI:
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/ports/{port_id}",
+                f"{self.librenms_url}/api/v0/resources/locations",
                 headers=self.headers,
-                timeout=10,
+                timeout=EXTENDED_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -656,10 +654,10 @@ class LibreNMSAPI:
             }
         """
         try:
-            response = requests.get(
-                f"{self.librenms_url}/api/v0/inventory/{device_id}/all",
+            response = requests.delete(
+                f"{self.librenms_url}/api/v0/devices/{device_id}",
                 headers=self.headers,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -691,7 +689,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/poller_group",
                 headers=self.headers,
-                timeout=10,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
@@ -703,6 +701,94 @@ class LibreNMSAPI:
             return False, []
         except requests.exceptions.RequestException as e:
             return False, str(e)
+
+    def get_inventory_filtered(
+        self, device_id, ent_physical_class=None, ent_physical_contained_in=None
+    ):
+        """
+        Fetch filtered inventory from LibreNMS with optional filtering.
+        Uses query parameters if supported, falls back to client-side filtering.
+
+        Route: /api/v0/inventory/{device_id}
+
+        Args:
+            device_id: LibreNMS device ID
+            ent_physical_class: Filter by entPhysicalClass (e.g., 'chassis', 'stack')
+            ent_physical_contained_in: Filter by entPhysicalContainedIn (0=root, 1=first level, etc.)
+
+        Returns:
+            tuple: (success: bool, inventory: list)
+
+        Example:
+            >>> api.get_inventory_filtered(22, ent_physical_class='chassis', ent_physical_contained_in=1)
+            (True, [{'entPhysicalClass': 'chassis', ...}, ...])
+        """
+        logger.debug(
+            f"get_inventory_filtered: device={device_id}, "
+            f"class={ent_physical_class}, contained_in={ent_physical_contained_in}"
+        )
+        try:
+            # Build query parameters for API filtering
+            params = {}
+            if ent_physical_class is not None:
+                params["entPhysicalClass"] = ent_physical_class
+            if ent_physical_contained_in is not None:
+                params["entPhysicalContainedIn"] = str(ent_physical_contained_in)
+
+            # Try the filtered endpoint first (non-/all)
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/inventory/{device_id}",
+                headers=self.headers,
+                params=params,
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "ok":
+                    inventory = data.get("inventory", [])
+                    logger.debug(f"API returned {len(inventory)} items")
+
+                    # If we got results or didn't specify filters, return
+                    if inventory or not params:
+                        return True, inventory
+
+            # If filtered endpoint returned empty but we have filters,
+            # try /all endpoint and filter client-side
+            if params:
+                logger.debug(
+                    "Filtered inventory API returned no results, falling back to client-side filtering"
+                )
+                success, all_inventory = self.get_device_inventory(device_id)
+
+                if not success:
+                    return False, []
+
+                # Apply client-side filters
+                filtered = all_inventory
+                if ent_physical_class:
+                    filtered = [
+                        item
+                        for item in filtered
+                        if item.get("entPhysicalClass") == ent_physical_class
+                    ]
+                if ent_physical_contained_in is not None:
+                    filtered = [
+                        item
+                        for item in filtered
+                        if str(item.get("entPhysicalContainedIn"))
+                        == str(ent_physical_contained_in)
+                    ]
+
+                return True, filtered
+
+            return False, []
+
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Failed to fetch filtered inventory: {e}")
+            return False, []
 
     def list_devices(self, filters=None):
         """
@@ -758,34 +844,17 @@ class LibreNMSAPI:
                 f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
                 params=params,
-                timeout=30,
+                timeout=EXTENDED_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-
             if response.status_code == 200:
                 result = response.json()
-                logger.warning(f"LibreNMS API response status: {result.get('status')}")
-                logger.warning(
-                    f"LibreNMS API response message: {result.get('message', 'N/A')}"
-                )
                 if result.get("status") == "ok":
-                    device_count = len(result.get("devices", []))
-                    logger.warning(f"LibreNMS API: Retrieved {device_count} devices")
-                    # Log first device location if devices exist for debugging
-                    if device_count > 0:
-                        first_device = result.get("devices", [])[0]
-                        logger.warning(
-                            f"First device location: '{first_device.get('location')}' (as example)"
-                        )
                     return True, result.get("devices", [])
 
-            logger.warning(
-                f"LibreNMS API: Unexpected response status: {response.status_code}"
-            )
             return False, []
         except requests.exceptions.RequestException as e:
-            logger.error(f"LibreNMS API: Request failed - {str(e)}")
             return False, str(e)
 
     def get_device_groups(self):
@@ -807,9 +876,9 @@ class LibreNMSAPI:
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/devicegroups",
+                f"{self.librenms_url}/api/v0/devices",
                 headers=self.headers,
-                timeout=10,
+                timeout=EXTENDED_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()

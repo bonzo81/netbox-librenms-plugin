@@ -9,7 +9,7 @@ menu = PluginMenu(
             (
                 PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:settings",
-                    link_text="Server Settings",
+                    link_text="Plugin Settings",
                     permissions=["netbox_librenms_plugin.view_librenmssettings"],
                 ),
                 PluginMenuItem(
@@ -32,6 +32,16 @@ menu = PluginMenu(
             ),
         ),
         (
+            "Import",
+            (
+                PluginMenuItem(
+                    link="plugins:netbox_librenms_plugin:librenms_import",
+                    link_text="LibreNMS Import",
+                    permissions=["dcim.view_device"],
+                ),
+            ),
+        ),
+        (
             "Status Check",
             (
                 PluginMenuItem(
@@ -42,11 +52,6 @@ menu = PluginMenu(
                 PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:device_status_list",
                     link_text="Device Status",
-                    permissions=["dcim.view_device"],
-                ),
-                PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:librenms_import",
-                    link_text="LibreNMS Import",
                     permissions=["dcim.view_device"],
                 ),
                 PluginMenuItem(

@@ -8,10 +8,11 @@ This module provides functions for:
 - Smart matching of NetBox objects
 """
 
+import copy
 import logging
 from typing import List
 
-from dcim.models import Device, DeviceRole, DeviceType, Site
+from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
@@ -26,8 +27,181 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def _determine_device_name(
+    libre_device: dict,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
+    device_id: int | str = None,
+) -> str:
+    """
+    Determine the device/VM name from LibreNMS data.
+
+    Centralized logic for building device names with consistent handling of:
+    - sysName vs hostname preference
+    - Domain stripping (avoiding IP addresses)
+    - Fallback to device_id when name is missing
+
+    Args:
+        libre_device: Device data from LibreNMS
+        use_sysname: If True, prefer sysName; if False, use hostname
+        strip_domain: If True, strip domain suffix (e.g., '.example.com')
+        device_id: LibreNMS device ID for fallback name generation
+
+    Returns:
+        str: The determined device name
+
+    Example:
+        >>> _determine_device_name({'sysName': 'router.example.com', 'hostname': 'router'},
+        ...                        use_sysname=True, strip_domain=True)
+        'router'
+    """
+    # Determine base name based on use_sysname preference
+    if use_sysname:
+        name = libre_device.get("sysName") or libre_device.get("hostname")
+    else:
+        name = libre_device.get("hostname") or libre_device.get("sysName")
+
+    # Fallback to device_id if no name found
+    if not name:
+        if device_id is not None:
+            name = f"device-{device_id}"
+        else:
+            name = libre_device.get("device_id", "unknown")
+            name = f"device-{name}"
+
+    # Strip domain if requested (but not for IP addresses)
+    if strip_domain and name and "." in name:
+        try:
+            from ipaddress import ip_address
+
+            ip_address(name)
+            # It's a valid IP address, don't strip
+        except ValueError:
+            # Not an IP, safe to strip domain
+            name = name.split(".")[0]
+
+    return name
+
+
+def empty_virtual_chassis_data() -> dict:
+    """Public helper for callers that need a blank VC payload."""
+
+    return {
+        "is_stack": False,
+        "member_count": 0,
+        "members": [],
+        "detection_error": None,
+    }
+
+
+def _clone_virtual_chassis_data(data: dict | None) -> dict:
+    """Return a defensive copy of cached VC data to avoid shared references."""
+
+    if not data:
+        return empty_virtual_chassis_data()
+
+    members = []
+    for idx, member in enumerate(data.get("members", [])):
+        member_copy = member.copy()
+        raw_position = member_copy.get("position", idx)
+        try:
+            member_copy["position"] = int(raw_position)
+        except (TypeError, ValueError):
+            member_copy["position"] = idx
+        members.append(member_copy)
+
+    member_count = data.get("member_count") or len(members)
+
+    return {
+        "is_stack": bool(data.get("is_stack")),
+        "member_count": member_count,
+        "members": members,
+        "detection_error": data.get("detection_error"),
+    }
+
+
+_VC_CACHE_VERSION = "v1"
+
+
+def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
+    server_key = getattr(api, "server_key", "default")
+    return f"librenms_vc_detection_{_VC_CACHE_VERSION}_{server_key}_{device_id}"
+
+
+def get_virtual_chassis_data(
+    api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False
+) -> dict:
+    """Fetch (and cache) virtual chassis data for a LibreNMS device."""
+
+    if not api or device_id is None:
+        return empty_virtual_chassis_data()
+
+    cache_key = _vc_cache_key(api, device_id)
+    if not force_refresh:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return _clone_virtual_chassis_data(cached)
+
+    detection_data = detect_virtual_chassis_from_inventory(api, device_id)
+    if detection_data and "detection_error" not in detection_data:
+        detection_data["detection_error"] = None
+
+    cache_value = (
+        _clone_virtual_chassis_data(detection_data)
+        if detection_data
+        else empty_virtual_chassis_data()
+    )
+
+    cache_timeout = getattr(api, "cache_timeout", 300) or 300
+    cache.set(cache_key, cache_value, timeout=cache_timeout)
+    return _clone_virtual_chassis_data(cache_value)
+
+
+def prefetch_vc_data_for_devices(
+    api: LibreNMSAPI, device_ids: List[int], *, force_refresh: bool = False
+) -> None:
+    """
+    Pre-warm the virtual chassis cache for multiple devices.
+
+    This eliminates the 0.5-1s delay when rendering the import table
+    by proactively fetching VC data before validation.
+
+    Args:
+        api: LibreNMSAPI instance
+        device_ids: List of LibreNMS device IDs to prefetch VC data for
+        force_refresh: When True, bypass cache and fetch fresh data
+
+    Example:
+        >>> # Before rendering import table
+        >>> prefetch_vc_data_for_devices(api, [123, 124, 125])
+        >>> # Now all validate_device_for_import() calls hit cache instantly
+    """
+    if not api or not device_ids:
+        return
+
+    logger.debug(f"Pre-warming VC cache for {len(device_ids)} devices")
+
+    for idx, device_id in enumerate(device_ids):
+        # This populates the cache if empty, or skips if already cached
+        try:
+            get_virtual_chassis_data(api, device_id, force_refresh=force_refresh)
+        except (BrokenPipeError, ConnectionError, IOError, OSError) as e:
+            logger.info(f"Connection error during VC prefetch at device {idx}: {e}")
+            # Stop processing if connection is broken
+            return
+        except Exception as e:
+            # Log but continue for other errors
+            logger.warning(f"Error prefetching VC data for device {device_id}: {e}")
+
+    logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
+
+
 def get_librenms_devices_for_import(
-    api: LibreNMSAPI = None, filters: dict = None, server_key: str = None
+    api: LibreNMSAPI = None,
+    filters: dict = None,
+    server_key: str = None,
+    *,
+    force_refresh: bool = False,
 ) -> List[dict]:
     """
     Retrieve LibreNMS devices based on filters.
@@ -43,6 +217,7 @@ def get_librenms_devices_for_import(
             - status: Device status filter (1=up, 0=down)
             - disabled: Include disabled devices (0=active only, 1=all)
         server_key: Key for specific server configuration (used if api not provided)
+        force_refresh: When True, bypass the cache and fetch fresh data
 
     Returns:
         List of device dictionaries from LibreNMS
@@ -138,9 +313,12 @@ def get_librenms_devices_for_import(
         # Use caching to avoid repeated API calls
         # Include both API and client filters in cache key
         cache_key = f"librenms_devices_import_{server_key}_{hash(str(api_filters))}_{hash(str(client_filters))}"
-        cached_result = cache.get(cache_key)
-        if cached_result:
-            return cached_result
+        if force_refresh:
+            cache.delete(cache_key)
+        else:
+            cached_result = cache.get(cache_key)
+            if cached_result is not None:
+                return copy.deepcopy(cached_result)
 
         success, devices = api.list_devices(api_filters if api_filters else None)
 
@@ -152,8 +330,8 @@ def get_librenms_devices_for_import(
         if client_filters:
             devices = _apply_client_filters(devices, client_filters)
 
-        # Cache for 5 minutes
-        cache.set(cache_key, devices, timeout=300)
+        # Cache using configured timeout (default 300s)
+        cache.set(cache_key, copy.deepcopy(devices), timeout=api.cache_timeout)
         return devices
 
     except Exception:
@@ -201,7 +379,14 @@ def _apply_client_filters(devices: List[dict], filters: dict) -> List[dict]:
     return filtered
 
 
-def validate_device_for_import(libre_device: dict, import_as_vm: bool = False) -> dict:
+def validate_device_for_import(
+    libre_device: dict,
+    import_as_vm: bool = False,
+    api: "LibreNMSAPI" = None,
+    *,
+    include_vc_detection: bool = True,
+    force_vc_refresh: bool = False,
+) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
 
@@ -210,11 +395,15 @@ def validate_device_for_import(libre_device: dict, import_as_vm: bool = False) -
     - Validates required prerequisites (Site, DeviceType, DeviceRole for devices)
       OR (Cluster for VMs)
     - Provides smart matching for missing objects
+    - Detects virtual chassis/stack configuration (if API provided)
     - Returns detailed validation status
 
     Args:
         libre_device: Device data from LibreNMS
         import_as_vm: If True, validate for VM import instead of device import
+        api: Optional LibreNMSAPI instance for virtual chassis detection
+        include_vc_detection: Skip VC detection when False to speed up bulk operations
+        force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS
 
     Returns:
         dict: Validation result with structure:
@@ -267,6 +456,7 @@ def validate_device_for_import(libre_device: dict, import_as_vm: bool = False) -
         "existing_match_type": None,  # Track how existing device was matched
         "issues": [],
         "warnings": [],
+        "virtual_chassis": empty_virtual_chassis_data(),
         "site": {
             "found": False,
             "site": None,
@@ -290,97 +480,110 @@ def validate_device_for_import(libre_device: dict, import_as_vm: bool = False) -
             "available_clusters": [],
         },
         "platform": {"found": False, "platform": None, "match_type": None},
+        "rack": {
+            "found": False,
+            "rack": None,
+            "available_racks": [],
+        },
     }
 
     try:
         # 1. Check if device/VM already exists in NetBox
+        # Always check both Devices AND VMs to properly detect existing objects
         librenms_id = libre_device.get("device_id")
         hostname = libre_device.get("hostname", "")
         logger.debug(
-            f"Checking for existing {'VM' if import_as_vm else 'device'}: "
+            f"Checking for existing device/VM: "
             f"librenms_id={librenms_id} (type={type(librenms_id).__name__}), "
             f"hostname={hostname}"
         )
 
-        if import_as_vm:
-            # Check for existing VM
-            from virtualization.models import VirtualMachine
+        from virtualization.models import VirtualMachine
 
-            # Check by librenms_id custom field (most reliable match)
-            existing = VirtualMachine.objects.filter(
-                custom_field_data__librenms_id=str(librenms_id)
-            ).first()
-            if not existing and isinstance(librenms_id, str):
-                try:
-                    existing = VirtualMachine.objects.filter(
-                        custom_field_data__librenms_id=int(librenms_id)
-                    ).first()
-                except (ValueError, TypeError):
-                    pass
+        # Check for existing VM first (by librenms_id custom field)
+        existing_vm = VirtualMachine.objects.filter(
+            custom_field_data__librenms_id=str(librenms_id)
+        ).first()
+        if not existing_vm and isinstance(librenms_id, str):
+            try:
+                existing_vm = VirtualMachine.objects.filter(
+                    custom_field_data__librenms_id=int(librenms_id)
+                ).first()
+            except (ValueError, TypeError):
+                pass
 
-            if existing:
-                logger.info(
-                    f"Found existing VM: {existing.name} (matched by librenms_id={librenms_id})"
-                )
-                result["existing_device"] = existing
-                result["existing_match_type"] = "librenms_id"
-                result["warnings"].append(
-                    f"VM already imported to NetBox as '{existing.name}'"
-                )
-                result["can_import"] = False
-                return result
+        if existing_vm:
+            logger.info(
+                f"Found existing VM: {existing_vm.name} (matched by librenms_id={librenms_id})"
+            )
+            result["existing_device"] = existing_vm
+            result["existing_match_type"] = "librenms_id"
+            result["import_as_vm"] = True  # Force VM mode since VM exists
+            result["warnings"].append(
+                f"VM already imported to NetBox as '{existing_vm.name}'"
+            )
+            result["can_import"] = False
+            return result
 
-            # Check by hostname/name
-            existing = VirtualMachine.objects.filter(name__iexact=hostname).first()
-            if existing:
-                result["existing_device"] = existing
-                result["existing_match_type"] = "hostname"
-                result["warnings"].append(
-                    f"VM with same hostname exists in NetBox as '{existing.name}' (not linked to LibreNMS)"
-                )
-                result["can_import"] = False
-                return result
-        else:
-            # Check for existing Device
-            # Check by librenms_id custom field (most reliable match)
-            # Note: Custom field data is stored as strings in NetBox's JSON field
-            # LibreNMS device_id might be int or str, so check both
-            existing = Device.objects.filter(
-                custom_field_data__librenms_id=str(librenms_id)
-            ).first()
-            if not existing and isinstance(librenms_id, str):
-                # Try as int if it was passed as string
-                try:
-                    existing = Device.objects.filter(
-                        custom_field_data__librenms_id=int(librenms_id)
-                    ).first()
-                except (ValueError, TypeError):
-                    pass
+        # Check for existing Device (by librenms_id custom field)
+        existing_device = Device.objects.filter(
+            custom_field_data__librenms_id=str(librenms_id)
+        ).first()
+        if not existing_device and isinstance(librenms_id, str):
+            try:
+                existing_device = Device.objects.filter(
+                    custom_field_data__librenms_id=int(librenms_id)
+                ).first()
+            except (ValueError, TypeError):
+                pass
 
-            if existing:
-                logger.info(
-                    f"Found existing device: {existing.name} (matched by librenms_id={librenms_id})"
-                )
-                result["existing_device"] = existing
-                result["existing_match_type"] = "librenms_id"
-                result["warnings"].append(
-                    f"Device already imported to NetBox as '{existing.name}'"
-                )
-                result["can_import"] = False
-                return result
-            else:
-                logger.debug(f"No existing device found by librenms_id={librenms_id}")
+        if existing_device:
+            logger.info(
+                f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})"
+            )
+            result["existing_device"] = existing_device
+            result["existing_match_type"] = "librenms_id"
+            result["warnings"].append(
+                f"Device already imported to NetBox as '{existing_device.name}'"
+            )
+            result["can_import"] = False
+            return result
 
-            # Check by hostname/name (strong match, but could be coincidence)
-            existing = Device.objects.filter(name__iexact=hostname).first()
-            if existing:
-                result["existing_device"] = existing
-                result["existing_match_type"] = "hostname"
-                result["warnings"].append(
-                    f"Device with same hostname exists in NetBox as '{existing.name}' (not linked to LibreNMS)"
-                )
-                result["can_import"] = False
-                return result
+        # Check by hostname/name - Check both VMs and Devices for conflicts
+        existing_vm = VirtualMachine.objects.filter(name__iexact=hostname).first()
+        existing_device = Device.objects.filter(name__iexact=hostname).first()
+
+        # If BOTH exist with same hostname, it's ambiguous - don't match either
+        if existing_vm and existing_device:
+            logger.warning(
+                f"Hostname conflict: Both VM '{existing_vm.name}' and Device "
+                f"'{existing_device.name}' exist with hostname '{hostname}'"
+            )
+            result["warnings"].append(
+                f"Both a VM and Device exist with hostname '{hostname}' in NetBox. "
+                f"Cannot determine which to match. Please set the librenms_id custom field on the correct object."
+            )
+            # Don't set existing_device, don't block import - let user proceed as new
+            # This allows them to import and then resolve the conflict manually
+        elif existing_vm:
+            logger.info(f"Found existing VM by hostname: {existing_vm.name}")
+            result["existing_device"] = existing_vm
+            result["existing_match_type"] = "hostname"
+            result["import_as_vm"] = True  # Force VM mode since VM exists
+            result["warnings"].append(
+                f"VM with same hostname exists in NetBox as '{existing_vm.name}' (not linked to LibreNMS)"
+            )
+            result["can_import"] = False
+            return result
+        elif existing_device:
+            logger.info(f"Found existing device by hostname: {existing_device.name}")
+            result["existing_device"] = existing_device
+            result["existing_match_type"] = "hostname"
+            result["warnings"].append(
+                f"Device with same hostname exists in NetBox as '{existing_device.name}' (not linked to LibreNMS)"
+            )
+            result["can_import"] = False
+            return result
 
         # Check by primary IP (weaker match, IP could be reassigned) - only for devices
         primary_ip = libre_device.get("ip")
@@ -478,6 +681,34 @@ def validate_device_for_import(libre_device: dict, import_as_vm: bool = False) -
             all_roles = DeviceRole.objects.all()
             result["device_role"]["available_roles"] = list(all_roles)
 
+            # 4b. Rack (optional) - Provide available racks for the matched site
+            if site_match["found"] and site_match["site"]:
+                site = site_match["site"]
+                # Use cache to optimize rack lookups per site
+                cache_key = f"librenms_import_racks_site_{site.pk}"
+                available_racks = cache.get(cache_key)
+
+                if available_racks is None:
+                    from dcim.models import Rack
+                    from django.db.models import Q
+
+                    # Query racks for this site - include both:
+                    # 1. Racks assigned to locations within the site
+                    # 2. Racks directly assigned to the site (without location)
+                    available_racks = list(
+                        Rack.objects.filter(Q(location__site=site) | Q(site=site))
+                        .select_related("location", "site")
+                        .order_by("location__name", "name")
+                    )
+                    # Cache for 5 minutes
+                    cache.set(cache_key, available_racks, 300)
+
+                result["rack"]["available_racks"] = available_racks
+                # Rack is optional, don't add to issues
+                result["rack"]["found"] = (
+                    True  # Mark as "found" even if None (optional field)
+                )
+
             # Skip VM-specific validations for devices
             result["cluster"]["found"] = True  # Not required for devices
 
@@ -502,7 +733,38 @@ def validate_device_for_import(libre_device: dict, import_as_vm: bool = False) -
                     f"Serial number {serial} already exists on device: {existing_serial.name}"
                 )
 
-        # 7. Determine if device/VM is ready to import
+        # 7. Virtual chassis detection (only for devices, not VMs)
+        if include_vc_detection and not import_as_vm and api is not None:
+            device_id = libre_device.get("device_id")
+            if device_id:
+                try:
+                    logger.debug(
+                        f"Calling get_virtual_chassis_data for device {device_id}"
+                    )
+                    vc_detection = get_virtual_chassis_data(
+                        api, device_id, force_refresh=force_vc_refresh
+                    )
+                    logger.debug(
+                        f"VC detection result: is_stack={vc_detection.get('is_stack')}, "
+                        f"member_count={vc_detection.get('member_count')}, "
+                        f"members={len(vc_detection.get('members', []))}"
+                    )
+                    if vc_detection:
+                        result["virtual_chassis"] = vc_detection
+                        if vc_detection["is_stack"]:
+                            logger.debug(
+                                f"Virtual chassis CONFIRMED for device {hostname}: "
+                                f"{vc_detection['member_count']} members"
+                            )
+                except Exception as e:
+                    logger.exception(
+                        f"Exception during VC detection for device {hostname}: {e}"
+                    )
+                    result["virtual_chassis"]["detection_error"] = str(e)
+            else:
+                logger.debug(f"No device_id found for {hostname}")
+
+        # 8. Determine if device/VM is ready to import
         result["can_import"] = len(result["issues"]) == 0
 
         if import_as_vm:
@@ -540,6 +802,7 @@ def import_single_device(
     validation: dict = None,
     manual_mappings: dict = None,
     sync_options: dict = None,
+    libre_device: dict = None,
 ) -> dict:
     """
     Import a single LibreNMS device to NetBox.
@@ -553,11 +816,14 @@ def import_single_device(
             - device_type_id: NetBox DeviceType ID
             - device_role_id: NetBox DeviceRole ID
             - platform_id: NetBox Platform ID (optional)
+            - rack_id: NetBox Rack ID (optional)
         sync_options: Sync options (optional):
             - sync_interfaces: bool (default True)
             - sync_cables: bool (default True)
             - sync_ips: bool (default True)
             - sync_fields: bool (default True)
+        libre_device: Pre-fetched LibreNMS device data (optional).
+            If provided, skips API call to fetch device info.
 
     Returns:
         dict: Import result with structure:
@@ -581,16 +847,17 @@ def import_single_device(
     try:
         api = LibreNMSAPI(server_key=server_key)
 
-        # Get device info from LibreNMS
-        success, libre_device = api.get_device_info(device_id)
-        if not success or not libre_device:
-            return {
-                "success": False,
-                "device": None,
-                "message": "",
-                "error": f"Failed to retrieve device {device_id} from LibreNMS",
-                "synced": {},
-            }
+        # Use pre-fetched device data if provided, otherwise fetch from API
+        if libre_device is None:
+            success, libre_device = api.get_device_info(device_id)
+            if not success or not libre_device:
+                return {
+                    "success": False,
+                    "device": None,
+                    "message": "",
+                    "error": f"Failed to retrieve device {device_id} from LibreNMS",
+                    "synced": {},
+                }
 
         # Validate device if validation not provided
         if validation is None:
@@ -606,26 +873,46 @@ def import_single_device(
                 "synced": {},
             }
 
-        # Use manual mappings if provided, otherwise use validation matches
+        # Use validation-derived matches, allow manual mappings to override specific fields
+        site = validation["site"].get("site")
+        device_type = validation["device_type"].get("device_type")
+        device_role = validation["device_role"].get("role")
+        platform = validation["platform"].get("platform")
+        rack = validation.get("rack", {}).get("rack")
+
         if manual_mappings:
-            site = Site.objects.filter(id=manual_mappings.get("site_id")).first()
-            device_type = DeviceType.objects.filter(
-                id=manual_mappings.get("device_type_id")
-            ).first()
-            device_role = DeviceRole.objects.filter(
-                id=manual_mappings.get("device_role_id")
-            ).first()
+            site = (
+                Site.objects.filter(id=manual_mappings.get("site_id")).first() or site
+            )
+            device_type = (
+                DeviceType.objects.filter(
+                    id=manual_mappings.get("device_type_id")
+                ).first()
+                or device_type
+            )
+            device_role = (
+                DeviceRole.objects.filter(
+                    id=manual_mappings.get("device_role_id")
+                ).first()
+                or device_role
+            )
+
             platform_id = manual_mappings.get("platform_id")
-            platform = None
             if platform_id:
                 from dcim.models import Platform
 
-                platform = Platform.objects.filter(id=platform_id).first()
-        else:
-            site = validation["site"].get("site")
-            device_type = validation["device_type"].get("device_type")
-            device_role = validation["device_role"].get("role")
-            platform = validation["platform"].get("platform")
+                platform = Platform.objects.filter(id=platform_id).first() or platform
+
+            rack_id = manual_mappings.get("rack_id")
+            if rack_id:
+                rack = (
+                    Rack.objects.select_related("location", "site")
+                    .filter(id=rack_id)
+                    .first()
+                    or rack
+                )
+
+        rack = rack or validation.get("rack", {}).get("rack")
 
         # Validate required fields
         if not site:
@@ -663,24 +950,12 @@ def import_single_device(
                 sync_options.get("strip_domain", False) if sync_options else False
             )
 
-            if use_sysname:
-                device_name = libre_device.get("sysName") or libre_device.get(
-                    "hostname", f"device-{device_id}"
-                )
-            else:
-                device_name = libre_device.get("hostname", f"device-{device_id}")
-
-            # Strip domain if requested (but not for IP addresses)
-            if strip_domain and device_name and "." in device_name:
-                # Check if it's an IP address - if so, don't strip
-                try:
-                    from ipaddress import ip_address
-
-                    ip_address(device_name)
-                    # It's a valid IP, don't strip
-                except ValueError:
-                    # Not an IP, safe to strip domain
-                    device_name = device_name.split(".")[0]
+            device_name = _determine_device_name(
+                libre_device,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
+                device_id=device_id,
+            )
 
             device_data = {
                 "name": device_name,
@@ -694,6 +969,9 @@ def import_single_device(
             # Add optional fields
             if platform:
                 device_data["platform"] = platform
+
+            if rack:
+                device_data["rack"] = rack
 
             serial = libre_device.get("serial", "")
             if serial and serial != "-":
@@ -766,6 +1044,7 @@ def bulk_import_devices(
     server_key: str = None,
     sync_options: dict = None,
     manual_mappings_per_device: dict = None,
+    libre_devices_cache: dict = None,
 ) -> dict:
     """
     Import multiple LibreNMS devices to NetBox.
@@ -776,6 +1055,8 @@ def bulk_import_devices(
         sync_options: Sync options to apply to all devices
         manual_mappings_per_device: Dict mapping device_id to manual_mappings dict
             Example: {1179: {'device_role_id': 5}, 1180: {'device_role_id': 3}}
+        libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
+            to avoid redundant API calls. Example: {123: {...device_data...}}
 
     Returns:
         dict: Bulk import result with structure:
@@ -783,7 +1064,8 @@ def bulk_import_devices(
                 'total': int,
                 'success': List[dict],  # Successfully imported devices
                 'failed': List[dict],   # Failed imports with errors
-                'skipped': List[dict]   # Skipped devices (already exist, etc.)
+                'skipped': List[dict],  # Skipped devices (already exist, etc.)
+                'virtual_chassis_created': int  # Number of VCs created
             }
 
     Example:
@@ -794,12 +1076,20 @@ def bulk_import_devices(
     success_list = []
     failed_list = []
     skipped_list = []
+    vc_created_count = 0
+    processed_vc_domains = set()  # Track VCs already created by domain
+
+    # Initialize API client once for all devices to avoid repeated config parsing
+    api = LibreNMSAPI(server_key=server_key)
 
     for device_id in device_ids:
         try:
-            # Get device info and validate first
-            api = LibreNMSAPI(server_key=server_key)
-            success, libre_device = api.get_device_info(device_id)
+            # Use cached device data if available to avoid redundant API calls
+            if libre_devices_cache and device_id in libre_devices_cache:
+                libre_device = libre_devices_cache[device_id]
+                success = True
+            else:
+                success, libre_device = api.get_device_info(device_id)
 
             if not success or not libre_device:
                 failed_list.append(
@@ -810,7 +1100,7 @@ def bulk_import_devices(
                 )
                 continue
 
-            validation = validate_device_for_import(libre_device)
+            validation = validate_device_for_import(libre_device, api=api)
 
             # Build manual mappings from validation + any provided overrides
             device_mappings = {}
@@ -838,6 +1128,7 @@ def bulk_import_devices(
                 server_key=server_key,
                 sync_options=sync_options,
                 manual_mappings=device_mappings if device_mappings else None,
+                libre_device=libre_device,
             )
 
             if result["success"]:
@@ -848,6 +1139,31 @@ def bulk_import_devices(
                         "message": result["message"],
                     }
                 )
+
+                # Handle virtual chassis creation for stacks
+                vc_data = validation.get("virtual_chassis", {})
+                if vc_data.get("is_stack", False):
+                    vc_domain = f"librenms-{device_id}"
+
+                    # Only create VC if we haven't processed this stack yet
+                    if vc_domain not in processed_vc_domains:
+                        try:
+                            vc = create_virtual_chassis_with_members(
+                                result["device"],
+                                vc_data["members"],
+                                libre_device,
+                            )
+                            vc_created_count += 1
+                            processed_vc_domains.add(vc_domain)
+                            logger.info(
+                                f"Created VC '{vc.name}' during bulk import for device {device_id}"
+                            )
+                        except Exception as vc_error:
+                            logger.warning(
+                                f"Failed to create VC for device {device_id}: {vc_error}"
+                            )
+                            # Don't fail the import, just log the warning
+
             elif result.get("device"):  # Device exists
                 skipped_list.append({"device_id": device_id, "reason": result["error"]})
             else:  # Failed to import
@@ -862,6 +1178,7 @@ def bulk_import_devices(
         "success": success_list,
         "failed": failed_list,
         "skipped": skipped_list,
+        "virtual_chassis_created": vc_created_count,
     }
 
 
@@ -916,12 +1233,15 @@ def create_device_from_librenms(
     device_type = validation["device_type"]["device_type"]
     device_role = validation["device_role"]["role"]
     platform = validation["platform"].get("platform")
+    rack = validation.get("rack", {}).get("rack")  # Optional rack assignment
 
     # Determine device name based on use_sysname setting
-    if use_sysname:
-        device_name = libre_device.get("sysName") or libre_device.get("hostname")
-    else:
-        device_name = libre_device.get("hostname")
+    device_name = _determine_device_name(
+        libre_device,
+        use_sysname=use_sysname,
+        strip_domain=False,
+        device_id=libre_device.get("device_id"),
+    )
 
     # Generate import timestamp comment
     import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -932,6 +1252,7 @@ def create_device_from_librenms(
         device_type=device_type,
         role=device_role,
         site=site,
+        rack=rack,  # Assign rack if selected
         platform=platform,
         serial=libre_device.get("serial", ""),
         comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
@@ -971,11 +1292,15 @@ def create_vm_from_librenms(
     cluster = validation["cluster"]["cluster"]
     platform = validation["platform"].get("platform")
 
-    # Determine VM name based on use_sysname setting
-    if use_sysname:
-        vm_name = libre_device.get("sysName") or libre_device.get("hostname")
-    else:
-        vm_name = libre_device.get("hostname")
+    # Determine VM name - use pre-computed name if available (handles strip_domain)
+    vm_name = libre_device.get("_computed_name")
+    if not vm_name:
+        vm_name = _determine_device_name(
+            libre_device,
+            use_sysname=use_sysname,
+            strip_domain=False,
+            device_id=libre_device.get("device_id"),
+        )
 
     # Generate import timestamp comment
     import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -994,3 +1319,348 @@ def create_vm_from_librenms(
         f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}"
     )
     return vm
+
+
+def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict:
+    """
+    Detect if device is a stack/Virtual Chassis by analyzing ENTITY-MIB inventory.
+    Vendor-agnostic using standard hierarchical structure.
+
+    Args:
+        api: LibreNMSAPI instance
+        device_id: LibreNMS device ID
+
+    Returns:
+        dict with structure:
+        {
+            'is_stack': bool,
+            'member_count': int,
+            'members': [
+                {
+                    'serial': str,
+                    'position': int,
+                    'model': str,
+                    'name': str,
+                    'index': int,
+                    'description': str,
+                    'suggested_name': str  # Generated using master device name
+                }
+            ]
+        }
+        Returns None if not a stack or detection fails.
+
+    Detection Logic:
+        1. Check root level (entPhysicalContainedIn=0) for parent container
+        2. Find parent index (entPhysicalClass='stack' or 'chassis')
+        3. Get children chassis at that parent's index
+        4. If multiple chassis found → Stack detected
+    """
+    try:
+        # Get the master device info to use for naming
+        success, device_info = api.get_device_info(device_id)
+        master_name = None
+        if success and device_info:
+            master_name = device_info.get("sysName") or device_info.get("hostname")
+
+        # Step 1: Get root level items
+        success, root_items = api.get_inventory_filtered(
+            device_id, ent_physical_contained_in=0
+        )
+
+        if not success or not root_items:
+            logger.debug(f"No root inventory items found for device {device_id}")
+            return None
+
+        # Step 2: Find parent container index
+        # Could be class="stack" or the main "chassis"
+        parent_index = None
+        for item in root_items:
+            item_class = item.get("entPhysicalClass")
+            if item_class in ["stack", "chassis"]:
+                parent_index = item.get("entPhysicalIndex")
+                logger.debug(
+                    f"VC detection: Found parent container at index {parent_index} for device {device_id}"
+                )
+                break
+
+        if not parent_index:
+            return None
+
+        # Step 3: Get children chassis at next level
+        success, child_items = api.get_inventory_filtered(
+            device_id,
+            ent_physical_class="chassis",
+            ent_physical_contained_in=parent_index,
+        )
+
+        if not success:
+            return None
+
+        # Filter for chassis only (in case API filter didn't work)
+        chassis_items = [
+            item
+            for item in (child_items or [])
+            if item.get("entPhysicalClass") == "chassis"
+        ]
+
+        # Step 4: Multiple chassis = stack
+        if len(chassis_items) <= 1:
+            return None
+
+        # Step 5: Extract member info
+        members = []
+        for idx, chassis in enumerate(chassis_items):
+            raw_position = chassis.get("entPhysicalParentRelPos", idx)
+            try:
+                position = int(raw_position)
+            except (TypeError, ValueError):
+                position = idx
+            member_data = {
+                "serial": chassis.get("entPhysicalSerialNum", ""),
+                "position": position,
+                "model": chassis.get("entPhysicalModelName", ""),
+                "name": chassis.get("entPhysicalName", ""),
+                "index": chassis.get("entPhysicalIndex"),
+                "description": chassis.get("entPhysicalDescr", ""),
+            }
+
+            # Generate suggested name if we have master name
+            if master_name:
+                member_data["suggested_name"] = _generate_vc_member_name(
+                    master_name, position + 1
+                )
+            else:
+                member_data["suggested_name"] = f"Member-{position + 1}"
+
+            members.append(member_data)
+
+        # Sort by position
+        members.sort(key=lambda m: m["position"])
+
+        logger.info(
+            f"Detected stack with {len(members)} members for device {device_id}"
+        )
+
+        return {"is_stack": True, "member_count": len(members), "members": members}
+
+    except Exception as e:
+        logger.exception(f"Error detecting virtual chassis for device {device_id}: {e}")
+        return None
+
+
+def _generate_vc_member_name(
+    master_name: str, position: int, serial: str = None
+) -> str:
+    """
+    Generate name for VC member device using configured pattern from settings.
+
+    Args:
+        master_name: Name of the master/primary device
+        position: VC position number
+        serial: Optional serial number of the member device
+
+    Returns:
+        Generated member device name
+
+    Examples:
+        pattern="-M{position}" → "switch01-M2"
+        pattern=" ({position})" → "switch01 (2)"
+        pattern="-SW{position}" → "switch01-SW2"
+        pattern=" [{serial}]" → "switch01 [ABC123]"
+    """
+    # Import here to avoid circular dependency
+    from .models import LibreNMSSettings
+
+    # Get pattern from settings with fallback to default
+    try:
+        settings = LibreNMSSettings.objects.first()
+        pattern = settings.vc_member_name_pattern if settings else "-M{position}"
+    except Exception as e:
+        logger.warning(
+            f"Could not load VC member name pattern from settings: {e}. Using default."
+        )
+        pattern = "-M{position}"
+
+    # Prepare format variables
+    format_vars = {
+        "master_name": master_name,
+        "position": position,
+        "serial": serial or "",
+    }
+
+    # Apply pattern - pattern should be suffix/prefix, not full name
+    try:
+        formatted_suffix = pattern.format(**format_vars)
+        return f"{master_name}{formatted_suffix}"
+    except KeyError as e:
+        logger.error(
+            f"Invalid placeholder in VC naming pattern '{pattern}': {e}. Using default."
+        )
+        return f"{master_name}-M{position}"
+
+
+def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
+    """
+    Regenerate suggested VC member names using the actual master device name.
+
+    This ensures preview shows accurate names after use_sysname and strip_domain
+    are applied to the master device name.
+
+    Args:
+        vc_data: Virtual chassis detection data dict
+        master_name: The actual name that will be used for master device in NetBox
+
+    Returns:
+        Updated vc_data dict with corrected suggested_name for each member
+    """
+    if not vc_data or not vc_data.get("is_stack"):
+        return vc_data
+
+    for idx, member in enumerate(vc_data.get("members", [])):
+        raw_position = member.get("position", idx)
+        try:
+            base_position = int(raw_position)
+        except (TypeError, ValueError):
+            base_position = idx
+        position = base_position + 1  # Convert to 1-based position
+        member["position"] = base_position
+        member["suggested_name"] = _generate_vc_member_name(
+            master_name, position, serial=member.get("serial")
+        )
+
+    return vc_data
+
+
+def create_virtual_chassis_with_members(
+    master_device: Device, members_info: list, libre_device: dict
+):
+    """
+    Create Virtual Chassis and member devices from detection info.
+
+    This function creates a NetBox VirtualChassis with the master device
+    and all detected member devices, wrapped in a transaction for safety.
+
+    Args:
+        master_device: The imported device (becomes VC master)
+        members_info: List of member dicts from VC detection
+        libre_device: Original LibreNMS device data
+
+    Returns:
+        VirtualChassis: The created virtual chassis instance
+
+    Raises:
+        ValidationError: If member count validation fails
+        IntegrityError: If duplicate serials/names are detected
+        Exception: For other creation errors
+
+    Example members_info:
+        [
+            {'serial': 'ABC123', 'position': 0, 'model': 'C9300-48U', 'name': 'Switch 1'},
+            {'serial': 'ABC124', 'position': 1, 'model': 'C9300-48U', 'name': 'Switch 2'}
+        ]
+    """
+
+    with transaction.atomic():
+        # Store original master device name for VC naming
+        original_master_name = master_device.name
+
+        # Rename master device to include position 1 pattern
+        master_device_new_name = _generate_vc_member_name(
+            original_master_name, 1, serial=master_device.serial
+        )
+
+        # Check if renamed master conflicts with existing device
+        if (
+            Device.objects.filter(name=master_device_new_name)
+            .exclude(pk=master_device.pk)
+            .exists()
+        ):
+            logger.warning(
+                f"Cannot rename master to '{master_device_new_name}' - name already exists. "
+                f"Keeping original name '{original_master_name}'"
+            )
+            master_base_name = original_master_name
+        else:
+            master_device.name = master_device_new_name
+            master_base_name = original_master_name
+
+        # Create VC using original base name
+        vc_name = master_base_name
+        vc = VirtualChassis.objects.create(
+            name=vc_name,
+            master=master_device,
+            domain=f"librenms-{libre_device['device_id']}",
+        )
+
+        # Update master device
+        master_device.virtual_chassis = vc
+        master_device.vc_position = 1  # Master is position 1
+        master_device.save()
+
+        # Create member devices for remaining positions
+        position = 2  # Start at 2 (master is 1)
+        members_created = 0
+
+        for member in members_info:
+            # Skip if this is the master's serial
+            if member.get("serial") == master_device.serial:
+                continue
+
+            serial = member.get("serial")
+
+            member_rack = master_device.rack
+            member_location = master_device.location or (
+                member_rack.location if member_rack and member_rack.location else None
+            )
+
+            # Check for duplicate serial
+            if serial and Device.objects.filter(serial=serial).exists():
+                logger.warning(
+                    f"Device with serial '{serial}' already exists, skipping VC member creation"
+                )
+                continue
+
+            member_name = _generate_vc_member_name(
+                master_base_name, position, serial=serial
+            )
+
+            # Check for duplicate name
+            if Device.objects.filter(name=member_name).exists():
+                logger.warning(
+                    f"Device with name '{member_name}' already exists, skipping VC member creation"
+                )
+                continue
+
+            Device.objects.create(
+                name=member_name,
+                device_type=master_device.device_type,
+                role=master_device.role,
+                site=master_device.site,
+                location=member_location,
+                rack=member_rack,
+                platform=master_device.platform,
+                serial=serial,
+                virtual_chassis=vc,
+                vc_position=position,
+                comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\n"
+                f"Auto-created from stack inventory",
+            )
+            members_created += 1
+            position += 1
+
+        # Validate member count
+        expected_members = len(
+            [m for m in members_info if m.get("serial") != master_device.serial]
+        )
+        if members_created < expected_members:
+            logger.warning(
+                f"Created {members_created} members but expected {expected_members}. "
+                "Some members may have been skipped due to duplicates."
+            )
+
+        logger.info(
+            f"Created Virtual Chassis '{vc.name}' with {vc.members.count()} total members "
+            f"(1 master + {members_created} additional)"
+        )
+
+    return vc

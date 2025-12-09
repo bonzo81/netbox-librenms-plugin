@@ -70,11 +70,10 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             messages.error(request, "Device not found in LibreNMS.")
             return redirect(self.get_redirect_url(obj))
 
-        # TODO: id 2 - Fix return to use tuple (success, data)
-        librenms_data = self.librenms_api.get_ports(self.librenms_id)
+        success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
-        if "error" in librenms_data:
-            messages.error(request, librenms_data["error"])
+        if not success:
+            messages.error(request, librenms_data)
             return redirect(self.get_redirect_url(obj))
 
         # Store data in cache

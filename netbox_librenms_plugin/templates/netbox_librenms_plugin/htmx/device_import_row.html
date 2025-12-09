@@ -16,3 +16,7 @@
     </td>
   </tr>
 {% endif %}
+{# Consume and clear any pending Django messages to prevent reappearing toasts #}
+<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">
+{% for _ in messages %}{% endfor %}
+</div>
