@@ -1,15 +1,16 @@
 import logging
 
 from dcim.models import Device
+from django.contrib import messages
 from django.core.cache import cache
+from django.http import JsonResponse
 from django.shortcuts import render
 from netbox.views import generic
+from utilities.rqworker import get_workers_for_queue
 
 from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
 from netbox_librenms_plugin.import_utils import (
-    empty_virtual_chassis_data,
-    get_librenms_devices_for_import,
-    validate_device_for_import,
+    process_device_filters,
 )
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
@@ -34,6 +35,104 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
         return get_permission_for_model(Device, "view")
 
+    def should_use_background_job(self, request, device_count, settings):
+        """
+        Determine if filter operation should run as background job.
+
+        Background jobs provide active cancellation and keep the browser responsive
+        during long-running operations. The decision is based on user-configured mode.
+
+        Note: Synchronous processing also completes once started, even if the user
+        navigates away. The main benefits of background jobs are:
+        - Active cancellation capability
+        - Browser responsiveness (no "page loading" hang)
+        - Job tracking in NetBox Jobs interface
+        - Results cached for later retrieval
+
+        Args:
+            request: Django request object
+            device_count: Number of devices that will be processed
+            settings: LibreNMSSettings instance with background_job_mode and threshold
+
+        Returns:
+            bool: True if background job should be used, False for synchronous
+        """
+        if not settings:
+            # Fallback to threshold mode with default of 20 if settings not found
+            return device_count >= 20
+
+        mode = settings.background_job_mode
+
+        if mode == "always":
+            return True
+        elif mode == "never":
+            return False
+        elif mode == "threshold":
+            threshold = settings.background_job_threshold
+            return device_count >= threshold
+        else:
+            # Unknown mode, default to threshold behavior
+            return device_count >= 20
+
+    def _load_job_results(self, job_id):
+        """
+        Load cached results from a completed background job.
+
+        Args:
+            job_id: ID of the completed FilterDevicesJob
+
+        Returns:
+            List[dict]: Validated devices from job cache, or [] if cache expired
+        """
+        from core.models import Job
+
+        try:
+            job = Job.objects.get(pk=job_id)
+        except Job.DoesNotExist:
+            logger.warning(f"Job {job_id} not found")
+            return []
+
+        if job.status != "completed":
+            logger.warning(f"Job {job_id} status is {job.status}, not completed")
+            return []
+
+        # Load cached devices from job using shared cache keys
+        from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+
+        job_data = job.data or {}
+        device_ids = job_data.get("device_ids", [])
+        filters = job_data.get("filters", {})
+        server_key = job_data.get("server_key", "default")
+        vc_enabled = job_data.get("vc_detection_enabled", False)
+
+        if not device_ids:
+            logger.warning(f"Job {job_id} missing device_ids")
+            return []
+
+        # Fetch devices from cache using shared keys
+        validated_devices = []
+        for device_id in device_ids:
+            cache_key = get_validated_device_cache_key(
+                server_key=server_key,
+                filters=filters,
+                device_id=device_id,
+                vc_enabled=vc_enabled,
+            )
+            device = cache.get(cache_key)
+            if device:
+                validated_devices.append(device)
+            else:
+                logger.warning(
+                    f"Device {device_id} from job {job_id} not in cache (may have expired)"
+                )
+
+        if not validated_devices and device_ids:
+            logger.error(
+                f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache."
+            )
+
+        return validated_devices
+
     def get(self, request, *args, **kwargs):  # noqa: D401 - inherited doc
         """Render the import table backed by LibreNMS data."""
         self._filter_warning = None
@@ -41,7 +140,10 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         self._libre_filters = {}
         self._cache_cleared = False
         self._request = request  # Store request for connection checks
+        self._job_results_loaded = False
+        self._from_cache = False
 
+        # Determine if new filters are being submitted
         libre_filter_fields = (
             "librenms_location",
             "librenms_type",
@@ -51,6 +153,29 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         )
         filters_present = any(request.GET.get(field) for field in libre_filter_fields)
         filters_submitted = request.GET.get("apply_filters") or filters_present
+
+        # Check if loading results from completed background job
+        # Only load job results if NOT submitting new filters
+        job_id = request.GET.get("job_id")
+        if job_id and not filters_submitted:
+            try:
+                job_id = int(job_id)
+                logger.info(f"Loading results from job {job_id}")
+                validated_devices = self._load_job_results(job_id)
+                if validated_devices:
+                    self._import_data = validated_devices
+                    self._job_results_loaded = True
+                    # Job results are cached data, so mark as from_cache
+                    self._from_cache = True
+                    # Extract filter info from first device's cache or job data
+                    # This allows the filter form to show what was searched
+                else:
+                    messages.warning(
+                        request,
+                        "Job results have expired. Please re-apply your filters.",
+                    )
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid job_id parameter: {request.GET.get('job_id')}")
 
         raw_enable_flag = request.GET.get("enable_vc_detection")
         legacy_skip_flag = request.GET.get("skip_vc_detection")
@@ -82,6 +207,116 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
         self._filters_submitted = filters_submitted
 
+        # Check if this should be processed as a background job
+        # Skip if we're loading results from a completed job (job_id in URL)
+        if (
+            filters_submitted
+            and not self._job_results_loaded
+            and not request.GET.get("job_id")
+        ):
+            # Build filter dict first
+            libre_filters = {}
+            if location := request.GET.get("librenms_location"):
+                libre_filters["location"] = location
+            if device_type := request.GET.get("librenms_type"):
+                libre_filters["type"] = device_type
+            if os := request.GET.get("librenms_os"):
+                libre_filters["os"] = os
+            if hostname := request.GET.get("librenms_hostname"):
+                libre_filters["hostname"] = hostname
+            if sysname := request.GET.get("librenms_sysname"):
+                libre_filters["sysname"] = sysname
+
+            # Check if data is already cached before deciding on background job
+            # This prevents creating a job when cached results are available
+            from netbox_librenms_plugin.import_utils import (
+                get_device_count_for_filters,
+                get_librenms_devices_for_import,
+            )
+
+            # Quick check: are the raw devices already cached?
+            devices_cached = False
+            if not self._cache_cleared:
+                try:
+                    _, devices_from_cache = get_librenms_devices_for_import(
+                        api=self.librenms_api,
+                        filters=libre_filters,
+                        force_refresh=False,
+                        return_cache_status=True,
+                    )
+                    devices_cached = devices_from_cache
+                except Exception:
+                    pass
+
+            # Get device count for background job decision
+            try:
+                device_count = get_device_count_for_filters(
+                    api=self.librenms_api,
+                    filters=libre_filters,
+                    clear_cache=self._cache_cleared,
+                    show_disabled=bool(
+                        self._filter_form_data.get("show_disabled", False)
+                    ),
+                )
+            except Exception as e:
+                logger.error(f"Error getting device count: {e}")
+                device_count = 0
+
+            # Load settings for background job decision
+            settings = None
+            try:
+                settings = LibreNMSSettings.objects.first()
+            except Exception:
+                pass
+
+            # Decide whether to use background job
+            # Skip background job if data is already cached (even if count exceeds threshold)
+            if not devices_cached and self.should_use_background_job(
+                request, device_count, settings
+            ):
+                # Check if RQ workers are available
+                if get_workers_for_queue("default") > 0:
+                    from netbox_librenms_plugin.jobs import FilterDevicesJob
+
+                    # Enqueue background job
+                    job = FilterDevicesJob.enqueue(
+                        user=request.user,
+                        filters=libre_filters,
+                        vc_detection_enabled=self._vc_detection_enabled,
+                        clear_cache=self._cache_cleared,
+                        show_disabled=bool(self._filter_form_data.get("show_disabled")),
+                        validation_status_filter=self._filter_form_data.get(
+                            "validation_status"
+                        ),
+                        server_key=self.librenms_api.server_key,
+                    )
+
+                    logger.info(
+                        f"Enqueued FilterDevicesJob {job.pk} (UUID: {job.job_id}) for user {request.user} - {device_count} devices"
+                    )
+
+                    # Return JSON for AJAX polling
+                    # Use background-tasks endpoint to poll Redis queue (where job actually runs)
+                    # IMPORTANT: Use job.job_id (UUID) for background-tasks API, but job.pk for result loading
+                    return JsonResponse(
+                        {
+                            "job_id": str(job.job_id),  # UUID for API polling
+                            "job_pk": job.pk,  # Integer PK for result loading
+                            "use_polling": True,
+                            "poll_url": f"/api/core/background-tasks/{job.job_id}/",
+                            "device_count": device_count,
+                        }
+                    )
+                else:
+                    # Fallback to synchronous processing
+                    logger.warning(
+                        "RQ workers not running, falling back to synchronous processing"
+                    )
+                    messages.warning(
+                        request,
+                        "Background job system unavailable. Processing may take longer than usual.",
+                    )
+
         queryset = self.get_queryset(request)
         table = self.get_table(queryset, request, bulk_actions=True)
 
@@ -111,6 +346,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
             "vc_detection_skipped": not getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
+            "from_cache": getattr(self, "_from_cache", False),
         }
         return render(request, self.template_name, context)
 
@@ -128,6 +364,10 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         return table
 
     def _get_import_queryset(self):
+        # Return job results if already loaded
+        if getattr(self, "_job_results_loaded", False):
+            return getattr(self, "_import_data", [])
+
         if not getattr(self, "_filters_submitted", False):
             self._libre_filters = {}
             return []
@@ -170,87 +410,21 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             )
             return []
 
-        libre_devices = get_librenms_devices_for_import(
-            self.librenms_api,
+        # Use shared processing function (same logic as background job)
+        show_disabled = bool(data_source.get("show_disabled"))
+        validation_status_filter = data_source.get("validation_status")
+
+        validated_devices, from_cache = process_device_filters(
+            api=self.librenms_api,
             filters=libre_filters,
-            force_refresh=clear_cache,
+            vc_detection_enabled=vc_detection_enabled,
+            clear_cache=clear_cache,
+            show_disabled=show_disabled,
+            validation_status_filter=validation_status_filter,
+            request=self._request,
+            return_cache_status=True,
         )
 
-        show_disabled = bool(data_source.get("show_disabled"))
-        if not show_disabled:
-            libre_devices = [d for d in libre_devices if d.get("status") == 1]
-
-        validated_devices = []
-        api_for_validation = self.librenms_api if vc_detection_enabled else None
-
-        # Pre-warm VC cache before validation loop to improve performance
-        if vc_detection_enabled and libre_devices:
-            from netbox_librenms_plugin.import_utils import prefetch_vc_data_for_devices
-
-            device_ids = [d["device_id"] for d in libre_devices]
-            try:
-                prefetch_vc_data_for_devices(
-                    self.librenms_api, device_ids, force_refresh=clear_cache
-                )
-            except (BrokenPipeError, ConnectionError, IOError) as e:
-                logger.info(f"Client disconnected during VC prefetch: {e}")
-                return []
-
-        for idx, device in enumerate(libre_devices):
-            # Periodically check if client is still connected (every 10 devices)
-            if idx % 10 == 0:
-                try:
-                    # Attempt to detect client disconnect by checking wsgi.input
-                    if hasattr(self._request, 'META') and self._request.META.get('wsgi.input'):
-                        # Force a check by trying to peek at the connection
-                        pass
-                except (BrokenPipeError, ConnectionError, IOError):
-                    logger.info(f"Client disconnected during validation at device {idx}")
-                    return []
-            
-            # Drop any cached validation/meta keys before recomputing
-            device.pop("_validation", None)
-            try:
-                validation = validate_device_for_import(
-                    device,
-                    api=api_for_validation,
-                    include_vc_detection=vc_detection_enabled,
-                    force_vc_refresh=clear_cache,
-                )
-            except (BrokenPipeError, ConnectionError, IOError) as e:
-                logger.info(f"Client disconnected during device validation: {e}")
-                return []
-
-            if not vc_detection_enabled:
-                validation["virtual_chassis"] = empty_virtual_chassis_data()
-                validation["_vc_detection_skipped"] = True
-            else:
-                validation["_vc_detection_skipped"] = False
-
-            validation_filter = data_source.get("validation_status")
-            if validation_filter:
-                has_existing = bool(validation["existing_device"])
-                if validation_filter == "ready" and not validation["is_ready"]:
-                    continue
-                elif validation_filter == "needs_review" and (
-                    has_existing
-                    or validation["is_ready"]
-                    or not validation["can_import"]
-                ):
-                    continue
-                elif validation_filter == "cannot_import" and (
-                    has_existing or validation["can_import"]
-                ):
-                    continue
-                elif validation_filter == "exists" and not has_existing:
-                    continue
-
-            device["_validation"] = validation
-            validated_devices.append(device)
-
-            # Cache device data for role/cluster/rack updates
-            # Uses configured cache_timeout (default 300s)
-            cache_key = f"import_device_data_{device['device_id']}"
-            cache.set(cache_key, device, timeout=self.librenms_api.cache_timeout)
+        self._from_cache = from_cache
 
         return validated_devices
