@@ -597,6 +597,7 @@ def validate_device_for_import(
                     custom_field_data__librenms_id=int(librenms_id)
                 ).first()
             except (ValueError, TypeError):
+                # librenms_id is not convertible to int; no match will be found
                 pass
 
         if existing_vm:
@@ -622,6 +623,7 @@ def validate_device_for_import(
                     custom_field_data__librenms_id=int(librenms_id)
                 ).first()
             except (ValueError, TypeError):
+                # librenms_id is not convertible to int; no match will be found
                 pass
 
         if existing_device:
@@ -1826,7 +1828,6 @@ def process_device_filters(
             filters=filters,
             force_refresh=clear_cache,
         )
-        from_cache = False
 
     # Filter out disabled devices if requested
     if not show_disabled:

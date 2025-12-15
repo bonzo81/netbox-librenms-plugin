@@ -246,12 +246,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
                     )
                     devices_cached = devices_from_cache
                 except Exception:
-                    pass
-
-            # Get device count for background job decision
-            try:
-                device_count = get_device_count_for_filters(
-                    api=self.librenms_api,
+                # Cache check failed; proceed with background job decision based on device_count
                     filters=libre_filters,
                     clear_cache=self._cache_cleared,
                     show_disabled=bool(
@@ -267,6 +262,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             try:
                 settings = LibreNMSSettings.objects.first()
             except Exception:
+                # Settings not available; will use default thresholds
                 pass
 
             # Decide whether to use background job
