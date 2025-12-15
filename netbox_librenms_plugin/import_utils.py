@@ -1646,108 +1646,125 @@ def create_virtual_chassis_with_members(
         ]
     """
 
-    with transaction.atomic():
-        # Store original master device name for VC naming
-        original_master_name = master_device.name
+    # Store original master device state for rollback
+    original_master_name = master_device.name
+    original_vc = master_device.virtual_chassis
+    original_vc_position = master_device.vc_position
 
-        # Rename master device to include position 1 pattern
-        master_device_new_name = _generate_vc_member_name(
-            original_master_name, 1, serial=master_device.serial
-        )
-
-        # Check if renamed master conflicts with existing device
-        if (
-            Device.objects.filter(name=master_device_new_name)
-            .exclude(pk=master_device.pk)
-            .exists()
-        ):
-            logger.warning(
-                f"Cannot rename master to '{master_device_new_name}' - name already exists. "
-                f"Keeping original name '{original_master_name}'"
+    try:
+        with transaction.atomic():
+            # Rename master device to include position 1 pattern
+            master_device_new_name = _generate_vc_member_name(
+                original_master_name, 1, serial=master_device.serial
             )
-            master_base_name = original_master_name
-        else:
-            master_device.name = master_device_new_name
-            master_base_name = original_master_name
 
-        # Create VC using original base name
-        vc_name = master_base_name
-        vc = VirtualChassis.objects.create(
-            name=vc_name,
-            master=master_device,
-            domain=f"librenms-{libre_device['device_id']}",
+            # Check if renamed master conflicts with existing device
+            if (
+                Device.objects.filter(name=master_device_new_name)
+                .exclude(pk=master_device.pk)
+                .exists()
+            ):
+                logger.warning(
+                    f"Cannot rename master to '{master_device_new_name}' - name already exists. "
+                    f"Keeping original name '{original_master_name}'"
+                )
+                master_base_name = original_master_name
+            else:
+                master_device.name = master_device_new_name
+                master_base_name = original_master_name
+
+            # Create VC using original base name
+            vc_name = master_base_name
+            vc = VirtualChassis.objects.create(
+                name=vc_name,
+                master=master_device,
+                domain=f"librenms-{libre_device['device_id']}",
+            )
+
+            # Update master device
+            master_device.virtual_chassis = vc
+            master_device.vc_position = 1  # Master is position 1
+            master_device.save()
+
+            # Create member devices for remaining positions
+            position = 2  # Start at 2 (master is 1)
+            members_created = 0
+
+            for member in members_info:
+                # Skip if this is the master's serial
+                if member.get("serial") == master_device.serial:
+                    continue
+
+                serial = member.get("serial")
+
+                member_rack = master_device.rack
+                member_location = master_device.location or (
+                    member_rack.location if member_rack and member_rack.location else None
+                )
+
+                # Check for duplicate serial
+                if serial and Device.objects.filter(serial=serial).exists():
+                    logger.warning(
+                        f"Device with serial '{serial}' already exists, skipping VC member creation"
+                    )
+                    continue
+
+                member_name = _generate_vc_member_name(
+                    master_base_name, position, serial=serial
+                )
+
+                # Check for duplicate name
+                if Device.objects.filter(name=member_name).exists():
+                    logger.warning(
+                        f"Device with name '{member_name}' already exists, skipping VC member creation"
+                    )
+                    continue
+
+                Device.objects.create(
+                    name=member_name,
+                    device_type=master_device.device_type,
+                    role=master_device.role,
+                    site=master_device.site,
+                    location=member_location,
+                    rack=member_rack,
+                    platform=master_device.platform,
+                    serial=serial,
+                    virtual_chassis=vc,
+                    vc_position=position,
+                    comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\n"
+                    f"Auto-created from stack inventory",
+                )
+                members_created += 1
+                position += 1
+
+            # Validate member count
+            expected_members = len(
+                [m for m in members_info if m.get("serial") != master_device.serial]
+            )
+            if members_created < expected_members:
+                logger.warning(
+                    f"Created {members_created} members but expected {expected_members}. "
+                    "Some members may have been skipped due to duplicates."
+                )
+
+            logger.info(
+                f"Created Virtual Chassis '{vc.name}' with {vc.members.count()} total members "
+                f"(1 master + {members_created} additional)"
+            )
+
+            return vc
+
+    except Exception as e:
+        # Rollback master device to original state
+        logger.error(
+            f"Virtual Chassis creation failed for device {master_device.name}: {e}. "
+            f"Rolling back master device changes."
         )
-
-        # Update master device
-        master_device.virtual_chassis = vc
-        master_device.vc_position = 1  # Master is position 1
+        master_device.name = original_master_name
+        master_device.virtual_chassis = original_vc
+        master_device.vc_position = original_vc_position
         master_device.save()
-
-        # Create member devices for remaining positions
-        position = 2  # Start at 2 (master is 1)
-        members_created = 0
-
-        for member in members_info:
-            # Skip if this is the master's serial
-            if member.get("serial") == master_device.serial:
-                continue
-
-            serial = member.get("serial")
-
-            member_rack = master_device.rack
-            member_location = master_device.location or (
-                member_rack.location if member_rack and member_rack.location else None
-            )
-
-            # Check for duplicate serial
-            if serial and Device.objects.filter(serial=serial).exists():
-                logger.warning(
-                    f"Device with serial '{serial}' already exists, skipping VC member creation"
-                )
-                continue
-
-            member_name = _generate_vc_member_name(
-                master_base_name, position, serial=serial
-            )
-
-            # Check for duplicate name
-            if Device.objects.filter(name=member_name).exists():
-                logger.warning(
-                    f"Device with name '{member_name}' already exists, skipping VC member creation"
-                )
-                continue
-
-            Device.objects.create(
-                name=member_name,
-                device_type=master_device.device_type,
-                role=master_device.role,
-                site=master_device.site,
-                location=member_location,
-                rack=member_rack,
-                platform=master_device.platform,
-                serial=serial,
-                virtual_chassis=vc,
-                vc_position=position,
-                comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\n"
-                f"Auto-created from stack inventory",
-            )
-            members_created += 1
-            position += 1
-
-        # Validate member count
-        expected_members = len(
-            [m for m in members_info if m.get("serial") != master_device.serial]
-        )
-        if members_created < expected_members:
-            logger.warning(
-                f"Created {members_created} members but expected {expected_members}. "
-                "Some members may have been skipped due to duplicates."
-            )
-
-        logger.info(
-            f"Created Virtual Chassis '{vc.name}' with {vc.members.count()} total members "
-            f"(1 master + {members_created} additional)"
-        )
+        raise
 
 
 def process_device_filters(
