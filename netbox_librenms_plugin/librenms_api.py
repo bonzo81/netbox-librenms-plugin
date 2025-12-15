@@ -856,37 +856,3 @@ class LibreNMSAPI:
             return False, []
         except requests.exceptions.RequestException as e:
             return False, str(e)
-
-    def get_device_groups(self):
-        """
-        Fetch all device groups from LibreNMS.
-
-        Route: /api/v0/devicegroups
-
-        Returns:
-            tuple: (success: bool, data: list)
-
-        Example device group:
-            {
-                "id": 1,
-                "name": "Switches",
-                "desc": "All network switches",
-                "pattern": "%switches%"
-            }
-        """
-        try:
-            response = requests.get(
-                f"{self.librenms_url}/api/v0/devices",
-                headers=self.headers,
-                timeout=EXTENDED_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("status") == "ok":
-                    return True, result.get("groups", [])
-            return False, []
-        except requests.exceptions.RequestException as e:
-            return False, str(e)

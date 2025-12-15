@@ -8,7 +8,6 @@ This module provides functions for:
 - Smart matching of NetBox objects
 """
 
-import copy
 import logging
 from typing import List
 
@@ -393,7 +392,8 @@ def get_librenms_devices_for_import(
         else:
             cached_result = cache.get(cache_key)
             if cached_result is not None:
-                devices = copy.deepcopy(cached_result)
+                # No need to deepcopy - cached data isn't mutated
+                devices = cached_result
                 from_cache = True
                 if return_cache_status:
                     return devices, from_cache
@@ -412,7 +412,8 @@ def get_librenms_devices_for_import(
             devices = _apply_client_filters(devices, client_filters)
 
         # Cache using configured timeout (default 300s)
-        cache.set(cache_key, copy.deepcopy(devices), timeout=api.cache_timeout)
+        # No need to deepcopy - Django's cache backend handles serialization
+        cache.set(cache_key, devices, timeout=api.cache_timeout)
 
         if return_cache_status:
             return devices, from_cache
@@ -1232,7 +1233,9 @@ def bulk_import_devices(
                     vc_domain = f"librenms-{device_id}"
 
                     # Only create VC if we haven't processed this stack yet
+                    # Add to set BEFORE attempting creation to prevent race condition
                     if vc_domain not in processed_vc_domains:
+                        processed_vc_domains.add(vc_domain)
                         try:
                             vc = create_virtual_chassis_with_members(
                                 result["device"],
@@ -1240,11 +1243,12 @@ def bulk_import_devices(
                                 libre_device,
                             )
                             vc_created_count += 1
-                            processed_vc_domains.add(vc_domain)
                             logger.info(
                                 f"Created VC '{vc.name}' during bulk import for device {device_id}"
                             )
                         except Exception as vc_error:
+                            # Remove from set on failure so retry is possible
+                            processed_vc_domains.discard(vc_domain)
                             logger.warning(
                                 f"Failed to create VC for device {device_id}: {vc_error}"
                             )
@@ -1699,7 +1703,9 @@ def create_virtual_chassis_with_members(
 
                 member_rack = master_device.rack
                 member_location = master_device.location or (
-                    member_rack.location if member_rack and member_rack.location else None
+                    member_rack.location
+                    if member_rack and member_rack.location
+                    else None
                 )
 
                 # Check for duplicate serial
