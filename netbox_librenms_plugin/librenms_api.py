@@ -654,8 +654,8 @@ class LibreNMSAPI:
             }
         """
         try:
-            response = requests.delete(
-                f"{self.librenms_url}/api/v0/devices/{device_id}",
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/inventory/{device_id}/all",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
