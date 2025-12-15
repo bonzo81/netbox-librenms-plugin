@@ -40,13 +40,34 @@ class LibreNMSSettingsForm(NetBoxModelForm):
     use_sysname_default = forms.BooleanField(
         label="Use sysName",
         required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
         help_text="Use SNMP sysName instead of LibreNMS hostname when importing devices",
     )
 
     strip_domain_default = forms.BooleanField(
         label="Strip domain",
         required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
         help_text="Remove domain suffix from device names during import",
+    )
+
+    background_job_mode = forms.ChoiceField(
+        label="Background Job Mode",
+        choices=[
+            ("always", "Always use background jobs"),
+            ("never", "Never use background jobs"),
+            ("threshold", "Use threshold-based decision"),
+        ],
+        widget=forms.Select(attrs={"class": "form-select"}),
+        help_text="Control when to use background jobs for device filtering",
+    )
+
+    background_job_threshold = forms.IntegerField(
+        label="Device Count Threshold",
+        min_value=1,
+        max_value=500,
+        widget=forms.NumberInput(attrs={"class": "form-control"}),
+        help_text="Number of devices that triggers background job processing (applies when mode is 'threshold')",
     )
 
     class Meta:
@@ -56,6 +77,8 @@ class LibreNMSSettingsForm(NetBoxModelForm):
             "vc_member_name_pattern",
             "use_sysname_default",
             "strip_domain_default",
+            "background_job_mode",
+            "background_job_threshold",
         ]
 
     def __init__(self, *args, **kwargs):
@@ -431,33 +454,32 @@ class LibreNMSImportFilterForm(forms.Form):
         required=False,
         label="LibreNMS Hostname",
         widget=forms.TextInput(attrs={"placeholder": "Partial hostname match"}),
-        help_text="IP address or DNS name used to add device to LibreNMS",
+        help_text="IP address or FQDN used to add device to LibreNMS",
     )
     librenms_sysname = forms.CharField(
         required=False,
         label="LibreNMS System Name",
         widget=forms.TextInput(attrs={"placeholder": "Exact or partial sysName match"}),
-        help_text="SNMP sysName of the device (exact match only; combine with another filter for partial matching)",
+        help_text="SNMP sysName. (exact match only; combine with another filter for partial matching)",
     )
     show_disabled = forms.BooleanField(
         required=False,
         initial=False,
         label="Include Disabled Devices",
-        help_text="Check to include disabled devices from LibreNMS",
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
     enable_vc_detection = forms.BooleanField(
         required=False,
         initial=False,
         label="Include Virtual Chassis Detection",
-        help_text="Run stack checks during the search when you need VC data. Leave unchecked for faster lookups.",
+        help_text="Run additional stack checks during the search. Will increase processing time.",
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
     clear_cache = forms.BooleanField(
         required=False,
         initial=False,
         label="Clear cache before search",
-        help_text="By default, search results are cached for 5 minutes to speed up repeats. Check this to discard the cache and pull fresh data.",
+        help_text="Discard the cache and pull fresh data.",
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
     validation_status = forms.ChoiceField(
