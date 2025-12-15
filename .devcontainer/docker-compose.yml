@@ -10,6 +10,7 @@ services:
     environment:
       NETBOX_VERSION: ${NETBOX_VERSION:-latest}
       DEBUG: ${DEBUG:-True}
+      DEVELOPER: ${DEVELOPER:-True}
       DB_HOST: ${DB_HOST:-postgres}
       DB_NAME: ${DB_NAME:-netbox}
       DB_USER: ${DB_USER:-netbox}
