@@ -495,13 +495,13 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         skipped_count = len(device_result.get("skipped", [])) + len(
             vm_result.get("skipped", [])
         )
-        vc_count = device_result.get("virtual_chassis_created", 0)
 
         if success_count:
-            msg = f"Successfully imported {success_count} device{'s' if success_count != 1 else ''}"
-            if vc_count:
-                msg += f" (including {vc_count} virtual chassis)"
-            messages.success(request, msg)
+            messages.success(
+                request,
+                f"Successfully imported {success_count} LibreNMS device"
+                f"{'s' if success_count != 1 else ''}",
+            )
         if failed_count:
             messages.error(
                 request,
