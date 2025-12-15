@@ -48,21 +48,25 @@
           <div class="row">
             {# Instructions column #}
             <div class="col-md-4">
-              <h6 class="mb-2"><i class="mdi mdi-information-outline"></i> Filter Requirements</h6>
-              <p class="mb-3"><strong>At least one filter is required</strong> to search LibreNMS devices.</p>
+              <h6 class="mb-2"><i class="mdi mdi-information-outline"></i> Search Instructions</h6>
+              <p class="mb-2">
+                <strong>At least one filter is required</strong> to search for devices.
+              </p>
 
-              <p class="mb-1"><strong>Filter Types:</strong></p>
-              <ul class="mb-3" style="padding-left: 1.2rem; font-size: 0.9rem;">
-                  <li><strong>Location/Type/OS:</strong> Exact match</li>
-                  <li><strong>Hostname:</strong> Partial match</li>
-                  <li><strong>System Name:</strong> Exact match (partial when combined)</li>
+              <p class="mb-2">
+                The following matching rules apply:
+              <ul class="mb-2" style="padding-left: 1.2rem; font-size: 0.9rem;">
+                <li><strong>Location/Type/OS:</strong> Exact match</li>
+                <li><strong>Hostname:</strong> Partial match</li>
+                <li><strong>System Name:</strong> Exact match (or partial when combined with other filters)</li>
               </ul>
 
-              <p class="mb-0 text-muted small">
-                  <i class="mdi mdi-lightbulb-on-outline"></i> Start with Location or Type, then refine with Hostname or System Name.
+              <p class="mb-2 text-muted small">
+                <i class="mdi mdi-lightbulb-on-outline"></i> <strong>Tip:</strong> Start with Location and/or Type to narrow results, then refine with additional filters.
               </p>
-              <div class="alert alert-info small mt-3 mb-0" role="status">
-                <strong>Cache tip:</strong> Search results are cached for 5 minutes to speed up repeat lookups. Initial searches against large LibreNMS datasets can take a while, but you can force a refresh using the "Clear cache before search" option below.
+
+              <div class="alert alert-info small mt-2 mb-0" role="status">
+                <strong>Performance note:</strong> Results are cached for 5 minutes. Initial searches on large LibreNMS datasets may take a moment, but repeat searches within the cache window will be faster.
               </div>
             </div>
             {# Filters column #}
@@ -71,11 +75,24 @@
                 <input type="hidden" name="apply_filters" value="1">
                 <!-- Filter submission with proper cancellation support -->
                 <script>
+    // Constants for timeouts and delays
+    const POLL_INTERVAL_MS = 2000;
+    const JOB_CANCEL_WAIT_MS = 500;
+    const JOB_CANCEL_REDIRECT_MS = 800;
+    const JOB_CANCEL_ERROR_REDIRECT_MS = 1000;
+
     // AbortController for cancelling the filter request
     let currentAbortController = null;
 
     document.getElementById('librenms-import-filter-form').addEventListener('submit', function(e) {
       e.preventDefault();
+
+      // Disable the apply filters button to prevent double submission
+      const applyBtn = document.getElementById('apply-filters-btn');
+      if (applyBtn) {
+        applyBtn.disabled = true;
+        applyBtn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Processing...';
+      }
 
       // Cancel any existing request before starting a new one
       if (currentAbortController) {
@@ -120,6 +137,12 @@
             currentAbortController = null;
           }
 
+          // Re-enable the apply filters button
+          if (applyBtn) {
+            applyBtn.disabled = false;
+            applyBtn.innerHTML = '<i class="mdi mdi-filter"></i> Apply Filters';
+          }
+
           // Hide modal
           if (modalInstance) {
             modalInstance.hide();
@@ -143,7 +166,8 @@
       // Add all text/select fields with non-empty values
       const inputs = this.querySelectorAll('input:not([type="checkbox"]), select');
       inputs.forEach(input => {
-        if (input.name && input.value) {
+        // Skip job_id parameter - we want a fresh filter, not loading old results
+        if (input.name && input.value && input.name !== 'job_id') {
           params.append(input.name, input.value);
         }
       });
@@ -162,37 +186,69 @@
 
       // Build final URL
       const finalUrl = baseUrl + '?' + params.toString();
-      console.log('Fetching filtered results:', finalUrl);
+
+      // Store original filters for reload after job completion
+      const originalFilters = params.toString();
 
       // Use fetch with AbortController instead of window.location
       fetch(finalUrl, {
         method: 'GET',
         signal: currentAbortController.signal,
         headers: {
-          'Accept': 'text/html'
+          'Accept': 'application/json, text/html'
         }
       })
       .then(response => {
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
+        // Check if response is JSON (background job) or HTML (synchronous)
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          return response.json().then(data => ({type: 'json', data}));
         }
-        return response.text();
+        return response.text().then(html => ({type: 'html', html}));
       })
-      .then(html => {
-        // Replace the entire page content with the returned HTML
-        document.open();
-        document.write(html);
-        document.close();
-        currentAbortController = null;
+      .then(result => {
+        if (result.type === 'json') {
+          // Background job response
+          if (result.data.use_polling && result.data.job_id && result.data.poll_url) {
+            // Start polling for background job
+            // job_id is UUID for API, job_pk is integer for result loading
+            pollJobStatus(
+              result.data.job_id,
+              result.data.job_pk,
+              result.data.poll_url,
+              baseUrl,
+              originalFilters,
+              result.data.device_count
+            );
+          } else {
+            // Unexpected JSON response
+            alert('Unexpected response from server. Please try again.');
+            if (modalInstance) {
+              modalInstance.hide();
+            }
+          }
+        } else if (result.type === 'html') {
+          // Synchronous response - replace page with HTML
+          document.open();
+          document.write(result.html);
+          document.close();
+          currentAbortController = null;
+        }
       })
       .catch(error => {
+        // Re-enable the apply filters button
+        if (applyBtn) {
+          applyBtn.disabled = false;
+          applyBtn.innerHTML = '<i class="mdi mdi-filter"></i> Apply Filters';
+        }
+
         if (error.name === 'AbortError') {
-          console.log('Filter request was cancelled by user');
+          // Request was cancelled by user - silent
         } else {
           console.error('Error fetching filtered results:', error);
           alert('Error loading filtered results. Please try again.');
         }
-        
+
         // Hide modal on error
         if (modalInstance) {
           modalInstance.hide();
@@ -208,6 +264,256 @@
         currentAbortController = null;
       });
     });
+
+    /**
+     * Poll background job status and reload page when complete.
+     *
+     * @param {string} jobId - Job UUID for API polling
+     * @param {number} jobPk - Job PK for result loading
+     * @param {string} pollUrl - API endpoint to poll
+     * @param {string} baseUrl - Base URL for reload
+     * @param {string} originalFilters - Original filter params
+     * @param {number} deviceCount - Number of devices being processed
+     */
+    function pollJobStatus(jobId, jobPk, pollUrl, baseUrl, originalFilters, deviceCount) {
+      const filterModal = document.getElementById('filter-processing-modal');
+      const messageEl = document.getElementById('filter-progress-message');
+      const cancelBtn = document.getElementById('cancel-filter-btn');
+
+      // Get CSRF token from cookie or form (needed for cancel and status sync)
+      let csrfToken = getCookie('csrftoken');
+      if (!csrfToken) {
+        const csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');
+        if (csrfInput) {
+          csrfToken = csrfInput.value;
+        }
+      }
+
+      // Update modal message with device count
+      if (messageEl) {
+        if (deviceCount !== undefined && deviceCount !== null) {
+          messageEl.textContent = `Found ${deviceCount} device${deviceCount !== 1 ? 's' : ''}, processing in background (job can be cancelled)...`;
+        } else {
+          messageEl.textContent = 'Processing filters in background (job can be cancelled)...';
+        }
+      }
+
+      // Wire cancel button to stop the job
+      // jobId here is the UUID (job.job_id), not the integer pk
+      if (cancelBtn) {
+        cancelBtn.onclick = function() {
+
+          // Mark that cancel is in progress to stop polling interference
+          cancelInProgress = true;
+
+          // Disable the cancel button to prevent double-clicks
+          cancelBtn.disabled = true;
+          const originalText = cancelBtn.textContent;
+
+          // Update modal message
+          if (messageEl) {
+            messageEl.textContent = 'Cancelling job...';
+          }
+          cancelBtn.textContent = 'Cancelling...';
+
+          // Stop the job using NetBox's correct background task stop endpoint
+          const stopUrl = `/api/core/background-tasks/${jobId}/stop/`;
+
+          fetch(stopUrl, {
+            method: 'POST',
+            headers: {
+              'X-CSRFToken': csrfToken,
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            }
+          })
+          .then(res => {
+            if (res.ok || res.status === 404) {
+              // Job stopped or already gone
+              if (messageEl) {
+                messageEl.textContent = 'Verifying job stopped...';
+              }
+              cancelBtn.textContent = 'Verifying...';
+
+              // Wait for RQ to update
+              return new Promise(resolve => setTimeout(resolve, JOB_CANCEL_WAIT_MS))
+                .then(() => {
+                  // Sync database status via our plugin API
+                  if (messageEl) {
+                    messageEl.textContent = 'Updating job status...';
+                  }
+                  cancelBtn.textContent = 'Updating...';
+
+                  const syncUrl = `/api/plugins/librenms_plugin/jobs/${jobPk}/sync-status/`;
+
+                  return fetch(syncUrl, {
+                    method: 'POST',
+                    headers: {
+                      'X-CSRFToken': csrfToken,
+                      'Accept': 'application/json'
+                    }
+                  });
+                })
+                .then(syncRes => {
+                  return syncRes.json().then(data => {
+                    if (syncRes.ok) {
+                      if (messageEl) {
+                        messageEl.textContent = 'Job cancelled successfully.';
+                      }
+                      cancelBtn.textContent = 'Cancelled';
+                      setTimeout(() => {
+                        window.location.href = baseUrl;
+                      }, JOB_CANCEL_REDIRECT_MS);
+                    } else {
+                      throw new Error(`Sync failed: ${syncRes.status}`);
+                    }
+                  });
+                })
+                .catch(syncErr => {
+                  // Still redirect even if sync fails - job is stopped in RQ
+                  if (messageEl) {
+                    messageEl.textContent = 'Job stopped (status sync failed).';
+                  }
+                  cancelBtn.textContent = 'Stopped';
+                  setTimeout(() => {
+                    window.location.href = baseUrl;
+                  }, JOB_CANCEL_ERROR_REDIRECT_MS);
+                });
+            } else {
+              // Failed to stop
+              if (messageEl) {
+                messageEl.textContent = 'Failed to cancel job. Please try again.';
+              }
+              cancelBtn.textContent = 'Stop Failed';
+              cancelBtn.disabled = false;
+            }
+          })
+          .catch(err => {
+            if (messageEl) {
+              messageEl.textContent = 'Error cancelling job.';
+            }
+            cancelBtn.textContent = originalText;
+            cancelBtn.disabled = false;
+            alert('Error stopping job. Please try again.');
+          });
+        };
+      }
+
+      // Poll function
+      let cancelInProgress = false;
+      const poll = () => {
+        if (cancelInProgress) {
+          // Cancel handler is taking over, don't interfere
+          return;
+        }
+
+        fetch(pollUrl, {
+          headers: {
+            'Accept': 'application/json'
+          }
+        })
+        .then(res => {
+          if (!res.ok) {
+            if (res.status === 404) {
+              // Job no longer in Redis queue, fall back to database endpoint
+              // Disable cancel button since we can't cancel jobs that left the queue
+              if (cancelBtn) {
+                cancelBtn.disabled = true;
+                cancelBtn.textContent = 'Job Finalizing...';
+              }
+              // Fall back to database endpoint (uses UUID job_id)
+              return fetch(`/api/core/jobs/${jobId}/`, {
+                headers: {
+                  'Accept': 'application/json'
+                }
+              }).then(dbRes => {
+                if (!dbRes.ok) {
+                  throw new Error(`Database job not found: ${dbRes.status}`);
+                }
+                return dbRes.json();
+              });
+            }
+            throw new Error(`HTTP ${res.status}`);
+          }
+          return res.json();
+        })
+        .then(data => {
+          // NetBox API returns status as an object with 'value' and 'label' fields
+          const statusValue = data.status?.value || data.status;
+
+          // Update modal message based on status
+          if (messageEl) {
+            const statusMessages = {
+              'queued': 'Job queued, waiting to start...',
+              'scheduled': 'Job scheduled...',
+              'started': 'Processing filters...',
+              'deferred': 'Job deferred...',
+              'finished': 'Job completed!',
+              'completed': 'Job completed!',
+              'failed': 'Job failed.',
+              'stopped': 'Job stopped.',
+              'errored': 'Job encountered an error.'
+            };
+            messageEl.textContent = statusMessages[statusValue] || `Job status: ${statusValue}`;
+          }
+
+          if (statusValue === 'completed' || statusValue === 'finished') {
+            // Job completed - reload page with job_id (PK) to load cached results
+            window.location.href = baseUrl + '?' + originalFilters + '&job_id=' + jobPk;
+          } else if (statusValue === 'stopped') {
+            // RQ job was stopped - this shouldn't happen since cancel button handles it
+            // But redirect anyway in case it does
+            window.location.href = baseUrl;
+          } else if (statusValue === 'failed') {
+            // Job failed - could be user cancellation or actual error
+            const errorMsg = data.data?.error;
+            if (errorMsg) {
+              // Actual error
+              alert('Error: ' + errorMsg);
+            }
+            // Either way, redirect back to clean state
+            window.location.href = baseUrl;
+          } else if (statusValue === 'errored') {
+            // Job errored - show error
+            const errorMsg = data.data?.error || 'Job encountered an error. Please try again.';
+            alert('Error: ' + errorMsg);
+            window.location.href = baseUrl;
+          } else if (statusValue === 'queued' || statusValue === 'started' || statusValue === 'deferred' || statusValue === 'scheduled') {
+            // Continue polling (job still in progress)
+            setTimeout(poll, POLL_INTERVAL_MS);
+          } else {
+            // Unknown status - continue polling
+            setTimeout(poll, POLL_INTERVAL_MS);
+          }
+        })
+        .catch(err => {
+          // Retry polling on network errors
+          setTimeout(poll, POLL_INTERVAL_MS);
+        });
+      };
+
+      // Start polling
+      poll();
+    }    /**
+     * Get CSRF token from cookies.
+     *
+     * @param {string} name - Cookie name
+     * @returns {string|null} Cookie value
+     */
+    function getCookie(name) {
+      let cookieValue = null;
+      if (document.cookie && document.cookie !== '') {
+        const cookies = document.cookie.split(';');
+        for (let i = 0; i < cookies.length; i++) {
+          const cookie = cookies[i].trim();
+          if (cookie.substring(0, name.length + 1) === (name + '=')) {
+            cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+            break;
+          }
+        }
+      }
+      return cookieValue;
+    }
 </script>
                 {% if show_filter_warning %}
                   <div class="alert alert-warning alert-dismissible fade show border-warning" role="alert" style="border-left: 4px solid #ffc107;">
@@ -290,7 +596,7 @@
                   </div>
                 </div>
                 <div class="text-end">
-                  <button type="submit" class="btn btn-primary">
+                  <button type="submit" class="btn btn-primary" id="apply-filters-btn">
                     <i class="mdi mdi-filter"></i> Apply Filters
                   </button>
                   <a href="{% url 'plugins:netbox_librenms_plugin:librenms_import' %}" class="btn btn-secondary">
@@ -321,41 +627,24 @@
         </p>
     </div>
   {% else %}
-    {# Import Settings #}
-    <div class="card mb-3 border-primary">
-        <div class="card-body p-2">
-            <div class="d-flex align-items-center gap-3">
-                <strong class="me-2">Import Settings:</strong>
-                <div class="form-check form-switch mb-0">
-                    <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if settings.use_sysname_default %}checked{% endif %}
-                           data-bs-toggle="tooltip"
-                           title="Use SNMP sysName instead of LibreNMS hostname">
-                    <label class="form-check-label small" for="use-sysname-toggle">
-                        Use sysName
-                    </label>
-                </div>
-                <div class="form-check form-switch mb-0">
-                    <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if settings.strip_domain_default %}checked{% endif %}
-                           data-bs-toggle="tooltip"
-                           title="Remove domain suffix (e.g., 'switch01.example.com' → 'switch01'). IP addresses preserved.">
-                    <label class="form-check-label small" for="strip-domain-toggle">
-                        Strip domain
-                    </label>
-                </div>
-            </div>
-        </div>
-    </div>
-
     {% if vc_detection_skipped %}
-      <div class="alert alert-info mb-3">
+      <div class="alert alert-info alert-dismissible fade show mb-3" role="alert">
         <i class="mdi mdi-progress-clock"></i>
         Virtual chassis detection is disabled for this search (default). Selecting a role from the drop down will trigger a virtual chassis check for that device.
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
     {% endif %}
     {% if cache_cleared %}
-      <div class="alert alert-success mb-3">
+      <div class="alert alert-success alert-dismissible fade show mb-3" role="alert">
         <i class="mdi mdi-refresh"></i>
         Cache cleared before this search. Results were pulled directly from LibreNMS and will be cached again for 5 minutes.
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+      </div>
+    {% elif from_cache and not request.GET.job_id %}
+      <div class="alert alert-info alert-dismissible fade show mb-3" role="alert">
+        <i class="mdi mdi-cached"></i>
+        These filter results were found in cache (last fetched within 5 minutes). Use "Clear cache before search" to fetch fresh data from LibreNMS.
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
     {% endif %}
 
@@ -372,7 +661,28 @@
                 <i class="mdi mdi-information"></i> 0 devices selected
             </span>
         </div>
-      <button type="button" class="btn btn-success" id="bulk-import-btn" disabled
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        {# Import Settings #}
+        <div class="d-flex align-items-center gap-2 border-start ps-2">
+            <strong class="small">Settings:</strong>
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if settings.use_sysname_default %}checked{% endif %}
+                       data-bs-toggle="tooltip"
+                       title="Use SNMP sysName instead of LibreNMS hostname">
+                <label class="form-check-label small" for="use-sysname-toggle">
+                    Use sysName
+                </label>
+            </div>
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if settings.strip_domain_default %}checked{% endif %}
+                       data-bs-toggle="tooltip"
+                       title="Remove domain suffix (e.g., 'switch01.example.com' → 'switch01'). IP addresses preserved.">
+                <label class="form-check-label small" for="strip-domain-toggle">
+                    Strip domain
+                </label>
+            </div>
+        </div>
+        <button type="button" class="btn btn-success" id="bulk-import-btn" disabled
           hx-post="{% url 'plugins:netbox_librenms_plugin:bulk_import_confirm' %}"
           hx-target="#htmx-modal-content"
           hx-swap="innerHTML"
@@ -382,7 +692,8 @@
           <span>Import Selected (<span id="import-count">0</span>)</span>
         </span>
         <span class="spinner-border spinner-border-sm ms-2 htmx-indicator" role="status" aria-hidden="true" style="display: none;"></span>
-      </button>
+        </button>
+      </div>
     </div>
   {% endif %}
 
@@ -408,6 +719,9 @@
 
   {# JavaScript for import functionality #}
   <script>
+  // Constants
+  const MODAL_AUTO_CLOSE_MS = 3000;
+
   // Configure HTMX to include CSRF token in all requests
   document.body.addEventListener('htmx:configRequest', function(event) {
     const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
@@ -673,7 +987,6 @@
       if (!targetCheckbox) {
         restoreSelectionState(previousSelections);
         pendingRowImport = null;
-        console.warn('Unable to locate selection checkbox for device', deviceId);
         return;
       }
 
@@ -700,7 +1013,7 @@
               }
             }
             window.location.reload();
-          }, 3000);
+          }, MODAL_AUTO_CLOSE_MS);
         }
       }
     });
@@ -758,7 +1071,7 @@
             <span class="visually-hidden">Loading...</span>
           </div>
           <h5 class="mb-2">Applying Filters</h5>
-          <p class="text-muted mb-3">Fetching LibreNMS data and processing filters...</p>
+          <p class="text-muted mb-3" id="filter-progress-message">Fetching LibreNMS data and processing filters...</p>
           <button type="button" class="btn btn-secondary btn-sm" id="cancel-filter-btn">
             <i class="mdi mdi-close"></i> Cancel
           </button>
