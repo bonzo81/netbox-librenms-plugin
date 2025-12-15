@@ -12,6 +12,7 @@ import copy
 import logging
 from typing import List
 
+from core.choices import JobStatusChoices
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
 from django.db import transaction
@@ -25,6 +26,35 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_validated_device_cache_key(
+    server_key: str, filters: dict, device_id: int | str, vc_enabled: bool
+) -> str:
+    """
+    Generate a consistent cache key for validated device data.
+
+    This ensures both synchronous and background job processing use the same
+    cache keys, avoiding duplicate validation work and cache entries.
+
+    Args:
+        server_key: LibreNMS server key
+        filters: Filter dict with location, type, os, hostname, sysname keys
+        device_id: LibreNMS device ID
+        vc_enabled: Whether virtual chassis detection was enabled
+
+    Returns:
+        str: Cache key for the validated device
+
+    Example:
+        >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
+        >>> key
+        'validated_device_default_-1234567890_123_vc'
+    """
+    # Sort filters for consistent hashing
+    filter_hash = hash(str(sorted(filters.items())))
+    vc_part = "vc" if vc_enabled else "novc"
+    return f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}"
 
 
 def _determine_device_name(
@@ -196,13 +226,51 @@ def prefetch_vc_data_for_devices(
     logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
 
 
+def get_device_count_for_filters(
+    api: LibreNMSAPI,
+    filters: dict,
+    clear_cache: bool = False,
+    show_disabled: bool = True,
+) -> int:
+    """
+    Get count of LibreNMS devices matching filters.
+
+    This is a lightweight function to determine device count for background job
+    decision making. Uses the same caching as get_librenms_devices_for_import().
+
+    Args:
+        api: LibreNMS API client instance
+        filters: Filter dict with location, type, os, hostname, sysname keys
+        clear_cache: Whether to force cache refresh
+        show_disabled: Whether to include disabled devices
+
+    Returns:
+        int: Count of devices matching filters
+
+    Example:
+        >>> api = LibreNMSAPI()
+        >>> count = get_device_count_for_filters(api, {'location': 'NYC'}, show_disabled=False)
+        >>> print(f"Found {count} devices")
+    """
+    devices = get_librenms_devices_for_import(
+        api, filters=filters, force_refresh=clear_cache
+    )
+
+    # Filter out disabled devices if requested
+    if not show_disabled:
+        devices = [d for d in devices if d.get("status") == 1]
+
+    return len(devices)
+
+
 def get_librenms_devices_for_import(
     api: LibreNMSAPI = None,
     filters: dict = None,
     server_key: str = None,
     *,
     force_refresh: bool = False,
-) -> List[dict]:
+    return_cache_status: bool = False,
+) -> List[dict] | tuple[List[dict], bool]:
     """
     Retrieve LibreNMS devices based on filters.
 
@@ -218,15 +286,20 @@ def get_librenms_devices_for_import(
             - disabled: Include disabled devices (0=active only, 1=all)
         server_key: Key for specific server configuration (used if api not provided)
         force_refresh: When True, bypass the cache and fetch fresh data
+        return_cache_status: When True, returns (devices, from_cache) tuple
 
     Returns:
-        List of device dictionaries from LibreNMS
+        List of device dictionaries from LibreNMS, or tuple of (devices, from_cache)
+        if return_cache_status is True. from_cache=True means data was loaded from
+        existing cache; from_cache=False means data was just fetched from LibreNMS.
 
     Example:
         >>> api = LibreNMSAPI()
         >>> devices = get_librenms_devices_for_import(api, {'location': 'NYC'})
         >>> for device in devices:
         ...     print(device['hostname'])
+        >>> # With cache status
+        >>> devices, from_cache = get_librenms_devices_for_import(api, {'location': 'NYC'}, return_cache_status=True)
     """
     try:
         # Use provided API instance or create a new one
@@ -313,17 +386,25 @@ def get_librenms_devices_for_import(
         # Use caching to avoid repeated API calls
         # Include both API and client filters in cache key
         cache_key = f"librenms_devices_import_{server_key}_{hash(str(api_filters))}_{hash(str(client_filters))}"
+        from_cache = False
+
         if force_refresh:
             cache.delete(cache_key)
         else:
             cached_result = cache.get(cache_key)
             if cached_result is not None:
-                return copy.deepcopy(cached_result)
+                devices = copy.deepcopy(cached_result)
+                from_cache = True
+                if return_cache_status:
+                    return devices, from_cache
+                return devices
 
         success, devices = api.list_devices(api_filters if api_filters else None)
 
         if not success:
             logger.error(f"Failed to retrieve devices from LibreNMS: {devices}")
+            if return_cache_status:
+                return [], False
             return []
 
         # Apply client-side filters if any
@@ -332,10 +413,15 @@ def get_librenms_devices_for_import(
 
         # Cache using configured timeout (default 300s)
         cache.set(cache_key, copy.deepcopy(devices), timeout=api.cache_timeout)
+
+        if return_cache_status:
+            return devices, from_cache
         return devices
 
     except Exception:
         logger.exception("Error retrieving LibreNMS devices for import")
+        if return_cache_status:
+            return [], False
         return []
 
 
@@ -1663,4 +1749,264 @@ def create_virtual_chassis_with_members(
             f"(1 master + {members_created} additional)"
         )
 
-    return vc
+
+def process_device_filters(
+    api: LibreNMSAPI,
+    filters: dict,
+    vc_detection_enabled: bool,
+    clear_cache: bool,
+    show_disabled: bool,
+    validation_status_filter: str = None,
+    job=None,
+    request=None,
+    return_cache_status: bool = False,
+) -> List[dict] | tuple[List[dict], bool]:
+    """
+    Process LibreNMS device filters and return validated devices.
+
+    Shared function used by both synchronous view and background job processing.
+    Fetches devices, optionally pre-warms VC cache, validates each device, and
+    caches results for HTMX row updates.
+
+    Args:
+        api: LibreNMS API client instance
+        filters: Filter dict with location, type, os, hostname, sysname keys
+        vc_detection_enabled: Whether to detect virtual chassis
+        clear_cache: Whether to force cache refresh
+        show_disabled: Whether to include disabled devices
+        validation_status_filter: Optional filter ('ready', 'needs_review', 'cannot_import', 'exists')
+        job: Optional JobRunner instance for logging job events
+        request: Optional Django request for client disconnect detection (synchronous only)
+        return_cache_status: When True, returns (devices, from_cache) tuple
+
+    Returns:
+        List[dict]: Validated devices with _validation key, or tuple of (devices, from_cache)
+        if return_cache_status is True. from_cache=True means data was loaded from existing
+        cache; from_cache=False means data was just fetched from LibreNMS.
+    """
+    # Fetch devices from LibreNMS
+    if job:
+        job.logger.info(f"Fetching devices with filters: {filters}")
+    else:
+        logger.info(f"Fetching devices with filters: {filters}")
+
+    if return_cache_status:
+        libre_devices, from_cache = get_librenms_devices_for_import(
+            api,
+            filters=filters,
+            force_refresh=clear_cache,
+            return_cache_status=True,
+        )
+    else:
+        libre_devices = get_librenms_devices_for_import(
+            api,
+            filters=filters,
+            force_refresh=clear_cache,
+        )
+        from_cache = False
+
+    # Filter out disabled devices if requested
+    if not show_disabled:
+        libre_devices = [d for d in libre_devices if d.get("status") == 1]
+
+    if job:
+        job.logger.info(f"Found {len(libre_devices)} devices to process")
+    else:
+        logger.info(f"Found {len(libre_devices)} devices")
+
+    # Pre-warm VC cache if needed
+    if vc_detection_enabled and libre_devices:
+        device_ids = [d["device_id"] for d in libre_devices]
+        if job:
+            job.logger.info(
+                f"Pre-fetching virtual chassis data for {len(device_ids)} devices. "
+                "This may take some time..."
+            )
+        else:
+            logger.info(f"Pre-fetching VC data for {len(device_ids)} devices")
+
+        try:
+            prefetch_vc_data_for_devices(api, device_ids, force_refresh=clear_cache)
+            if job:
+                job.logger.info("Virtual chassis data pre-fetch completed")
+        except (BrokenPipeError, ConnectionError, IOError) as e:
+            if request:
+                logger.info(f"Client disconnected during VC prefetch: {e}")
+                return []
+            raise
+
+    # Validate each device
+    validated_devices = []
+    total = len(libre_devices)
+    api_for_validation = api if vc_detection_enabled else None
+
+    if job:
+        job.logger.info(f"Starting validation of {total} devices")
+        # Initial check if job was already terminated before we even started
+        try:
+            from django_rq import get_queue
+            from rq.job import Job as RQJob
+
+            queue = get_queue("default")
+            rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
+
+            if rq_job.is_failed or rq_job.is_stopped:
+                job.logger.warning("Job was already stopped before validation started")
+                return []
+        except Exception:
+            # Fall back to DB check if RQ check fails
+            job.job.refresh_from_db()
+            if job.job.status == JobStatusChoices.STATUS_FAILED:
+                job.logger.warning("Job was stopped before validation started")
+                return []
+    else:
+        logger.info(f"Validating {total} devices")
+
+    for idx, device in enumerate(libre_devices, 1):
+        # Check for job termination or client disconnect periodically
+        if (
+            idx % 5 == 0 or idx == 1
+        ):  # Check more frequently (every 5 devices + first device)
+            if job:
+                # Check if job was terminated via stop API
+                # CRITICAL: Check the RQ job status in Redis, not just the DB model
+                # NetBox's stop endpoint marks the RQ job as failed in Redis
+                try:
+                    from django_rq import get_queue
+                    from rq.job import Job as RQJob
+
+                    queue = get_queue("default")
+                    rq_job = RQJob.fetch(
+                        str(job.job.job_id), connection=queue.connection
+                    )
+
+                    # Check if RQ job is in a stopped state
+                    if rq_job.is_failed or rq_job.is_stopped:
+                        job.logger.info(
+                            f"Job stopped at device {idx}/{total} (RQ status: {rq_job.get_status()}). Exiting gracefully."
+                        )
+                        return []
+                except Exception:
+                    # If we can't check RQ status, fall back to DB status check
+                    job.job.refresh_from_db()
+                    if job.job.status == JobStatusChoices.STATUS_FAILED:
+                        job.logger.info(
+                            f"Job stopped at device {idx}/{total}. Exiting gracefully."
+                        )
+                        return []
+            elif request:
+                # Check for client disconnect
+                try:
+                    if hasattr(request, "META") and request.META.get("wsgi.input"):
+                        pass
+                except (BrokenPipeError, ConnectionError, IOError):
+                    logger.info(
+                        f"Client disconnected during validation at device {idx}"
+                    )
+                    return []
+
+        # Drop any cached validation/meta keys before recomputing
+        device.pop("_validation", None)
+
+        # Generate shared cache key for this validated device
+        device_id = device["device_id"]
+        cache_key = get_validated_device_cache_key(
+            server_key=api.server_key,
+            filters=filters,
+            device_id=device_id,
+            vc_enabled=vc_detection_enabled,
+        )
+
+        # Check if we already have cached validation for this device
+        # (only if not forcing refresh)
+        if not clear_cache:
+            cached_device = cache.get(cache_key)
+            if cached_device:
+                # Use cached validation
+                device["_validation"] = cached_device["_validation"]
+
+                # Apply validation status filter if provided
+                if validation_status_filter:
+                    validation = device["_validation"]
+                    has_existing = bool(validation["existing_device"])
+                    if (
+                        validation_status_filter == "ready"
+                        and not validation["is_ready"]
+                    ):
+                        continue
+                    elif validation_status_filter == "needs_review" and (
+                        has_existing
+                        or validation["is_ready"]
+                        or not validation["can_import"]
+                    ):
+                        continue
+                    elif validation_status_filter == "cannot_import" and (
+                        has_existing or validation["can_import"]
+                    ):
+                        continue
+                    elif validation_status_filter == "exists" and not has_existing:
+                        continue
+
+                validated_devices.append(device)
+                continue
+
+        # Not in cache or forcing refresh - validate now
+        try:
+            validation = validate_device_for_import(
+                device,
+                api=api_for_validation,
+                include_vc_detection=vc_detection_enabled,
+                force_vc_refresh=clear_cache,
+            )
+        except (BrokenPipeError, ConnectionError, IOError) as e:
+            if request:
+                logger.info(f"Client disconnected during device validation: {e}")
+                return []
+            raise
+
+        # Set VC detection metadata
+        if not vc_detection_enabled:
+            validation["virtual_chassis"] = empty_virtual_chassis_data()
+            validation["_vc_detection_skipped"] = True
+        else:
+            validation["_vc_detection_skipped"] = False
+
+        # Apply validation status filter if provided
+        if validation_status_filter:
+            has_existing = bool(validation["existing_device"])
+            if validation_status_filter == "ready" and not validation["is_ready"]:
+                continue
+            elif validation_status_filter == "needs_review" and (
+                has_existing or validation["is_ready"] or not validation["can_import"]
+            ):
+                continue
+            elif validation_status_filter == "cannot_import" and (
+                has_existing or validation["can_import"]
+            ):
+                continue
+            elif validation_status_filter == "exists" and not has_existing:
+                continue
+
+        device["_validation"] = validation
+        validated_devices.append(device)
+
+        # Cache validated device data (shared between sync and async processing)
+        cache.set(cache_key, device, timeout=api.cache_timeout)
+
+    if job:
+        if validation_status_filter:
+            filtered_count = total - len(validated_devices)
+            job.logger.info(
+                f"Validation complete: {len(validated_devices)} devices passed filter, "
+                f"{filtered_count} filtered out (status: {validation_status_filter})"
+            )
+        else:
+            job.logger.info(
+                f"Validation complete: {len(validated_devices)} devices ready for import"
+            )
+    else:
+        logger.info(f"Processed {len(validated_devices)} validated devices")
+
+    if return_cache_status:
+        return validated_devices, from_cache
+    return validated_devices
