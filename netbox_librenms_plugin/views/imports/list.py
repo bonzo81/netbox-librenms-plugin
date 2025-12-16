@@ -246,7 +246,13 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
                     )
                     devices_cached = devices_from_cache
                 except Exception:
-                # Cache check failed; proceed with background job decision based on device_count
+                    # Cache check failed; proceed with background job decision based on device_count
+                    pass
+
+            # Get device count for background job decision
+            try:
+                device_count = get_device_count_for_filters(
+                    api=self.librenms_api,
                     filters=libre_filters,
                     clear_cache=self._cache_cleared,
                     show_disabled=bool(
