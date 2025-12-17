@@ -9,7 +9,7 @@ menu = PluginMenu(
             (
                 PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:settings",
-                    link_text="Server Settings",
+                    link_text="Plugin Settings",
                     permissions=["netbox_librenms_plugin.view_librenmssettings"],
                 ),
                 PluginMenuItem(
@@ -28,6 +28,16 @@ menu = PluginMenu(
                             icon_class="mdi mdi-upload",
                         ),
                     ),
+                ),
+            ),
+        ),
+        (
+            "Import",
+            (
+                PluginMenuItem(
+                    link="plugins:netbox_librenms_plugin:librenms_import",
+                    link_text="LibreNMS Import",
+                    permissions=["dcim.view_device"],
                 ),
             ),
         ),

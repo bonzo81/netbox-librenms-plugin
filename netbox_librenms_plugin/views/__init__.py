@@ -2,17 +2,19 @@
 Module for initializing views for the NetBox LibreNMS plugin.
 """
 
-# Import views as needed
 from .base.cables_view import BaseCableTableView, SingleCableVerifyView
 from .base.interfaces_view import BaseInterfaceTableView
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView
 from .base.librenms_sync_view import BaseLibreNMSSyncView
-from .device_views import (
-    DeviceCableTableView,
-    DeviceInterfaceTableView,
-    DeviceIPAddressTableView,
-    DeviceLibreNMSSyncView,
-    SingleInterfaceVerifyView,
+from .imports import (
+    BulkImportConfirmView,
+    BulkImportDevicesView,
+    DeviceClusterUpdateView,
+    DeviceRackUpdateView,
+    DeviceRoleUpdateView,
+    DeviceValidationDetailsView,
+    DeviceVCDetailsView,
+    LibreNMSImportView,
 )
 from .mapping_views import (
     InterfaceTypeMappingBulkDeleteView,
@@ -24,22 +26,27 @@ from .mapping_views import (
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
 )
-from .settings_views import LibreNMSSettingsView, TestLibreNMSConnectionView
-from .status_check import (
-    DeviceStatusListView,
-    VMStatusListView,
+from .object_sync import (
+    DeviceCableTableView,
+    DeviceInterfaceTableView,
+    DeviceIPAddressTableView,
+    DeviceLibreNMSSyncView,
+    SingleInterfaceVerifyView,
+    VMInterfaceTableView,
+    VMIPAddressTableView,
+    VMLibreNMSSyncView,
 )
-from .sync.cables_sync import SyncCablesView
-from .sync.cleanup_interfaces import DeleteNetBoxInterfacesView
-from .sync.device_fields_sync import (
+from .settings_views import LibreNMSSettingsView, TestLibreNMSConnectionView
+from .status_check import DeviceStatusListView, VMStatusListView
+from .sync.cables import SyncCablesView
+from .sync.device_fields import (
     AssignVCSerialView,
     CreateAndAssignPlatformView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,
     UpdateDeviceTypeView,
 )
-from .sync.devices_sync import AddDeviceToLibreNMSView, UpdateDeviceLocationView
-from .sync.interfaces_sync import SyncInterfacesView
-from .sync.ipaddresses_sync import SyncIPAddressesView
-from .sync.locations_sync import SyncSiteLocationView
-from .vm_views import VMInterfaceTableView, VMIPAddressTableView, VMLibreNMSSyncView
+from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView
+from .sync.interfaces import DeleteNetBoxInterfacesView, SyncInterfacesView
+from .sync.ip_addresses import SyncIPAddressesView
+from .sync.locations import SyncSiteLocationView

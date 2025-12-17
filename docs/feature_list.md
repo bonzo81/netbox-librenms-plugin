@@ -1,5 +1,16 @@
 # Features List
 
+### [Device Import](librenms_import/overview.md)
+
+* Search and discover devices from LibreNMS using flexible filters
+* Validate device prerequisites before import (Site, Device Type, Device Role)
+* Import devices as physical Devices or Virtual Machines
+* Smart matching for Sites, Device Types, and Platforms
+* Bulk import with consistent configuration
+* Automatic Virtual Chassis creation for stackable devices
+* Background job processing for large device sets
+* Duplicate detection to prevent re-importing existing devices
+
 ### Device
 
 * LibreNMS device identification via:

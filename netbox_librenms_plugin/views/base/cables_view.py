@@ -41,8 +41,10 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
         if cached_data:
             return cached_data
-        # TODO: id 2 - Fix return to use tuple (success, data)
-        return self.librenms_api.get_ports(self.librenms_id)
+        success, data = self.librenms_api.get_ports(self.librenms_id)
+        if not success:
+            return {"ports": []}
+        return data
 
     def get_links_data(self, obj):
         """Fetch links data from LibreNMS for the device and add local port names."""
@@ -86,7 +88,11 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             except Device.DoesNotExist:
                 pass
             except MultipleObjectsReturned:
-                return None, False, f"Multiple devices found with the same LibreNMS ID: {remote_device_id}."
+                return (
+                    None,
+                    False,
+                    f"Multiple devices found with the same LibreNMS ID: {remote_device_id}.",
+                )
 
         # Fall back to name matching if no device found by ID
         try:
@@ -101,7 +107,11 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             except Device.DoesNotExist:
                 return None, False, None
             except MultipleObjectsReturned:
-                return None, False, f"Multiple devices found with the same name: {hostname}."
+                return (
+                    None,
+                    False,
+                    f"Multiple devices found with the same name: {hostname}.",
+                )
 
     def enrich_local_port(self, link, obj):
         """Add local port URL if interface exists in NetBox"""
@@ -143,18 +153,18 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         if remote_port := link.get("remote_port"):
             netbox_remote_interface = None
             librenms_remote_port_id = link.get("remote_port_id")
-            
+
             # Handle virtual chassis case
             if hasattr(device, "virtual_chassis") and device.virtual_chassis:
                 # Get the appropriate chassis member based on the port name
                 chassis_member = get_virtual_chassis_member(device, remote_port)
-                
+
                 # First try to find interface by librenms_id
                 if librenms_remote_port_id:
                     netbox_remote_interface = chassis_member.interfaces.filter(
                         custom_field_data__librenms_id=librenms_remote_port_id
                     ).first()
-                
+
                 # If not found by librenms_id, fall back to name matching on the correct chassis member
                 if not netbox_remote_interface:
                     netbox_remote_interface = chassis_member.interfaces.filter(
@@ -167,7 +177,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
                     netbox_remote_interface = device.interfaces.filter(
                         custom_field_data__librenms_id=librenms_remote_port_id
                     ).first()
-                    
+
                 # If not found by librenms_id, fall back to name matching
                 if not netbox_remote_interface:
                     netbox_remote_interface = device.interfaces.filter(
@@ -218,7 +228,9 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
     def process_remote_device(self, link, remote_hostname, remote_device_id):
         """Process remote device data and add remote device URL if device exists in NetBox"""
-        device, found, error_message = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
+        device, found, error_message = self.get_device_by_id_or_name(
+            remote_device_id, remote_hostname
+        )
         if found:
             link.update(
                 {
@@ -231,7 +243,9 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         link.update(
             {
                 "remote_port_name": link["remote_port"],
-                "cable_status": error_message if error_message else "Device Not Found in NetBox",
+                "cable_status": error_message
+                if error_message
+                else "Device Not Found in NetBox",
                 "can_create_cable": False,
             }
         )

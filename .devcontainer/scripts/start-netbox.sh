@@ -27,6 +27,18 @@ source /opt/netbox/venv/bin/activate
 # Navigate to NetBox directory
 cd /opt/netbox/netbox
 
+# Start RQ worker in background
+echo "⚙️  Starting RQ worker..."
+(
+  source /opt/netbox/venv/bin/activate
+  cd /opt/netbox/netbox
+  python manage.py rqworker --verbosity=1
+) > /tmp/rqworker.log 2>&1 &
+
+RQ_PID=$!
+echo $RQ_PID > /tmp/rqworker.pid
+echo "✅ RQ worker started (PID: $RQ_PID)"
+
 if [ "$BACKGROUND" = true ]; then
   echo "🚀 Starting NetBox in background"
   (

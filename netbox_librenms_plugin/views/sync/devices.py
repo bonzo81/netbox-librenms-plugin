@@ -9,39 +9,46 @@ from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 
 class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
-    """
-    Add a device to LibreNMS using the API.
-    """
+    """Add a NetBox device or VM to LibreNMS via the API."""
 
     def get_form_class(self):
-        """Return the correct form class based on the SNMP version."""
-        if self.request.POST.get("snmp_version") == "v2c":
+        snmp_version = self.request.POST.get("snmp_version")
+        if not snmp_version:
+            snmp_version = self.request.POST.get(
+                "v2-snmp_version"
+            ) or self.request.POST.get("v3-snmp_version")
+
+        if snmp_version == "v2c":
             return AddToLIbreSNMPV2
         return AddToLIbreSNMPV3
 
     def get_object(self, object_id):
-        """Retrieve the object (Device or VirtualMachine)."""
         try:
             return Device.objects.get(pk=object_id)
         except Device.DoesNotExist:
             return VirtualMachine.objects.get(pk=object_id)
 
     def post(self, request, object_id):
-        """Handle the POST request to add a device to LibreNMS."""
         self.object = self.get_object(object_id)
         form_class = self.get_form_class()
-        form = form_class(request.POST)
+
+        snmp_version = (
+            request.POST.get("snmp_version")
+            or request.POST.get("v2-snmp_version")
+            or request.POST.get("v3-snmp_version")
+        )
+        prefix = "v2" if snmp_version == "v2c" else "v3"
+
+        form = form_class(request.POST, prefix=prefix)
         if form.is_valid():
             return self.form_valid(form)
-        else:
-            # Handle form validation errors
-            for field, errors in form.errors.items():
-                for error in errors:
-                    messages.error(request, f"{field}: {error}")
-            return redirect(self.object.get_absolute_url())
+
+        for field, errors in form.errors.items():
+            for error in errors:
+                messages.error(request, f"{field}: {error}")
+        return redirect(self.object.get_absolute_url())
 
     def form_valid(self, form):
-        """Handle the form submission"""
         data = form.cleaned_data
         device_data = {
             "hostname": data.get("hostname"),
@@ -49,7 +56,6 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
             "force_add": data.get("force_add", False),
         }
 
-        # Add optional common fields if provided
         if data.get("port"):
             device_data["port"] = data.get("port")
         if data.get("transport"):
@@ -57,11 +63,10 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
         if data.get("port_association_mode"):
             device_data["port_association_mode"] = data.get("port_association_mode")
         if data.get("poller_group"):
-            # Convert poller_group string to integer for LibreNMS API
             try:
                 device_data["poller_group"] = int(data.get("poller_group"))
             except (ValueError, TypeError):
-                pass  # Skip if conversion fails
+                pass
 
         if device_data["snmp_version"] == "v2c":
             device_data["community"] = data.get("community")
@@ -79,25 +84,21 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
         else:
             messages.error(self.request, "Unknown SNMP version.")
             return redirect(self.object.get_absolute_url())
-        # TODO: id 1 - Fix API return to use tuple (success, message)
-        result = self.librenms_api.add_device(device_data)
 
-        if result["success"]:
-            messages.success(self.request, result["message"])
+        success, message = self.librenms_api.add_device(device_data)
+
+        if success:
+            messages.success(self.request, message)
         else:
-            messages.error(self.request, result["message"])
+            messages.error(self.request, message)
         return redirect(self.object.get_absolute_url())
 
 
 class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
-    """
-    Update the device location in LibreNMS based on the device's site in NetBox.
-    """
+    """Update the LibreNMS site/location based on the NetBox site."""
 
     def post(self, request, pk):
-        """Handle the POST request to update the device location in LibreNMS."""
         device = get_object_or_404(Device, pk=pk)
-
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if device.site:

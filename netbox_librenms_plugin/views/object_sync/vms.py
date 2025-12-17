@@ -5,16 +5,14 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
 from netbox_librenms_plugin.utils import get_interface_name_field
 
-from .base.interfaces_view import BaseInterfaceTableView
-from .base.ip_addresses_view import BaseIPAddressTableView
-from .base.librenms_sync_view import BaseLibreNMSSyncView
+from ..base.interfaces_view import BaseInterfaceTableView
+from ..base.ip_addresses_view import BaseIPAddressTableView
+from ..base.librenms_sync_view import BaseLibreNMSSyncView
 
 
 @register_model_view(VirtualMachine, name="librenms_sync", path="librenms-sync")
 class VMLibreNMSSyncView(BaseLibreNMSSyncView):
-    """
-    View for virtual machine page with LibreNMS sync information.
-    """
+    """Virtual machine detail tab for LibreNMS sync data."""
 
     queryset = VirtualMachine.objects.all()
     model = VirtualMachine
@@ -24,31 +22,20 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
     )
 
     def get_interface_context(self, request, obj):
-        """
-        Get the context data for interface sync for virtual machines.
-        """
         interface_name_field = get_interface_name_field(request)
         interface_sync_view = VMInterfaceTableView()
         return interface_sync_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
-        """
-        Virtual machines don't have physical cables, return None.
-        """
-        return None
+        return None  # VMs do not expose cable sync data
 
     def get_ip_context(self, request, obj):
-        """
-        Get the context data for IP address sync for virtual machines.
-        """
         ipaddress_sync_view = VMIPAddressTableView()
         return ipaddress_sync_view.get_context_data(request, obj)
 
 
 class VMInterfaceTableView(BaseInterfaceTableView):
-    """
-    View for VM interface synchronization.
-    """
+    """Interface synchronization view for Virtual Machines."""
 
     model = VirtualMachine
 
@@ -65,9 +52,7 @@ class VMInterfaceTableView(BaseInterfaceTableView):
 
 
 class VMIPAddressTableView(BaseIPAddressTableView):
-    """
-    View for VM IP address synchronization.
-    """
+    """IP address synchronization view for Virtual Machines."""
 
     model = VirtualMachine
     # VM-specific implementations

@@ -16,6 +16,40 @@ class LibreNMSSettings(models.Model):
         help_text="The key of the selected LibreNMS server from configuration",
     )
 
+    vc_member_name_pattern = models.CharField(
+        max_length=100,
+        default="-M{position}",
+        help_text="Pattern for naming virtual chassis member devices. "
+        "Available placeholders: {master_name}, {position}, {serial}. "
+        "Example: '-M{position}' results in 'switch01-M2'",
+    )
+
+    use_sysname_default = models.BooleanField(
+        default=True,
+        help_text="Use SNMP sysName instead of LibreNMS hostname when importing devices",
+    )
+
+    strip_domain_default = models.BooleanField(
+        default=False,
+        help_text="Remove domain suffix from device names during import",
+    )
+
+    background_job_mode = models.CharField(
+        max_length=20,
+        choices=[
+            ("always", "Always use background jobs"),
+            ("never", "Never use background jobs"),
+            ("threshold", "Use threshold-based decision"),
+        ],
+        default="threshold",
+        help_text="Control when to use background jobs for device filtering",
+    )
+
+    background_job_threshold = models.IntegerField(
+        default=20,
+        help_text="Number of devices that triggers background job processing (applies when mode is 'threshold')",
+    )
+
     class Meta:
         verbose_name = "LibreNMS Settings"
         verbose_name_plural = "LibreNMS Settings"

@@ -1,3 +1,7 @@
+// Constants for timeouts and delays
+const TOMSELECT_INIT_DELAY_MS = 100;
+const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
+
 // Function to initialize Cache countdown timer
 function initializeCountdown(elementId) {
     const countdownElement = document.getElementById(elementId);
@@ -22,7 +26,7 @@ function initializeCountdown(elementId) {
     }
 
     updateCountdown();
-    countdownInterval = setInterval(updateCountdown, 1000);
+    countdownInterval = setInterval(updateCountdown, COUNTDOWN_UPDATE_INTERVAL_MS);
     return countdownInterval;
 }
 
@@ -200,7 +204,7 @@ function handleVRFChange(select, value) {
             }
         })
         .catch(error => {
-            console.error("Error during VRF change fetch:", error);
+            // Silently fail - VRF change is not critical
         });
 }
 
@@ -632,7 +636,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
 
     if (!csrfToken) {
-        console.error('CSRF token not found. Please refresh the page and try again.');
+        alert('CSRF token not found. Please refresh the page and try again.');
         return;
     }
 
@@ -675,7 +679,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     }
 
     if (!objectType || !objectId) {
-        console.error('Could not determine object type and ID');
+        alert('Unable to determine object type. Please refresh and try again.');
         return;
     }
 
@@ -729,11 +733,11 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
                     window.location.reload();
                 }
             } else {
-                console.error('Error:', data.error || 'Unknown error occurred');
+                alert('Error: ' + (data.error || 'Unknown error occurred'));
             }
         })
         .catch(error => {
-            console.error('Error:', error);
+            alert('Error deleting interfaces: ' + error.message);
         })
         .finally(() => {
             // Restore button state

@@ -1,0 +1,22 @@
+{% load render_table from django_tables2 %}
+{% if table.rows %}
+  {% for row in table.rows %}
+    <tr {{ row.attrs.as_html }} hx-swap-oob="true">
+      {% for column, cell in row.items %}
+        <td {{ column.attrs.td.as_html }}>{{ cell }}</td>
+      {% endfor %}
+    </tr>
+  {% endfor %}
+{% else %}
+  <tr id="device-row-{{ record.device_id }}">
+    <td colspan="13">
+      <div class="alert alert-danger">
+        ERROR: No table rows found for device {{ record.device_id }}
+      </div>
+    </td>
+  </tr>
+{% endif %}
+{# Consume and clear any pending Django messages to prevent reappearing toasts #}
+<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">
+{% for _ in messages %}{% endfor %}
+</div>

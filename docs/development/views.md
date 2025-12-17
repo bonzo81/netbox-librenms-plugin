@@ -6,7 +6,8 @@ Views are organized by resource type (e.g., devices, mappings, VMs) in the `view
 
 **Resource-specific views:**
 
-  - `device_views.py`, `vm_views.py`, `mapping_views.py`, etc. contain views for each main resource type.
+  - Device and VM sync tabs live under `object_sync/` (see `object_sync/devices.py` and `object_sync/vms.py`), while mappings/settings/status views remain as individual modules alongside the package.
+  - The LibreNMS import workflow is grouped under `views/imports/`: `list.py` renders the main table view and `actions.py` contains the HTMX endpoints (preview, validation, bulk execute). All legacy handlers formerly in `librenms_import_views.py` and `device_import_views.py` were folded into this package.
 
 **Base views:**
 

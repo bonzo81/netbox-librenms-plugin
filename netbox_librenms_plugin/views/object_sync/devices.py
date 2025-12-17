@@ -18,51 +18,38 @@ from netbox_librenms_plugin.tables.interfaces import (
 )
 from netbox_librenms_plugin.utils import get_interface_name_field
 
-from .base.cables_view import BaseCableTableView
-from .base.interfaces_view import BaseInterfaceTableView
-from .base.ip_addresses_view import BaseIPAddressTableView
-from .base.librenms_sync_view import BaseLibreNMSSyncView
-from .mixins import CacheMixin
+from ..base.cables_view import BaseCableTableView
+from ..base.interfaces_view import BaseInterfaceTableView
+from ..base.ip_addresses_view import BaseIPAddressTableView
+from ..base.librenms_sync_view import BaseLibreNMSSyncView
+from ..mixins import CacheMixin
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
 class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
-    """
-    View for devices page with LibreNMS sync information.
-    """
+    """Device detail tab showing LibreNMS sync information."""
 
     queryset = Device.objects.all()
     model = Device
     tab = ViewTab(label="LibreNMS Sync", permission="dcim.view_device")
 
     def get_interface_context(self, request, obj):
-        """
-        Get the context data for interface sync for devices.
-        """
         interface_name_field = get_interface_name_field(request)
         interface_table_view = DeviceInterfaceTableView()
         interface_table_view.request = request
         return interface_table_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
-        """
-        Get the context data for cable sync for devices.
-        """
         cable_table_view = DeviceCableTableView()
         return cable_table_view.get_context_data(request, obj)
 
     def get_ip_context(self, request, obj):
-        """
-        Get the context data for IP address sync for devices.
-        """
         ipaddress_table_view = DeviceIPAddressTableView()
         return ipaddress_table_view.get_context_data(request, obj)
 
 
 class DeviceInterfaceTableView(BaseInterfaceTableView):
-    """
-    View for device interface synchronization.
-    """
+    """Interface synchronization table for Devices."""
 
     model = Device
 
@@ -75,9 +62,6 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
         )
 
     def get_table(self, data, obj, interface_name_field):
-        """
-        Returns the appropriate table instance for rendering interface data.
-        """
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table = VCInterfaceTable(
                 data, device=obj, interface_name_field=interface_name_field
@@ -91,14 +75,9 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 
 
 class SingleInterfaceVerifyView(CacheMixin, View):
-    """
-    View for verifying single interface data for a device.
-    """
+    """Verify single interface data for a device via cached LibreNMS payload."""
 
     def post(self, request):
-        """
-        POST request to return json response with formatted interface data.
-        """
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
@@ -113,7 +92,6 @@ class SingleInterfaceVerifyView(CacheMixin, View):
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-        # Get the primary device (master or first with IP) if part of virtual chassis
         if selected_device.virtual_chassis:
             primary_device = selected_device.virtual_chassis.master
             if not primary_device or not primary_device.primary_ip:
@@ -128,7 +106,6 @@ class SingleInterfaceVerifyView(CacheMixin, View):
         else:
             primary_device = selected_device
 
-        # Get cached data using primary device
         cached_data = cache.get(self.get_cache_key(primary_device, "ports"))
 
         if cached_data:
@@ -142,7 +119,6 @@ class SingleInterfaceVerifyView(CacheMixin, View):
             )
 
             if port_data:
-                # Choose appropriate table class based on device type
                 table_class = (
                     VCInterfaceTable
                     if selected_device.virtual_chassis
@@ -164,25 +140,17 @@ class SingleInterfaceVerifyView(CacheMixin, View):
 
 
 class DeviceCableTableView(BaseCableTableView):
-    """
-    View for device cable synchronization.
-    """
+    """Cable synchronization view for Devices."""
 
     model = Device
 
     def get_table(self, data, obj):
-        """
-        Returns the appropriate table instance for rendering cable data.
-        """
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             return VCCableTable(data, device=obj)
         return LibreNMSCableTable(data, device=obj)
 
 
 class DeviceIPAddressTableView(BaseIPAddressTableView):
-    """
-    View for device IP address synchronization.
-    """
+    """IP address synchronization view for Devices."""
 
     model = Device
-    #  TODO: Implement the IP Address sync view

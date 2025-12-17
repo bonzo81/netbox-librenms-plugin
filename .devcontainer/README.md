@@ -230,13 +230,15 @@ cat ~/.ssh/id_ed25519.pub
 
 ## 📋 Commands (aliases)
 
-- `netbox-run-bg` - start NetBox in background
-- `netbox-run` - start NetBox in foreground (with Django logs showing)
-- `netbox-stop` - stop background server
-- `netbox-restart` - restart NetBox
+- `netbox-run-bg` - start NetBox and RQ worker in background
+- `netbox-run` - start NetBox and RQ worker in foreground (with Django logs showing)
+- `netbox-stop` - stop both NetBox and RQ worker
+- `netbox-restart` - restart NetBox and RQ worker
 - `netbox-reload` - reinstall plugin and restart
-- `netbox-status` - show server status
-- `netbox-logs` - tail server logs
+- `netbox-status` - show server and RQ worker status
+- `netbox-logs` - tail NetBox server logs
+- `rq-status` - check RQ worker status
+- `rq-logs` - tail RQ worker logs
 - `netbox-shell` - Django shell
 - `netbox-manage` - Django manage.py
 - `netbox-test` - run tests
