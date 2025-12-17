@@ -16,6 +16,18 @@
     - Switch between different LibreNMS servers through the web interface
     - Maintain backward compatibility with single-server configurations
 
+## Device Import
+
+[Device Import Guide](../librenms_import/overview.md) - Import devices from LibreNMS into NetBox
+
+1. Search for devices using flexible filters (location, type, OS, hostname, sysname)
+2. Validate import prerequisites (Site, Device Type, Device Role)
+3. Configure missing mappings or select from suggestions
+4. Import devices individually or in bulk
+5. Automatic Virtual Chassis creation for stackable switches
+
+The Device Import feature automatically sets the `librenms_id` custom field, enabling all other plugin features.
+
 ## Device Synchronization
 
 ### Devices
@@ -28,8 +40,8 @@
 ### Virtual Chassis
 1. The plugin automatically selects a sync device using priority: `librenms_id` → master with IP → any member with IP → lowest position
 2. Only the sync device should have the `librenms_id` custom field set
-3. When possible, chassis member position should match interface names 
-    
+3. When possible, chassis member position should match interface names
+
     *e.g. switch 1 = eth1/0/1, switch 2 = eth2/0/1*
 
 4. Verify member selection before bulk synchronization

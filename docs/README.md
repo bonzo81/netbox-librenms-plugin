@@ -8,6 +8,20 @@ The NetBox LibreNMS Plugin enables integration between NetBox and LibreNMS, allo
 
 The plugin offers the following key features:
 
+### Device Import
+
+Search and import devices from LibreNMS into NetBox with comprehensive validation and control:
+
+* Filter devices by location, type, OS, hostname, or system name
+* Validate import prerequisites (Site, Device Type, Device Role)
+* Smart matching for Sites, Device Types, and Platforms
+* Import as physical Devices or Virtual Machines
+* Bulk import multiple devices with consistent configuration
+* Automatic Virtual Chassis creation for stackable switches
+* Background job processing for large device sets
+
+See the [Device Import Guide](librenms_import/overview.md) for detailed usage instructions.
+
 ### Device Field Sync
 
 Synchronize device information from LibreNMS to NetBox. The following device fields can be synchronized:
