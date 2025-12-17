@@ -482,17 +482,12 @@ class LibreNMSImportFilterForm(forms.Form):
         help_text="Discard the cache and pull fresh data.",
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
-    validation_status = forms.ChoiceField(
+    exclude_existing = forms.BooleanField(
         required=False,
-        label="Import Status",
-        choices=[
-            ("", "All"),
-            ("ready", "Ready to Import"),
-            ("needs_review", "Needs Review"),
-            ("cannot_import", "Cannot Import"),
-            ("exists", "Already Exists"),
-        ],
-        help_text="Filter by import readiness status",
+        initial=False,
+        label="Exclude Existing Devices",
+        help_text="Hide devices that already exist in NetBox",
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
 
     def __init__(self, *args, **kwargs):

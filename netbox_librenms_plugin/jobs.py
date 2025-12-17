@@ -43,7 +43,7 @@ class FilterDevicesJob(JobRunner):
         vc_detection_enabled,
         clear_cache,
         show_disabled,
-        validation_status_filter=None,
+        exclude_existing=False,
         server_key=None,
         **kwargs,
     ):
@@ -58,7 +58,7 @@ class FilterDevicesJob(JobRunner):
             vc_detection_enabled: Whether to detect virtual chassis
             clear_cache: Whether to force cache refresh
             show_disabled: Whether to include disabled devices
-            validation_status_filter: Optional filter for validation status
+            exclude_existing: Whether to exclude devices that already exist in NetBox
             server_key: Optional LibreNMS server key for multi-server setups
             **kwargs: Additional job parameters
         """
@@ -70,8 +70,8 @@ class FilterDevicesJob(JobRunner):
         self.logger.info(f"VC detection: {vc_detection_enabled}")
         self.logger.info(f"Clear cache: {clear_cache}")
         self.logger.info(f"Show disabled: {show_disabled}")
-        if validation_status_filter:
-            self.logger.info(f"Validation status filter: {validation_status_filter}")
+        if exclude_existing:
+            self.logger.info("Excluding existing devices")
         if server_key:
             self.logger.info(f"Using LibreNMS server: {server_key}")
 
@@ -88,7 +88,7 @@ class FilterDevicesJob(JobRunner):
             vc_detection_enabled=vc_detection_enabled,
             clear_cache=clear_cache,
             show_disabled=show_disabled,
-            validation_status_filter=validation_status_filter,
+            exclude_existing=exclude_existing,
             job=self,
         )
 

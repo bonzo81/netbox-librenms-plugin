@@ -173,7 +173,7 @@
       });
 
       // Explicitly add ONLY currently checked checkboxes
-      const checkboxes = ['id_enable_vc_detection', 'id_clear_cache', 'id_show_disabled'];
+      const checkboxes = ['id_enable_vc_detection', 'id_clear_cache', 'id_show_disabled', 'id_exclude_existing'];
       checkboxes.forEach(id => {
         const checkbox = document.getElementById(id);
         if (checkbox?.checked && checkbox.name) {
@@ -555,16 +555,20 @@
                       <small class="form-text text-muted">{{ filter_form.librenms_sysname.help_text }}</small>
                     {% endif %}
                   </div>
-                  <div class="col-md-6">
-                    <label for="{{ filter_form.validation_status.id_for_label }}" class="form-label">{{ filter_form.validation_status.label }}</label>
-                    {{ filter_form.validation_status }}
-                    {% if filter_form.validation_status.help_text %}
-                      <small class="form-text text-muted">{{ filter_form.validation_status.help_text }}</small>
-                    {% endif %}
-                  </div>
                 </div>
                 <div class="row mb-3">
-                  <div class="col-md-12">
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      {{ filter_form.exclude_existing }}
+                      <label class="form-check-label" for="{{ filter_form.exclude_existing.id_for_label }}">
+                        {{ filter_form.exclude_existing.label }}
+                      </label>
+                      {% if filter_form.exclude_existing.help_text %}
+                        <small class="form-text text-muted d-block">{{ filter_form.exclude_existing.help_text }}</small>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <div class="col-md-6">
                     <div class="form-check">
                       {{ filter_form.show_disabled }}
                       <label class="form-check-label" for="{{ filter_form.show_disabled.id_for_label }}">
@@ -574,7 +578,11 @@
                         <small class="form-text text-muted d-block">{{ filter_form.show_disabled.help_text }}</small>
                       {% endif %}
                     </div>
-                    <div class="form-check mt-2">
+                  </div>
+                </div>
+                <div class="row mb-3">
+                  <div class="col-md-6">
+                    <div class="form-check">
                       {{ filter_form.enable_vc_detection }}
                       <label class="form-check-label" for="{{ filter_form.enable_vc_detection.id_for_label }}">
                         {{ filter_form.enable_vc_detection.label }}
@@ -583,7 +591,9 @@
                         <small class="form-text text-muted d-block">{{ filter_form.enable_vc_detection.help_text }}</small>
                       {% endif %}
                     </div>
-                    <div class="form-check mt-2">
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check">
                       {{ filter_form.clear_cache }}
                       <label class="form-check-label" for="{{ filter_form.clear_cache.id_for_label }}">
                         {{ filter_form.clear_cache.label }}

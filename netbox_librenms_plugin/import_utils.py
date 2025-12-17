@@ -1781,7 +1781,7 @@ def process_device_filters(
     vc_detection_enabled: bool,
     clear_cache: bool,
     show_disabled: bool,
-    validation_status_filter: str = None,
+    exclude_existing: bool = False,
     job=None,
     request=None,
     return_cache_status: bool = False,
@@ -1799,7 +1799,7 @@ def process_device_filters(
         vc_detection_enabled: Whether to detect virtual chassis
         clear_cache: Whether to force cache refresh
         show_disabled: Whether to include disabled devices
-        validation_status_filter: Optional filter ('ready', 'needs_review', 'cannot_import', 'exists')
+        exclude_existing: Whether to exclude devices that already exist in NetBox
         job: Optional JobRunner instance for logging job events
         request: Optional Django request for client disconnect detection (synchronous only)
         return_cache_status: When True, returns (devices, from_cache) tuple
@@ -1949,26 +1949,10 @@ def process_device_filters(
                 # Use cached validation
                 device["_validation"] = cached_device["_validation"]
 
-                # Apply validation status filter if provided
-                if validation_status_filter:
+                # Apply exclude_existing filter if enabled
+                if exclude_existing:
                     validation = device["_validation"]
-                    has_existing = bool(validation["existing_device"])
-                    if (
-                        validation_status_filter == "ready"
-                        and not validation["is_ready"]
-                    ):
-                        continue
-                    elif validation_status_filter == "needs_review" and (
-                        has_existing
-                        or validation["is_ready"]
-                        or not validation["can_import"]
-                    ):
-                        continue
-                    elif validation_status_filter == "cannot_import" and (
-                        has_existing or validation["can_import"]
-                    ):
-                        continue
-                    elif validation_status_filter == "exists" and not has_existing:
+                    if validation["existing_device"]:
                         continue
 
                 validated_devices.append(device)
@@ -1995,21 +1979,9 @@ def process_device_filters(
         else:
             validation["_vc_detection_skipped"] = False
 
-        # Apply validation status filter if provided
-        if validation_status_filter:
-            has_existing = bool(validation["existing_device"])
-            if validation_status_filter == "ready" and not validation["is_ready"]:
-                continue
-            elif validation_status_filter == "needs_review" and (
-                has_existing or validation["is_ready"] or not validation["can_import"]
-            ):
-                continue
-            elif validation_status_filter == "cannot_import" and (
-                has_existing or validation["can_import"]
-            ):
-                continue
-            elif validation_status_filter == "exists" and not has_existing:
-                continue
+        # Apply exclude_existing filter if enabled
+        if exclude_existing and validation["existing_device"]:
+            continue
 
         device["_validation"] = validation
         validated_devices.append(device)

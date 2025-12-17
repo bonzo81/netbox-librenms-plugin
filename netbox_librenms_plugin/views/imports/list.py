@@ -287,8 +287,8 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
                         vc_detection_enabled=self._vc_detection_enabled,
                         clear_cache=self._cache_cleared,
                         show_disabled=bool(self._filter_form_data.get("show_disabled")),
-                        validation_status_filter=self._filter_form_data.get(
-                            "validation_status"
+                        exclude_existing=bool(
+                            self._filter_form_data.get("exclude_existing")
                         ),
                         server_key=self.librenms_api.server_key,
                     )
@@ -414,7 +414,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
         # Use shared processing function (same logic as background job)
         show_disabled = bool(data_source.get("show_disabled"))
-        validation_status_filter = data_source.get("validation_status")
+        exclude_existing = bool(data_source.get("exclude_existing"))
 
         validated_devices, from_cache = process_device_filters(
             api=self.librenms_api,
@@ -422,7 +422,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             vc_detection_enabled=vc_detection_enabled,
             clear_cache=clear_cache,
             show_disabled=show_disabled,
-            validation_status_filter=validation_status_filter,
+            exclude_existing=exclude_existing,
             request=self._request,
             return_cache_status=True,
         )
