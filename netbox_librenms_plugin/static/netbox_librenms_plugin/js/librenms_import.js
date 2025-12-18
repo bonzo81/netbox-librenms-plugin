@@ -202,6 +202,9 @@ function pollJobStatus(jobId, jobPk, pollUrl, baseUrl, originalFilters, deviceCo
         }
     }
 
+    // Track cancel state - must be declared before onclick handler uses it
+    let cancelInProgress = false;
+
     // Wire cancel button to stop the job
     // jobId here is the UUID (job.job_id), not the integer pk
     if (cancelBtn) {
@@ -303,7 +306,6 @@ function pollJobStatus(jobId, jobPk, pollUrl, baseUrl, originalFilters, deviceCo
     }
 
     // Poll function
-    let cancelInProgress = false;
     const poll = () => {
         if (cancelInProgress) {
             // Cancel handler is taking over, don't interfere
@@ -562,8 +564,13 @@ function initializeFilterForm() {
                         }
                     }
                 } else if (result.type === 'html') {
-                    // Synchronous response - navigate to the URL to load the new page
-                    window.location.href = finalUrl;
+                    // Synchronous response - replace current document with returned HTML
+                    if (modalInstance) {
+                        modalInstance.hide();
+                    }
+                    document.open();
+                    document.write(result.html);
+                    document.close();
                 }
             })
             .catch(error => {

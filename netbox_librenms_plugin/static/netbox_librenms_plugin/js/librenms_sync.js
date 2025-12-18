@@ -613,7 +613,7 @@ function initializeTabs() {
         }
     }
 
-    // Add event listeners - use { once: true } to prevent duplicates on repeated calls
+    // Add event listeners to update URL when tabs are clicked
     const tabs = document.querySelectorAll('[data-bs-toggle="tab"]')
     tabs.forEach(tab => {
         tab.addEventListener('shown.bs.tab', function (e) {
@@ -630,7 +630,7 @@ function initializeTabs() {
 
             // Update the browser history without reloading the page
             window.history.replaceState({}, '', url);
-        }, { once: true });
+        });
     });
 }
 
