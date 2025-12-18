@@ -1990,11 +1990,11 @@ def process_device_filters(
         cache.set(cache_key, device, timeout=api.cache_timeout)
 
     if job:
-        if validation_status_filter:
+        if exclude_existing:
             filtered_count = total - len(validated_devices)
             job.logger.info(
                 f"Validation complete: {len(validated_devices)} devices passed filter, "
-                f"{filtered_count} filtered out (status: {validation_status_filter})"
+                f"{filtered_count} filtered out (existing devices excluded)"
             )
         else:
             job.logger.info(
