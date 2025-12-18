@@ -1,8 +1,98 @@
-// Constants for timeouts and delays
+/**
+ * librenms_sync.js
+ *
+ * Handles LibreNMS data synchronization for devices/VMs:
+ * - Interface, cable, and IP address comparison tables
+ * - Virtual chassis member selection and verification
+ * - VRF assignment and verification
+ * - Bulk operations and filtering
+ * - Cache countdown timers
+ *
+ * Dependencies: Bootstrap 5, TomSelect, HTMX 2.x
+ */
+
+// ============================================
+// CONSTANTS
+// ============================================
+
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 
-// Function to initialize Cache countdown timer
+/**
+ * Extract device/VM ID and type from current URL pathname.
+ * Supports multiple URL patterns:
+ * - /dcim/devices/{id}/
+ * - /virtualization/virtual-machines/{id}/
+ * - /plugins/librenms_plugin/device/{id}/
+ * - /plugins/librenms_plugin/vm/{id}/
+ * - /plugins/librenms_plugin/virtualmachine/{id}/
+ *
+ * @returns {Object|null} Object with {id: string, type: 'device'|'virtualmachine'} or null if not found
+ */
+function getDeviceIdFromUrl() {
+    const pathname = window.location.pathname;
+    const pathParts = pathname.split('/');
+
+    // Try device patterns
+    const deviceIdMatch = pathname.match(/\/devices\/(\d+)\//);
+    if (deviceIdMatch) {
+        return { id: deviceIdMatch[1], type: 'device' };
+    }
+
+    // Try virtual machine patterns
+    const vmIdMatch = pathname.match(/\/virtual-machines\/(\d+)\//);
+    if (vmIdMatch) {
+        return { id: vmIdMatch[1], type: 'virtualmachine' };
+    }
+
+    // Try plugin device pattern
+    const pluginDeviceMatch = pathname.match(/\/plugins\/librenms_plugin\/device\/(\d+)\//);
+    if (pluginDeviceMatch) {
+        return { id: pluginDeviceMatch[1], type: 'device' };
+    }
+
+    // Try plugin VM patterns
+    const pluginVMMatch = pathname.match(/\/plugins\/librenms_plugin\/vm\/(\d+)\//);
+    if (pluginVMMatch) {
+        return { id: pluginVMMatch[1], type: 'virtualmachine' };
+    }
+
+    // Try plugin virtualmachine pattern (alternate)
+    const pluginVirtualMachineMatch = pathname.match(/\/plugins\/librenms_plugin\/virtualmachine\/(\d+)\//);
+    if (pluginVirtualMachineMatch) {
+        return { id: pluginVirtualMachineMatch[1], type: 'virtualmachine' };
+    }
+
+    // Also check path parts for edge cases
+    const deviceIndex = pathParts.indexOf('devices');
+    const vmIndex = pathParts.indexOf('virtual-machines');
+    const pluginDeviceIndex = pathParts.indexOf('device');
+    const pluginVMIndex = pathParts.indexOf('virtualmachine');
+
+    if (deviceIndex !== -1 && deviceIndex + 1 < pathParts.length) {
+        return { id: pathParts[deviceIndex + 1], type: 'device' };
+    } else if (vmIndex !== -1 && vmIndex + 1 < pathParts.length) {
+        return { id: pathParts[vmIndex + 1], type: 'virtualmachine' };
+    } else if (pluginDeviceIndex !== -1 && pluginDeviceIndex + 1 < pathParts.length) {
+        return { id: pathParts[pluginDeviceIndex + 1], type: 'device' };
+    } else if (pluginVMIndex !== -1 && pluginVMIndex + 1 < pathParts.length) {
+        return { id: pathParts[pluginVMIndex + 1], type: 'virtualmachine' };
+    }
+
+    return null;
+}
+
+// ============================================
+// CACHE COUNTDOWN TIMERS
+// ============================================
+
+/**
+ * Initialize a countdown timer for cache expiry display.
+ * Updates every second to show remaining time in MM:SS format.
+ *
+ * @param {string} elementId - DOM element ID containing data-expiry attribute
+ * @returns {number|undefined} Interval ID for cleanup, or undefined if element not found
+ */
 function initializeCountdown(elementId) {
     const countdownElement = document.getElementById(elementId);
     if (!countdownElement) return;
@@ -30,6 +120,10 @@ function initializeCountdown(elementId) {
     return countdownInterval;
 }
 
+/**
+ * Initialize all cache countdown timers on the page.
+ * Clears any existing intervals before starting new ones.
+ */
 function initializeCountdowns() {
     if (window.interfaceCountdownInterval) {
         clearInterval(window.interfaceCountdownInterval);
@@ -46,8 +140,16 @@ function initializeCountdowns() {
     window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
 }
 
+// ============================================
+// TABLE CHECKBOX HANDLING
+// ============================================
 
-// Function to initialize checkbox handling for a specific table
+/**
+ * Initialize checkbox selection for a table with shift-click support.
+ * Enables "select all" toggle and shift-click range selection.
+ *
+ * @param {string} tableId - DOM element ID of the table
+ */
 function initializeTableCheckboxes(tableId) {
     const table = document.getElementById(tableId);
     if (!table) return;
@@ -84,7 +186,9 @@ function initializeTableCheckboxes(tableId) {
     });
 }
 
-// Initialize both tables
+/**
+ * Initialize checkbox handling for all sync comparison tables.
+ */
 function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-interface-table');
     initializeTableCheckboxes('librenms-interface-table-vm');
@@ -93,7 +197,14 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-ipaddress-table');
 }
 
-// Initialize the 'Apply' button for the bulk VCMember select
+// ============================================
+// VIRTUAL CHASSIS & VRF HANDLING
+// ============================================
+
+/**
+ * Initialize TomSelect dropdowns for VC member selection.
+ * Waits for TomSelect initialization before attaching change handlers.
+ */
 function initializeVCMemberSelect() {
     setTimeout(() => {
         const interfaceTable = document.getElementById('librenms-interface-table');
@@ -122,10 +233,13 @@ function initializeVCMemberSelect() {
                 }
             });
         }
-    }, 100);
+    }, TOMSELECT_INIT_DELAY_MS);
 }
 
-// Function to initialize VRF selects
+/**
+ * Initialize VRF assignment dropdowns for IP addresses.
+ * Handles both TomSelect-enhanced and standard select elements.
+ */
 function initializeVRFSelects() {
     setTimeout(() => {
         const ipAddressTable = document.getElementById('librenms-ipaddress-table');
@@ -155,30 +269,27 @@ function initializeVRFSelects() {
                 }
             });
         }
-    }, 100);
+    }, TOMSELECT_INIT_DELAY_MS);
 }
 
-// Function to handle VRF change event
+/**
+ * Handle VRF selection change and verify IP address assignment.
+ * Sends verification request to backend and updates row status.
+ *
+ * @param {HTMLSelectElement} select - The VRF dropdown element
+ * @param {string} value - Selected VRF ID
+ */
 function handleVRFChange(select, value) {
     const ipAddress = select.dataset.ip;
     const prefixLength = select.dataset.prefix || "";  // Get prefix length if present
     const fullIpAddress = prefixLength ? `${ipAddress}/${prefixLength}` : ipAddress;
 
-    // Extract device ID from various URL patterns
-    let deviceId = null;
-    const deviceIdMatch = window.location.pathname.match(/\/devices\/(\d+)\//);
-    const vmIdMatch = window.location.pathname.match(/\/virtual-machines\/(\d+)\//);
-    const pluginDeviceMatch = window.location.pathname.match(/\/plugins\/librenms_plugin\/device\/(\d+)\//);
-    const pluginVMMatch = window.location.pathname.match(/\/plugins\/librenms_plugin\/vm\/(\d+)\//);
-
-    deviceId = deviceIdMatch ? deviceIdMatch[1] :
-        vmIdMatch ? vmIdMatch[1] :
-            pluginDeviceMatch ? pluginDeviceMatch[1] :
-                pluginVMMatch ? pluginVMMatch[1] : null;
-
-    if (!deviceId) {
+    // Extract device ID from URL
+    const deviceInfo = getDeviceIdFromUrl();
+    if (!deviceInfo) {
         return;
     }
+    const deviceId = deviceInfo.id;
 
     fetch('/plugins/librenms_plugin/verify-ipaddress/', {
         method: 'POST',
@@ -204,11 +315,17 @@ function handleVRFChange(select, value) {
             }
         })
         .catch(error => {
-            // Silently fail - VRF change is not critical
+            console.error('VRF verification failed:', error);
         });
 }
 
-// Function to handle VC member interface change event
+/**
+ * Handle VC member selection change and verify interface mapping.
+ * Fetches interface data from selected device and updates table row.
+ *
+ * @param {HTMLSelectElement} select - The VC member dropdown element
+ * @param {string} value - Selected device ID
+ */
 function handleInterfaceChange(select, value) {
     fetch('/plugins/librenms_plugin/verify-interface/', {
         method: 'POST',
@@ -238,7 +355,14 @@ function handleInterfaceChange(select, value) {
             }
         });
 }
-// Function to handle cable VC member change event
+
+/**
+ * Handle VC member selection change for cable verification.
+ * Fetches cable connection data and updates table row.
+ *
+ * @param {HTMLSelectElement} select - The VC member dropdown element
+ * @param {string} value - Selected device ID
+ */
 function handleCableChange(select, value) {
     fetch('/plugins/librenms_plugin/verify-cable/', {
         method: 'POST',
@@ -268,8 +392,10 @@ function handleCableChange(select, value) {
         });
 }
 
-
-// Function to initialize the 'Apply' button for bulk VC member assignment
+/**
+ * Initialize bulk VC member assignment functionality.
+ * Applies selected VC member to all checked interfaces.
+ */
 function initializeBulkEditApply() {
     const applyButton = document.getElementById('apply-bulk-vc-member');
     if (applyButton) {
@@ -314,7 +440,10 @@ function initializeBulkEditApply() {
     }
 }
 
-// Update the 'initializeCheckboxListeners' function
+/**
+ * Initialize checkbox change listeners for bulk actions.
+ * Enables/disables bulk action button based on selection.
+ */
 function initializeCheckboxListeners() {
     const interfaceTable = document.getElementById('librenms-interface-table');
     if (!interfaceTable) return;
@@ -334,7 +463,9 @@ function initializeCheckboxListeners() {
     }
 }
 
-// Update the 'updateBulkActionButton' function
+/**
+ * Update bulk action button enabled state based on checkbox selection.
+ */
 function updateBulkActionButton() {
     const interfaceTable = document.getElementById('librenms-interface-table');
     if (!interfaceTable) return;
@@ -345,7 +476,18 @@ function updateBulkActionButton() {
     }
 }
 
-// Generic function to initialize filters for a table
+// ============================================
+// TABLE FILTERING
+// ============================================
+
+/**
+ * Initialize column-based filtering for a sync comparison table.
+ * Creates filter inputs that hide rows not matching the filter text.
+ *
+ * @param {string} tableId - DOM element ID of the table
+ * @param {string[]} filterKeys - Array of column identifiers to filter
+ * @param {Object} dataCols - Configuration mapping column IDs to data attributes or selectors
+ */
 function initializeTableFilters(tableId, filterKeys, dataCols) {
     const table = document.getElementById(tableId);
     if (!table) return;
@@ -447,9 +589,14 @@ function initializeFilters() {
     );
 }
 
-// Initialize a flag to prevent adding duplicate event listeners
-let tabsInitialized = false;
-// Function to initialize the 'active' tab based on the URL
+// ============================================
+// TAB NAVIGATION
+// ============================================
+
+/**
+ * Initialize tab navigation with URL parameter synchronization.
+ * Activates correct tab based on URL and updates URL when tabs change.
+ */
 function initializeTabs() {
     const urlParams = new URLSearchParams(window.location.search);
     const activeTab = urlParams.get('tab') || 'interfaces'; // Set default tab
@@ -466,31 +613,35 @@ function initializeTabs() {
         }
     }
 
-    // Add event listeners only once
-    if (!tabsInitialized) {
-        const tabs = document.querySelectorAll('[data-bs-toggle="tab"]')
-        tabs.forEach(tab => {
-            tab.addEventListener('shown.bs.tab', function (e) {
-                const tabId = this.getAttribute('aria-controls');
-                const url = new URL(window.location);
+    // Add event listeners - use { once: true } to prevent duplicates on repeated calls
+    const tabs = document.querySelectorAll('[data-bs-toggle="tab"]')
+    tabs.forEach(tab => {
+        tab.addEventListener('shown.bs.tab', function (e) {
+            const tabId = this.getAttribute('aria-controls');
+            const url = new URL(window.location);
 
-                // Update the 'tab' parameter in the URL
-                url.searchParams.set('tab', tabId);
+            // Update the 'tab' parameter in the URL
+            url.searchParams.set('tab', tabId);
 
-                // Preserve 'interface_name_field' parameter if it exists
-                if (interfaceNameField) {
-                    url.searchParams.set('interface_name_field', interfaceNameField);
-                }
+            // Preserve 'interface_name_field' parameter if it exists
+            if (interfaceNameField) {
+                url.searchParams.set('interface_name_field', interfaceNameField);
+            }
 
-                // Update the browser history without reloading the page
-                window.history.replaceState({}, '', url);
-            });
-        });
-        tabsInitialized = true;
-    }
+            // Update the browser history without reloading the page
+            window.history.replaceState({}, '', url);
+        }, { once: true });
+    });
 }
 
-// Function to toggle SNMP forms based on version
+// ============================================
+// SNMP CONFIGURATION MODAL
+// ============================================
+
+/**
+ * Toggle SNMP form visibility based on selected version.
+ * Shows either SNMPv2c or SNMPv3 configuration form.
+ */
 function toggleSNMPForms() {
     const snmpSelect = document.querySelector('#add-device-modal select.form-select');
     if (!snmpSelect) return;
@@ -508,7 +659,10 @@ function toggleSNMPForms() {
     }
 }
 
-// Function to initialize modal-specific scripts
+/**
+ * Initialize SNMP modal form behavior.
+ * Sets up version toggle and displays correct form.
+ */
 function initializeSNMPModalScripts() {
     const snmpSelect = document.querySelector('#add-device-modal select.form-select');
     if (snmpSelect) {
@@ -626,7 +780,12 @@ function initializeNetBoxOnlyInterfaces() {
     }
 }
 
-
+/**
+ * Delete selected NetBox-only interfaces.
+ * Sends bulk delete request and handles modal display.
+ *
+ * @param {NodeList} selectedCheckboxes - Checked interface checkboxes to delete
+ */
 function deleteSelectedInterfaces(selectedCheckboxes) {
     const interfaceIds = Array.from(selectedCheckboxes).map(cb => cb.value);
 
@@ -647,41 +806,14 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
         formData.append('interface_ids', id);
     });
 
-    // Get the current URL to construct the delete URL
-    const currentPath = window.location.pathname;
-    const pathParts = currentPath.split('/');
-
-    // Extract object type and ID from the path
-    // Expected path formats: 
-    // /dcim/devices/{id}/librenms-sync/
-    // /dcim/virtual-machines/{id}/librenms-sync/
-    // /plugins/librenms_plugin/device/{id}/librenms-sync/
-    // /plugins/librenms_plugin/virtual-machines/{id}/librenms-sync/
-    let objectType, objectId;
-
-    const deviceIndex = pathParts.indexOf('devices');
-    const vmIndex = pathParts.indexOf('virtual-machines');
-    const pluginDeviceIndex = pathParts.indexOf('device');
-    const pluginVMIndex = pathParts.indexOf('virtualmachine');
-
-    if (deviceIndex !== -1 && deviceIndex + 1 < pathParts.length) {
-        objectType = 'device';
-        objectId = pathParts[deviceIndex + 1];
-    } else if (vmIndex !== -1 && vmIndex + 1 < pathParts.length) {
-        objectType = 'virtualmachine';
-        objectId = pathParts[vmIndex + 1];
-    } else if (pluginDeviceIndex !== -1 && pluginDeviceIndex + 1 < pathParts.length) {
-        objectType = 'device';
-        objectId = pathParts[pluginDeviceIndex + 1];
-    } else if (pluginVMIndex !== -1 && pluginVMIndex + 1 < pathParts.length) {
-        objectType = 'virtualmachine';
-        objectId = pathParts[pluginVMIndex + 1];
-    }
-
-    if (!objectType || !objectId) {
+    // Extract object type and ID from URL
+    const deviceInfo = getDeviceIdFromUrl();
+    if (!deviceInfo) {
         alert('Unable to determine object type. Please refresh and try again.');
         return;
     }
+    const objectType = deviceInfo.type;
+    const objectId = deviceInfo.id;
 
     const deleteUrl = `/plugins/librenms_plugin/${objectType}/${objectId}/delete-netbox-interfaces/`;
 
@@ -746,8 +878,14 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
         });
 }
 
+// ============================================
+// INITIALIZATION
+// ============================================
 
-// Function to initialize all necessary scripts
+/**
+ * Initialize all sync page functionality.
+ * Called on DOMContentLoaded and after HTMX content swaps.
+ */
 function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
