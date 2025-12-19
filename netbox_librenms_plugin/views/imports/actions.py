@@ -32,6 +32,53 @@ logger = logging.getLogger(__name__)
 class DeviceImportHelperMixin:
     """Mixin providing common validation and rendering helpers for device import views."""
 
+    def _should_enable_vc_detection(self, device_id: int, request) -> bool:
+        """
+        Determine if VC detection should be enabled for this request.
+
+        VC detection is always enabled for role/rack changes and detail views,
+        regardless of the initial user preference. This implements smart caching:
+
+        1. If user originally requested VC detection: Uses cached data from initial load
+        2. If VC data is already cached: Reuses cached data (no API call)
+        3. Otherwise: Fetches VC data from LibreNMS API and caches it
+
+        This approach ensures:
+        - Role/rack changes always have VC context available (required for import)
+        - No redundant API calls when VC data is already cached
+        - Consistent VC detection behavior across dropdowns and detail modals
+        - Since role assignment is required before import, VC data is always
+          available by the time bulk import/confirm operations run
+
+        Args:
+            device_id: LibreNMS device ID
+            request: Django request object
+
+        Returns:
+            bool: Always returns True to enable VC detection with smart caching
+        """
+        # Check if user originally requested VC detection
+        vc_requested = request.GET.get("enable_vc_detection") == "true"
+
+        if vc_requested:
+            # User explicitly enabled it - use it (will use cache if available)
+            return True
+
+        # Check if VC data is already cached (no API call will be made)
+        from netbox_librenms_plugin.import_utils import _vc_cache_key
+
+        cache_key = _vc_cache_key(self.librenms_api, device_id)
+        vc_cached = cache.get(cache_key) is not None
+
+        if vc_cached:
+            # Data already in cache - enable detection (no API call)
+            return True
+
+        # Not requested and not cached - make API call to get VC data
+        # This handles the case where user didn't initially request it
+        # but is now changing role/rack (so we fetch it now)
+        return True
+
     def get_validated_device_with_selections(
         self, device_id: int, request
     ) -> tuple[dict | None, dict | None, dict]:
@@ -63,10 +110,15 @@ class DeviceImportHelperMixin:
         if not libre_device:
             return None, None, selections
 
+        # Determine if we should enable VC detection for this request
+        # This checks: user preference, cache status, and VM vs Device
+        enable_vc = not is_vm and self._should_enable_vc_detection(device_id, request)
+
         validation = validate_device_for_import(
             libre_device,
             import_as_vm=is_vm,
-            api=self.librenms_api,
+            api=self.librenms_api if enable_vc else None,
+            include_vc_detection=enable_vc,
         )
         validation["import_as_vm"] = is_vm
 
@@ -213,6 +265,11 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
             validation = validate_device_for_import(
                 libre_device, import_as_vm=is_vm, api=self.librenms_api
             )
+
+            # Mark validation with VC detection flag for proper URL generation in table
+            # Bulk confirm should respect the initial filter's VC detection preference
+            vc_requested = request.GET.get("enable_vc_detection") == "true"
+            validation["_vc_detection_enabled"] = vc_requested
 
             device_name = _determine_device_name(
                 libre_device,

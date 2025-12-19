@@ -226,12 +226,17 @@ class DeviceImportTable(tables.Table):
             "plugins:netbox_librenms_plugin:device_cluster_update",
             kwargs={"device_id": device_id},
         )
+        
+        # Include VC detection flag in URL if present in validation (from initial load)
+        vc_detection_flag = ""
+        if validation.get("_vc_detection_enabled"):
+            vc_detection_flag = "?enable_vc_detection=true"
 
         select_html = (
             f'<select class="form-select form-select-sm cluster-select" '
             f'name="cluster_{device_id}" '
             f'data-device-id="{device_id}" '
-            f'hx-post="{update_url}" '
+            f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f'hx-include="[name=role_{device_id}], [name=rack_{device_id}]" '
@@ -291,12 +296,17 @@ class DeviceImportTable(tables.Table):
             "plugins:netbox_librenms_plugin:device_role_update",
             kwargs={"device_id": device_id},
         )
+        
+        # Include VC detection flag in URL if present in validation (from initial load)
+        vc_detection_flag = ""
+        if validation.get("_vc_detection_enabled"):
+            vc_detection_flag = "?enable_vc_detection=true"
 
         select_html = (
             f'<select class="form-select form-select-sm device-role-select" '
             f'name="role_{device_id}" '
             f'data-device-id="{device_id}" '
-            f'hx-post="{update_url}" '
+            f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f'hx-include="[name=cluster_{device_id}], [name=rack_{device_id}]" '
@@ -364,12 +374,17 @@ class DeviceImportTable(tables.Table):
             "plugins:netbox_librenms_plugin:device_rack_update",
             kwargs={"device_id": device_id},
         )
+        
+        # Include VC detection flag in URL if present in validation (from initial load)
+        vc_detection_flag = ""
+        if validation.get("_vc_detection_enabled"):
+            vc_detection_flag = "?enable_vc_detection=true"
 
         select_html = (
             f'<select class="form-select form-select-sm rack-select" '
             f'name="rack_{device_id}" '
             f'data-device-id="{device_id}" '
-            f'hx-post="{update_url}" '
+            f'hx-post="{update_url}{vc_detection_flag}" '
             f'hx-trigger="change" '
             f'hx-swap="none" '
             f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}]" '
@@ -519,7 +534,7 @@ class DeviceImportTable(tables.Table):
         Build validation details URL with appropriate query parameters.
 
         Constructs the URL for the device validation details modal, adding
-        cluster_id or role_id as query parameters based on validation state.
+        cluster_id, role_id, and VC detection flag as query parameters.
 
         Args:
             device_id: LibreNMS device ID
@@ -548,6 +563,10 @@ class DeviceImportTable(tables.Table):
         ).get("role"):
             role_id = validation["device_role"]["role"].id
             params.append(f"role_id={role_id}")
+        
+        # Add VC detection flag if it was enabled during initial load
+        if validation.get("_vc_detection_enabled"):
+            params.append("enable_vc_detection=true")
 
         if params:
             details_url += "?" + "&".join(params)

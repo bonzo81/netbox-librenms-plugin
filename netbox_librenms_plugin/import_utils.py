@@ -1986,8 +1986,17 @@ def process_device_filters(
         device["_validation"] = validation
         validated_devices.append(device)
 
-        # Cache validated device data (shared between sync and async processing)
+        # Cache with TWO keys for different purposes:
+        # 1. Complex key (with filter context) - for full validated device with all metadata
         cache.set(cache_key, device, timeout=api.cache_timeout)
+
+        # 2. Simple key (device ID only) - for quick device data lookup by role/rack updates
+        #    This avoids redundant API calls when user interacts with dropdowns
+        simple_cache_key = f"import_device_data_{device_id}"
+        # Cache just the raw device data (not the full validation result)
+        # This is what get_validated_device_with_selections() expects
+        device_data_only = {k: v for k, v in device.items() if k != "_validation"}
+        cache.set(simple_cache_key, device_data_only, timeout=api.cache_timeout)
 
     if job:
         if exclude_existing:

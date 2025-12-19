@@ -308,7 +308,10 @@
             <span class="visually-hidden">Loading...</span>
           </div>
           <h5 class="mb-2">Applying Filters</h5>
-          <p class="text-muted mb-3" id="filter-progress-message">Fetching LibreNMS data and processing filters...</p>
+          <p class="text-muted mb-1" id="filter-progress-message">Fetching LibreNMS data and processing filters...</p>
+          <p class="text-info mb-3" id="filter-device-count" style="display: none;">
+            <strong>LibreNMS Devices:</strong> <span id="filter-device-count-value">0</span>
+          </p>
           <button type="button" class="btn btn-secondary btn-sm" id="cancel-filter-btn">
             <i class="mdi mdi-close"></i> Cancel
           </button>
