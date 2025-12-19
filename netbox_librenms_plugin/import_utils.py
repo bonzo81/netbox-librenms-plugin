@@ -1046,12 +1046,16 @@ def import_single_device(
                 device_id=device_id,
             )
 
+            # Generate import timestamp comment
+            import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
+
             device_data = {
                 "name": device_name,
                 "site": site,
                 "device_type": device_type,
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
+                "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
                 "custom_field_data": {"librenms_id": str(device_id)},
             }
 
@@ -1296,65 +1300,6 @@ def get_librenms_device_by_id(api: LibreNMSAPI, device_id: int) -> dict:
     except Exception as e:
         logger.exception(f"Failed to get device {device_id} from LibreNMS: {e}")
         return None
-
-
-def create_device_from_librenms(
-    libre_device: dict, validation: dict, use_sysname: bool = True
-) -> Device:
-    """
-    Create a NetBox device from LibreNMS device data.
-
-    Args:
-        libre_device: Device data from LibreNMS
-        validation: Validation result from validate_device_for_import
-        use_sysname: If True, prefer sysName; if False, use hostname
-
-    Returns:
-        Created Device instance
-
-    Raises:
-        Exception if device cannot be created
-    """
-    if not validation["can_import"]:
-        raise ValueError(
-            f"Device cannot be imported: {', '.join(validation['issues'])}"
-        )
-
-    # Extract matched objects from validation
-    site = validation["site"]["site"]
-    device_type = validation["device_type"]["device_type"]
-    device_role = validation["device_role"]["role"]
-    platform = validation["platform"].get("platform")
-    rack = validation.get("rack", {}).get("rack")  # Optional rack assignment
-
-    # Determine device name based on use_sysname setting
-    device_name = _determine_device_name(
-        libre_device,
-        use_sysname=use_sysname,
-        strip_domain=False,
-        device_id=libre_device.get("device_id"),
-    )
-
-    # Generate import timestamp comment
-    import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
-
-    # Create the device with librenms_id custom field
-    device = Device.objects.create(
-        name=device_name,
-        device_type=device_type,
-        role=device_role,
-        site=site,
-        rack=rack,  # Assign rack if selected
-        platform=platform,
-        serial=libre_device.get("serial", ""),
-        comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-        custom_field_data={"librenms_id": str(libre_device["device_id"])},
-    )
-
-    logger.info(
-        f"Created device {device.name} (ID: {device.pk}) from LibreNMS device {libre_device['device_id']}"
-    )
-    return device
 
 
 def create_vm_from_librenms(
