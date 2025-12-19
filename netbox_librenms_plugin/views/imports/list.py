@@ -428,5 +428,10 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         )
 
         self._from_cache = from_cache
+        
+        # Mark each device's validation with VC detection flag for downstream views
+        for device in validated_devices:
+            if '_validation' in device:
+                device['_validation']['_vc_detection_enabled'] = vc_detection_enabled
 
         return validated_devices

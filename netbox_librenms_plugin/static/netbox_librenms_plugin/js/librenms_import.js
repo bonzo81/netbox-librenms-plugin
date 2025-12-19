@@ -161,6 +161,17 @@
         if (fallbackBackdropRef && fallbackBackdropRef.element) {
             fallbackBackdropRef.element.remove();
             fallbackBackdropRef.element = null;
+    // Update modal message with device count
+    if (messageEl) {
+        if (deviceCount !== undefined && deviceCount !== null) {
+            messageEl.textContent = `Found ${deviceCount} device${deviceCount !== 1 ? 's' : ''}, processing in background (job can be cancelled)...`;
+            // Show device count in dedicated element
+            const deviceCountEl = document.getElementById('filter-device-count');
+            const deviceCountValueEl = document.getElementById('filter-device-count-value');
+            if (deviceCountEl && deviceCountValueEl) {
+                deviceCountValueEl.textContent = deviceCount;
+                deviceCountEl.style.display = 'block';
+            }
         } else {
             const backdrop = document.querySelector('.modal-backdrop');
             if (backdrop) {
@@ -225,6 +236,44 @@
                     messageEl.textContent = 'Cancelling job...';
                 }
                 cancelBtn.textContent = 'Cancelling...';
+            })
+                .then(res => {
+                    console.log('[Cancel] Stop API response status:', res.status);
+                    // Check if job already finished (404 = gone from queue)
+                    if (res.status === 404 || res.status === 410) {
+                        console.log('[Cancel] Job already completed (404/410)');
+                        if (messageEl) {
+                            messageEl.textContent = 'Job already completed, loading results...';
+                        }
+                        cancelBtn.textContent = 'Completed';
+
+                        const modal = document.getElementById('filter-processing-modal');
+                        if (modal && modal._bsModal) {
+                            modal._bsModal.hide();
+                            delete modal._bsModal;
+                        }
+
+                        setTimeout(() => {
+                            window.location.href = baseUrl + '?' + originalFilters + '&job_id=' + jobPk;
+                        }, 100);
+                        return Promise.resolve();
+                    }
+
+                    if (res.ok) {
+                        // Job stopped or already gone
+                        if (messageEl) {
+                            messageEl.textContent = 'Verifying job stopped...';
+                        }
+                        cancelBtn.textContent = 'Verifying...';
+
+                        // Wait for RQ to update
+                        return new Promise(resolve => setTimeout(resolve, JOB_CANCEL_WAIT_MS))
+                            .then(() => {
+                                // Sync database status via our plugin API
+                                if (messageEl) {
+                                    messageEl.textContent = 'Updating job status...';
+                                }
+                                cancelBtn.textContent = 'Updating...';
 
                 // Stop the job using NetBox's correct background task stop endpoint
                 const stopUrl = `/api/core/background-tasks/${jobId}/stop/`;
@@ -283,6 +332,19 @@
                                     // Still redirect even if sync fails - job is stopped in RQ
                                     if (messageEl) {
                                         messageEl.textContent = 'Job stopped (status sync failed).';
+                                        cancelBtn.textContent = 'Cancelled';
+
+                                        const modal = document.getElementById('filter-processing-modal');
+                                        if (modal && modal._bsModal) {
+                                            modal._bsModal.hide();
+                                            delete modal._bsModal;
+                                        }
+
+                                        setTimeout(() => {
+                                            window.location.href = baseUrl;
+                                        }, JOB_CANCEL_REDIRECT_MS);
+                                    } else {
+                                        throw new Error(`Sync failed: ${syncRes.status}`);
                                     }
                                     cancelBtn.textContent = 'Stopped';
                                     setTimeout(() => {
@@ -314,6 +376,90 @@
             if (cancelInProgress) {
                 // Cancel handler is taking over, don't interfere
                 return;
+                            })
+                            .catch(syncErr => {
+                                // Still redirect even if sync fails - job is stopped in RQ
+                                if (messageEl) {
+                                    messageEl.textContent = 'Job stopped (status sync failed).';
+                                }
+                                cancelBtn.textContent = 'Stopped';
+
+                                const modal = document.getElementById('filter-processing-modal');
+                                if (modal && modal._bsModal) {
+                                    modal._bsModal.hide();
+                                    delete modal._bsModal;
+                                }
+
+                                setTimeout(() => {
+                                    window.location.href = baseUrl;
+                                }, JOB_CANCEL_ERROR_REDIRECT_MS);
+                            });
+                    } else {
+                        console.log('[Cancel] Stop API failed with status:', res.status);
+                        if (res.status === 404 || res.status === 410 || res.status === 400) {
+                            console.log('[Cancel] Job likely finished');
+                            if (messageEl) {
+                                messageEl.textContent = 'Job completed, loading results...';
+                            }
+                            cancelBtn.textContent = 'Completed';
+
+                            const modal = document.getElementById('filter-processing-modal');
+                            if (modal && modal._bsModal) {
+                                modal._bsModal.hide();
+                                delete modal._bsModal;
+                            }
+
+                            setTimeout(() => {
+                                window.location.href = baseUrl + '?' + originalFilters + '&job_id=' + jobPk;
+                            }, 100);
+                            return;
+                        }
+
+                        // Genuine failure - close modal anyway, don't trap user
+                        if (messageEl) {
+                            messageEl.textContent = 'Failed to cancel job. Closing...';
+                        }
+                        cancelBtn.textContent = 'Close';
+                        cancelBtn.disabled = false;
+
+                        const modal = document.getElementById('filter-processing-modal');
+                        if (modal && modal._bsModal) {
+                            modal._bsModal.hide();
+                            delete modal._bsModal;
+                        }
+
+                        setTimeout(() => window.location.href = baseUrl, 1000);
+                    }
+                })
+                .catch(err => {
+                    if (messageEl) {
+                        messageEl.textContent = 'Error cancelling job.';
+                    }
+                    cancelBtn.textContent = originalText;
+                    cancelBtn.disabled = false;
+                    alert('Error stopping job. Please try again.');
+                });
+        };
+    }
+
+    // Poll function
+    let pollingStopped = false; // Flag to stop polling
+    const poll = () => {
+        if (cancelInProgress) {
+            // Cancel handler is taking over, don't interfere
+            console.log('[Job Polling] Skipping poll - cancel in progress');
+            return;
+        }
+
+        if (pollingStopped) {
+            console.log('[Job Polling] Polling stopped, not continuing');
+            return;
+        }
+
+        console.log('[Job Polling] Fetching job status from:', pollUrl);
+        fetch(pollUrl, {
+            headers: {
+                'Accept': 'application/json'
             }
 
             fetch(pollUrl, {
@@ -385,6 +531,44 @@
                     } else if (statusValue === 'errored') {
                         // Job errored - show error
                         const errorMsg = data.data?.error || 'Job encountered an error. Please try again.';
+                if (statusValue === 'completed' || statusValue === 'finished') {
+                    console.log('[Job Polling] Job completed, closing modal and redirecting...');
+                    pollingStopped = true; // Stop future polls
+
+                    const modal = document.getElementById('filter-processing-modal');
+                    if (modal && modal._bsModal) {
+                        modal._bsModal.hide();
+                        delete modal._bsModal;
+                    }
+
+                    // Small delay to let modal close before redirect
+                    setTimeout(() => {
+                        window.location.href = baseUrl + '?' + originalFilters + '&job_id=' + jobPk;
+                    }, 100);
+                    return; // Stop polling
+                } else if (statusValue === 'stopped') {
+                    console.log('[Job Polling] Job stopped by user');
+                    pollingStopped = true;
+
+                    const modal = document.getElementById('filter-processing-modal');
+                    if (modal && modal._bsModal) {
+                        modal._bsModal.hide();
+                        delete modal._bsModal;
+                    }
+
+                    setTimeout(() => window.location.href = baseUrl, 100);
+                } else if (statusValue === 'failed') {
+                    console.log('[Job Polling] Job failed');
+                    pollingStopped = true;
+
+                    const modal = document.getElementById('filter-processing-modal');
+                    if (modal && modal._bsModal) {
+                        modal._bsModal.hide();
+                        delete modal._bsModal;
+                    }
+
+                    const errorMsg = data.data?.error;
+                    if (errorMsg) {
                         alert('Error: ' + errorMsg);
                         window.location.href = baseUrl;
                     } else if (statusValue === 'queued' || statusValue === 'started' || statusValue === 'deferred' || statusValue === 'scheduled') {
@@ -397,6 +581,24 @@
                 })
                 .catch(err => {
                     // Retry polling on network errors
+                    setTimeout(() => window.location.href = baseUrl, 100);
+                } else if (statusValue === 'errored') {
+                    pollingStopped = true;
+
+                    const modal = document.getElementById('filter-processing-modal');
+                    if (modal && modal._bsModal) {
+                        modal._bsModal.hide();
+                        delete modal._bsModal;
+                    }
+
+                    const errorMsg = data.data?.error || 'Job encountered an error. Please try again.';
+                    alert('Error: ' + errorMsg);
+                    setTimeout(() => window.location.href = baseUrl, 100);
+                } else if (statusValue === 'queued' || statusValue === 'started' || statusValue === 'deferred' || statusValue === 'scheduled') {
+                    // Continue polling (job still in progress)
+                    setTimeout(poll, POLL_INTERVAL_MS);
+                } else {
+                    // Unknown status - continue polling
                     setTimeout(poll, POLL_INTERVAL_MS);
                 });
         };
@@ -438,6 +640,27 @@
             if (currentAbortController) {
                 currentAbortController.abort();
                 currentAbortController = null;
+        if (filterModal) {
+            if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+                modalInstance = new bootstrap.Modal(filterModal);
+                modalInstance.show();
+                // Store instance on element for later retrieval
+                filterModal._bsModal = modalInstance;
+                console.log('[Filter Modal] Modal opened with Bootstrap instance');
+            } else {
+                // Fallback for manual modal display
+                filterModal.classList.add('show');
+                filterModal.style.display = 'block';
+                filterModal.setAttribute('aria-modal', 'true');
+                filterModal.removeAttribute('aria-hidden');
+                document.body.classList.add('modal-open');
+
+                // Add backdrop
+                const backdrop = document.createElement('div');
+                backdrop.className = 'modal-backdrop fade show';
+                backdrop.id = 'filter-modal-backdrop';
+                document.body.appendChild(backdrop);
+                console.log('[Filter Modal] Modal opened with manual fallback');
             }
 
             // Create new AbortController for this request
