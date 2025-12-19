@@ -36,21 +36,26 @@ class DeviceImportHelperMixin:
         """
         Determine if VC detection should be enabled for this request.
         
-        VC detection is enabled if:
-        1. User originally requested it (enable_vc_detection=true in URL), OR
-        2. VC data is already cached (no API call will be made)
+        VC detection is always enabled for role/rack changes and detail views,
+        regardless of the initial user preference. This implements smart caching:
         
-        This ensures:
-        - If user didn't check VC detection initially, role changes will trigger detection
-        - If user did check VC detection, cached data is used (no redundant API call)
-        - Details button follows same logic
+        1. If user originally requested VC detection: Uses cached data from initial load
+        2. If VC data is already cached: Reuses cached data (no API call)
+        3. Otherwise: Fetches VC data from LibreNMS API and caches it
+        
+        This approach ensures:
+        - Role/rack changes always have VC context available (required for import)
+        - No redundant API calls when VC data is already cached
+        - Consistent VC detection behavior across dropdowns and detail modals
+        - Since role assignment is required before import, VC data is always
+          available by the time bulk import/confirm operations run
         
         Args:
             device_id: LibreNMS device ID
             request: Django request object
             
         Returns:
-            bool: True if VC detection should be enabled
+            bool: Always returns True to enable VC detection with smart caching
         """
         # Check if user originally requested VC detection
         vc_requested = request.GET.get('enable_vc_detection') == 'true'
