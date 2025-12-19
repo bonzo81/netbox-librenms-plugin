@@ -10,6 +10,10 @@
  * Dependencies: Bootstrap 5, HTMX 2.x
  */
 
+// Wrap everything in an IIFE to avoid global scope pollution and duplicate declarations
+(function() {
+'use strict';
+
 // ============================================
 // CONSTANTS
 // ============================================
@@ -564,13 +568,12 @@ function initializeFilterForm() {
                         }
                     }
                 } else if (result.type === 'html') {
-                    // Synchronous response - replace current document with returned HTML
+                    // Synchronous response - navigate to show results
+                    // Note: Cannot use document.write() as it causes script re-execution issues
                     if (modalInstance) {
                         modalInstance.hide();
                     }
-                    document.open();
-                    document.write(result.html);
-                    document.close();
+                    window.location.href = finalUrl;
                 }
             })
             .catch(error => {
@@ -911,3 +914,5 @@ if (document.readyState === 'loading') {
     // DOM already loaded, initialize immediately
     initializeImportPage();
 }
+
+})(); // End of IIFE
