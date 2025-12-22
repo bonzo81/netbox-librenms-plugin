@@ -1031,15 +1031,6 @@ function initializeImportPage() {
     initializeFilterForm();
     initializeBulkImport();
     initializeHTMXHandlers();
-    
-    // Ensure HTMX processes the table element (for deviceImported trigger)
-    // This is especially important after page reloads from background jobs
-    const objectList = document.getElementById('object_list');
-    if (objectList && typeof htmx !== 'undefined') {
-        console.log('LibreNMS Import: Processing HTMX attributes on table');
-        htmx.process(objectList);
-    }
-    
     console.log('LibreNMS Import: Initialization complete');
 }
 
