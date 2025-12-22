@@ -448,8 +448,6 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
 
                 from netbox_librenms_plugin.import_utils import (
                     create_vm_from_librenms,
-                    get_librenms_device_by_id,
-                    validate_device_for_import,
                 )
 
                 for vm_id in vm_ids_to_import:
@@ -573,9 +571,62 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
             )
 
         if request.headers.get("HX-Request"):
+            # Return updated rows for all imported devices using HTMX OOB swaps
+            # This updates only the affected rows instead of refreshing the entire table
+            updated_rows_html = []
+            
+            # Collect all successfully imported device IDs (devices + VMs)
+            imported_device_ids = [
+                item["device_id"] for item in device_result.get("success", [])
+            ] + [item["device_id"] for item in vm_result.get("success", [])]
+            
+            # Re-validate and render each imported device with fresh status
+            for device_id in imported_device_ids:
+                # Fetch device from cache or API
+                cache_key = f"import_device_data_{device_id}"
+                libre_device = libre_devices_cache.get(device_id) or cache.get(cache_key)
+                
+                if not libre_device:
+                    libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
+                
+                if libre_device:
+                    # Determine if this was imported as VM or device
+                    is_vm = device_id in [item["device_id"] for item in vm_result.get("success", [])]
+                    
+                    # Re-validate with fresh status (will now show as imported)
+                    validation = validate_device_for_import(
+                        libre_device,
+                        import_as_vm=is_vm,
+                        api=None,  # No VC detection needed for already-imported devices
+                        include_vc_detection=False,
+                    )
+                    validation["import_as_vm"] = is_vm
+                    
+                    # Update cache with fresh validation
+                    libre_device["_validation"] = validation
+                    cache.set(cache_key, libre_device, 300)  # 5 minutes TTL
+                    
+                    # Render updated row
+                    table = DeviceImportTable([libre_device])
+                    context = {
+                        "record": libre_device,
+                        "table": table,
+                        "cluster_id": None,
+                        "role_id": None,
+                        "rack_id": None,
+                    }
+                    
+                    row_html = render(
+                        request,
+                        "netbox_librenms_plugin/htmx/device_import_row.html",
+                        context,
+                    ).content.decode("utf-8")
+                    updated_rows_html.append(row_html)
+            
+            # Return concatenated row HTML with closeModal trigger
             return HttpResponse(
-                status=204,
-                headers={"HX-Trigger": '{"deviceImported": null, "closeModal": null}'},
+                "\n".join(updated_rows_html),
+                headers={"HX-Trigger": '{"closeModal": null}'},
             )
 
         return redirect("plugins:netbox_librenms_plugin:librenms_import")

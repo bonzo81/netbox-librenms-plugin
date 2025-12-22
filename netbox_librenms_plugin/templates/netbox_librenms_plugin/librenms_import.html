@@ -269,11 +269,7 @@
 
     {# Objects table #}
     <div class="card">
-      <div class="htmx-container" id="object_list"
-           hx-trigger="deviceImported from:body"
-           hx-get="{{ request.path }}?{{ request.GET.urlencode }}"
-           hx-select="#object_list"
-           hx-swap="outerHTML">
+      <div class="htmx-container" id="object_list">
         {% include 'inc/paginator.html' with htmx=True table=table paginator=table.paginator page=table.page %}
         <div class="table-responsive">
           {% include 'inc/table.html' %}
