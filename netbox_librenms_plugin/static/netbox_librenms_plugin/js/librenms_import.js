@@ -10,6 +10,20 @@
  * Dependencies: Bootstrap 5, HTMX 2.x
  */
 
+// Wrap in IIFE to prevent const redeclaration errors during HTMX swaps
+(function() {
+    'use strict';
+
+    // Guard against re-initialization during HTMX content swaps
+    // The flag is reset before document.write() to allow proper initialization after page replacement
+    if (window.LibreNMSImportInitialized) {
+        console.log('LibreNMS Import: Already initialized, skipping re-initialization');
+        return;
+    }
+    
+    // Mark as initialized for this page session
+    window.LibreNMSImportInitialized = true;
+
 // ============================================
 // CONSTANTS
 // ============================================
@@ -682,6 +696,8 @@ function initializeFilterForm() {
                     if (modalInstance) {
                         modalInstance.hide();
                     }
+                    // Reset initialization flag so new document can initialize
+                    window.LibreNMSImportInitialized = false;
                     document.open();
                     document.write(result.html);
                     document.close();
@@ -1015,6 +1031,15 @@ function initializeImportPage() {
     initializeFilterForm();
     initializeBulkImport();
     initializeHTMXHandlers();
+    
+    // Ensure HTMX processes the table element (for deviceImported trigger)
+    // This is especially important after page reloads from background jobs
+    const objectList = document.getElementById('object_list');
+    if (objectList && typeof htmx !== 'undefined') {
+        console.log('LibreNMS Import: Processing HTMX attributes on table');
+        htmx.process(objectList);
+    }
+    
     console.log('LibreNMS Import: Initialization complete');
 }
 
@@ -1025,3 +1050,5 @@ if (document.readyState === 'loading') {
     // DOM already loaded, initialize immediately
     initializeImportPage();
 }
+
+})(); // End of IIFE
