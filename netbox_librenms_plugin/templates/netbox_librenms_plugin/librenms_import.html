@@ -182,6 +182,24 @@
     {% applied_filters model filter_form request.GET %}
   {% endif %}
 
+  <style>
+    /* Allow dropdown menus to extend beyond table container */
+    .device-import-table-wrapper {
+      overflow-x: auto;
+      overflow-y: visible;
+      /* Add space below table for dropdowns in last rows */
+      padding-bottom: 200px;
+      /* Pull up pagination to remove visual gap */
+      margin-bottom: -200px;
+    }
+    
+    /* Ensure card doesn't clip overflowing dropdowns */
+    .device-import-table-wrapper + .pagination {
+      position: relative;
+      z-index: 1;
+    }
+  </style>
+
   {# Results Section #}
   {% if table.page.paginator.count == 0 %}
     <div class="alert alert-warning mb-3">
@@ -271,7 +289,7 @@
     <div class="card">
       <div class="htmx-container" id="object_list">
         {% include 'inc/paginator.html' with htmx=True table=table paginator=table.paginator page=table.page %}
-        <div class="table-responsive">
+        <div class="table-responsive device-import-table-wrapper">
           {% include 'inc/table.html' %}
         </div>
         {% include 'inc/paginator.html' with htmx=True table=table paginator=table.paginator page=table.page %}
