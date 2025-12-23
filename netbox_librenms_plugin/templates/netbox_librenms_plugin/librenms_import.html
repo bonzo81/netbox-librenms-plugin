@@ -46,26 +46,32 @@
           <div class="row">
             {# Instructions column #}
             <div class="col-md-4">
-              <h6 class="mb-2"><i class="mdi mdi-information-outline"></i> Search Instructions</h6>
-              <p class="mb-2">
+              <h6 class="mb-3"><i class="mdi mdi-information-outline"></i> Search Instructions</h6>
+              <p class="mb-3">
                 <strong>At least one filter is required</strong> to search for devices.
               </p>
 
-              <p class="mb-2">
+              <p class="mb-3">
                 The following matching rules apply:
-              <ul class="mb-2" style="padding-left: 1.2rem; font-size: 0.9rem;">
+              <ul class="mb-3" style="padding-left: 1.2rem; font-size: 0.9rem;">
                 <li><strong>Location/Type/OS:</strong> Exact match</li>
                 <li><strong>Hostname:</strong> Partial match</li>
                 <li><strong>System Name:</strong> Exact match (or partial when combined with other filters)</li>
               </ul>
 
-              <p class="mb-2 text-muted small">
+              <div class="alert alert-info small mt-2 mb-0" role="status">
+                <ul class="mb-0" style="padding-left: 1.2rem;">
+                  <strong>Performance note:</strong> <li>Results are cached (default: 5 minutes).</li>
+                  <li>Large LibreNMS datasets take time to process</li>
+                  <li>Repeating the same filter search will use cached data if available.</li>
+                  <li>Using background jobs is recommended for large filter sets.</li>
+                  <li>Background jobs can be cancelled if needed.</li>
+                </ul>
+              </div>
+
+              <p class="mt-3 text-muted small">
                 <i class="mdi mdi-lightbulb-on-outline"></i> <strong>Tip:</strong> Start with Location and/or Type to narrow results, then refine with additional filters.
               </p>
-
-              <div class="alert alert-info small mt-2 mb-0" role="status">
-                <strong>Performance note:</strong> Results are cached for 5 minutes. Initial searches on large LibreNMS datasets may take a moment, but repeat searches within the cache window will be faster.
-              </div>
             </div>
             {# Filters column #}
             <div class="col-md-8">
@@ -192,7 +198,7 @@
       /* Pull up pagination to remove visual gap */
       margin-bottom: -200px;
     }
-    
+
     /* Ensure card doesn't clip overflowing dropdowns */
     .device-import-table-wrapper + .pagination {
       position: relative;
