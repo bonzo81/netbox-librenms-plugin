@@ -190,6 +190,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             self._vc_detection_enabled = False
 
         filter_form = self.filterset_form(request.GET) if self.filterset_form else None
+        form_valid = False  # Track form validity
 
         if filter_form:
             form_valid = filter_form.is_valid()
@@ -209,8 +210,10 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
         # Check if this should be processed as a background job
         # Skip if we're loading results from a completed job (job_id in URL)
+        # IMPORTANT: Only process if form is valid (filter requirement enforced)
         if (
             filters_submitted
+            and form_valid
             and not self._job_results_loaded
             and not request.GET.get("job_id")
         ):
@@ -406,11 +409,8 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
         self._libre_filters = libre_filters
 
-        if not libre_filters:
-            self._filter_warning = (
-                "Please select at least one LibreNMS filter before applying the search."
-            )
-            return []
+        # Form validation already ensures at least one filter is present
+        # No need for redundant check here
 
         # Use shared processing function (same logic as background job)
         show_disabled = bool(data_source.get("show_disabled"))

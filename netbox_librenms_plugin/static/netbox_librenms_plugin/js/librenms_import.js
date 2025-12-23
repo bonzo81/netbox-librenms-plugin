@@ -547,6 +547,84 @@ function initializeFilterForm() {
     filterForm.addEventListener('submit', function (e) {
         e.preventDefault();
 
+        // Validate that at least one filter is set before proceeding
+        const filterFields = [
+            'librenms_location',
+            'librenms_type',
+            'librenms_os',
+            'librenms_hostname',
+            'librenms_sysname'
+        ];
+        
+        const hasFilter = filterFields.some(fieldName => {
+            const field = filterForm.elements[fieldName];
+            return field && field.value && field.value.trim() !== '';
+        });
+
+        const filterModal = document.getElementById('filter-processing-modal');
+        let modalInstance;
+
+        if (!hasFilter) {
+            // Show validation error in modal
+            if (filterModal) {
+                // Hide spinner and show error message
+                const spinner = filterModal.querySelector('.spinner-border');
+                const messageTitle = filterModal.querySelector('h5');
+                const messageText = document.getElementById('filter-progress-message');
+                const deviceCount = document.getElementById('filter-device-count');
+                const cancelBtn = document.getElementById('cancel-filter-btn');
+
+                if (spinner) spinner.style.display = 'none';
+                if (messageTitle) messageTitle.textContent = 'Filter Required';
+                if (messageText) {
+                    messageText.innerHTML = '<i class="mdi mdi-alert text-warning"></i> Please select at least one LibreNMS filter before applying the search.';
+                    messageText.classList.remove('text-muted');
+                    messageText.classList.add('text-warning');
+                }
+                if (deviceCount) deviceCount.style.display = 'none';
+                if (cancelBtn) {
+                    cancelBtn.innerHTML = '<i class="mdi mdi-close"></i> Close';
+                    cancelBtn.onclick = function() {
+                        if (modalInstance) {
+                            modalInstance.hide();
+                        } else {
+                            filterModal.classList.remove('show');
+                            filterModal.style.display = 'none';
+                            document.body.classList.remove('modal-open');
+                            const backdrop = document.getElementById('filter-modal-backdrop');
+                            if (backdrop) backdrop.remove();
+                        }
+                        // Reset modal content for next use
+                        if (spinner) spinner.style.display = 'block';
+                        if (messageTitle) messageTitle.textContent = 'Applying Filters';
+                        if (messageText) {
+                            messageText.textContent = 'Fetching LibreNMS data and processing filters...';
+                            messageText.classList.remove('text-warning');
+                            messageText.classList.add('text-muted');
+                        }
+                    };
+                }
+
+                // Show modal
+                if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+                    modalInstance = new bootstrap.Modal(filterModal);
+                    modalInstance.show();
+                    filterModal._bsModal = modalInstance;
+                } else {
+                    filterModal.classList.add('show');
+                    filterModal.style.display = 'block';
+                    filterModal.setAttribute('aria-modal', 'true');
+                    filterModal.removeAttribute('aria-hidden');
+                    document.body.classList.add('modal-open');
+                    const backdrop = document.createElement('div');
+                    backdrop.className = 'modal-backdrop fade show';
+                    backdrop.id = 'filter-modal-backdrop';
+                    document.body.appendChild(backdrop);
+                }
+            }
+            return;
+        }
+
         // Disable the apply filters button to prevent double submission
         const applyBtn = document.getElementById('apply-filters-btn');
         if (applyBtn) {
@@ -564,9 +642,6 @@ function initializeFilterForm() {
         currentAbortController = new AbortController();
 
         // Show filter processing modal
-        const filterModal = document.getElementById('filter-processing-modal');
-        let modalInstance;
-
         if (filterModal) {
             if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
                 modalInstance = new bootstrap.Modal(filterModal);
