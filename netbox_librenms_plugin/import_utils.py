@@ -1132,15 +1132,19 @@ def import_single_device(
         }
 
 
-def bulk_import_devices(
+def bulk_import_devices_shared(
     device_ids: List[int],
     server_key: str = None,
     sync_options: dict = None,
     manual_mappings_per_device: dict = None,
     libre_devices_cache: dict = None,
+    job=None,
 ) -> dict:
     """
-    Import multiple LibreNMS devices to NetBox.
+    Shared function for importing multiple LibreNMS devices to NetBox.
+
+    Used by both synchronous imports and background jobs. Handles per-device error
+    collection and optional progress logging when job context is provided.
 
     Args:
         device_ids: List of LibreNMS device IDs to import
@@ -1150,6 +1154,7 @@ def bulk_import_devices(
             Example: {1179: {'device_role_id': 5}, 1180: {'device_role_id': 3}}
         libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             to avoid redundant API calls. Example: {123: {...device_data...}}
+        job: Optional JobRunner instance for progress logging and cancellation checks
 
     Returns:
         dict: Bulk import result with structure:
@@ -1162,8 +1167,10 @@ def bulk_import_devices(
             }
 
     Example:
-        >>> result = bulk_import_devices([1, 2, 3, 4, 5])
-        >>> print(f"Imported {len(result['success'])} of {result['total']} devices")
+        >>> # Synchronous usage
+        >>> result = bulk_import_devices_shared([1, 2, 3, 4, 5])
+        >>> # Background job usage
+        >>> result = bulk_import_devices_shared([1, 2, 3], job=self)
     """
     total = len(device_ids)
     success_list = []
@@ -1175,7 +1182,23 @@ def bulk_import_devices(
     # Initialize API client once for all devices to avoid repeated config parsing
     api = LibreNMSAPI(server_key=server_key)
 
-    for device_id in device_ids:
+    for idx, device_id in enumerate(device_ids, start=1):
+        # Check for job cancellation every 5 devices
+        if job and idx % 5 == 0:
+            # Refresh job from DB to get current status
+            job.job.refresh_from_db()
+            job_status = job.job.status
+            status_value = job_status.value if hasattr(job_status, 'value') else job_status
+            if status_value in (JobStatusChoices.STATUS_FAILED, 'failed', 'errored'):
+                if job.logger:
+                    job.logger.warning(f"Import job cancelled at device {idx} of {total}")
+                else:
+                    logger.warning(f"Import cancelled at device {idx} of {total}")
+                break
+            # Log progress
+            if job.logger:
+                job.logger.info(f"Imported device {idx} of {total}")
+
         try:
             # Use cached device data if available to avoid redundant API calls
             if libre_devices_cache and device_id in libre_devices_cache:
@@ -1185,12 +1208,12 @@ def bulk_import_devices(
                 success, libre_device = api.get_device_info(device_id)
 
             if not success or not libre_device:
-                failed_list.append(
-                    {
-                        "device_id": device_id,
-                        "error": f"Failed to retrieve device {device_id} from LibreNMS",
-                    }
-                )
+                error_msg = f"Failed to retrieve device {device_id} from LibreNMS"
+                failed_list.append({"device_id": device_id, "error": error_msg})
+                if job and job.logger:
+                    job.logger.error(error_msg)
+                else:
+                    logger.error(error_msg)
                 continue
 
             validation = validate_device_for_import(libre_device, api=api)
@@ -1249,24 +1272,34 @@ def bulk_import_devices(
                                 libre_device,
                             )
                             vc_created_count += 1
-                            logger.info(
-                                f"Created VC '{vc.name}' during bulk import for device {device_id}"
-                            )
+                            log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
+                            if job and job.logger:
+                                job.logger.info(log_msg)
+                            else:
+                                logger.info(log_msg)
                         except Exception as vc_error:
                             # Remove from set on failure so retry is possible
                             processed_vc_domains.discard(vc_domain)
-                            logger.warning(
-                                f"Failed to create VC for device {device_id}: {vc_error}"
-                            )
+                            warn_msg = f"Failed to create VC for device {device_id}: {vc_error}"
+                            if job and job.logger:
+                                job.logger.warning(warn_msg)
+                            else:
+                                logger.warning(warn_msg)
                             # Don't fail the import, just log the warning
 
             elif result.get("device"):  # Device exists
                 skipped_list.append({"device_id": device_id, "reason": result["error"]})
             else:  # Failed to import
                 failed_list.append({"device_id": device_id, "error": result["error"]})
+                if job and job.logger:
+                    job.logger.error(f"Failed to import device {device_id}: {result['error']}")
 
         except Exception as e:
-            logger.exception(f"Unexpected error importing device {device_id}")
+            error_msg = f"Unexpected error importing device {device_id}: {str(e)}"
+            if job and job.logger:
+                job.logger.error(error_msg, exc_info=True)
+            else:
+                logger.exception(f"Unexpected error importing device {device_id}")
             failed_list.append({"device_id": device_id, "error": str(e)})
 
     return {
@@ -1276,6 +1309,52 @@ def bulk_import_devices(
         "skipped": skipped_list,
         "virtual_chassis_created": vc_created_count,
     }
+
+
+def bulk_import_devices(
+    device_ids: List[int],
+    server_key: str = None,
+    sync_options: dict = None,
+    manual_mappings_per_device: dict = None,
+    libre_devices_cache: dict = None,
+) -> dict:
+    """
+    Import multiple LibreNMS devices to NetBox (synchronous).
+
+    This is the public API for synchronous imports. For background job usage,
+    use bulk_import_devices_shared() with a job context.
+
+    Args:
+        device_ids: List of LibreNMS device IDs to import
+        server_key: LibreNMS server configuration key
+        sync_options: Sync options to apply to all devices
+        manual_mappings_per_device: Dict mapping device_id to manual_mappings dict
+            Example: {1179: {'device_role_id': 5}, 1180: {'device_role_id': 3}}
+        libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
+            to avoid redundant API calls. Example: {123: {...device_data...}}
+
+    Returns:
+        dict: Bulk import result with structure:
+            {
+                'total': int,
+                'success': List[dict],  # Successfully imported devices
+                'failed': List[dict],   # Failed imports with errors
+                'skipped': List[dict],  # Skipped devices (already exist, etc.)
+                'virtual_chassis_created': int  # Number of VCs created
+            }
+
+    Example:
+        >>> result = bulk_import_devices([1, 2, 3, 4, 5])
+        >>> print(f"Imported {len(result['success'])} of {result['total']} devices")
+    """
+    return bulk_import_devices_shared(
+        device_ids=device_ids,
+        server_key=server_key,
+        sync_options=sync_options,
+        manual_mappings_per_device=manual_mappings_per_device,
+        libre_devices_cache=libre_devices_cache,
+        job=None,  # No job context for synchronous imports
+    )
 
 
 def get_librenms_device_by_id(api: LibreNMSAPI, device_id: int) -> dict:

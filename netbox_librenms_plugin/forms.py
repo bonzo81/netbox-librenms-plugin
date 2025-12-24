@@ -70,6 +70,25 @@ class LibreNMSSettingsForm(NetBoxModelForm):
         help_text="Number of devices that triggers background job processing (applies when mode is 'threshold')",
     )
 
+    import_job_mode = forms.ChoiceField(
+        label="Import Job Mode",
+        choices=[
+            ("always", "Always use background jobs"),
+            ("never", "Never use background jobs"),
+            ("threshold", "Use threshold-based decision"),
+        ],
+        widget=forms.Select(attrs={"class": "form-select"}),
+        help_text="Control when to use background jobs for device imports",
+    )
+
+    import_job_threshold = forms.IntegerField(
+        label="Import Count Threshold",
+        min_value=1,
+        max_value=500,
+        widget=forms.NumberInput(attrs={"class": "form-control"}),
+        help_text="Number of devices that triggers background job for imports (applies when mode is 'threshold')",
+    )
+
     class Meta:
         model = LibreNMSSettings
         fields = [
@@ -79,6 +98,8 @@ class LibreNMSSettingsForm(NetBoxModelForm):
             "strip_domain_default",
             "background_job_mode",
             "background_job_threshold",
+            "import_job_mode",
+            "import_job_threshold",
         ]
 
     def __init__(self, *args, **kwargs):

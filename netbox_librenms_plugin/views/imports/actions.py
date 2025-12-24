@@ -4,7 +4,7 @@ import logging
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.views import View
 
@@ -339,6 +339,37 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
 class BulkImportDevicesView(LibreNMSAPIMixin, View):
     """Handle bulk import requests coming from the LibreNMS import table."""
 
+    def should_use_background_job_for_import(self, device_count, settings):
+        """
+        Determine if import operation should run as background job.
+
+        Similar to filter processing, import jobs provide active cancellation
+        and keep the browser responsive during bulk imports.
+
+        Args:
+            device_count: Number of devices that will be imported
+            settings: LibreNMSSettings instance with import_job_mode and threshold
+
+        Returns:
+            bool: True if background job should be used, False for synchronous
+        """
+        if not settings:
+            # Fallback to threshold mode with default of 5 if settings not found
+            return device_count >= 5
+
+        mode = settings.import_job_mode
+
+        if mode == "always":
+            return True
+        elif mode == "never":
+            return False
+        elif mode == "threshold":
+            threshold = settings.import_job_threshold
+            return device_count >= threshold
+        else:
+            # Unknown mode, default to threshold behavior
+            return device_count >= 5
+
     def post(self, request):  # noqa: PLR0912 - branching keeps responses explicit
         device_ids = request.POST.getlist("select")
         if not device_ids:
@@ -421,6 +452,76 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
             if cached_device:
                 libre_devices_cache[device_id] = cached_device
 
+        # Check if we should use background job for import
+        total_import_count = len(parsed_ids)
+        
+        # Load settings for background job decision
+        settings = None
+        try:
+            from netbox_librenms_plugin.models import LibreNMSSettings
+            settings = LibreNMSSettings.objects.first()
+        except Exception:
+            # Settings not available; will use default thresholds
+            pass
+
+        # Decide whether to use background job
+        if self.should_use_background_job_for_import(total_import_count, settings):
+            # Check if RQ workers are available
+            from utilities.rqworker import get_workers_for_queue
+            
+            if get_workers_for_queue("default") > 0:
+                from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+                # Enqueue background job
+                job = ImportDevicesJob.enqueue(
+                    user=request.user,
+                    device_ids=device_ids_to_import,
+                    vm_imports=vm_imports,
+                    server_key=self.librenms_api.server_key,
+                    sync_options=sync_options,
+                    manual_mappings_per_device=manual_mappings_per_device,
+                    libre_devices_cache=libre_devices_cache,
+                )
+
+                logger.info(
+                    f"Enqueued ImportDevicesJob {job.pk} (UUID: {job.job_id}) for user {request.user} - {total_import_count} devices/VMs"
+                )
+
+                # Show notification and redirect - matching NetBox's native pattern
+                from django.utils.safestring import mark_safe
+                messages.info(
+                    request,
+                    mark_safe(
+                        f"Import job started for {total_import_count} device{'s' if total_import_count != 1 else ''}. "
+                        f'You can monitor progress in the <a href="/core/jobs/{job.pk}/">Jobs interface</a>.'
+                    ),
+                )
+                
+                if request.headers.get("HX-Request"):
+                    # For HTMX requests, trigger a page refresh
+                    return HttpResponse(
+                        "",
+                        headers={"HX-Refresh": "true"},
+                    )
+                else:
+                    return redirect("plugins:netbox_librenms_plugin:librenms_import")
+            else:
+                # No workers available - warn user and proceed synchronously
+                logger.warning("No RQ workers available for import job, falling back to synchronous import")
+                messages.warning(
+                    request,
+                    f"Background job requested but no workers available. Importing {total_import_count} devices synchronously..."
+                )
+
+        # Synchronous import execution
+        # Build cache of already-fetched device data to avoid redundant API calls
+        libre_devices_cache_sync = {}
+        for device_id in parsed_ids:
+            cache_key = f"import_device_data_{device_id}"
+            cached_device = cache.get(cache_key)
+            if cached_device:
+                libre_devices_cache_sync[device_id] = cached_device
+
         # Import devices and VMs separately
         device_result = {
             "success": [],
@@ -438,7 +539,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                     server_key=self.librenms_api.server_key,
                     sync_options=sync_options,
                     manual_mappings_per_device=manual_mappings_per_device,  # type: ignore
-                    libre_devices_cache=libre_devices_cache,
+                    libre_devices_cache=libre_devices_cache_sync,
                 )
 
             # Import VMs if any
@@ -454,7 +555,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                     try:
                         # Try to use cached device data first
                         cache_key = f"import_device_data_{vm_id}"
-                        libre_device = cache.get(cache_key)
+                        libre_device = libre_devices_cache_sync.get(vm_id) or cache.get(cache_key)
 
                         if not libre_device:
                             libre_device = get_librenms_device_by_id(
@@ -584,7 +685,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
             for device_id in imported_device_ids:
                 # Fetch device from cache or API
                 cache_key = f"import_device_data_{device_id}"
-                libre_device = libre_devices_cache.get(device_id) or cache.get(cache_key)
+                libre_device = libre_devices_cache_sync.get(device_id) or cache.get(cache_key)
                 
                 if not libre_device:
                     libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
@@ -629,6 +730,150 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                 headers={"HX-Trigger": '{"closeModal": null}'},
             )
 
+        return redirect("plugins:netbox_librenms_plugin:librenms_import")
+
+
+class LoadImportJobResultsView(LibreNMSAPIMixin, View):
+    """Load and display results from a completed import background job."""
+
+    def get(self, request, job_id):
+        """
+        Load completed import job results and update table rows via HTMX.
+
+        Args:
+            request: Django request object
+            job_id: Integer PK of completed ImportDevicesJob
+
+        Returns:
+            HttpResponse with HTMX fragments for imported device rows
+        """
+        from core.models import Job
+        from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+
+        try:
+            job = Job.objects.get(pk=job_id)
+        except Job.DoesNotExist:
+            messages.error(request, f"Import job {job_id} not found")
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+
+        # Handle both string status and choice field object
+        status_value = job.status.value if hasattr(job.status, 'value') else job.status
+        status_label = job.status.label if hasattr(job.status, 'label') else job.status
+        
+        if status_value != "completed":
+            messages.warning(
+                request,
+                f"Import job is {status_label}, not completed. Please wait or check Jobs interface."
+            )
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
+
+        # Load results from job data
+        job_data = job.data or {}
+        imported_device_pks = job_data.get("imported_device_pks", [])
+        imported_vm_pks = job_data.get("imported_vm_pks", [])
+        imported_libre_device_ids = job_data.get("imported_libre_device_ids", [])
+        imported_libre_vm_ids = job_data.get("imported_libre_vm_ids", [])
+        server_key = job_data.get("server_key")
+        success_count = job_data.get("success_count", 0)
+        failed_count = job_data.get("failed_count", 0)
+        skipped_count = job_data.get("skipped_count", 0)
+        vc_created_count = job_data.get("virtual_chassis_created", 0)
+        errors = job_data.get("errors", [])
+
+        # Display summary messages
+        if success_count:
+            msg = f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}"
+            if vc_created_count:
+                msg += f" ({vc_created_count} virtual chassis created)"
+            messages.success(request, msg)
+        
+        if failed_count:
+            messages.error(
+                request,
+                f"Failed to import {failed_count} device{'s' if failed_count != 1 else ''}. Check job logs for details."
+            )
+        
+        if skipped_count:
+            messages.warning(
+                request,
+                f"Skipped {skipped_count} existing device{'s' if skipped_count != 1 else ''}"
+            )
+
+        # Log errors if any
+        for error_item in errors[:10]:  # Limit to first 10 errors in messages
+            device_id = error_item.get("device_id")
+            error_msg = error_item.get("error", "Unknown error")
+            logger.error(f"Import job {job_id}: Device {device_id} failed - {error_msg}")
+
+        # For HTMX requests, render updated table rows
+        if request.headers.get("HX-Request"):
+            updated_rows_html = []
+            
+            # All imported LibreNMS device IDs
+            all_imported_ids = imported_libre_device_ids + imported_libre_vm_ids
+            
+            if all_imported_ids:
+                # Re-fetch and re-validate each imported device
+                for device_id in all_imported_ids:
+                    try:
+                        # Fetch device from cache or API
+                        cache_key = f"import_device_data_{device_id}"
+                        libre_device = cache.get(cache_key)
+                        
+                        if not libre_device:
+                            libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
+                        
+                        if libre_device:
+                            # Determine if this was imported as VM or device
+                            is_vm = device_id in imported_libre_vm_ids
+                            
+                            # Re-validate with fresh status (will now show as imported)
+                            validation = validate_device_for_import(
+                                libre_device,
+                                import_as_vm=is_vm,
+                                api=None,  # No VC detection needed for already-imported devices
+                                include_vc_detection=False,
+                            )
+                            validation["import_as_vm"] = is_vm
+                            
+                            # Update cache with fresh validation
+                            libre_device["_validation"] = validation
+                            cache.set(cache_key, libre_device, 300)  # 5 minutes TTL
+                            
+                            # Render updated row
+                            table = DeviceImportTable([libre_device])
+                            context = {
+                                "record": libre_device,
+                                "table": table,
+                                "cluster_id": None,
+                                "role_id": None,
+                                "rack_id": None,
+                            }
+                            
+                            row_html = render(
+                                request,
+                                "netbox_librenms_plugin/htmx/device_import_row.html",
+                                context,
+                            ).content.decode("utf-8")
+                            updated_rows_html.append(row_html)
+                    except Exception as e:
+                        logger.warning(f"Failed to render updated row for device {device_id}: {e}")
+                        continue
+            
+            if updated_rows_html:
+                # Return concatenated row HTML with closeModal trigger
+                return HttpResponse(
+                    "\n".join(updated_rows_html),
+                    headers={"HX-Trigger": '{"closeModal": null}'},
+                )
+            else:
+                # No rows to update, just trigger a page reload
+                return HttpResponse(
+                    "",
+                    headers={"HX-Refresh": "true"},
+                )
+
+        # Non-HTMX request: redirect to import page
         return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
 
