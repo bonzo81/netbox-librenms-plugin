@@ -1031,74 +1031,7 @@
             }
         });
 
-        // Intercept bulk import responses to handle JSON (background job) vs HTML (synchronous)
-        document.body.addEventListener('htmx:beforeSwap', function (event) {
-            // Only handle bulk import responses
-            if (!event.detail.requestConfig ||
-                !event.detail.requestConfig.path.includes('/device-import/bulk/')) {
-                return;
-            }
 
-            // Check if response is JSON
-            const xhr = event.detail.xhr;
-            const contentType = xhr.getResponseHeader('content-type');
-
-            if (contentType && contentType.includes('application/json')) {
-                // Prevent default HTMX swap for JSON responses
-                event.detail.shouldSwap = false;
-
-                try {
-                    const data = JSON.parse(xhr.responseText);
-
-                    if (data.job_id && data.job_pk && data.device_count !== undefined) {
-                        // Background job response - start polling
-                        console.log('[Import] Background job enqueued:', data);
-
-                        // Show import processing modal
-                        const importModal = document.getElementById('import-processing-modal');
-                        if (!importModal) {
-                            // Create modal dynamically if it doesn't exist
-                            const modalHTML = `
-                            <div class="modal fade" id="import-processing-modal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
-                                <div class="modal-dialog modal-dialog-centered">
-                                    <div class="modal-content">
-                                        <div class="modal-header">
-                                            <h5 class="modal-title">Importing Devices</h5>
-                                        </div>
-                                        <div class="modal-body text-center">
-                                            <div class="spinner-border text-primary mb-3" role="status">
-                                                <span class="visually-hidden">Importing...</span>
-                                            </div>
-                                            <p id="import-progress-message">Importing devices...</p>
-                                        </div>
-                                        <div class="modal-footer">
-                                            <button type="button" class="btn btn-warning" id="cancel-import-btn">Cancel Import</button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                            document.body.insertAdjacentHTML('beforeend', modalHTML);
-                        }
-
-                        const modal = document.getElementById('import-processing-modal');
-                        const fallbackBackdrop = { element: null };
-                        showModal(modal, fallbackBackdrop);
-
-                        // Store reference for cancel button
-                        modal._bsModal = { hide: () => hideModal(modal, fallbackBackdrop) };
-
-                        // Start polling
-                        const pollUrl = `/api/core/background-tasks/${data.job_id}/`;
-                        pollImportJobStatus(data.job_id, data.job_pk, pollUrl, data.device_count);
-                    } else {
-                        console.warn('[Import] Unexpected JSON response:', data);
-                    }
-                } catch (e) {
-                    console.error('[Import] Failed to parse JSON response:', e);
-                }
-            }
-        });
 
         // Initialize Bootstrap tooltips
         if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
