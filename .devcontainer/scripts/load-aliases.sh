@@ -8,9 +8,39 @@ PLUGIN_DIR="/workspaces/netbox-librenms-plugin"
 
 alias netbox-run-bg="$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh --background"
 alias netbox-run="$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh"
+
+# Robust stop command that kills both tracked and orphaned processes
+alias netbox-stop='echo "🛑 Stopping NetBox and RQ workers..."; \
+  if [ -f /tmp/netbox.pid ]; then \
+    PID=$(cat /tmp/netbox.pid 2>/dev/null); \
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then \
+      kill "$PID" 2>/dev/null || kill -9 "$PID" 2>/dev/null; \
+      echo "   Stopped NetBox (PID: $PID)"; \
+    fi; \
+    rm -f /tmp/netbox.pid; \
+  fi; \
+  if [ -f /tmp/rqworker.pid ]; then \
+    PID=$(cat /tmp/rqworker.pid 2>/dev/null); \
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then \
+      kill "$PID" 2>/dev/null || kill -9 "$PID" 2>/dev/null; \
+      echo "   Stopped RQ worker (PID: $PID)"; \
+    fi; \
+    rm -f /tmp/rqworker.pid; \
+  fi; \
+  if pgrep -f "python.*rqworker" >/dev/null 2>&1; then \
+    ORPHAN_COUNT=$(pgrep -cf "python.*rqworker" 2>/dev/null || echo 0); \
+    pkill -9 -f "python.*rqworker" 2>/dev/null; \
+    echo "   Killed $ORPHAN_COUNT orphaned RQ worker(s)"; \
+  fi; \
+  if pgrep -f "python.*runserver.*8000" >/dev/null 2>&1; then \
+    pkill -9 -f "python.*runserver.*8000" 2>/dev/null; \
+    echo "   Killed orphaned NetBox server(s)"; \
+  fi; \
+  echo "✅ All processes stopped"'
+
 alias netbox-restart="netbox-stop && sleep 1 && netbox-run-bg"
 alias netbox-reload="cd $PLUGIN_DIR && (command -v uv >/dev/null 2>&1 && uv pip install -e . || pip install -e .) && netbox-restart"
-alias netbox-stop="([ -f /tmp/netbox.pid ] && kill \$(cat /tmp/netbox.pid) && rm /tmp/netbox.pid && echo 'NetBox stopped' || echo 'NetBox not running'); ([ -f /tmp/rqworker.pid ] && kill \$(cat /tmp/rqworker.pid) && rm /tmp/rqworker.pid && echo 'RQ worker stopped' || echo 'RQ worker not running')"
+
 alias netbox-logs="tail -f /tmp/netbox.log"
 alias netbox-status="[ -f /tmp/netbox.pid ] && kill -0 \$(cat /tmp/netbox.pid) 2>/dev/null && echo 'NetBox is running (PID: '\$(cat /tmp/netbox.pid)')' || echo 'NetBox is not running'; [ -f /tmp/rqworker.pid ] && kill -0 \$(cat /tmp/rqworker.pid) 2>/dev/null && echo 'RQ worker is running (PID: '\$(cat /tmp/rqworker.pid)')' || echo 'RQ worker is not running'"
 alias rq-logs="tail -f /tmp/rqworker.log"
