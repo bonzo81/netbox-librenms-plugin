@@ -108,6 +108,19 @@
     {% endwith %}
   {% endfor %}
 </div>
+<div class="modal-body pt-0">
+  <div class="p-3 bg-primary-subtle border border-primary rounded-1">
+    <div class="form-check">
+      <input type="checkbox" name="use_background_job" id="use-background-job-checkbox" class="form-check-input" checked>
+      <label class="form-check-label" for="use-background-job-checkbox">
+        Run as background job
+      </label>
+      <small class="form-text text-muted d-block mt-1">
+        Recommended: Jobs are logged and can be cancelled.
+      </small>
+    </div>
+  </div>
+</div>
 <div class="modal-footer">
   <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
     <i class="mdi mdi-close"></i> Cancel
@@ -126,6 +139,7 @@
     {% endfor %}
     <input type="hidden" name="use_sysname" value="{{ use_sysname|yesno:'true,false' }}">
     <input type="hidden" name="strip_domain" value="{{ strip_domain|yesno:'true,false' }}">
+    <input type="hidden" name="use_background_job" id="use-background-job-hidden" value="on">
     <button type="submit" class="btn btn-success d-inline-flex align-items-center gap-1" data-bulk-confirm-submit>
       <span data-state="idle" class="d-inline-flex align-items-center gap-1">
         <i class="mdi mdi-download"></i>
@@ -166,6 +180,15 @@
       if (loading) {
         loading.classList.toggle('d-none', !isLoading);
       }
+    }
+
+    // Sync checkbox with hidden input
+    const checkbox = document.getElementById('use-background-job-checkbox');
+    const hiddenInput = document.getElementById('use-background-job-hidden');
+    if (checkbox && hiddenInput) {
+      checkbox.addEventListener('change', function() {
+        hiddenInput.value = checkbox.checked ? 'on' : 'off';
+      });
     }
 
     document.addEventListener('htmx:beforeRequest', function(event) {

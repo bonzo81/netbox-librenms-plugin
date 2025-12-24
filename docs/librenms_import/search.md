@@ -73,24 +73,21 @@ Type: network
 
 ## Background Job Processing
 
-For searches that return many devices or include Virtual Chassis detection, the plugin may process your search as a background job. This keeps your browser responsive and allows you to cancel long-running operations.
+For searches that return many devices or include Virtual Chassis detection, you can choose to run your search as a background job. This keeps your browser responsive and allows you to cancel long-running operations.
 
-### Background Job Modes
+### Controlling Background Jobs
 
-The background job behavior is controlled in Plugin Settings:
+The filter form includes a "Run as background job" checkbox (enabled by default):
 
-**Always**
-: All searches run as background jobs. Provides cancellation capability and keeps browser responsive, but adds slight overhead for small searches.
+**Enabled** (recommended)
+: Search runs asynchronously as a background job. Provides cancellation capability, keeps browser responsive, and tracks progress in NetBox's Jobs interface.
 
-**Never**
-: All searches run synchronously. Browser enters "page loading" state until complete. Cannot cancel once started.
-
-**Threshold** (default)
-: Searches exceeding the configured device count trigger a background job (default: 20 devices). Balances responsiveness with simplicity for small searches.
+**Disabled**
+: Search runs synchronously. Browser enters "page loading" state until complete. Use for small searches when immediate results are preferred.
 
 ### Background Job Experience
 
-When a background job is triggered, you see a modal showing:
+When you enable background job processing, you see a modal showing:
 
 1. **Initial Status** - "Job queued, waiting to start..."
 2. **Processing** - "Processing your filter request..."
