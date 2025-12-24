@@ -2,6 +2,7 @@
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
+from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
     NetBoxModelFilterSetForm,
@@ -480,8 +481,8 @@ class LibreNMSImportFilterForm(forms.Form):
         """Initialize the form and populate dynamic choices."""
         # For bound forms, ensure use_background_job defaults to 'on' if not present
         # This handles the case where checkbox is checked by default but not in GET params
-        if args and isinstance(args[0], dict):
-            # Form is being bound with data (GET/POST dict)
+        if args and isinstance(args[0], (dict, QueryDict)):
+            # Form is being bound with data (GET/POST dict or QueryDict)
             data = args[0].copy() if hasattr(args[0], "copy") else dict(args[0])
             # If use_background_job is not in the data, add it with default 'on'
             # This makes the checkbox checked by default even on first submission
