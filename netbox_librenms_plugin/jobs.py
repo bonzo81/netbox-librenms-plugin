@@ -22,10 +22,9 @@ class FilterDevicesJob(JobRunner):
     - Job progress tracked in NetBox Jobs table
     - Results persist in cache for later retrieval
 
-    Jobs are triggered based on user-configured mode:
-    - 'always': All filter operations run as background jobs
-    - 'never': All operations run synchronously (no cancellation, browser may hang)
-    - 'threshold': Jobs run when device count exceeds configured threshold
+    Users control background job execution via the "Run as background job" checkbox
+    in the filter form. When enabled, the job runs asynchronously; when disabled,
+    filtering runs synchronously.
 
     Note: Both synchronous and background processing complete once started,
     even if the user navigates away. The key difference is cancellation ability
@@ -50,7 +49,6 @@ class FilterDevicesJob(JobRunner):
         """
         Execute filter processing in background.
 
-        Background job execution is controlled by plugin settings (always/never/threshold).
         Logs job start, completion, and any early termination events.
 
         Args:
@@ -127,10 +125,9 @@ class ImportDevicesJob(JobRunner):
     - Job progress tracked with device count logging
     - Errors collected per device without stopping entire import
 
-    Jobs are triggered based on user-configured import threshold settings:
-    - 'always': All import operations run as background jobs
-    - 'never': All operations run synchronously (no cancellation, browser may hang)
-    - 'threshold': Jobs run when device count exceeds configured threshold (default: 10)
+    Users control background job execution via the "Run as background job" checkbox
+    in the import confirmation modal. When enabled, the job runs asynchronously;
+    when disabled, imports run synchronously.
 
     Results stored in job.data with structure:
     {

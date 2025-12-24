@@ -34,38 +34,6 @@ class LibreNMSSettings(models.Model):
         help_text="Remove domain suffix from device names during import",
     )
 
-    background_job_mode = models.CharField(
-        max_length=20,
-        choices=[
-            ("always", "Always use background jobs"),
-            ("never", "Never use background jobs"),
-            ("threshold", "Use threshold-based decision"),
-        ],
-        default="threshold",
-        help_text="Control when to use background jobs for device filtering",
-    )
-
-    background_job_threshold = models.IntegerField(
-        default=20,
-        help_text="Number of devices that triggers background job processing (applies when mode is 'threshold')",
-    )
-
-    import_job_mode = models.CharField(
-        max_length=20,
-        choices=[
-            ("always", "Always use background jobs"),
-            ("never", "Never use background jobs"),
-            ("threshold", "Use threshold-based decision"),
-        ],
-        default="threshold",
-        help_text="Control when to use background jobs for device imports",
-    )
-
-    import_job_threshold = models.IntegerField(
-        default=5,
-        help_text="Number of devices that triggers background job for imports (applies when mode is 'threshold')",
-    )
-
     class Meta:
         verbose_name = "LibreNMS Settings"
         verbose_name_plural = "LibreNMS Settings"

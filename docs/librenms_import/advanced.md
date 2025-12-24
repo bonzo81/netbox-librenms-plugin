@@ -56,20 +56,15 @@ Match Device Type model names to LibreNMS hardware strings for automatic matchin
 
 ## Performance Optimization
 
-### Background Job Configuration
+### Background Job Control
 
-Choose the background job mode that fits your workflow:
+The import filter form includes a "Run as background job" checkbox (enabled by default) that controls whether searches run asynchronously:
 
-**Threshold mode** (recommended)
-: Small searches (< threshold) run immediately. Large searches run as jobs. Balances convenience with responsiveness.
+**Background job enabled** (recommended)
+: Search runs asynchronously with progress tracking, cancellation capability, and browser responsiveness. Best for most use cases, especially with Virtual Chassis detection or large device counts.
 
-**Always mode**
-: All searches run as background jobs. Best for environments with consistently large device counts or slow LibreNMS APIs.
-
-**Never mode**
-: All searches run synchronously. Best for small LibreNMS installations or when job overhead isn't desired.
-
-Adjust the threshold based on your LibreNMS size and network speed. Default is 20 devices.
+**Background job disabled**
+: Search runs synchronously. Browser enters "page loading" state until complete. Use for small searches when immediate results are preferred and job overhead isn't needed.
 
 ### Caching Strategy
 

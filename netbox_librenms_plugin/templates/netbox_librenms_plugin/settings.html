@@ -233,141 +233,6 @@
                             </div>
                         </div>
                     </div>
-
-                    <!-- Right Column: Background Job Processing -->
-                    <div class="col-lg-6">
-                        <!-- Background Job Processing Card -->
-                        <div class="card mb-3">
-                            <div class="card-header">
-                                <h3 class="card-title">
-                                    <i class="ti ti-cpu me-2"></i>
-                                    Background Job Processing
-                                </h3>
-                            </div>
-                            <div class="card-body">
-                                <p class="text-muted mb-3">
-                                    Configure when device filtering operations run as background jobs.
-                                </p>
-
-                                <div class="alert alert-info mb-3">
-                                    <p class="small mb-2"><strong>Background job benefits:</strong></p>
-                                    <ul class="mb-0 small" style="padding-left: 1.2rem;">
-                                        <li>Job progress tracked in NetBox Jobs table</li>
-                                        <li>Results persist in cache for later retrieval (Default 5 minutes)</li>
-                                        <li>Browser remains responsive during processing</li>
-                                        <li>Active cancellation of long-running operations</li>
-                                    </ul>
-                                </div>
-
-                                <div class="row">
-                                    <div class="col-md-6">
-                                        <div class="form-group mb-3">
-                                            <label for="{{ form.background_job_mode.id_for_label }}" class="form-label">
-                                                {{ form.background_job_mode.label }}
-                                            </label>
-                                            {{ form.background_job_mode }}
-                                        </div>
-                                    </div>
-
-                                    <div class="col-md-6">
-                                        <div class="form-group mb-3">
-                                            <label for="{{ form.background_job_threshold.id_for_label }}" class="form-label">
-                                                {{ form.background_job_threshold.label }}
-                                            </label>
-                                            {{ form.background_job_threshold }}
-                                            {% if form.background_job_threshold.help_text %}
-                                                <small class="form-text text-muted d-block">{{ form.background_job_threshold.help_text }}</small>
-                                            {% endif %}
-                                        </div>
-                                    </div>
-
-                                    <div class="col-12">
-                                        <div class="alert alert-warning mb-0">
-                                            <div class="d-flex">
-                                                <div>
-                                                    <i class="ti ti-alert-triangle me-2"></i>
-                                                </div>
-                                                <div>
-                                                    <strong>Warning:</strong> "Never" is not recommended for large LibreNMS device numbers or Virtual Chassis (Stacks) detection. When mode is set to "Never", you can not cancel the filtering process.
-                                                    <ul class="mb-0 mt-2">
-                                                        <li>Filter requests run even when you browse away from the filter page.</li>
-                                                        <li>This could lead to large imports causing performance issues on NetBox as the filtering processes complete</li>
-                                                        <li>Large filter queries may result in significant LibreNMS API calls.</li>
-                                                    </ul>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Import Job Processing Card -->
-                        <div class="card mb-3">
-                            <div class="card-header">
-                                <h3 class="card-title">
-                                    <i class="ti ti-download me-2"></i>
-                                    Import Job Processing
-                                </h3>
-                            </div>
-                            <div class="card-body">
-                                <p class="text-muted mb-3">
-                                    Configure when device import operations run as background jobs.
-                                </p>
-
-                                <div class="alert alert-info mb-3">
-                                    <p class="small mb-2"><strong>Background job benefits for imports:</strong></p>
-                                    <ul class="mb-0 small" style="padding-left: 1.2rem;">
-                                        <li>Browser remains responsive during large imports</li>
-                                        <li>Job progress tracked in NetBox Jobs table</li>
-                                        <li>Active cancellation of long-running imports</li>
-                                        <li>Error collection without stopping entire import</li>
-                                    </ul>
-                                </div>
-
-                                <div class="row">
-                                    <div class="col-md-6">
-                                        <div class="form-group mb-3">
-                                            <label for="{{ form.import_job_mode.id_for_label }}" class="form-label">
-                                                {{ form.import_job_mode.label }}
-                                            </label>
-                                            {{ form.import_job_mode }}
-                                        </div>
-                                    </div>
-
-                                    <div class="col-md-6">
-                                        <div class="form-group mb-3">
-                                            <label for="{{ form.import_job_threshold.id_for_label }}" class="form-label">
-                                                {{ form.import_job_threshold.label }}
-                                            </label>
-                                            {{ form.import_job_threshold }}
-                                            {% if form.import_job_threshold.help_text %}
-                                                <small class="form-text text-muted d-block">{{ form.import_job_threshold.help_text }}</small>
-                                            {% endif %}
-                                        </div>
-                                    </div>
-
-                                    <div class="col-12">
-                                        <div class="alert alert-warning mb-0">
-                                            <div class="d-flex">
-                                                <div>
-                                                    <i class="ti ti-alert-triangle me-2"></i>
-                                                </div>
-                                                <div>
-                                                    <strong>Note:</strong> Setting mode to "Never" will cause browser blocking during large imports.
-                                                    <ul class="mb-0 mt-2">
-                                                        <li>Import operations run even when you browse away from the page</li>
-                                                        <li>Large imports cannot be cancelled once started</li>
-                                                        <li>Recommended to use "Threshold" mode for flexibility</li>
-                                                    </ul>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
                 </div>
 
                 <!-- Save Button -->
@@ -401,16 +266,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const initialVcPatternValue = vcPatternInput.value;
     const useSysnameCheckbox = document.getElementById('id_use_sysname_default');
     const stripDomainCheckbox = document.getElementById('id_strip_domain_default');
-    const backgroundJobModeSelect = document.getElementById('id_background_job_mode');
-    const backgroundJobThresholdInput = document.getElementById('id_background_job_threshold');
-    const importJobModeSelect = document.getElementById('id_import_job_mode');
-    const importJobThresholdInput = document.getElementById('id_import_job_threshold');
     const initialUseSysnameValue = useSysnameCheckbox ? useSysnameCheckbox.checked : true;
     const initialStripDomainValue = stripDomainCheckbox ? stripDomainCheckbox.checked : false;
-    const initialBackgroundJobModeValue = backgroundJobModeSelect ? backgroundJobModeSelect.value : '';
-    const initialBackgroundJobThresholdValue = backgroundJobThresholdInput ? backgroundJobThresholdInput.value : '';
-    const initialImportJobModeValue = importJobModeSelect ? importJobModeSelect.value : '';
-    const initialImportJobThresholdValue = importJobThresholdInput ? importJobThresholdInput.value : '';
 
     // Enable/disable server save button based on changes
     function updateServerSaveButton() {
@@ -431,11 +288,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const vcPatternChanged = vcPatternInput.value !== initialVcPatternValue;
         const useSysnameChanged = useSysnameCheckbox ? (useSysnameCheckbox.checked !== initialUseSysnameValue) : false;
         const stripDomainChanged = stripDomainCheckbox ? (stripDomainCheckbox.checked !== initialStripDomainValue) : false;
-        const backgroundJobModeChanged = backgroundJobModeSelect ? (backgroundJobModeSelect.value !== initialBackgroundJobModeValue) : false;
-        const backgroundJobThresholdChanged = backgroundJobThresholdInput ? (backgroundJobThresholdInput.value !== initialBackgroundJobThresholdValue) : false;
-        const importJobModeChanged = importJobModeSelect ? (importJobModeSelect.value !== initialImportJobModeValue) : false;
-        const importJobThresholdChanged = importJobThresholdInput ? (importJobThresholdInput.value !== initialImportJobThresholdValue) : false;
-        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged || backgroundJobModeChanged || backgroundJobThresholdChanged || importJobModeChanged || importJobThresholdChanged;
+        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged;
         saveImportBtn.disabled = !hasChanges;
 
         if (hasChanges) {
@@ -452,10 +305,6 @@ document.addEventListener('DOMContentLoaded', function() {
     vcPatternInput.addEventListener('input', updateImportSaveButton);
     if (useSysnameCheckbox) useSysnameCheckbox.addEventListener('change', updateImportSaveButton);
     if (stripDomainCheckbox) stripDomainCheckbox.addEventListener('change', updateImportSaveButton);
-    if (backgroundJobModeSelect) backgroundJobModeSelect.addEventListener('change', updateImportSaveButton);
-    if (backgroundJobThresholdInput) backgroundJobThresholdInput.addEventListener('input', updateImportSaveButton);
-    if (importJobModeSelect) importJobModeSelect.addEventListener('change', updateImportSaveButton);
-    if (importJobThresholdInput) importJobThresholdInput.addEventListener('input', updateImportSaveButton);
 
     // Initialize button states
     updateServerSaveButton();

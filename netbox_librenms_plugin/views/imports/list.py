@@ -35,44 +35,23 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
         return get_permission_for_model(Device, "view")
 
-    def should_use_background_job(self, request, device_count, settings):
+    def should_use_background_job(self):
         """
         Determine if filter operation should run as background job.
 
         Background jobs provide active cancellation and keep the browser responsive
-        during long-running operations. The decision is based on user-configured mode.
+        during long-running operations.
 
-        Note: Synchronous processing also completes once started, even if the user
-        navigates away. The main benefits of background jobs are:
+        The main benefits of background jobs are:
         - Active cancellation capability
         - Browser responsiveness (no "page loading" hang)
         - Job tracking in NetBox Jobs interface
         - Results cached for later retrieval
 
-        Args:
-            request: Django request object
-            device_count: Number of devices that will be processed
-            settings: LibreNMSSettings instance with background_job_mode and threshold
-
         Returns:
             bool: True if background job should be used, False for synchronous
         """
-        if not settings:
-            # Fallback to threshold mode with default of 20 if settings not found
-            return device_count >= 20
-
-        mode = settings.background_job_mode
-
-        if mode == "always":
-            return True
-        elif mode == "never":
-            return False
-        elif mode == "threshold":
-            threshold = settings.background_job_threshold
-            return device_count >= threshold
-        else:
-            # Unknown mode, default to threshold behavior
-            return device_count >= 20
+        return self._filter_form_data.get("use_background_job", True)
 
     def _load_job_results(self, job_id):
         """
@@ -268,17 +247,9 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
             # Load settings for background job decision
             settings = None
-            try:
-                settings = LibreNMSSettings.objects.first()
-            except Exception:
-                # Settings not available; will use default thresholds
-                pass
-
             # Decide whether to use background job
-            # Skip background job if data is already cached (even if count exceeds threshold)
-            if not devices_cached and self.should_use_background_job(
-                request, device_count, settings
-            ):
+            # Skip background job if data is already cached
+            if not devices_cached and self.should_use_background_job():
                 # Check if RQ workers are available
                 if get_workers_for_queue("default") > 0:
                     from netbox_librenms_plugin.jobs import FilterDevicesJob
@@ -428,10 +399,10 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         )
 
         self._from_cache = from_cache
-        
+
         # Mark each device's validation with VC detection flag for downstream views
         for device in validated_devices:
-            if '_validation' in device:
-                device['_validation']['_vc_detection_enabled'] = vc_detection_enabled
+            if "_validation" in device:
+                device["_validation"]["_vc_detection_enabled"] = vc_detection_enabled
 
         return validated_devices

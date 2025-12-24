@@ -64,7 +64,7 @@
                   <strong>Performance note:</strong> <li>Results are cached (default: 5 minutes).</li>
                   <li>Large LibreNMS datasets take time to process</li>
                   <li>Repeating the same filter search will use cached data if available.</li>
-                  <li>Using background jobs is recommended for large filter sets.</li>
+                  <li>Using background jobs is default and recommended.</li>
                   <li>Background jobs can be cancelled if needed.</li>
                 </ul>
               </div>
@@ -167,6 +167,17 @@
                     </div>
                   </div>
                 </div>
+                <div class="p-3 my-3 bg-primary-subtle border border-primary rounded-1">
+                  <div class="form-check">
+                    {{ filter_form.use_background_job }}
+                    <label class="form-check-label" for="{{ filter_form.use_background_job.id_for_label }}">
+                      {{ filter_form.use_background_job.label }}
+                    </label>
+                    {% if filter_form.use_background_job.help_text %}
+                      <small class="form-text text-muted d-block">{{ filter_form.use_background_job.help_text }}</small>
+                    {% endif %}
+                  </div>
+                </div>
                 <div class="text-end">
                   <button type="submit" class="btn btn-primary" id="apply-filters-btn">
                     <i class="mdi mdi-filter"></i> Apply Filters
@@ -217,7 +228,7 @@
         </p>
     </div>
   {% else %}
-    {% if vc_detection_skipped %}
+    {% if vc_detection_skipped and filters_submitted %}
       <div class="alert alert-info alert-dismissible fade show mb-3" role="alert">
         <i class="mdi mdi-progress-clock"></i>
         Virtual chassis detection is disabled for this search (default). Selecting a role from the drop down will trigger a virtual chassis check for that device.
@@ -231,9 +242,9 @@
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
     {% elif from_cache and not request.GET.job_id %}
-      <div class="alert alert-info alert-dismissible fade show mb-3" role="alert">
-        <i class="mdi mdi-cached"></i>
-        These filter results were found in cache (last fetched within 5 minutes). Use "Clear cache before search" to fetch fresh data from LibreNMS.
+      <div class="alert alert-info alert-dismissible fade show mb-3 border-warning border-2" role="alert">
+        <i class="mdi mdi-cached me-1"></i>
+        <strong>Cached Results:</strong> These filter results were found in cache (last fetched within 5 minutes). Use "Clear cache before search" to fetch fresh data from LibreNMS.
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
     {% endif %}
