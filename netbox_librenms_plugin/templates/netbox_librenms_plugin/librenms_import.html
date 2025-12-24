@@ -242,9 +242,9 @@
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
     {% elif from_cache and not request.GET.job_id %}
-      <div class="alert alert-info alert-dismissible fade show mb-3" role="alert">
-        <i class="mdi mdi-cached"></i>
-        These filter results were found in cache (last fetched within 5 minutes). Use "Clear cache before search" to fetch fresh data from LibreNMS.
+      <div class="alert alert-info alert-dismissible fade show mb-3 border-warning border-2" role="alert">
+        <i class="mdi mdi-cached me-1"></i>
+        <strong>Cached Results:</strong> These filter results were found in cache (last fetched within 5 minutes). Use "Clear cache before search" to fetch fresh data from LibreNMS.
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
     {% endif %}

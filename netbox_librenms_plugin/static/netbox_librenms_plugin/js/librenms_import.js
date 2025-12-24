@@ -767,15 +767,12 @@
                             }
                         }
                     } else if (result.type === 'html') {
-                        // Synchronous response - replace current document with returned HTML
+                        // Synchronous response - navigate to the URL to reload with results
                         if (modalInstance) {
                             modalInstance.hide();
                         }
-                        // Reset initialization flag so new document can initialize
-                        window.LibreNMSImportInitialized = false;
-                        document.open();
-                        document.write(result.html);
-                        document.close();
+                        // Navigate to the results URL, allowing proper browser history
+                        window.location.href = finalUrl;
                     }
                 })
                 .catch(error => {

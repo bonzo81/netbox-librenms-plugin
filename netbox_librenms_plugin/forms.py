@@ -481,12 +481,28 @@ class LibreNMSImportFilterForm(forms.Form):
         """Initialize the form and populate dynamic choices."""
         # For bound forms, ensure use_background_job defaults to 'on' if not present
         # This handles the case where checkbox is checked by default but not in GET params
+        # Only apply this default when no filters are applied (initial page load)
         if args and isinstance(args[0], (dict, QueryDict)):
             # Form is being bound with data (GET/POST dict or QueryDict)
             data = args[0].copy() if hasattr(args[0], "copy") else dict(args[0])
             # If use_background_job is not in the data, add it with default 'on'
             # This makes the checkbox checked by default even on first submission
-            if "use_background_job" not in data and not data.get("job_id"):
+            # Only do this if no filter fields are set (initial page load scenario)
+            filter_fields = [
+                "librenms_location",
+                "librenms_type",
+                "librenms_os",
+                "librenms_hostname",
+                "librenms_sysname",
+            ]
+            has_filters = any(data.get(field) for field in filter_fields)
+
+            # Apply default only on initial load (no filters, no job_id)
+            if (
+                "use_background_job" not in data
+                and not data.get("job_id")
+                and not has_filters
+            ):
                 data["use_background_job"] = "on"
             args = (data,) + args[1:]
 
