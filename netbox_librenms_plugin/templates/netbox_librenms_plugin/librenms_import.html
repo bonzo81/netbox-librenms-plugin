@@ -235,19 +235,6 @@
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
     {% endif %}
-    {% if cache_cleared %}
-      <div class="alert alert-success alert-dismissible fade show mb-3" role="alert">
-        <i class="mdi mdi-refresh"></i>
-        Cache cleared before this search. Results were pulled directly from LibreNMS and will be cached again for 5 minutes.
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-      </div>
-    {% elif from_cache and not request.GET.job_id %}
-      <div class="alert alert-info alert-dismissible fade show mb-3 border-warning border-2" role="alert">
-        <i class="mdi mdi-cached me-1"></i>
-        <strong>Cached Results:</strong> These filter results were found in cache. Use "Clear cache before search" to fetch fresh data from LibreNMS.
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-      </div>
-    {% endif %}
 
     {# Bulk import toolbar #}
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
