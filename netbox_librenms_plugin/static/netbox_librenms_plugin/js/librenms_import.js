@@ -1093,6 +1093,90 @@
     }
 
     // ============================================
+    // CACHE EXPIRATION COUNTDOWN
+    // ============================================
+
+    /**
+     * Display live countdown for cache expiration.
+     * Shows time remaining until cached filter results expire.
+     */
+    function initializeCacheExpirationMonitor() {
+        const cacheInfoDisplay = document.getElementById('cache-info-display');
+        if (!cacheInfoDisplay) {
+            return; // No cache data present
+        }
+
+        const cacheTimestamp = cacheInfoDisplay.dataset.cacheTimestamp;
+        const cacheTimeout = parseInt(cacheInfoDisplay.dataset.cacheTimeout, 10);
+
+        if (!cacheTimestamp || !cacheTimeout) {
+            return;
+        }
+
+        // Parse ISO timestamp
+        const cachedAt = new Date(cacheTimestamp);
+        if (isNaN(cachedAt.getTime())) {
+            console.warn('[Cache Monitor] Invalid cache timestamp:', cacheTimestamp);
+            return;
+        }
+
+        const expiresAt = new Date(cachedAt.getTime() + cacheTimeout * 1000);
+        const countdownSpan = document.getElementById('cache-expiry-countdown');
+        const iconElement = cacheInfoDisplay.querySelector('.mdi');
+
+        /**
+         * Update countdown display.
+         */
+        function updateCountdown() {
+            const now = new Date();
+            const remainingMs = expiresAt - now;
+
+            if (remainingMs <= 0) {
+                // Cache has expired
+                if (countdownSpan) {
+                    countdownSpan.textContent = 'expired';
+                    countdownSpan.classList.add('text-danger');
+                }
+                if (iconElement) {
+                    iconElement.classList.remove('mdi-clock-outline');
+                    iconElement.classList.add('mdi-clock-alert', 'text-danger');
+                }
+                cacheInfoDisplay.classList.remove('text-muted');
+                cacheInfoDisplay.classList.add('text-danger');
+                cacheInfoDisplay.title = 'Cache expired - refresh page to reload data';
+                return; // Stop updating
+            }
+
+            // Format remaining time
+            const seconds = Math.floor(remainingMs / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+
+            if (countdownSpan) {
+                if (minutes > 0) {
+                    countdownSpan.textContent = `${minutes}m ${secs}s`;
+                } else {
+                    countdownSpan.textContent = `${secs}s`;
+                }
+                
+                // Visual warning when under 60 seconds (less than 1 minute)
+                if (seconds < 60 && !countdownSpan.classList.contains('text-warning')) {
+                    countdownSpan.classList.add('text-warning');
+                    if (iconElement) {
+                        iconElement.classList.add('text-warning');
+                    }
+                }
+            }
+
+            // Continue updating
+            setTimeout(updateCountdown, 1000);
+        }
+
+        // Start countdown
+        updateCountdown();
+    }
+
+    // ============================================
     // INITIALIZATION
     // ============================================
 
@@ -1105,6 +1189,7 @@
         initializeFilterForm();
         initializeBulkImport();
         initializeHTMXHandlers();
+        initializeCacheExpirationMonitor();
         console.log('LibreNMS Import: Initialization complete');
     }
 

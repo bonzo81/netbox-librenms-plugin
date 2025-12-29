@@ -235,19 +235,6 @@
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
     {% endif %}
-    {% if cache_cleared %}
-      <div class="alert alert-success alert-dismissible fade show mb-3" role="alert">
-        <i class="mdi mdi-refresh"></i>
-        Cache cleared before this search. Results were pulled directly from LibreNMS and will be cached again for 5 minutes.
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-      </div>
-    {% elif from_cache and not request.GET.job_id %}
-      <div class="alert alert-info alert-dismissible fade show mb-3 border-warning border-2" role="alert">
-        <i class="mdi mdi-cached me-1"></i>
-        <strong>Cached Results:</strong> These filter results were found in cache (last fetched within 5 minutes). Use "Clear cache before search" to fetch fresh data from LibreNMS.
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-      </div>
-    {% endif %}
 
     {# Bulk import toolbar #}
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
@@ -263,6 +250,24 @@
             </span>
         </div>
       <div class="d-flex align-items-center gap-2 flex-wrap">
+        {# Cache expiration info - before Settings section #}
+        {% if filters_submitted and table.rows %}
+          {% if cache_metadata_missing %}
+          <div class="d-flex align-items-center gap-1 text-warning small" title="Cache metadata not found. This may indicate a cache synchronization issue.">
+              <i class="mdi mdi-alert"></i>
+              <span>Cache status: <strong>unavailable</strong></span>
+          </div>
+          <span class="text-muted">|</span>
+          {% elif cache_timestamp and cache_timeout %}
+          <div class="d-flex align-items-center gap-1 text-muted small" id="cache-info-display"
+               data-cache-timestamp="{{ cache_timestamp }}"
+               data-cache-timeout="{{ cache_timeout }}">
+              <i class="mdi mdi-clock-outline"></i>
+              <span>Cache expires in <strong id="cache-expiry-countdown">{{ cache_timeout }}s</strong></span>
+          </div>
+          <span class="text-muted">|</span>
+          {% endif %}
+        {% endif %}
         {# Import Settings #}
         <div class="d-flex align-items-center gap-2 border-start ps-2">
             <strong class="small">Settings:</strong>

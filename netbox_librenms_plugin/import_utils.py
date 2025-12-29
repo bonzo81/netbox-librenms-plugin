@@ -27,6 +27,23 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def get_cache_metadata_key(server_key: str, filters: dict, vc_enabled: bool) -> str:
+    """
+    Generate a consistent cache metadata key from filter parameters.
+    
+    Args:
+        server_key: LibreNMS server identifier
+        filters: Filter dictionary
+        vc_enabled: Whether VC detection is enabled
+    
+    Returns:
+        str: Consistent cache key for metadata
+    """
+    # Sort filter items to ensure consistent key generation
+    filter_parts = "_".join(f"{k}={v}" for k, v in sorted(filters.items()) if v)
+    return f"librenms_filter_cache_metadata_{server_key}_{filter_parts}_{vc_enabled}"
+
+
 def get_validated_device_cache_key(
     server_key: str, filters: dict, device_id: int | str, vc_enabled: bool
 ) -> str:
@@ -2021,6 +2038,27 @@ def process_device_filters(
         # This is what get_validated_device_with_selections() expects
         device_data_only = {k: v for k, v in device.items() if k != "_validation"}
         cache.set(simple_cache_key, device_data_only, timeout=api.cache_timeout)
+
+    # Store cache metadata (timestamp) for all filter operations
+    # This enables countdown display regardless of background job vs synchronous execution
+    if validated_devices and not from_cache:
+        from datetime import datetime, timezone
+        
+        cache_metadata_key = get_cache_metadata_key(
+            server_key=api.server_key,
+            filters=filters,
+            vc_enabled=vc_detection_enabled
+        )
+        cache_metadata = {
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "cache_timeout": api.cache_timeout,
+        }
+        cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
+        
+        if job:
+            job.logger.info(f"Stored cache metadata with key: {cache_metadata_key}")
+        else:
+            logger.info(f"Stored cache metadata with key: {cache_metadata_key}")
 
     if job:
         if exclude_existing:

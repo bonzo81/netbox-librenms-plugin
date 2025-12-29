@@ -84,6 +84,10 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         server_key = job_data.get("server_key", "default")
         vc_enabled = job_data.get("vc_detection_enabled", False)
 
+        # Extract cache metadata for frontend warnings
+        self._cache_timestamp = job_data.get("cached_at")
+        self._cache_timeout = job_data.get("cache_timeout", 300)
+
         if not device_ids:
             logger.warning(f"Job {job_id} missing device_ids")
             return []
@@ -323,6 +327,9 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             "vc_detection_skipped": not getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),
+            "cache_timestamp": getattr(self, "_cache_timestamp", None),
+            "cache_timeout": getattr(self, "_cache_timeout", 300),
+            "cache_metadata_missing": getattr(self, "_cache_metadata_missing", False),
         }
         return render(request, self.template_name, context)
 
@@ -399,6 +406,32 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         )
 
         self._from_cache = from_cache
+
+        # Retrieve cache metadata (timestamp) for countdown display
+        # This works for both new caches and existing caches
+        if validated_devices:
+            from netbox_librenms_plugin.import_utils import get_cache_metadata_key
+            
+            cache_metadata_key = get_cache_metadata_key(
+                server_key=self.librenms_api.server_key,
+                filters=libre_filters,
+                vc_enabled=vc_detection_enabled
+            )
+            cache_metadata = cache.get(cache_metadata_key)
+            if cache_metadata:
+                self._cache_timestamp = cache_metadata.get("cached_at")
+                self._cache_timeout = cache_metadata.get("cache_timeout", 300)
+                self._cache_metadata_missing = False
+                logger.info(
+                    f"Retrieved cache metadata: timestamp={self._cache_timestamp}, "
+                    f"timeout={self._cache_timeout}, from_cache={from_cache}"
+                )
+            else:
+                self._cache_metadata_missing = True
+                logger.warning(
+                    f"Cache metadata not found for key: {cache_metadata_key}, from_cache={from_cache}. "
+                    f"This may indicate cache key mismatch or metadata expiration."
+                )
 
         # Mark each device's validation with VC detection flag for downstream views
         for device in validated_devices:

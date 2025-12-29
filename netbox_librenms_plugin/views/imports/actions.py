@@ -227,6 +227,7 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
         devices = []
         errors = []
         seen_ids = set()
+        cache_expired_count = 0
 
         for raw_device_id in device_ids:
             try:
@@ -242,9 +243,11 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
             # Try to use cached device data from table load or role changes
             cache_key = f"import_device_data_{device_id}"
             libre_device = cache.get(cache_key)
+            from_cache = bool(libre_device)
 
             if not libre_device:
                 # Fallback to API fetch if cache expired or not populated
+                cache_expired_count += 1
                 libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
                 if libre_device:
                     # Cache for later use during actual import
@@ -316,10 +319,39 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
             )
 
         if not devices:
-            return HttpResponse(
-                '<div class="alert alert-danger mb-0">No valid devices selected.</div>',
-                status=400,
-            )
+            # Check if this is due to cache expiration
+            if cache_expired_count > 0 and cache_expired_count == len(seen_ids):
+                return HttpResponse(
+                    '<div class="alert alert-warning mb-0">'
+                    '<i class="mdi mdi-clock-alert"></i> '
+                    '<strong>Filter results have expired.</strong><br>'
+                    'The device data is no longer available in cache (5-minute timeout). '
+                    'Please <a href="javascript:window.location.reload();" class="alert-link">refresh the page</a> '
+                    'or re-run your filter to reload device data.'
+                    '</div>',
+                    status=400,
+                )
+            elif cache_expired_count > 0:
+                # Partial expiration - some devices lost their selections
+                return HttpResponse(
+                    '<div class="alert alert-warning mb-0">'
+                    '<i class="mdi mdi-clock-alert"></i> '
+                    f'<strong>Some device data has expired.</strong><br>'
+                    f'{cache_expired_count} of {len(seen_ids)} selected devices had expired cache data and may be missing role/rack selections. '
+                    'Please <a href="javascript:window.location.reload();" class="alert-link">refresh the page</a> '
+                    'or re-run your filter to reload device data.'
+                    '</div>',
+                    status=400,
+                )
+            else:
+                # Generic error - validation failed for all devices
+                return HttpResponse(
+                    '<div class="alert alert-danger mb-0">'
+                    'No valid devices selected. '
+                    f'{len(errors)} error(s) occurred: {" ".join(errors) if errors else "Please check device validation status."}'
+                    '</div>',
+                    status=400,
+                )
 
         context = {
             "devices": devices,
