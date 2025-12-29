@@ -15,7 +15,7 @@ Search and import devices from LibreNMS into NetBox with comprehensive validatio
 - Validate import prerequisites (Site, Device Type, Device Role)
 - Smart matching for Sites, Device Types, and Platforms
 - Import as physical Devices or Virtual Machines
-- Bulk import multiple devices with consistent configuration
+- Bulk import multiple devices
 - Automatic Virtual Chassis creation for stackable switches
 - Background job processing for large device sets
 

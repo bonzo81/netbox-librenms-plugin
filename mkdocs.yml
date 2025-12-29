@@ -5,19 +5,22 @@ repo_name: /netbox-librenms-plugin
 #strict: true
 nav:
   - Home: README.md
-  - Feature List: feature_list.md
-  - LibreNMS Import:
+  - Getting Started:
+    - Feature Overview: feature_list.md
+    - Initial Setup: usage_tips/README.md
+    - Custom Field Setup: usage_tips/custom_field.md
+    - Multi-Server Setup: usage_tips/multi_server_configuration.md
+    - Suggested Workflow: usage_tips/suggested_workflow.md
+  - Import Devices:
     - Overview: librenms_import/overview.md
     - Searching for Devices: librenms_import/search.md
     - Validation & Configuration: librenms_import/validation.md
-    - Importing Devices: librenms_import/import_process.md
-    - Advanced Topics: librenms_import/advanced.md
-  - Feature Guide:
-    - Custom Field: usage_tips/custom_field.md
+    - Import Settings: librenms_import/import_settings.md
+    - Background Jobs & Caching: librenms_import/background_jobs.md
+  - Sync & Configuration:
     - Virtual Chassis: usage_tips/virtual_chassis.md
     - Interface Mappings: usage_tips/interface_mappings.md
-  - Usage Tips: usage_tips/README.md
-  - Development Guide:
+  - Development:
     - Overview: development/README.md
     - Project Structure: development/structure.md
     - Views & Inheritance: development/views.md
