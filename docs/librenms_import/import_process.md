@@ -1,58 +1,3 @@
-# Importing Devices
-
-Once devices are validated and ready, you can import them individually or in bulk.
-
-## Single Device Import
-
-To import a single device:
-
-1. Ensure the device has a green "Ready to Import" badge
-2. Click the **Import** button on the device row
-3. The row updates to show the result:
-   - Success message with link to the created NetBox device
-   - Any warnings encountered during import
-   - Update timestamp
-
-The device is immediately created in NetBox with all configured attributes.
-
-## Bulk Import
-
-To import multiple devices at once:
-
-1. **Select devices** - Check the box next to each device you want to import
-2. **Click "Import Selected Devices"** - Button appears at the top of the table
-3. **Review confirmation modal** - Shows devices to be imported and their settings
-4. **Configure import settings** (optional):
-   - Use sysName for device names
-   - Strip domain suffixes from names
-5. **Click "Confirm Import"** - Starts the bulk import process
-
-### Bulk Import Results
-
-The bulk import operation shows a detailed summary:
-
-**Success section**
-: Lists successfully imported devices with links to their NetBox pages. Shows the device name and any Virtual Chassis created.
-
-**Failed section**
-: Lists devices that failed to import with specific error messages explaining why.
-
-**Skipped section**
-: Lists devices that were skipped (typically because they already exist) with the reason.
-
-**Summary statistics**
-: Total devices processed, success count, failure count, Virtual Chassis created count.
-
-### Bulk Import Features
-
-**Transaction safety**: All selected devices are processed in individual transactions. If one fails, others still succeed.
-
-**Consistent settings**: Import settings (use sysName, strip domain) apply to all selected devices uniformly.
-
-**Virtual Chassis creation**: If Virtual Chassis are detected, they're automatically created during bulk import with all members properly assigned.
-
-**Validation preservation**: Your manual selections (Site, Device Role, Rack, etc.) are preserved and applied during import.
-
 ## Import Settings
 
 Both single and bulk imports support these configuration options:
@@ -100,6 +45,8 @@ Created with these attributes:
 
 **Optional fields**
 : Platform, Serial number, Rack (devices only), Location (devices only)
+
+> **Note:** When a rack is assigned during import, the device is placed in the rack but without a specific rack unit (U) position. After import, these devices appear in the "Non racked" section of the rack in NetBox. You'll need to manually assign U positions to organize devices within the rack. The [NetBox Reorder Rack plugin](https://github.com/minitriga/netbox-reorder-rack) can simplify this task.
 
 **Status field**
 : Set to "active" if LibreNMS shows device as up (status=1), "offline" otherwise
@@ -166,6 +113,5 @@ These sync operations use the `librenms_id` custom field that was automatically 
 ## Next Steps
 
 After importing devices:
-- [Advanced Topics](advanced.md) - Best practices, performance tips, and special cases
 - [Interface Sync](../feature_list.md#interface-sync) - Pull interface data from LibreNMS
 - [Virtual Chassis](../usage_tips/virtual_chassis.md) - Manage multi-member devices
