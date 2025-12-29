@@ -94,6 +94,11 @@ class FilterDevicesJob(JobRunner):
         # Note: Validated devices are cached with shared keys by process_device_filters
         device_ids = [device["device_id"] for device in validated_devices]
 
+        # Track cache timestamp for frontend expiration warnings
+        from datetime import datetime, timezone
+
+        cached_at = datetime.now(timezone.utc).isoformat()
+
         # Store only metadata in job data (not the full device list)
         # Devices are retrieved via shared cache keys in _load_job_results
         self.job.data = {
@@ -103,6 +108,7 @@ class FilterDevicesJob(JobRunner):
             "server_key": server_key,
             "vc_detection_enabled": vc_detection_enabled,
             "cache_timeout": api.cache_timeout,
+            "cached_at": cached_at,
             "completed": True,
         }
 
@@ -166,19 +172,6 @@ class ImportDevicesJob(JobRunner):
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             **kwargs: Additional job parameters
         """
-        # Debug: Log import attempt
-        import sys
-        self.logger.warning(f"Python executable: {sys.executable}")
-        self.logger.warning(f"Python path: {sys.path[:3]}...")  # First 3 entries
-        
-        try:
-            import netbox_librenms_plugin.import_utils as import_utils_module
-            self.logger.warning(f"import_utils module loaded from: {import_utils_module.__file__}")
-            self.logger.warning(f"Available functions: {[x for x in dir(import_utils_module) if not x.startswith('_')][:10]}...")
-            self.logger.warning(f"bulk_import_devices_shared exists: {'bulk_import_devices_shared' in dir(import_utils_module)}")
-        except Exception as debug_err:
-            self.logger.warning(f"Debug import failed: {debug_err}")
-
         from netbox_librenms_plugin.import_utils import (
             bulk_import_devices_shared,
             create_vm_from_librenms,
