@@ -2063,12 +2063,7 @@ def process_device_filters(
 
         if existing_metadata and not should_update:
             # Metadata exists and cache wasn't cleared, keep using it (preserves original cache time)
-            if job:
-                job.logger.warning(
-                    "[CACHE DEBUG] Metadata already exists, preserving it"
-                )
-            else:
-                logger.warning("[CACHE DEBUG] Metadata already exists, preserving it")
+            pass
         else:
             # No metadata exists, OR cache was cleared, OR fresh data - create/update it now
             cache_metadata = {
@@ -2076,26 +2071,6 @@ def process_device_filters(
                 "cache_timeout": api.cache_timeout,
             }
             cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
-
-            action = "Updated" if existing_metadata else "Stored"
-            if job:
-                job.logger.warning(
-                    f"[CACHE DEBUG] {action} metadata with key: {cache_metadata_key}"
-                )
-                job.logger.warning(f"[CACHE DEBUG] Metadata content: {cache_metadata}")
-                job.logger.warning(f"[CACHE DEBUG] filters used: {filters}")
-                job.logger.warning(
-                    f"[CACHE DEBUG] clear_cache={clear_cache}, from_cache={from_cache}"
-                )
-            else:
-                logger.warning(
-                    f"[CACHE DEBUG] {action} metadata with key: {cache_metadata_key}"
-                )
-                logger.warning(f"[CACHE DEBUG] Metadata content: {cache_metadata}")
-                logger.warning(f"[CACHE DEBUG] filters used: {filters}")
-                logger.warning(
-                    f"[CACHE DEBUG] clear_cache={clear_cache}, from_cache={from_cache}"
-                )
 
     if job:
         if exclude_existing:
