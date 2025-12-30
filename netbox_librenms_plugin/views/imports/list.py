@@ -347,7 +347,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             self._import_data = self._get_import_queryset()
 
         data = self._import_data
-        table = DeviceImportTable(data)
+        table = DeviceImportTable(data, order_by=request.GET.get("sort"))
         return table
 
     def _get_import_queryset(self):
