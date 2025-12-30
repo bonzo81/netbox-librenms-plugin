@@ -97,6 +97,46 @@ class DeviceImportTable(tables.Table):
         self._cached_clusters = list(Cluster.objects.all().order_by("name"))
         self._cached_roles = list(DeviceRole.objects.all().order_by("name"))
 
+        # Apply sorting if order_by is specified
+        # Since we're working with dictionaries, not QuerySets, we handle sorting manually
+        if self.order_by:
+            self._sort_data()
+
+    def _sort_data(self):
+        """Sort table data based on order_by parameter."""
+        if not self.data:
+            return
+
+        # Get the ordering field and direction
+        order_by = self.order_by[0] if isinstance(self.order_by, (list, tuple)) else self.order_by
+        reverse = order_by.startswith("-")
+        field = order_by.lstrip("-")
+
+        # Map column names to data keys
+        field_map = {
+            "hostname": "hostname",
+            "sysname": "sysName",
+            "location": "location",
+            "hardware": "hardware",
+        }
+
+        data_key = field_map.get(field)
+        if not data_key:
+            return  # Unknown field, skip sorting
+
+        # Sort the data list in place
+        # Handle None values by treating them as empty strings for sorting
+        def sort_key(item):
+            value = item.get(data_key, "")
+            return (value or "").lower() if isinstance(value, str) else str(value or "")
+
+        try:
+            self.data.data.sort(key=sort_key, reverse=reverse)
+        except (AttributeError, TypeError):
+            # If data is a plain list, sort it directly
+            if isinstance(self.data, list):
+                self.data.sort(key=sort_key, reverse=reverse)
+
     # Selection checkbox
     selection = Column(
         verbose_name="",
