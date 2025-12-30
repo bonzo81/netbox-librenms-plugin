@@ -324,11 +324,11 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
                 return HttpResponse(
                     '<div class="alert alert-warning mb-0">'
                     '<i class="mdi mdi-clock-alert"></i> '
-                    '<strong>Filter results have expired.</strong><br>'
-                    'The device data is no longer available in cache (5-minute timeout). '
+                    "<strong>Filter results have expired.</strong><br>"
+                    "The device data is no longer available in cache (5-minute timeout). "
                     'Please <a href="javascript:window.location.reload();" class="alert-link">refresh the page</a> '
-                    'or re-run your filter to reload device data.'
-                    '</div>',
+                    "or re-run your filter to reload device data."
+                    "</div>",
                     status=400,
                 )
             elif cache_expired_count > 0:
@@ -336,20 +336,20 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
                 return HttpResponse(
                     '<div class="alert alert-warning mb-0">'
                     '<i class="mdi mdi-clock-alert"></i> '
-                    f'<strong>Some device data has expired.</strong><br>'
-                    f'{cache_expired_count} of {len(seen_ids)} selected devices had expired cache data and may be missing role/rack selections. '
+                    f"<strong>Some device data has expired.</strong><br>"
+                    f"{cache_expired_count} of {len(seen_ids)} selected devices had expired cache data and may be missing role/rack selections. "
                     'Please <a href="javascript:window.location.reload();" class="alert-link">refresh the page</a> '
-                    'or re-run your filter to reload device data.'
-                    '</div>',
+                    "or re-run your filter to reload device data."
+                    "</div>",
                     status=400,
                 )
             else:
                 # Generic error - validation failed for all devices
                 return HttpResponse(
                     '<div class="alert alert-danger mb-0">'
-                    'No valid devices selected. '
-                    f'{len(errors)} error(s) occurred: {" ".join(errors) if errors else "Please check device validation status."}'
-                    '</div>',
+                    "No valid devices selected. "
+                    f"{len(errors)} error(s) occurred: {' '.join(errors) if errors else 'Please check device validation status.'}"
+                    "</div>",
                     status=400,
                 )
 

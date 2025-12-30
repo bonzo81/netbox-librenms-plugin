@@ -125,6 +125,9 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         self._request = request  # Store request for connection checks
         self._job_results_loaded = False
         self._from_cache = False
+        self._cache_timestamp = None
+        self._cache_timeout = 300
+        self._cache_metadata_missing = False
 
         # Determine if new filters are being submitted
         libre_filter_fields = (
@@ -409,15 +412,28 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
         # Retrieve cache metadata (timestamp) for countdown display
         # This works for both new caches and existing caches
+        logger.warning(
+            f"[CACHE DEBUG] validated_devices count: {len(validated_devices) if validated_devices else 0}"
+        )
+        logger.warning(f"[CACHE DEBUG] libre_filters: {libre_filters}")
+        logger.warning(f"[CACHE DEBUG] vc_detection_enabled: {vc_detection_enabled}")
+        logger.warning(f"[CACHE DEBUG] server_key: {self.librenms_api.server_key}")
+
         if validated_devices:
             from netbox_librenms_plugin.import_utils import get_cache_metadata_key
-            
+
             cache_metadata_key = get_cache_metadata_key(
                 server_key=self.librenms_api.server_key,
                 filters=libre_filters,
-                vc_enabled=vc_detection_enabled
+                vc_enabled=vc_detection_enabled,
             )
+            logger.warning(
+                f"[CACHE DEBUG] Looking for metadata with key: {cache_metadata_key}"
+            )
+
             cache_metadata = cache.get(cache_metadata_key)
+            logger.warning(f"[CACHE DEBUG] Retrieved metadata: {cache_metadata}")
+
             if cache_metadata:
                 self._cache_timestamp = cache_metadata.get("cached_at")
                 self._cache_timeout = cache_metadata.get("cache_timeout", 300)
