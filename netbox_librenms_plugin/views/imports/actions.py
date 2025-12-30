@@ -727,7 +727,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
 
                     # Update cache with fresh validation
                     libre_device["_validation"] = validation
-                    cache.set(cache_key, libre_device, 300)  # 5 minutes TTL
+                    cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
 
                     # Render updated row
                     table = DeviceImportTable([libre_device])
@@ -865,7 +865,7 @@ class LoadImportJobResultsView(LibreNMSAPIMixin, View):
 
                             # Update cache with fresh validation
                             libre_device["_validation"] = validation
-                            cache.set(cache_key, libre_device, 300)  # 5 minutes TTL
+                            cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
 
                             # Render updated row
                             table = DeviceImportTable([libre_device])

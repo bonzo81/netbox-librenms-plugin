@@ -828,8 +828,9 @@ def validate_device_for_import(
                         .select_related("location", "site")
                         .order_by("location__name", "name")
                     )
-                    # Cache for 5 minutes
-                    cache.set(cache_key, available_racks, 300)
+                    # Use API cache timeout if available, otherwise use default 5 minutes
+                    cache_timeout = api.cache_timeout if api else 300
+                    cache.set(cache_key, available_racks, cache_timeout)
 
                 result["rack"]["available_racks"] = available_racks
                 # Rack is optional, don't add to issues
