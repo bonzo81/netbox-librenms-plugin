@@ -125,6 +125,9 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         self._request = request  # Store request for connection checks
         self._job_results_loaded = False
         self._from_cache = False
+        self._cache_timestamp = None
+        self._cache_timeout = 300
+        self._cache_metadata_missing = False
 
         # Determine if new filters are being submitted
         libre_filter_fields = (
@@ -411,11 +414,11 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         # This works for both new caches and existing caches
         if validated_devices:
             from netbox_librenms_plugin.import_utils import get_cache_metadata_key
-            
+
             cache_metadata_key = get_cache_metadata_key(
                 server_key=self.librenms_api.server_key,
                 filters=libre_filters,
-                vc_enabled=vc_detection_enabled
+                vc_enabled=vc_detection_enabled,
             )
             cache_metadata = cache.get(cache_metadata_key)
             if cache_metadata:

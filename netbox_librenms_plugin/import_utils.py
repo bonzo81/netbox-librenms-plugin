@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 def get_cache_metadata_key(server_key: str, filters: dict, vc_enabled: bool) -> str:
     """
     Generate a consistent cache metadata key from filter parameters.
-    
+
     Args:
         server_key: LibreNMS server identifier
         filters: Filter dictionary
         vc_enabled: Whether VC detection is enabled
-    
+
     Returns:
         str: Consistent cache key for metadata
     """
@@ -1205,10 +1205,14 @@ def bulk_import_devices_shared(
             # Refresh job from DB to get current status
             job.job.refresh_from_db()
             job_status = job.job.status
-            status_value = job_status.value if hasattr(job_status, 'value') else job_status
-            if status_value in (JobStatusChoices.STATUS_FAILED, 'failed', 'errored'):
+            status_value = (
+                job_status.value if hasattr(job_status, "value") else job_status
+            )
+            if status_value in (JobStatusChoices.STATUS_FAILED, "failed", "errored"):
                 if job.logger:
-                    job.logger.warning(f"Import job cancelled at device {idx} of {total}")
+                    job.logger.warning(
+                        f"Import job cancelled at device {idx} of {total}"
+                    )
                 else:
                     logger.warning(f"Import cancelled at device {idx} of {total}")
                 break
@@ -1309,7 +1313,9 @@ def bulk_import_devices_shared(
             else:  # Failed to import
                 failed_list.append({"device_id": device_id, "error": result["error"]})
                 if job and job.logger:
-                    job.logger.error(f"Failed to import device {device_id}: {result['error']}")
+                    job.logger.error(
+                        f"Failed to import device {device_id}: {result['error']}"
+                    )
 
         except Exception as e:
             error_msg = f"Unexpected error importing device {device_id}: {str(e)}"
@@ -2041,24 +2047,30 @@ def process_device_filters(
 
     # Store cache metadata (timestamp) for all filter operations
     # This enables countdown display regardless of background job vs synchronous execution
-    if validated_devices and not from_cache:
+    # Always store metadata when we have validated devices, even if from_cache
+    # This ensures metadata is available for countdown display
+    if validated_devices:
         from datetime import datetime, timezone
-        
+
         cache_metadata_key = get_cache_metadata_key(
-            server_key=api.server_key,
-            filters=filters,
-            vc_enabled=vc_detection_enabled
+            server_key=api.server_key, filters=filters, vc_enabled=vc_detection_enabled
         )
-        cache_metadata = {
-            "cached_at": datetime.now(timezone.utc).isoformat(),
-            "cache_timeout": api.cache_timeout,
-        }
-        cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
-        
-        if job:
-            job.logger.info(f"Stored cache metadata with key: {cache_metadata_key}")
+
+        # Check if metadata already exists to preserve original timestamp
+        # BUT: if clear_cache was requested or data came fresh from LibreNMS, update it
+        existing_metadata = cache.get(cache_metadata_key)
+        should_update = clear_cache or not from_cache
+
+        if existing_metadata and not should_update:
+            # Metadata exists and cache wasn't cleared, keep using it (preserves original cache time)
+            pass
         else:
-            logger.info(f"Stored cache metadata with key: {cache_metadata_key}")
+            # No metadata exists, OR cache was cleared, OR fresh data - create/update it now
+            cache_metadata = {
+                "cached_at": datetime.now(timezone.utc).isoformat(),
+                "cache_timeout": api.cache_timeout,
+            }
+            cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
 
     if job:
         if exclude_existing:
