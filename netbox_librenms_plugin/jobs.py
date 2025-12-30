@@ -234,7 +234,8 @@ class ImportDevicesJob(JobRunner):
                     if libre_devices_cache and vm_id in libre_devices_cache:
                         libre_device = libre_devices_cache[vm_id]
                     else:
-                        cache_key = f"import_device_data_{vm_id}"
+                        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+                        cache_key = get_import_device_cache_key(vm_id, server_key or "default")
                         libre_device = cache.get(cache_key)
 
                     if not libre_device:

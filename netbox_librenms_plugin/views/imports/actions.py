@@ -11,6 +11,7 @@ from django.views import View
 from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
+    get_import_device_cache_key,
     get_librenms_device_by_id,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
@@ -100,7 +101,7 @@ class DeviceImportHelperMixin:
         is_vm = bool(cluster_id)
 
         # Try to use cached device data from table load (eliminates redundant API calls)
-        cache_key = f"import_device_data_{device_id}"
+        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         libre_device = cache.get(cache_key)
 
         if not libre_device:
@@ -241,7 +242,7 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
             seen_ids.add(device_id)
 
             # Try to use cached device data from table load or role changes
-            cache_key = f"import_device_data_{device_id}"
+            cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
             libre_device = cache.get(cache_key)
             from_cache = bool(libre_device)
 
@@ -463,7 +464,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         # Build cache of already-fetched device data to avoid redundant API calls
         libre_devices_cache = {}
         for device_id in parsed_ids:
-            cache_key = f"import_device_data_{device_id}"
+            cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
             cached_device = cache.get(cache_key)
             if cached_device:
                 libre_devices_cache[device_id] = cached_device
@@ -530,7 +531,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         # Build cache of already-fetched device data to avoid redundant API calls
         libre_devices_cache_sync = {}
         for device_id in parsed_ids:
-            cache_key = f"import_device_data_{device_id}"
+            cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
             cached_device = cache.get(cache_key)
             if cached_device:
                 libre_devices_cache_sync[device_id] = cached_device
@@ -567,7 +568,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                 for vm_id in vm_ids_to_import:
                     try:
                         # Try to use cached device data first
-                        cache_key = f"import_device_data_{vm_id}"
+                        cache_key = get_import_device_cache_key(vm_id, self.librenms_api.server_key)
                         libre_device = libre_devices_cache_sync.get(vm_id) or cache.get(
                             cache_key
                         )
@@ -699,7 +700,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
             # Re-validate and render each imported device with fresh status
             for device_id in imported_device_ids:
                 # Fetch device from cache or API
-                cache_key = f"import_device_data_{device_id}"
+                cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
                 libre_device = libre_devices_cache_sync.get(device_id) or cache.get(
                     cache_key
                 )
@@ -841,7 +842,7 @@ class LoadImportJobResultsView(LibreNMSAPIMixin, View):
                 for device_id in all_imported_ids:
                     try:
                         # Fetch device from cache or API
-                        cache_key = f"import_device_data_{device_id}"
+                        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
                         libre_device = cache.get(cache_key)
 
                         if not libre_device:

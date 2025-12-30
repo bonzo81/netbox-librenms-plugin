@@ -73,6 +73,28 @@ def get_validated_device_cache_key(
     return f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}"
 
 
+def get_import_device_cache_key(device_id: int | str, server_key: str = "default") -> str:
+    """
+    Generate cache key for raw LibreNMS device data.
+
+    This key is used to cache raw device data (without validation metadata)
+    to avoid redundant API calls when users interact with dropdowns during
+    the import workflow.
+
+    Args:
+        device_id: LibreNMS device ID
+        server_key: LibreNMS server identifier for multi-server setups
+
+    Returns:
+        str: Cache key for the device data
+
+    Example:
+        >>> get_import_device_cache_key(123, "production")
+        'import_device_data_production_123'
+    """
+    return f"import_device_data_{server_key}_{device_id}"
+
+
 def _determine_device_name(
     libre_device: dict,
     use_sysname: bool = True,
@@ -2039,7 +2061,7 @@ def process_device_filters(
 
         # 2. Simple key (device ID only) - for quick device data lookup by role/rack updates
         #    This avoids redundant API calls when user interacts with dropdowns
-        simple_cache_key = f"import_device_data_{device_id}"
+        simple_cache_key = get_import_device_cache_key(device_id, api.server_key)
         # Cache just the raw device data (not the full validation result)
         # This is what get_validated_device_with_selections() expects
         device_data_only = {k: v for k, v in device.items() if k != "_validation"}
