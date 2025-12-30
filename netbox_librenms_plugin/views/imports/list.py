@@ -333,6 +333,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             "cache_timestamp": getattr(self, "_cache_timestamp", None),
             "cache_timeout": getattr(self, "_cache_timeout", 300),
             "cache_metadata_missing": getattr(self, "_cache_metadata_missing", False),
+            "librenms_server_info": self.get_server_info(),
         }
         return render(request, self.template_name, context)
 
