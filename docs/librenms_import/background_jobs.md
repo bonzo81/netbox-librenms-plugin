@@ -24,7 +24,23 @@ All background jobs appear in NetBox's **Jobs** interface, where you can view st
 
 ## Caching
 
-LibreNMS API responses are cached for 5 minutes to reduce load times and minimize API calls. Cache keys are unique per filter combination.
+The import table caches data for 5 minutes to reduce load times and minimize API calls to LibreNMS. Cache keys are unique per filter combination.
+
+### What Gets Cached
+
+The cache includes both LibreNMS device data AND NetBox reference data used in the import table:
+
+**From LibreNMS:**
+- Device lists matching your search filters
+- Device details (hostname, sysName, location, hardware, etc.)
+- Virtual chassis detection results
+
+**From NetBox:**
+- Available device roles (for the role dropdown in each row)
+- Available VM clusters (for VM imports)
+- Available racks for each site (filtered by the device's matched site)
+
+This means if you add a new role, create a new rack, or add a new cluster in NetBox, those changes won't appear in the import table dropdowns until you clear the cache or wait for it to expire (5 minutes).
 
 ### Controlling Cache
 
@@ -33,6 +49,15 @@ The search form includes a "Clear cache before search" checkbox:
 | Setting | Behavior |
 |---------|----------|
 | Unchecked (default) | Uses cached data if available. Fastest results. |
-| Checked | Forces fresh data retrieval from LibreNMS. |
+| Checked | Forces fresh data retrieval from both LibreNMS and NetBox. |
 
-Clear cache when you need current data after adding or updating devices in LibreNMS, or when troubleshooting. Keep cache enabled for normal operations and when refining filters.
+**When to clear cache:**
+- After adding or updating devices in LibreNMS
+- After adding new roles, racks, or clusters in NetBox that should appear in import dropdowns
+- When troubleshooting import issues
+- When you need to verify current state
+
+**When to keep cache enabled:**
+- Normal operations and when refining search filters
+- When repeatedly working with the same set of devices
+- When NetBox reference data hasn't changed
