@@ -18,7 +18,7 @@ The plugin validates all required NetBox objects (Site, Device Type, Device Role
 ## Key Features
 
 **Flexible Filtering**
-: Search by location, type, operating system, hostname, or system name. Combine filters for precise device selection.
+: Search by location, type, operating system, hostname, system name, or hardware model. Combine filters for precise device selection.
 
 **Smart Validation**
 : Automatic matching for Sites, Device Types, and Platforms based on LibreNMS data. Clear indicators for what's missing.

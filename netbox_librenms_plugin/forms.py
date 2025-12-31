@@ -442,6 +442,12 @@ class LibreNMSImportFilterForm(forms.Form):
         widget=forms.TextInput(attrs={"placeholder": "Exact or partial sysName match"}),
         help_text="SNMP sysName. (exact match only; combine with another filter for partial matching)",
     )
+    librenms_hardware = forms.CharField(
+        required=False,
+        label="Hardware",
+        widget=forms.TextInput(attrs={"placeholder": "e.g., C9300-48P, ASR-920"}),
+        help_text="LibreNMS hardware model (partial match)",
+    )
     show_disabled = forms.BooleanField(
         required=False,
         initial=False,
@@ -494,6 +500,7 @@ class LibreNMSImportFilterForm(forms.Form):
                 "librenms_os",
                 "librenms_hostname",
                 "librenms_sysname",
+                "librenms_hardware",
             ]
             has_filters = any(data.get(field) for field in filter_fields)
 
@@ -521,6 +528,7 @@ class LibreNMSImportFilterForm(forms.Form):
                 "librenms_os",
                 "librenms_hostname",
                 "librenms_sysname",
+                "librenms_hardware",
             )
 
             if not any(cleaned_data.get(field) for field in filter_fields):

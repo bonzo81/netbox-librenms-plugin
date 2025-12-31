@@ -17,6 +17,9 @@ LibreNMS Hostname
 LibreNMS System Name
 : When used alone, performs an exact match on the SNMP sysName. When combined with other filters, performs a partial match.
 
+Hardware
+: Partial match by LibreNMS hardware model. For example, "C9300" matches devices with hardware like "Cisco C9300-48P".
+
 ## Additional Search Options
 
 Include Disabled Devices
@@ -56,6 +59,12 @@ Type: network
 ```
 Type: network
 OS: ios
+```
+
+**Find specific hardware model**
+```
+Hardware: C9300
+Type: network
 ```
 
 **Find a specific device by name**
