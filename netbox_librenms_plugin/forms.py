@@ -465,7 +465,7 @@ class LibreNMSImportFilterForm(forms.Form):
         required=False,
         initial=False,
         label="Clear cache before search",
-        help_text="Discard the cache and pull fresh data.",
+        help_text="Discard the cache and pull fresh data from both LibreNMS and NetBox.",
         widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
     )
     exclude_existing = forms.BooleanField(
