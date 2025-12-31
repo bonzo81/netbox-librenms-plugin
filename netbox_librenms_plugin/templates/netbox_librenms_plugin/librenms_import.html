@@ -142,6 +142,13 @@
                       <small class="form-text text-muted">{{ filter_form.librenms_sysname.help_text }}</small>
                     {% endif %}
                   </div>
+                  <div class="col-md-6">
+                    <label for="{{ filter_form.librenms_hardware.id_for_label }}" class="form-label">{{ filter_form.librenms_hardware.label }}</label>
+                    {{ filter_form.librenms_hardware }}
+                    {% if filter_form.librenms_hardware.help_text %}
+                      <small class="form-text text-muted">{{ filter_form.librenms_hardware.help_text }}</small>
+                    {% endif %}
+                  </div>
                 </div>
                 <div class="row mb-3">
                   <div class="col-md-6">

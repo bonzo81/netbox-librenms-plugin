@@ -136,6 +136,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             "librenms_os",
             "librenms_hostname",
             "librenms_sysname",
+            "librenms_hardware",
         )
         filters_present = any(request.GET.get(field) for field in libre_filter_fields)
         filters_submitted = request.GET.get("apply_filters") or filters_present
@@ -215,6 +216,8 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
                 libre_filters["hostname"] = hostname
             if sysname := request.GET.get("librenms_sysname"):
                 libre_filters["sysname"] = sysname
+            if hardware := request.GET.get("librenms_hardware"):
+                libre_filters["hardware"] = hardware
 
             # Check if data is already cached before deciding on background job
             # This prevents creating a job when cached results are available
@@ -388,6 +391,8 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             libre_filters["hostname"] = hostname
         if sysname := data_source.get("librenms_sysname"):
             libre_filters["sysname"] = sysname
+        if hardware := data_source.get("librenms_hardware"):
+            libre_filters["hardware"] = hardware
 
         self._libre_filters = libre_filters
 

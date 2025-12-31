@@ -55,7 +55,7 @@ def get_validated_device_cache_key(
 
     Args:
         server_key: LibreNMS server key
-        filters: Filter dict with location, type, os, hostname, sysname keys
+        filters: Filter dict with location, type, os, hostname, sysname, hardware keys
         device_id: LibreNMS device ID
         vc_enabled: Whether virtual chassis detection was enabled
 
@@ -371,10 +371,13 @@ def get_librenms_devices_for_import(
                     client_filters["hostname"] = filters["hostname"]
                 if filters.get("sysname"):
                     client_filters["sysname"] = filters["sysname"]
+                if filters.get("hardware"):
+                    client_filters["hardware"] = filters["hardware"]
             else:
                 # Priority order for type/query filters: location > type > os > hostname > sysname
                 # Note: When sysname is combined with other filters, it's applied client-side for partial matching
                 # When sysname is alone, it uses API exact match (type=sysName)
+                # Note: hardware is always applied client-side for partial matching
                 # Use first available for API, save others for client-side filtering
                 if filters.get("location"):
                     api_filters["type"] = "location_id"
@@ -388,6 +391,8 @@ def get_librenms_devices_for_import(
                         client_filters["hostname"] = filters["hostname"]
                     if filters.get("sysname"):
                         client_filters["sysname"] = filters["sysname"]
+                    if filters.get("hardware"):
+                        client_filters["hardware"] = filters["hardware"]
                 elif filters.get("type"):
                     api_filters["type"] = "type"
                     api_filters["query"] = filters["type"]
@@ -398,6 +403,8 @@ def get_librenms_devices_for_import(
                         client_filters["hostname"] = filters["hostname"]
                     if filters.get("sysname"):
                         client_filters["sysname"] = filters["sysname"]
+                    if filters.get("hardware"):
+                        client_filters["hardware"] = filters["hardware"]
                 elif filters.get("os"):
                     api_filters["type"] = "os"
                     api_filters["query"] = filters["os"]
@@ -406,17 +413,27 @@ def get_librenms_devices_for_import(
                         client_filters["hostname"] = filters["hostname"]
                     if filters.get("sysname"):
                         client_filters["sysname"] = filters["sysname"]
+                    if filters.get("hardware"):
+                        client_filters["hardware"] = filters["hardware"]
                 elif filters.get("hostname"):
                     api_filters["type"] = "hostname"
                     api_filters["query"] = filters["hostname"]
-                    # Save sysname for client-side
+                    # Save sysname and hardware for client-side
                     if filters.get("sysname"):
                         client_filters["sysname"] = filters["sysname"]
+                    if filters.get("hardware"):
+                        client_filters["hardware"] = filters["hardware"]
                 elif filters.get("sysname"):
                     # sysname-only filter: Use API exact match (type=sysName&query=<value>)
                     # This is safe - returns empty if no exact match found
                     api_filters["type"] = "sysName"
                     api_filters["query"] = filters["sysname"]
+                    # Save hardware for client-side
+                    if filters.get("hardware"):
+                        client_filters["hardware"] = filters["hardware"]
+                elif filters.get("hardware"):
+                    # hardware-only filter: apply client-side for partial matching
+                    client_filters["hardware"] = filters["hardware"]
 
             # Note: disabled filter isn't directly supported by LibreNMS API
             # We'll filter client-side if needed
@@ -500,6 +517,12 @@ def _apply_client_filters(devices: List[dict], filters: dict) -> List[dict]:
         sysname_filter = filters["sysname"].lower()
         filtered = [
             d for d in filtered if sysname_filter in d.get("sysName", "").lower()
+        ]
+
+    if filters.get("hardware"):
+        hardware_filter = filters["hardware"].lower()
+        filtered = [
+            d for d in filtered if hardware_filter in (d.get("hardware") or "").lower()
         ]
 
     return filtered
@@ -1865,7 +1888,7 @@ def process_device_filters(
 
     Args:
         api: LibreNMS API client instance
-        filters: Filter dict with location, type, os, hostname, sysname keys
+        filters: Filter dict with location, type, os, hostname, sysname, hardware keys
         vc_detection_enabled: Whether to detect virtual chassis
         clear_cache: Whether to force cache refresh
         show_disabled: Whether to include disabled devices
