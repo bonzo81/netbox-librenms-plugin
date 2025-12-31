@@ -48,13 +48,22 @@ class LibreNMSSettingsView(View):
         # Create a mutable copy of POST data to handle partial form submissions
         post_data = request.POST.copy()
 
-        # If submitting import settings, populate server field with current value
-        if form_type == "import_settings" and not post_data.get("selected_server"):
-            post_data["selected_server"] = settings.selected_server
-
         form = LibreNMSSettingsForm(post_data, instance=settings)
 
-        if form.is_valid():
+        # Run validation first
+        form.is_valid()
+
+        # For import_settings form, we don't need to validate selected_server
+        # as it's not being changed. Clear any validation errors for that field.
+        if form_type == "import_settings":
+            # Clear selected_server errors since we're not updating it
+            if "selected_server" in form.errors:
+                del form.errors["selected_server"]
+
+        # Check if form is valid (after potentially clearing selected_server errors)
+        has_errors = bool(form.errors)
+
+        if not has_errors:
             # Only update the relevant field based on form_type
             if form_type == "server_config":
                 settings.selected_server = form.cleaned_data["selected_server"]

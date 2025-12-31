@@ -90,11 +90,11 @@ class LibreNMSSettingsForm(NetBoxModelForm):
         return choices
 
     def clean_vc_member_name_pattern(self):
-        """Validate that the VC member name pattern includes the {position} placeholder."""
+        """Validate that the VC member name pattern includes a unique identifier placeholder."""
         pattern = self.cleaned_data.get("vc_member_name_pattern")
-        if pattern and "{position}" not in pattern:
+        if pattern and "{position}" not in pattern and "{serial}" not in pattern:
             raise forms.ValidationError(
-                "The naming pattern must include the {position} placeholder to ensure unique member names."
+                "The naming pattern must include either {position} or {serial} placeholder to ensure unique member names."
             )
         return pattern
 
