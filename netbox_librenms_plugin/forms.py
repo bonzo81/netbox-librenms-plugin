@@ -16,15 +16,59 @@ from virtualization.models import Cluster, VirtualMachine
 from .models import InterfaceTypeMapping, LibreNMSSettings
 
 
-class LibreNMSSettingsForm(NetBoxModelForm):
+def _get_librenms_server_choices():
+    """
+    Helper function to get server choices from plugin configuration.
+    Shared between ServerConfigForm and other forms that need server selection.
+    """
+    choices = []
+
+    # Try to get multi-server configuration
+    servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
+
+    if servers_config and isinstance(servers_config, dict):
+        # Multi-server configuration
+        for key, config in servers_config.items():
+            display_name = config.get("display_name", key)
+            url = config.get("librenms_url", "Unknown URL")
+            choices.append((key, f"{display_name} ({url})"))
+    else:
+        # Legacy single-server configuration
+        legacy_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
+        if legacy_url:
+            choices.append(("default", f"Default Server ({legacy_url})"))
+        else:
+            choices.append(("default", "Default Server"))
+
+    return choices
+
+
+class ServerConfigForm(NetBoxModelForm):
     """
     Form for selecting the active LibreNMS server from configured servers.
+    Handles server configuration changes only.
     """
 
     selected_server = forms.ChoiceField(
         label="LibreNMS Server",
         help_text="Select which LibreNMS server to use for synchronization operations",
     )
+
+    class Meta:
+        model = LibreNMSSettings
+        fields = ["selected_server"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Get available servers from configuration
+        self.fields["selected_server"].choices = _get_librenms_server_choices()
+
+
+class ImportSettingsForm(NetBoxModelForm):
+    """
+    Form for configuring device import settings including naming patterns
+    and virtual chassis member naming.
+    """
 
     vc_member_name_pattern = forms.CharField(
         label="Virtual Chassis Member Naming Pattern",
@@ -55,48 +99,79 @@ class LibreNMSSettingsForm(NetBoxModelForm):
     class Meta:
         model = LibreNMSSettings
         fields = [
-            "selected_server",
             "vc_member_name_pattern",
             "use_sysname_default",
             "strip_domain_default",
         ]
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Get available servers from configuration
-        self.fields["selected_server"].choices = self._get_server_choices()
-
-    def _get_server_choices(self):
-        """Get server choices from plugin configuration."""
-        choices = []
-
-        # Try to get multi-server configuration
-        servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
-
-        if servers_config and isinstance(servers_config, dict):
-            # Multi-server configuration
-            for key, config in servers_config.items():
-                display_name = config.get("display_name", key)
-                url = config.get("librenms_url", "Unknown URL")
-                choices.append((key, f"{display_name} ({url})"))
-        else:
-            # Legacy single-server configuration
-            legacy_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
-            if legacy_url:
-                choices.append(("default", f"Default Server ({legacy_url})"))
-            else:
-                choices.append(("default", "Default Server"))
-
-        return choices
-
     def clean_vc_member_name_pattern(self):
-        """Validate that the VC member name pattern includes a unique identifier placeholder."""
+        """
+        Validate VC member name pattern for valid placeholders and formatting.
+
+        The pattern is used as a suffix appended to the master device name.
+        Valid placeholders: {position}, {serial}
+        At least one is required for uniqueness.
+        """
         pattern = self.cleaned_data.get("vc_member_name_pattern")
-        if pattern and "{position}" not in pattern and "{serial}" not in pattern:
+
+        if not pattern:
+            return pattern
+
+        # Check for valid placeholder names using regex
+        import re
+
+        valid_placeholders = {"position", "serial"}
+        found_placeholders = set(re.findall(r"\{(\w+)\}", pattern))
+        invalid_placeholders = found_placeholders - valid_placeholders
+
+        if invalid_placeholders:
+            invalid_list = ", ".join(f"{{{p}}}" for p in sorted(invalid_placeholders))
+            error_msg = f"Invalid placeholder(s): {invalid_list}. Valid options are: {{position}}, {{serial}}"
+            raise forms.ValidationError(error_msg)
+
+        # Check required: must have at least one unique identifier
+        if "{position}" not in pattern and "{serial}" not in pattern:
             raise forms.ValidationError(
-                "The naming pattern must include either {position} or {serial} placeholder to ensure unique member names."
+                "The naming pattern must include either {{position}} or {{serial}} "
+                "placeholder to ensure unique member names."
             )
+
+        # Test the pattern can be formatted without errors
+        test_vars = {
+            "position": 1,
+            "serial": "ABC123",
+        }
+
+        try:
+            test_result = pattern.format(**test_vars)
+
+            # Check result isn't empty or just whitespace
+            if not test_result.strip():
+                raise forms.ValidationError(
+                    "The pattern results in an empty suffix. "
+                    "Please include some text content in the pattern."
+                )
+
+        except KeyError as e:
+            # This should be caught by check above, but just in case
+            raise forms.ValidationError(
+                f"Invalid placeholder in pattern: {e}. "
+                f"Valid options are: {{position}}, {{serial}}"
+            )
+        except (ValueError, IndexError) as e:
+            raise forms.ValidationError(f"Invalid pattern syntax: {str(e)}")
+
         return pattern
+
+
+# Keep for backward compatibility if needed elsewhere
+class LibreNMSSettingsForm(ServerConfigForm):
+    """
+    Deprecated: Use ServerConfigForm or ImportSettingsForm instead.
+    Kept for backward compatibility.
+    """
+
+    pass
 
 
 class InterfaceTypeMappingForm(NetBoxModelForm):

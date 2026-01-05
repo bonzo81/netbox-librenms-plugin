@@ -312,13 +312,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
         # Load settings for import defaults
         try:
-            settings, _ = LibreNMSSettings.objects.get_or_create(
-                defaults={
-                    "selected_server": "default",
-                    "use_sysname_default": True,
-                    "strip_domain_default": False,
-                }
-            )
+            settings, _ = LibreNMSSettings.objects.get_or_create()
         except Exception:
             settings = None
 
