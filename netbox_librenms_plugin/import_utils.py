@@ -44,6 +44,99 @@ def get_cache_metadata_key(server_key: str, filters: dict, vc_enabled: bool) -> 
     return f"librenms_filter_cache_metadata_{server_key}_{filter_parts}_{vc_enabled}"
 
 
+def get_active_cached_searches(server_key: str) -> list[dict]:
+    """
+    Retrieve all active cached searches for a server and enrich with display-friendly values.
+
+    Enriches raw filter IDs with human-readable names by looking up location names
+    from cached choices and converting type codes to display names.
+
+    Args:
+        server_key: LibreNMS server identifier
+
+    Returns:
+        List of dicts containing cache metadata with enriched display_filters
+    """
+    from datetime import datetime, timezone
+
+    cache_index_key = f"librenms_cache_index_{server_key}"
+    cache_index = cache.get(cache_index_key, [])
+
+    active_searches = []
+    valid_cache_keys = []
+
+    # Get location and type choices for enriching display
+    location_choices = {}
+    type_choices = {
+        "": "All Types",
+        "network": "Network",
+        "server": "Server",
+        "storage": "Storage",
+        "wireless": "Wireless",
+        "firewall": "Firewall",
+        "power": "Power",
+        "appliance": "Appliance",
+        "printer": "Printer",
+        "loadbalancer": "Load Balancer",
+        "other": "Other",
+    }
+
+    # Get cached location choices for enrichment
+    location_cache_key = "librenms_locations_choices"
+    cached_locations = cache.get(location_cache_key)
+    if cached_locations:
+        location_choices = dict(cached_locations)
+
+    for cache_key in cache_index:
+        metadata = cache.get(cache_key)
+        if metadata:
+            # Cache still exists, calculate time remaining
+            cached_at = datetime.fromisoformat(metadata.get("cached_at"))
+            cache_timeout = metadata.get("cache_timeout", 300)
+            now = datetime.now(timezone.utc)
+            age_seconds = (now - cached_at).total_seconds()
+            remaining_seconds = max(0, cache_timeout - age_seconds)
+
+            if remaining_seconds > 0:
+                # Add remaining time and cache key
+                metadata["remaining_seconds"] = int(remaining_seconds)
+                metadata["cache_key"] = cache_key
+
+                # Enrich filters with human-readable display values
+                if "filters" in metadata:
+                    display_filters = metadata["filters"].copy()
+                    # Convert location ID to location name
+                    if (
+                        "location" in display_filters
+                        and display_filters["location"] in location_choices
+                    ):
+                        display_filters["location"] = location_choices[
+                            display_filters["location"]
+                        ]
+                    # Convert type code to display name
+                    if (
+                        "type" in display_filters
+                        and display_filters["type"] in type_choices
+                    ):
+                        display_filters["type"] = type_choices[display_filters["type"]]
+                    metadata["display_filters"] = display_filters
+                else:
+                    # Fallback if filters key missing
+                    metadata["display_filters"] = {}
+
+                active_searches.append(metadata)
+                valid_cache_keys.append(cache_key)
+
+    # Clean up index if any keys have expired
+    if len(valid_cache_keys) < len(cache_index):
+        cache.set(cache_index_key, valid_cache_keys, timeout=3600)
+
+    # Sort by most recent first
+    active_searches.sort(key=lambda x: x.get("cached_at", ""), reverse=True)
+
+    return active_searches
+
+
 def get_validated_device_cache_key(
     server_key: str, filters: dict, device_id: int | str, vc_enabled: bool
 ) -> str:
@@ -73,7 +166,9 @@ def get_validated_device_cache_key(
     return f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}"
 
 
-def get_import_device_cache_key(device_id: int | str, server_key: str = "default") -> str:
+def get_import_device_cache_key(
+    device_id: int | str, server_key: str = "default"
+) -> str:
     """
     Generate cache key for raw LibreNMS device data.
 
@@ -931,7 +1026,6 @@ def validate_device_for_import(
                 and result["device_role"]["found"]
             )
 
-        # Debug logging
         logger.debug(
             f"Validation for {libre_device.get('hostname')} ({'VM' if import_as_vm else 'Device'}): "
             f"issues={len(result['issues'])}, can_import={result['can_import']}, "
@@ -2068,9 +2162,6 @@ def process_device_filters(
         # Set VC detection metadata
         if not vc_detection_enabled:
             validation["virtual_chassis"] = empty_virtual_chassis_data()
-            validation["_vc_detection_skipped"] = True
-        else:
-            validation["_vc_detection_skipped"] = False
 
         # Apply exclude_existing filter if enabled
         if exclude_existing and validation["existing_device"]:
@@ -2115,8 +2206,20 @@ def process_device_filters(
             cache_metadata = {
                 "cached_at": datetime.now(timezone.utc).isoformat(),
                 "cache_timeout": api.cache_timeout,
+                "filters": filters,
+                "vc_enabled": vc_detection_enabled,
+                "device_count": len(validated_devices),
             }
             cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
+
+            # Maintain cache index for this server to enable listing active searches
+            cache_index_key = f"librenms_cache_index_{api.server_key}"
+            cache_index = cache.get(cache_index_key, [])
+            # Add this cache key if not already in index
+            if cache_metadata_key not in cache_index:
+                cache_index.append(cache_metadata_key)
+                # Store index with same timeout as the metadata
+                cache.set(cache_index_key, cache_index, timeout=api.cache_timeout)
 
     if job:
         if exclude_existing:

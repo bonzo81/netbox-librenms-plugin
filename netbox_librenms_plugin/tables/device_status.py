@@ -108,7 +108,11 @@ class DeviceImportTable(tables.Table):
             return
 
         # Get the ordering field and direction
-        order_by = self.order_by[0] if isinstance(self.order_by, (list, tuple)) else self.order_by
+        order_by = (
+            self.order_by[0]
+            if isinstance(self.order_by, (list, tuple))
+            else self.order_by
+        )
         reverse = order_by.startswith("-")
         field = order_by.lstrip("-")
 
@@ -266,7 +270,7 @@ class DeviceImportTable(tables.Table):
             "plugins:netbox_librenms_plugin:device_cluster_update",
             kwargs={"device_id": device_id},
         )
-        
+
         # Include VC detection flag in URL if present in validation (from initial load)
         vc_detection_flag = ""
         if validation.get("_vc_detection_enabled"):
@@ -336,7 +340,7 @@ class DeviceImportTable(tables.Table):
             "plugins:netbox_librenms_plugin:device_role_update",
             kwargs={"device_id": device_id},
         )
-        
+
         # Include VC detection flag in URL if present in validation (from initial load)
         vc_detection_flag = ""
         if validation.get("_vc_detection_enabled"):
@@ -414,7 +418,7 @@ class DeviceImportTable(tables.Table):
             "plugins:netbox_librenms_plugin:device_rack_update",
             kwargs={"device_id": device_id},
         )
-        
+
         # Include VC detection flag in URL if present in validation (from initial load)
         vc_detection_flag = ""
         if validation.get("_vc_detection_enabled"):
@@ -530,8 +534,6 @@ class DeviceImportTable(tables.Table):
     def render_virtual_chassis(self, value, record):
         """Render Virtual Chassis status and details button."""
         validation = record.get("_validation", {})
-        if validation.get("_vc_detection_skipped"):
-            return mark_safe('<span class="text-muted">Not requested</span>')
         vc_data = validation.get("virtual_chassis", {})
         device_id = record.get("device_id")
 
@@ -603,7 +605,7 @@ class DeviceImportTable(tables.Table):
         ).get("role"):
             role_id = validation["device_role"]["role"].id
             params.append(f"role_id={role_id}")
-        
+
         # Add VC detection flag if it was enabled during initial load
         if validation.get("_vc_detection_enabled"):
             params.append("enable_vc_detection=true")

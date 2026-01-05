@@ -225,6 +225,48 @@
     </div>
   {% endif %}
 
+  {# Cached Searches Section #}
+  {% if cached_searches %}
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h6 class="card-title mb-0">
+        Active Cached Searches
+        <span id="cached-searches-badge">{% badge cached_searches|length bg_color="primary" %}</span>
+      </h6>
+      <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#cached-searches-collapse" aria-expanded="true" aria-controls="cached-searches-collapse">
+        <i class="mdi mdi-clock-fast"></i> Toggle Cached Searches
+      </button>
+    </div>
+    <div class="collapse show" id="cached-searches-collapse">
+      <div class="card-body p-2">
+        <div class="d-flex flex-wrap gap-2">
+          {% for search in cached_searches %}
+            <a href="?apply_filters=1{% for key, value in search.filters.items %}&librenms_{{ key }}={{ value|urlencode }}{% endfor %}{% if search.vc_enabled %}&enable_vc_detection=1{% endif %}"
+               class="btn btn-sm btn-outline-secondary"
+               style="text-decoration: none;"
+               title="Click to load this cached search">
+              <i class="mdi mdi-filter-outline"></i>
+              {% with display_data=search.display_filters|default:search.filters %}
+                {% for key, value in display_data.items %}
+                  {% if not forloop.first %} <span class="text-muted">|</span> {% endif %}
+                  {{ value }}
+                {% endfor %}
+              {% endwith %}
+              {% if search.vc_enabled %}
+                <span class="text-muted">| VC</span>
+              {% endif %}
+              <span class="text-muted ms-2">({{ search.device_count }} devices, <span class="cached-search-countdown" data-cache-timestamp="{{ search.cached_at }}" data-cache-timeout="{{ search.cache_timeout }}">{{ search.remaining_seconds }}s</span> left)</span>
+            </a>
+          {% endfor %}
+        </div>
+        <small class="text-muted d-block mt-2">
+          <i class="mdi mdi-information-outline"></i> Click any cached search to load those results again.
+        </small>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   {# Applied filters #}
   {% if filter_form %}
     {% applied_filters model filter_form request.GET %}
@@ -259,14 +301,6 @@
         </p>
     </div>
   {% else %}
-    {% if vc_detection_skipped and filters_submitted %}
-      <div class="alert alert-info alert-dismissible fade show mb-3" role="alert">
-        <i class="mdi mdi-progress-clock"></i>
-        Virtual chassis detection is disabled for this search (default). Selecting a role from the drop down will trigger a virtual chassis check for that device.
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-      </div>
-    {% endif %}
-
     {# Bulk import toolbar #}
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
       <div class="d-flex align-items-center gap-2 flex-wrap">

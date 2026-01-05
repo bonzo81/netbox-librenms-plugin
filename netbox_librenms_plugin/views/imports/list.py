@@ -10,6 +10,7 @@ from utilities.rqworker import get_workers_for_queue
 
 from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
 from netbox_librenms_plugin.import_utils import (
+    get_active_cached_searches,
     process_device_filters,
 )
 from netbox_librenms_plugin.models import LibreNMSSettings
@@ -204,8 +205,9 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             and not self._job_results_loaded
             and not request.GET.get("job_id")
         ):
-            # Build filter dict first
+            # Build filter dict
             libre_filters = {}
+
             if location := request.GET.get("librenms_location"):
                 libre_filters["location"] = location
             if device_type := request.GET.get("librenms_type"):
@@ -320,6 +322,9 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         except Exception:
             settings = None
 
+        # Get active cached searches for this server
+        cached_searches = get_active_cached_searches(self.librenms_api.server_key)
+
         context = {
             "model": Device,
             "table": table,
@@ -330,12 +335,12 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             "show_filter_warning": bool(filter_warning),
             "settings": settings,
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
-            "vc_detection_skipped": not getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),
             "cache_timestamp": getattr(self, "_cache_timestamp", None),
             "cache_timeout": getattr(self, "_cache_timeout", 300),
             "cache_metadata_missing": getattr(self, "_cache_metadata_missing", False),
+            "cached_searches": cached_searches,
             "librenms_server_info": self.get_server_info(),
         }
         return render(request, self.template_name, context)

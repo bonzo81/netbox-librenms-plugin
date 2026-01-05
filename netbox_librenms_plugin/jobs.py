@@ -172,25 +172,28 @@ class ImportDevicesJob(JobRunner):
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             **kwargs: Additional job parameters
         """
+        from dcim.models import DeviceRole
+        from django.core.cache import cache
+        from virtualization.models import Cluster
+
         from netbox_librenms_plugin.import_utils import (
+            _determine_device_name,
             bulk_import_devices_shared,
             create_vm_from_librenms,
             get_librenms_device_by_id,
             validate_device_for_import,
-            _determine_device_name,
         )
         from netbox_librenms_plugin.import_validation_helpers import (
             apply_cluster_to_validation,
             apply_role_to_validation,
         )
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from dcim.models import DeviceRole
-        from virtualization.models import Cluster
-        from django.core.cache import cache
 
         total_count = len(device_ids) + len(vm_imports)
         self.logger.info(f"Starting LibreNMS import job for {total_count} devices/VMs")
-        self.logger.info(f"Device imports: {len(device_ids)}, VM imports: {len(vm_imports)}")
+        self.logger.info(
+            f"Device imports: {len(device_ids)}, VM imports: {len(vm_imports)}"
+        )
         if server_key:
             self.logger.info(f"Using LibreNMS server: {server_key}")
 
@@ -198,7 +201,12 @@ class ImportDevicesJob(JobRunner):
         api = LibreNMSAPI(server_key=server_key)
 
         # Import devices using shared function with job context
-        device_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        device_result = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "virtual_chassis_created": 0,
+        }
         if device_ids:
             self.logger.info(f"Importing {len(device_ids)} devices...")
             device_result = bulk_import_devices_shared(
@@ -215,16 +223,20 @@ class ImportDevicesJob(JobRunner):
         if vm_imports:
             self.logger.info(f"Importing {len(vm_imports)} VMs...")
             vm_ids_to_import = list(vm_imports.keys())
-            
+
             for idx, vm_id in enumerate(vm_ids_to_import, start=1):
                 # Check for job cancellation every 5 VMs
                 if idx % 5 == 0:
                     # Refresh job from DB to get current status
                     self.job.refresh_from_db()
                     job_status = self.job.status
-                    status_value = job_status.value if hasattr(job_status, 'value') else job_status
-                    if status_value in ('failed', 'errored'):
-                        self.logger.warning(f"Import job cancelled at VM {idx} of {len(vm_ids_to_import)}")
+                    status_value = (
+                        job_status.value if hasattr(job_status, "value") else job_status
+                    )
+                    if status_value in ("failed", "errored"):
+                        self.logger.warning(
+                            f"Import job cancelled at VM {idx} of {len(vm_ids_to_import)}"
+                        )
                         break
                     self.logger.info(f"Imported VM {idx} of {len(vm_ids_to_import)}")
 
@@ -234,18 +246,25 @@ class ImportDevicesJob(JobRunner):
                     if libre_devices_cache and vm_id in libre_devices_cache:
                         libre_device = libre_devices_cache[vm_id]
                     else:
-                        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
-                        cache_key = get_import_device_cache_key(vm_id, server_key or "default")
+                        from netbox_librenms_plugin.import_utils import (
+                            get_import_device_cache_key,
+                        )
+
+                        cache_key = get_import_device_cache_key(
+                            vm_id, server_key or "default"
+                        )
                         libre_device = cache.get(cache_key)
 
                     if not libre_device:
                         libre_device = get_librenms_device_by_id(api, vm_id)
 
                     if not libre_device:
-                        vm_result["failed"].append({
-                            "device_id": vm_id,
-                            "error": f"Device {vm_id} not found in LibreNMS",
-                        })
+                        vm_result["failed"].append(
+                            {
+                                "device_id": vm_id,
+                                "error": f"Device {vm_id} not found in LibreNMS",
+                            }
+                        )
                         self.logger.error(f"Device {vm_id} not found in LibreNMS")
                         continue
 
@@ -256,11 +275,15 @@ class ImportDevicesJob(JobRunner):
 
                     # Check if VM already exists
                     if validation.get("existing_device"):
-                        vm_result["skipped"].append({
-                            "device_id": vm_id,
-                            "reason": f"VM already exists: {validation['existing_device'].name}",
-                        })
-                        self.logger.info(f"VM already exists: {validation['existing_device'].name}")
+                        vm_result["skipped"].append(
+                            {
+                                "device_id": vm_id,
+                                "reason": f"VM already exists: {validation['existing_device'].name}",
+                            }
+                        )
+                        self.logger.info(
+                            f"VM already exists: {validation['existing_device'].name}"
+                        )
                         continue
 
                     # Apply manual cluster and role selections
@@ -280,8 +303,14 @@ class ImportDevicesJob(JobRunner):
                             apply_role_to_validation(validation, role, is_vm=True)
 
                     # Create the VM
-                    use_sysname = sync_options.get("use_sysname", True) if sync_options else True
-                    strip_domain = sync_options.get("strip_domain", False) if sync_options else False
+                    use_sysname = (
+                        sync_options.get("use_sysname", True) if sync_options else True
+                    )
+                    strip_domain = (
+                        sync_options.get("strip_domain", False)
+                        if sync_options
+                        else False
+                    )
 
                     vm_name = _determine_device_name(
                         libre_device,
@@ -297,30 +326,56 @@ class ImportDevicesJob(JobRunner):
                         libre_device, validation, use_sysname=use_sysname, role=role
                     )
 
-                    vm_result["success"].append({
-                        "device_id": vm_id,
-                        "device": vm,
-                        "message": f"VM {vm.name} created successfully",
-                    })
-                    self.logger.info(f"Successfully imported VM {vm.name} (ID: {vm_id})")
+                    vm_result["success"].append(
+                        {
+                            "device_id": vm_id,
+                            "device": vm,
+                            "message": f"VM {vm.name} created successfully",
+                        }
+                    )
+                    self.logger.info(
+                        f"Successfully imported VM {vm.name} (ID: {vm_id})"
+                    )
 
                 except Exception as vm_error:
                     # Log error but continue with other VMs
-                    self.logger.error(f"Failed to import VM {vm_id}: {vm_error}", exc_info=True)
-                    vm_result["failed"].append({"device_id": vm_id, "error": str(vm_error)})
+                    self.logger.error(
+                        f"Failed to import VM {vm_id}: {vm_error}", exc_info=True
+                    )
+                    vm_result["failed"].append(
+                        {"device_id": vm_id, "error": str(vm_error)}
+                    )
 
         # Combine results
-        imported_device_pks = [item["device"].pk for item in device_result.get("success", []) if item.get("device")]
-        imported_vm_pks = [item["device"].pk for item in vm_result.get("success", []) if item.get("device")]
-        
+        imported_device_pks = [
+            item["device"].pk
+            for item in device_result.get("success", [])
+            if item.get("device")
+        ]
+        imported_vm_pks = [
+            item["device"].pk
+            for item in vm_result.get("success", [])
+            if item.get("device")
+        ]
+
         # Also store LibreNMS device IDs for re-rendering table rows
-        imported_libre_device_ids = [item["device_id"] for item in device_result.get("success", [])]
-        imported_libre_vm_ids = [item["device_id"] for item in vm_result.get("success", [])]
-        
-        success_count = len(device_result.get("success", [])) + len(vm_result.get("success", []))
-        failed_count = len(device_result.get("failed", [])) + len(vm_result.get("failed", []))
-        skipped_count = len(device_result.get("skipped", [])) + len(vm_result.get("skipped", []))
-        
+        imported_libre_device_ids = [
+            item["device_id"] for item in device_result.get("success", [])
+        ]
+        imported_libre_vm_ids = [
+            item["device_id"] for item in vm_result.get("success", [])
+        ]
+
+        success_count = len(device_result.get("success", [])) + len(
+            vm_result.get("success", [])
+        )
+        failed_count = len(device_result.get("failed", [])) + len(
+            vm_result.get("failed", [])
+        )
+        skipped_count = len(device_result.get("skipped", [])) + len(
+            vm_result.get("skipped", [])
+        )
+
         all_errors = device_result.get("failed", []) + vm_result.get("failed", [])
 
         # Store results in job.data

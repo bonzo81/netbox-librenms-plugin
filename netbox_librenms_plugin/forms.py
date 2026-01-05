@@ -562,12 +562,12 @@ class LibreNMSImportFilterForm(forms.Form):
             success, locations = api.get_locations()
 
             if success and locations:
-                # Build choices list: (id, "name (id)")
+                # Build choices list: (id, name)
                 choices = [("", "All Locations")]
                 for loc in locations:
                     loc_id = str(loc.get("id", ""))
                     loc_name = loc.get("location", f"Location {loc_id}")
-                    choices.append((loc_id, f"{loc_name} (ID: {loc_id})"))
+                    choices.append((loc_id, loc_name))
 
                 # Sort by name
                 choices[1:] = sorted(choices[1:], key=lambda x: x[1])
