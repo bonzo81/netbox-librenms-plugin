@@ -18,7 +18,7 @@
 {% endblock tabs %}
 
 {% block content %}
-    <div class="tab-content">
+    <div class="tab-content" data-active-tab="{{ active_tab|default:'' }}">
         <!-- Server Config Tab -->
         <div class="tab-pane fade show active" id="config" role="tabpanel" aria-labelledby="config-tab">
             <form action="" method="post" class="form" enctype="multipart/form-data">
@@ -40,7 +40,7 @@
                                         Configure which LibreNMS server to use for synchronization operations.
                                         Multiple servers can be configured in the NetBox configuration file.
                                     </p>
-                                    {% render_field form.selected_server %}
+                                    {% render_field server_form.selected_server %}
                                 </div>
                                 <div class="text-end mt-auto">
                                     <button type="submit" id="save-server-btn" class="btn btn-primary" disabled>
@@ -64,11 +64,16 @@
                                 <p class="text-muted mb-3">Test the connection to the selected LibreNMS server to verify configuration.</p>
                                 <button type="button"
                                         id="test-connection-btn"
-                                        class="btn btn-outline-info w-100">
+                                        class="btn btn-outline-info w-100"
+                                        hx-post="{% url 'plugins:netbox_librenms_plugin:test_connection' %}"
+                                        hx-target="#test-result"
+                                        hx-swap="innerHTML"
+                                        hx-include="[name='selected_server']">
                                     <i class="ti ti-network me-1"></i> Test Connection
+                                    <span class="spinner-border spinner-border-sm ms-1 htmx-indicator" role="status" style="display: none;"></span>
                                 </button>
                                 <!-- Test result area -->
-                                <div id="test-result" class="mt-3 d-none"></div>
+                                <div id="test-result" class="mt-3"></div>
                             </div>
                         </div>
                     </div>
@@ -134,7 +139,6 @@
             <form action="" method="post" class="form" enctype="multipart/form-data">
                 {% csrf_token %}
                 <input type="hidden" name="form_type" value="import_settings">
-                <input type="hidden" name="selected_server" value="{{ form.selected_server.value }}">
 
                 <div class="row justify-content-start">
                     <!-- Left Column: Device Naming and Virtual Chassis -->
@@ -156,24 +160,24 @@
                                     <div class="col-12">
                                         <div class="form-group mb-3">
                                             <div class="form-check form-switch">
-                                                {{ form.use_sysname_default }}
-                                                <label class="form-check-label" for="{{ form.use_sysname_default.id_for_label }}">
-                                                    {{ form.use_sysname_default.label }}
+                                                {{ import_form.use_sysname_default }}
+                                                <label class="form-check-label" for="{{ import_form.use_sysname_default.id_for_label }}">
+                                                    {{ import_form.use_sysname_default.label }}
                                                 </label>
-                                                {% if form.use_sysname_default.help_text %}
-                                                    <small class="form-text text-muted d-block">{{ form.use_sysname_default.help_text }}</small>
+                                                {% if import_form.use_sysname_default.help_text %}
+                                                    <small class="form-text text-muted d-block">{{ import_form.use_sysname_default.help_text }}</small>
                                                 {% endif %}
                                             </div>
                                         </div>
 
                                         <div class="form-group mb-3">
                                             <div class="form-check form-switch">
-                                                {{ form.strip_domain_default }}
-                                                <label class="form-check-label" for="{{ form.strip_domain_default.id_for_label }}">
-                                                    {{ form.strip_domain_default.label }}
+                                                {{ import_form.strip_domain_default }}
+                                                <label class="form-check-label" for="{{ import_form.strip_domain_default.id_for_label }}">
+                                                    {{ import_form.strip_domain_default.label }}
                                                 </label>
-                                                {% if form.strip_domain_default.help_text %}
-                                                    <small class="form-text text-muted d-block">{{ form.strip_domain_default.help_text }}</small>
+                                                {% if import_form.strip_domain_default.help_text %}
+                                                    <small class="form-text text-muted d-block">{{ import_form.strip_domain_default.help_text }}</small>
                                                 {% endif %}
                                             </div>
                                         </div>
@@ -199,10 +203,15 @@
                                 <div class="row">
                                     <div class="col-12">
                                         <div class="form-group mb-3">
-                                            <label for="{{ form.vc_member_name_pattern.id_for_label }}" class="form-label">
-                                                {{ form.vc_member_name_pattern.label }}
+                                            <label for="{{ import_form.vc_member_name_pattern.id_for_label }}" class="form-label">
+                                                {{ import_form.vc_member_name_pattern.label }}
                                             </label>
-                                            {{ form.vc_member_name_pattern }}
+                                            {{ import_form.vc_member_name_pattern }}
+                                            {% if import_form.vc_member_name_pattern.errors %}
+                                                <div class="invalid-feedback d-block">
+                                                    {{ import_form.vc_member_name_pattern.errors }}
+                                                </div>
+                                            {% endif %}
                                         </div>
                                     </div>
                                 </div>
@@ -210,11 +219,12 @@
                                 <div class="row">
                                     <div class="col-12">
                                         <div class="alert alert-info mb-0">
-                                            <p class="small mb-2">Available placeholders (at least one required):</p>
+                                            <p class="small mb-2"><strong>Available placeholders:</strong></p>
                                             <ul class="mb-3 small" style="padding-left: 1.2rem;">
                                                 <li><code>{position}</code> - VC position number</li>
                                                 <li><code>{serial}</code> - Member serial number</li>
                                             </ul>
+                                            <p class="small mb-0"><strong>Note:</strong> The pattern is appended to the master device name. At least one placeholder is required to ensure each member gets a unique name.</p>
                                         </div>
                                     </div>
                                 </div>
@@ -254,18 +264,40 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const testBtn = document.getElementById('test-connection-btn');
-    const testResult = document.getElementById('test-result');
+    // Auto-select the correct tab if there was a validation error
+    // Uses the same pattern as librenms_sync.js for consistency
+    const tabContent = document.querySelector('.tab-content');
+    const activeTab = tabContent ? tabContent.dataset.activeTab : '';
+
+    if (activeTab === 'import_settings') {
+        const importTab = document.getElementById('import-settings-tab');
+        const importPane = document.getElementById('import-settings');
+        const configTab = document.getElementById('config-tab');
+        const configPane = document.getElementById('config');
+
+        if (importTab && importPane && configTab && configPane) {
+            // Deactivate config tab
+            configTab.classList.remove('active');
+            configTab.setAttribute('aria-selected', 'false');
+            configPane.classList.remove('show', 'active');
+
+            // Activate import settings tab
+            importTab.classList.add('active');
+            importTab.setAttribute('aria-selected', 'true');
+            importPane.classList.add('show', 'active');
+        }
+    }
+
     const serverSelect = document.getElementById('id_selected_server');
     const vcPatternInput = document.getElementById('id_vc_member_name_pattern');
     const saveServerBtn = document.getElementById('save-server-btn');
     const saveImportBtn = document.getElementById('save-import-btn');
+    const useSysnameCheckbox = document.getElementById('id_use_sysname_default');
+    const stripDomainCheckbox = document.getElementById('id_strip_domain_default');
 
     // Store the initial values to detect changes
     const initialServerValue = serverSelect.value;
     const initialVcPatternValue = vcPatternInput.value;
-    const useSysnameCheckbox = document.getElementById('id_use_sysname_default');
-    const stripDomainCheckbox = document.getElementById('id_strip_domain_default');
     const initialUseSysnameValue = useSysnameCheckbox ? useSysnameCheckbox.checked : true;
     const initialStripDomainValue = stripDomainCheckbox ? stripDomainCheckbox.checked : false;
 
@@ -273,14 +305,8 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateServerSaveButton() {
         const hasChanges = serverSelect.value !== initialServerValue;
         saveServerBtn.disabled = !hasChanges;
-
-        if (hasChanges) {
-            saveServerBtn.classList.remove('btn-secondary');
-            saveServerBtn.classList.add('btn-primary');
-        } else {
-            saveServerBtn.classList.remove('btn-primary');
-            saveServerBtn.classList.add('btn-secondary');
-        }
+        saveServerBtn.classList.toggle('btn-primary', hasChanges);
+        saveServerBtn.classList.toggle('btn-secondary', !hasChanges);
     }
 
     // Enable/disable import save button based on changes
@@ -290,14 +316,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const stripDomainChanged = stripDomainCheckbox ? (stripDomainCheckbox.checked !== initialStripDomainValue) : false;
         const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged;
         saveImportBtn.disabled = !hasChanges;
-
-        if (hasChanges) {
-            saveImportBtn.classList.remove('btn-secondary');
-            saveImportBtn.classList.add('btn-primary');
-        } else {
-            saveImportBtn.classList.remove('btn-primary');
-            saveImportBtn.classList.add('btn-secondary');
-        }
+        saveImportBtn.classList.toggle('btn-primary', hasChanges);
+        saveImportBtn.classList.toggle('btn-secondary', !hasChanges);
     }
 
     // Listen for changes on respective form fields
@@ -309,62 +329,6 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initialize button states
     updateServerSaveButton();
     updateImportSaveButton();
-
-    testBtn.addEventListener('click', function() {
-        const selectedServer = serverSelect.value;
-
-        if (!selectedServer) {
-            showTestResult('error', 'Please select a server first.');
-            return;
-        }
-
-        // Disable button and show loading state
-        testBtn.disabled = true;
-        testBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span> Testing...';
-
-        // Clear previous results
-        testResult.classList.add('d-none');
-
-        // Make AJAX request
-        fetch('{% url "plugins:netbox_librenms_plugin:test_connection" %}', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': '{{ csrf_token }}'
-            },
-            body: JSON.stringify({
-                'server_key': selectedServer
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                let message = `<strong>Connection successful!</strong><br>`;
-                if (data.system_info) {
-                    message += `LibreNMS Version: ${data.system_info.version}<br>`;
-                    message += `Database: ${data.system_info.database}<br>`;
-                    message += `PHP Version: ${data.system_info.php_version}`;
-                }
-                showTestResult('success', message);
-            } else {
-                showTestResult('error', `<strong>Connection failed:</strong><br>${data.error || 'Unknown error'}`);
-            }
-        })
-        .catch(error => {
-            showTestResult('error', `<strong>Network error:</strong><br>${error.message}`);
-        })
-        .finally(() => {
-            // Re-enable button
-            testBtn.disabled = false;
-            testBtn.innerHTML = '<i class="ti ti-network me-1"></i> Test Connection';
-        });
-    });
-
-    function showTestResult(type, message) {
-        testResult.className = `mt-2 alert alert-${type === 'success' ? 'success' : 'danger'}`;
-        testResult.innerHTML = message;
-        testResult.classList.remove('d-none');
-    }
 });
-    </script>
+</script>
 {% endblock %}

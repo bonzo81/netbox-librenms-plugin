@@ -20,7 +20,7 @@ class LibreNMSSettings(models.Model):
         max_length=100,
         default="-M{position}",
         help_text="Pattern for naming virtual chassis member devices. "
-        "Available placeholders: {master_name}, {position}, {serial}. "
+        "Available placeholders: {position}, {serial}. "
         "Example: '-M{position}' results in 'switch01-M2'",
     )
 
