@@ -850,9 +850,15 @@ def validate_device_for_import(
             result["issues"].append(
                 "Cluster must be manually selected before importing as VM"
             )
-            # Provide list of available clusters for user selection
-            all_clusters = Cluster.objects.all()
-            result["cluster"]["available_clusters"] = list(all_clusters)
+            # Provide list of available clusters for user selection (cached)
+            cache_key = "librenms_import_all_clusters"
+            all_clusters = cache.get(cache_key)
+            if all_clusters is None:
+                all_clusters = list(Cluster.objects.all())
+                # Use API cache timeout if available, otherwise use default 5 minutes
+                cache_timeout = api.cache_timeout if api else 300
+                cache.set(cache_key, all_clusters, cache_timeout)
+            result["cluster"]["available_clusters"] = all_clusters
 
             # Skip device-specific validations for VMs
             result["site"]["found"] = True  # Not required for VMs
@@ -910,9 +916,15 @@ def validate_device_for_import(
             logger.debug(
                 f"[{hostname}] Issues AFTER adding role issue: {result['issues']}"
             )
-            # Provide list of available roles for user selection
-            all_roles = DeviceRole.objects.all()
-            result["device_role"]["available_roles"] = list(all_roles)
+            # Provide list of available roles for user selection (cached)
+            cache_key = "librenms_import_all_roles"
+            all_roles = cache.get(cache_key)
+            if all_roles is None:
+                all_roles = list(DeviceRole.objects.all())
+                # Use API cache timeout if available, otherwise use default 5 minutes
+                cache_timeout = api.cache_timeout if api else 300
+                cache.set(cache_key, all_roles, cache_timeout)
+            result["device_role"]["available_roles"] = all_roles
 
             # 4b. Rack (optional) - Provide available racks for the matched site
             if site_match["found"] and site_match["site"]:
