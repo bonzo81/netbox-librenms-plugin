@@ -349,7 +349,7 @@ def prefetch_vc_data_for_devices(
         try:
             get_virtual_chassis_data(api, device_id, force_refresh=force_refresh)
         except (BrokenPipeError, ConnectionError, IOError, OSError) as e:
-            logger.info(f"Connection error during VC prefetch at device {idx}: {e}")
+            logger.warning(f"Connection error during VC prefetch at device {idx}: {e}")
             # Stop processing if connection is broken
             return
         except Exception as e:
@@ -379,11 +379,6 @@ def get_device_count_for_filters(
 
     Returns:
         int: Count of devices matching filters
-
-    Example:
-        >>> api = LibreNMSAPI()
-        >>> count = get_device_count_for_filters(api, {'location': 'NYC'}, show_disabled=False)
-        >>> print(f"Found {count} devices")
     """
     devices = get_librenms_devices_for_import(
         api, filters=filters, force_refresh=clear_cache
@@ -425,14 +420,6 @@ def get_librenms_devices_for_import(
         List of device dictionaries from LibreNMS, or tuple of (devices, from_cache)
         if return_cache_status is True. from_cache=True means data was loaded from
         existing cache; from_cache=False means data was just fetched from LibreNMS.
-
-    Example:
-        >>> api = LibreNMSAPI()
-        >>> devices = get_librenms_devices_for_import(api, {'location': 'NYC'})
-        >>> for device in devices:
-        ...     print(device['hostname'])
-        >>> # With cache status
-        >>> devices, from_cache = get_librenms_devices_for_import(api, {'location': 'NYC'}, return_cache_status=True)
     """
     try:
         # Use provided API instance or create a new one
@@ -1084,11 +1071,6 @@ def import_single_device(
                     'ip_addresses': int
                 }
             }
-
-    Example:
-        >>> result = import_single_device(123, manual_mappings={'site_id': 1})
-        >>> if result['success']:
-        ...     print(f"Imported: {result['device'].name}")
     """
     try:
         api = LibreNMSAPI(server_key=server_key)
@@ -1505,10 +1487,6 @@ def bulk_import_devices(
                 'skipped': List[dict],  # Skipped devices (already exist, etc.)
                 'virtual_chassis_created': int  # Number of VCs created
             }
-
-    Example:
-        >>> result = bulk_import_devices([1, 2, 3, 4, 5])
-        >>> print(f"Imported {len(result['success'])} of {result['total']} devices")
     """
     return bulk_import_devices_shared(
         device_ids=device_ids,

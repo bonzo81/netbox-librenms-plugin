@@ -178,11 +178,6 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
             - matched (bool): Whether a match was found
             - device_type (DeviceType|None): The matched DeviceType object
             - match_type (str|None): Always 'exact' if found, None otherwise
-
-    Examples:
-        >>> result = match_librenms_hardware_to_device_type('C9200L-48P-4X')
-        >>> if result['matched']:
-        ...     print(f"Found: {result['device_type']}")
     """
     from dcim.models import DeviceType
 
@@ -237,11 +232,6 @@ def find_matching_site(librenms_location: str) -> dict:
             - site (Site|None): The matched Site object
             - match_type (str|None): Always 'exact' if found, None otherwise
             - confidence (float): Always 1.0 if found, 0.0 otherwise
-
-    Examples:
-        >>> result = find_matching_site('Datacenter 1')
-        >>> if result['found']:
-        ...     print(f"Found site: {result['site']}")
     """
     from dcim.models import Site
 
@@ -275,11 +265,6 @@ def find_matching_platform(librenms_os: str) -> dict:
             - found (bool): Whether a match was found
             - platform (Platform|None): The matched Platform object
             - match_type (str|None): Always 'exact' if found, None otherwise
-
-    Examples:
-        >>> result = find_matching_platform('ios')
-        >>> if result['found']:
-        ...     print(f"Platform: {result['platform'].name}")
     """
     from dcim.models import Platform
 

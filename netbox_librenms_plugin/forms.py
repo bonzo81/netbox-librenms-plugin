@@ -1,4 +1,6 @@
 # forms.py
+import logging
+
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
@@ -14,6 +16,8 @@ from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceFie
 from virtualization.models import Cluster, VirtualMachine
 
 from .models import InterfaceTypeMapping, LibreNMSSettings
+
+logger = logging.getLogger(__name__)
 
 
 def _get_librenms_server_choices():
@@ -615,13 +619,9 @@ class LibreNMSImportFilterForm(forms.Form):
 
     def _populate_librenms_locations(self):
         """Fetch and populate LibreNMS locations in the dropdown."""
-        import logging
-
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        logger = logging.getLogger(__name__)
 
         try:
             # Use caching to avoid repeated API calls
