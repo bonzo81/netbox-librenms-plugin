@@ -17,7 +17,6 @@
     // Guard against re-initialization during HTMX content swaps
     // The flag is reset before document.write() to allow proper initialization after page replacement
     if (window.LibreNMSImportInitialized) {
-        console.log('LibreNMS Import: Already initialized, skipping re-initialization');
         return;
     }
 
@@ -255,10 +254,8 @@
                     }
                 })
                     .then(res => {
-                        console.log('[Cancel] Stop API response status:', res.status);
                         // Check if job already finished (404 = gone from queue)
                         if (res.status === 404 || res.status === 410) {
-                            console.log('[Cancel] Job already completed (404/410)');
                             if (messageEl) {
                                 messageEl.textContent = 'Job already completed, loading results...';
                             }
@@ -342,9 +339,7 @@
                                     }, JOB_CANCEL_ERROR_REDIRECT_MS);
                                 });
                         } else {
-                            console.log('[Cancel] Stop API failed with status:', res.status);
                             if (res.status === 404 || res.status === 410 || res.status === 400) {
-                                console.log('[Cancel] Job likely finished');
                                 if (messageEl) {
                                     messageEl.textContent = 'Job completed, loading results...';
                                 }
@@ -394,16 +389,13 @@
         const poll = () => {
             if (cancelInProgress) {
                 // Cancel handler is taking over, don't interfere
-                console.log('[Job Polling] Skipping poll - cancel in progress');
                 return;
             }
 
             if (pollingStopped) {
-                console.log('[Job Polling] Polling stopped, not continuing');
                 return;
             }
 
-            console.log('[Job Polling] Fetching job status from:', pollUrl);
             fetch(pollUrl, {
                 headers: {
                     'Accept': 'application/json'
@@ -455,7 +447,6 @@
                     }
 
                     if (statusValue === 'completed' || statusValue === 'finished') {
-                        console.log('[Job Polling] Job completed, closing modal and redirecting...');
                         pollingStopped = true; // Stop future polls
 
                         const modal = document.getElementById('filter-processing-modal');
@@ -470,7 +461,6 @@
                         }, 100);
                         return; // Stop polling
                     } else if (statusValue === 'stopped') {
-                        console.log('[Job Polling] Job stopped by user');
                         pollingStopped = true;
 
                         const modal = document.getElementById('filter-processing-modal');
@@ -481,7 +471,6 @@
 
                         setTimeout(() => window.location.href = baseUrl, 100);
                     } else if (statusValue === 'failed') {
-                        console.log('[Job Polling] Job failed');
                         pollingStopped = true;
 
                         const modal = document.getElementById('filter-processing-modal');
@@ -536,10 +525,8 @@
     function initializeFilterForm() {
         const filterForm = document.getElementById('librenms-import-filter-form');
         if (!filterForm) {
-            console.log('LibreNMS Import: Filter form not found on this page');
             return;
         }
-        console.log('LibreNMS Import: Initializing filter form');
 
         // AbortController for cancelling the filter request
         let currentAbortController = null;
@@ -648,7 +635,6 @@
                     modalInstance.show();
                     // Store instance on element for later retrieval
                     filterModal._bsModal = modalInstance;
-                    console.log('[Filter Modal] Modal opened with Bootstrap instance');
                 } else {
                     // Fallback for manual modal display
                     filterModal.classList.add('show');
@@ -662,7 +648,6 @@
                     backdrop.className = 'modal-backdrop fade show';
                     backdrop.id = 'filter-modal-backdrop';
                     document.body.appendChild(backdrop);
-                    console.log('[Filter Modal] Modal opened with manual fallback');
                 }
             }
 
@@ -1097,6 +1082,127 @@
     // ============================================
 
     /**
+     * Create a countdown timer for a cache expiration.
+     * Reusable function that handles the countdown logic.
+     *
+     * @param {Date} expiresAt - When the cache expires
+     * @param {HTMLElement} countdownElement - Element to update with countdown text
+     * @param {Function} onExpired - Optional callback when countdown reaches zero
+     * @param {HTMLElement} warningElement - Optional element to add warning class to
+     * @returns {Function} The update function (for immediate invocation)
+     */
+    function createCacheCountdown(expiresAt, countdownElement, onExpired, warningElement) {
+        function updateCountdown() {
+            const now = new Date();
+            const remainingMs = expiresAt - now;
+
+            if (remainingMs <= 0) {
+                // Cache has expired
+                countdownElement.textContent = 'expired';
+                countdownElement.classList.add('text-danger');
+                if (onExpired) {
+                    onExpired();
+                }
+                return; // Stop updating
+            }
+
+            // Format remaining time
+            const seconds = Math.floor(remainingMs / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+
+            countdownElement.textContent = minutes > 0 ? `${minutes}m ${secs}s` : `${secs}s`;
+
+            // Visual warning when under 60 seconds
+            if (seconds < 60) {
+                if (!countdownElement.classList.contains('text-warning')) {
+                    countdownElement.classList.add('text-warning');
+                    if (warningElement) {
+                        warningElement.classList.add('text-warning');
+                    }
+                }
+            }
+
+            // Continue updating
+            setTimeout(updateCountdown, 1000);
+        }
+
+        return updateCountdown;
+    }
+
+    /**
+     * Update the cached searches badge count.
+     * Counts visible cached search buttons and updates the badge.
+     */
+    function updateCachedSearchesBadge() {
+        const badge = document.getElementById('cached-searches-badge');
+        if (!badge) {
+            return;
+        }
+
+        // Count visible cached search buttons
+        const buttons = document.querySelectorAll('.cached-search-countdown');
+        let visibleCount = 0;
+        buttons.forEach(function (element) {
+            const button = element.closest('.btn');
+            if (button && button.style.display !== 'none') {
+                visibleCount++;
+            }
+        });
+
+        // Update badge text
+        const badgeElement = badge.querySelector('.badge');
+        if (badgeElement) {
+            badgeElement.textContent = visibleCount;
+        }
+    }
+
+    /**
+     * Initialize countdown timers for cached search items.
+     * Each cached search button shows a live countdown until that cache expires.
+     */
+    function initializeCachedSearchCountdowns() {
+        const countdownElements = document.querySelectorAll('.cached-search-countdown');
+        if (countdownElements.length === 0) {
+            return;
+        }
+
+        countdownElements.forEach(function (element) {
+            const cacheTimestamp = element.dataset.cacheTimestamp;
+            const cacheTimeout = parseInt(element.dataset.cacheTimeout, 10);
+
+            if (!cacheTimestamp || !cacheTimeout) {
+                return;
+            }
+
+            const cachedAt = new Date(cacheTimestamp);
+            if (isNaN(cachedAt.getTime())) {
+                console.warn('[Cached Search Countdown] Invalid timestamp:', cacheTimestamp);
+                return;
+            }
+
+            const expiresAt = new Date(cachedAt.getTime() + cacheTimeout * 1000);
+
+            // Create countdown with expiration handler to hide the button and update badge
+            const updateCountdown = createCacheCountdown(
+                expiresAt,
+                element,
+                function onExpired() {
+                    const button = element.closest('.btn');
+                    if (button) {
+                        button.style.display = 'none';
+                        // Update the badge count after hiding the button
+                        updateCachedSearchesBadge();
+                    }
+                }
+            );
+
+            // Start countdown
+            updateCountdown();
+        });
+    }
+
+    /**
      * Display live countdown for cache expiration.
      * Shows time remaining until cached filter results expire.
      */
@@ -1113,7 +1219,6 @@
             return;
         }
 
-        // Parse ISO timestamp
         const cachedAt = new Date(cacheTimestamp);
         if (isNaN(cachedAt.getTime())) {
             console.warn('[Cache Monitor] Invalid cache timestamp:', cacheTimestamp);
@@ -1124,19 +1229,15 @@
         const countdownSpan = document.getElementById('cache-expiry-countdown');
         const iconElement = cacheInfoDisplay.querySelector('.mdi');
 
-        /**
-         * Update countdown display.
-         */
-        function updateCountdown() {
-            const now = new Date();
-            const remainingMs = expiresAt - now;
+        if (!countdownSpan) {
+            return;
+        }
 
-            if (remainingMs <= 0) {
-                // Cache has expired
-                if (countdownSpan) {
-                    countdownSpan.textContent = 'expired';
-                    countdownSpan.classList.add('text-danger');
-                }
+        // Create countdown with expiration handler to update icon and styling
+        const updateCountdown = createCacheCountdown(
+            expiresAt,
+            countdownSpan,
+            function onExpired() {
                 if (iconElement) {
                     iconElement.classList.remove('mdi-clock-outline');
                     iconElement.classList.add('mdi-clock-alert', 'text-danger');
@@ -1144,33 +1245,9 @@
                 cacheInfoDisplay.classList.remove('text-muted');
                 cacheInfoDisplay.classList.add('text-danger');
                 cacheInfoDisplay.title = 'Cache expired - refresh page to reload data';
-                return; // Stop updating
-            }
-
-            // Format remaining time
-            const seconds = Math.floor(remainingMs / 1000);
-            const minutes = Math.floor(seconds / 60);
-            const secs = seconds % 60;
-
-            if (countdownSpan) {
-                if (minutes > 0) {
-                    countdownSpan.textContent = `${minutes}m ${secs}s`;
-                } else {
-                    countdownSpan.textContent = `${secs}s`;
-                }
-                
-                // Visual warning when under 60 seconds (less than 1 minute)
-                if (seconds < 60 && !countdownSpan.classList.contains('text-warning')) {
-                    countdownSpan.classList.add('text-warning');
-                    if (iconElement) {
-                        iconElement.classList.add('text-warning');
-                    }
-                }
-            }
-
-            // Continue updating
-            setTimeout(updateCountdown, 1000);
-        }
+            },
+            iconElement
+        );
 
         // Start countdown
         updateCountdown();
@@ -1185,12 +1262,11 @@
      * Called when DOM is ready or immediately if already loaded.
      */
     function initializeImportPage() {
-        console.log('LibreNMS Import: Initializing import page, readyState:', document.readyState);
         initializeFilterForm();
         initializeBulkImport();
         initializeHTMXHandlers();
+        initializeCachedSearchCountdowns();
         initializeCacheExpirationMonitor();
-        console.log('LibreNMS Import: Initialization complete');
     }
 
     // Handle both cases: DOM already loaded or still loading
