@@ -87,31 +87,10 @@ No additional configuration is needed—these features become immediately availa
 After importing devices, typical next steps include:
 
 1. **Review imported devices** - Click the links in the success message to verify device details
-2. **Sync interfaces** - Navigate to the device in NetBox and use the LibreNMS sync button to pull interface data
-3. **Sync cables** - Once interfaces exist, sync cable connections from LibreNMS link data
-4. **Sync IP addresses** - Pull IP address assignments from LibreNMS to NetBox
+2. **Assign rack positions** - If devices were imported to a rack, assign specific U positions. The [NetBox Reorder Rack plugin](https://github.com/minitriga/netbox-reorder-rack) makes this process a lot easier.
+3. **Sync interfaces** - Navigate to the device in NetBox and use the LibreNMS sync button to pull interface data
+4. **Sync cables** - Once interfaces exist, sync cable connections from LibreNMS link data
+5. **Sync IP addresses** - Pull IP address assignments from LibreNMS to NetBox
 
 These sync operations use the `librenms_id` custom field that was automatically set during import.
 
-## Troubleshooting Import Issues
-
-**Import fails with "Site is required"**
-: The device's Site selection was not saved. Refresh the page, re-validate, select the Site, and try again.
-
-**Import fails with "Device type is required"**
-: The device's Device Type selection was not saved. Refresh the page, re-validate, select the Device Type, and try again.
-
-**Import fails with "Device role is required"**
-: The device's Device Role selection was not saved. Refresh the page, re-validate, select the Device Role, and try again.
-
-**Bulk import shows some failures**
-: Review the detailed error messages in the "Failed" section of the import summary. Common causes include validation selections not being saved, network issues, or database constraints.
-
-**Device created but interfaces/cables not synced**
-: Import only creates the device object. Use the separate Interface Sync and Cable Sync features from the device's NetBox page to pull additional data.
-
-## Next Steps
-
-After importing devices:
-- [Interface Sync](../feature_list.md#interface-sync) - Pull interface data from LibreNMS
-- [Virtual Chassis](../usage_tips/virtual_chassis.md) - Manage multi-member devices

@@ -32,7 +32,7 @@ Clear cache before search
 : Forces the plugin to fetch fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance.
 
 Exclude Existing Devices
-: When checked, hides devices that already exist in NetBox. By default, all devices are shown including those already imported. This helps focus on new devices that need to be imported.
+: When checked, hides devices that already exist in NetBox. By default, all devices are shown including those already imported.
 
 ## Filter Matching Rules
 
@@ -51,18 +51,19 @@ Multiple Filters
 
 **Find all network devices in New York**
 ```
-Location: New York (ID: 5)
+Location: New York
 Type: network
 ```
 
-**Find Cisco switches**
+**Find Cisco devices**
 ```
 Type: network
 OS: ios
 ```
 
-**Find specific hardware model**
+**Find specific hardware model at New York**
 ```
+Location: New York
 Hardware: C9300
 Type: network
 ```
@@ -72,10 +73,11 @@ Type: network
 System Name: router-core-01.example.com
 ```
 
-**Find devices with "router" in hostname**
+**Find devices with "F" in hostname at New York with device type firewall**
 ```
-Hostname: router
-Type: network
+Hostname: F
+Location: New York
+Type: firewall
 ```
 
 ## Search Options
@@ -85,6 +87,9 @@ Run as background job
 
 Clear cache before search
 : Forces fresh data from LibreNMS instead of using cached results. LibreNMS data is normally cached for 5 minutes to improve performance. See [Background Jobs & Caching](background_jobs.md) for caching details.
+
+## Saved Cached Searches
+The import page displays all your recent searches at the top, showing which filter combinations, that are still found in the cache. Each cached search shows the filters used, device count, and time remaining before expiration.  Click any cached search to instantly reload those results without re-running filters. This is particularly useful when switching between different filter combinations.
 
 ## Next Steps
 
