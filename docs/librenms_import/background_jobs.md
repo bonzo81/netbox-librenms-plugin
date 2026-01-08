@@ -6,17 +6,20 @@ The Device Import feature uses background job processing and intelligent caching
 
 Background jobs run asynchronously in NetBox's job system for both device searches and import operations.
 
-### Search Jobs
+### Background Job Processing
 
-When searching for devices, you can choose to run as a background job (default) or synchronously. Background jobs are recommended for large device sets or when Virtual Chassis detection is enabled. They allow you to cancel operations and avoid browser timeouts.
+Both device searches and import operations can run as background jobs (default) or synchronously. Background jobs are recommended for:
 
-For small, quick searches (under 50 devices), you can disable background jobs for immediate results.
+- Large device sets (especially searches with more than 50 devices)
+- Operations with Virtual Chassis detection enabled
+- Import operations of any size
 
-### Import Jobs
+**Benefits of background jobs:**
+- Avoid browser timeouts on long-running operations
+- Cancel operations in progress if needed
+- Continue using NetBox while the job runs
+- Review detailed logs and results after completion
 
-Device import operations can run as background jobs (default) or synchronously. Background jobs are recommended as they allow you to continue using NetBox while devices are imported, handle errors properly, and let you review results after completion.
-
-For small imports, you can disable background jobs if you prefer to wait for immediate completion.
 
 ### Viewing Job Status
 
@@ -61,3 +64,13 @@ The search form includes a "Clear cache before search" checkbox:
 - Normal operations and when refining search filters
 - When repeatedly working with the same set of devices
 - When NetBox reference data hasn't changed
+
+### Active Cached Searches
+
+The import page displays all your recent searches at the top, showing which filter combinations, that are still found in the cache. Each cached search shows the filters used, device count, and time remaining before expiration.
+
+Click any cached search to instantly reload those results without re-running filters or Virtual Chassis detection. This is particularly useful when switching between different filter combinations.
+
+Cached searches expire after 5 minutes of inactivity (or what you set as the cache timeout). The countdown timer shows how long each search remains available.
+
+The "Clear cache before search" option only clears the cache for the specific filter combination you're searching—other cached searches remain available.
