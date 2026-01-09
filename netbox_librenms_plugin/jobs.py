@@ -173,14 +173,12 @@ class ImportDevicesJob(JobRunner):
             **kwargs: Additional job parameters
         """
         from dcim.models import DeviceRole
-        from django.core.cache import cache
         from virtualization.models import Cluster
 
         from netbox_librenms_plugin.import_utils import (
             _determine_device_name,
             bulk_import_devices_shared,
             create_vm_from_librenms,
-            get_librenms_device_by_id,
             validate_device_for_import,
         )
         from netbox_librenms_plugin.import_validation_helpers import (
@@ -222,129 +220,11 @@ class ImportDevicesJob(JobRunner):
         vm_result = {"success": [], "failed": [], "skipped": []}
         if vm_imports:
             self.logger.info(f"Importing {len(vm_imports)} VMs...")
-            vm_ids_to_import = list(vm_imports.keys())
+            from netbox_librenms_plugin.import_utils import bulk_import_vms
 
-            for idx, vm_id in enumerate(vm_ids_to_import, start=1):
-                # Check for job cancellation every 5 VMs
-                if idx % 5 == 0:
-                    # Refresh job from DB to get current status
-                    self.job.refresh_from_db()
-                    job_status = self.job.status
-                    status_value = (
-                        job_status.value if hasattr(job_status, "value") else job_status
-                    )
-                    if status_value in ("failed", "errored"):
-                        self.logger.warning(
-                            f"Import job cancelled at VM {idx} of {len(vm_ids_to_import)}"
-                        )
-                        break
-                    self.logger.info(f"Imported VM {idx} of {len(vm_ids_to_import)}")
-
-                try:
-                    # Try to use cached device data first
-                    libre_device = None
-                    if libre_devices_cache and vm_id in libre_devices_cache:
-                        libre_device = libre_devices_cache[vm_id]
-                    else:
-                        from netbox_librenms_plugin.import_utils import (
-                            get_import_device_cache_key,
-                        )
-
-                        cache_key = get_import_device_cache_key(
-                            vm_id, server_key or "default"
-                        )
-                        libre_device = cache.get(cache_key)
-
-                    if not libre_device:
-                        libre_device = get_librenms_device_by_id(api, vm_id)
-
-                    if not libre_device:
-                        vm_result["failed"].append(
-                            {
-                                "device_id": vm_id,
-                                "error": f"Device {vm_id} not found in LibreNMS",
-                            }
-                        )
-                        self.logger.error(f"Device {vm_id} not found in LibreNMS")
-                        continue
-
-                    # Validate as VM
-                    validation = validate_device_for_import(
-                        libre_device, import_as_vm=True, api=api
-                    )
-
-                    # Check if VM already exists
-                    if validation.get("existing_device"):
-                        vm_result["skipped"].append(
-                            {
-                                "device_id": vm_id,
-                                "reason": f"VM already exists: {validation['existing_device'].name}",
-                            }
-                        )
-                        self.logger.info(
-                            f"VM already exists: {validation['existing_device'].name}"
-                        )
-                        continue
-
-                    # Apply manual cluster and role selections
-                    vm_mappings = vm_imports[vm_id]
-                    cluster_id = vm_mappings.get("cluster_id")
-                    role_id = vm_mappings.get("device_role_id")
-
-                    if cluster_id:
-                        cluster = Cluster.objects.filter(id=cluster_id).first()
-                        if cluster:
-                            apply_cluster_to_validation(validation, cluster)
-
-                    role = None
-                    if role_id:
-                        role = DeviceRole.objects.filter(id=role_id).first()
-                        if role:
-                            apply_role_to_validation(validation, role, is_vm=True)
-
-                    # Create the VM
-                    use_sysname = (
-                        sync_options.get("use_sysname", True) if sync_options else True
-                    )
-                    strip_domain = (
-                        sync_options.get("strip_domain", False)
-                        if sync_options
-                        else False
-                    )
-
-                    vm_name = _determine_device_name(
-                        libre_device,
-                        use_sysname=use_sysname,
-                        strip_domain=strip_domain,
-                        device_id=vm_id,
-                    )
-
-                    # Update validation with the final name
-                    libre_device["_computed_name"] = vm_name
-
-                    vm = create_vm_from_librenms(
-                        libre_device, validation, use_sysname=use_sysname, role=role
-                    )
-
-                    vm_result["success"].append(
-                        {
-                            "device_id": vm_id,
-                            "device": vm,
-                            "message": f"VM {vm.name} created successfully",
-                        }
-                    )
-                    self.logger.info(
-                        f"Successfully imported VM {vm.name} (ID: {vm_id})"
-                    )
-
-                except Exception as vm_error:
-                    # Log error but continue with other VMs
-                    self.logger.error(
-                        f"Failed to import VM {vm_id}: {vm_error}", exc_info=True
-                    )
-                    vm_result["failed"].append(
-                        {"device_id": vm_id, "error": str(vm_error)}
-                    )
+            vm_result = bulk_import_vms(
+                vm_imports, api, sync_options, libre_devices_cache, job=self
+            )
 
         # Combine results
         imported_device_pks = [
