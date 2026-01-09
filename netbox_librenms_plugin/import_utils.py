@@ -1716,7 +1716,10 @@ def bulk_import_vms(
 
             if not libre_device:
                 result["failed"].append(
-                    {"device_id": vm_id, "error": f"Device {vm_id} not found in LibreNMS"}
+                    {
+                        "device_id": vm_id,
+                        "error": f"Device {vm_id} not found in LibreNMS",
+                    }
                 )
                 log.error(f"Device {vm_id} not found in LibreNMS")
                 continue

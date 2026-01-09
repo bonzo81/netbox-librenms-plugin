@@ -172,18 +172,9 @@ class ImportDevicesJob(JobRunner):
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             **kwargs: Additional job parameters
         """
-        from dcim.models import DeviceRole
-        from virtualization.models import Cluster
 
         from netbox_librenms_plugin.import_utils import (
-            _determine_device_name,
             bulk_import_devices_shared,
-            create_vm_from_librenms,
-            validate_device_for_import,
-        )
-        from netbox_librenms_plugin.import_validation_helpers import (
-            apply_cluster_to_validation,
-            apply_role_to_validation,
         )
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
