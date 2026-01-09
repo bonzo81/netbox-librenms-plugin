@@ -1,0 +1,425 @@
+{% extends 'generic/_base.html' %}
+{% load buttons %}
+{% load helpers %}
+{% load plugins %}
+{% load render_table from django_tables2 %}
+{% load static %}
+{% load i18n %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block javascript %}
+{{ block.super }}
+<script src="{% static 'netbox_librenms_plugin/js/librenms_import.js' %}"></script>
+{% endblock %}
+
+
+
+{% block controls %}
+  <div class="btn-list">
+    {% plugin_list_buttons model %}
+    {% action_buttons actions model %}
+  </div>
+{% endblock controls %}
+
+{% block content %}
+
+  {# Display Django messages #}
+  {% include 'inc/messages.html' %}
+
+  {# LibreNMS Server Information #}
+  {% if librenms_server_info %}
+  <div class="card mb-3">
+    <div class="card-body p-2">
+      <div class="d-flex justify-content-between align-items-center">
+        <div>
+          <i class="mdi mdi-server-network text-primary"></i>
+          <strong>Active LibreNMS Server:</strong>
+          {% if librenms_server_info.is_legacy %}
+          {{ librenms_server_info.url }}
+          {% else %}
+          {{ librenms_server_info.display_name }} ({{ librenms_server_info.url }})
+          {% endif %}
+        </div>
+        {% if not librenms_server_info.is_legacy %}
+        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary ms-3">
+          <i class="mdi mdi-cog"></i> Change Server
+        </a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {# Collapsible Filter Section #}
+  {% if filter_form %}
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="card-title mb-0">
+          Search Filters
+          {% if filter_form.changed_data %}
+            {% badge filter_form.changed_data|length bg_color="primary" %}
+          {% endif %}
+        </h5>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#filter-collapse" aria-expanded="{% if filter_form.changed_data %}false{% else %}true{% endif %}" aria-controls="filter-collapse">
+          <i class="mdi mdi-filter"></i> Toggle Filters
+        </button>
+      </div>
+      <div class="collapse {% if not filter_form.changed_data %}show{% endif %}" id="filter-collapse">
+        <div class="card-body">
+          <div class="row">
+            {# Instructions column #}
+            <div class="col-md-4">
+              <h6 class="mb-3"><i class="mdi mdi-information-outline"></i> Search Instructions</h6>
+              <p class="mb-3">
+                <strong>At least one filter is required</strong> to search for devices.
+              </p>
+
+              <p class="mb-3">
+                The following matching rules apply:
+              <ul class="mb-3" style="padding-left: 1.2rem; font-size: 0.9rem;">
+                <li><strong>Location/Type/OS:</strong> Exact match</li>
+                <li><strong>Hostname:</strong> Partial match</li>
+                <li><strong>System Name:</strong> Exact match (or partial when combined with other filters)</li>
+              </ul>
+
+              <div class="alert alert-info small mt-2 mb-0" role="status">
+                <ul class="mb-0" style="padding-left: 1.2rem;">
+                  <strong>Performance note:</strong> <li>Results are cached (default: 5 minutes).</li>
+                  <li>Large LibreNMS datasets take time to process</li>
+                  <li>Repeating the same filter search will use cached data if available.</li>
+                  <li>Using background jobs is default and recommended.</li>
+                  <li>Background jobs can be cancelled if needed.</li>
+                </ul>
+              </div>
+
+              <p class="mt-3 text-muted small">
+                <i class="mdi mdi-lightbulb-on-outline"></i> <strong>Tip:</strong> Start with Location and/or Type to narrow results, then refine with additional filters.
+              </p>
+            </div>
+            {# Filters column #}
+            <div class="col-md-8">
+              <form method="get" class="form" id="librenms-import-filter-form">
+                <input type="hidden" name="apply_filters" value="1">
+                {% if show_filter_warning %}
+                  <div class="alert alert-warning alert-dismissible fade show border-warning" role="alert" style="border-left: 4px solid #ffc107;">
+                    <i class="mdi mdi-alert text-warning"></i>
+                    <strong>Filter Required:</strong> {{ filter_warning }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                  </div>
+                {% endif %}
+                <div class="row mb-3">
+                  <div class="col-md-6">
+                    <label for="{{ filter_form.librenms_location.id_for_label }}" class="form-label">{{ filter_form.librenms_location.label }}</label>
+                    {{ filter_form.librenms_location }}
+                  </div>
+                  <div class="col-md-6">
+                    <label for="{{ filter_form.librenms_type.id_for_label }}" class="form-label">{{ filter_form.librenms_type.label }}</label>
+                    {{ filter_form.librenms_type }}
+                  </div>
+                </div>
+                <div class="row mb-3">
+                  <div class="col-md-6">
+                    <label for="{{ filter_form.librenms_os.id_for_label }}" class="form-label">{{ filter_form.librenms_os.label }}</label>
+                    {{ filter_form.librenms_os }}
+                    {% if filter_form.librenms_os.help_text %}
+                      <small class="form-text text-muted">{{ filter_form.librenms_os.help_text }}</small>
+                    {% endif %}
+                  </div>
+                  <div class="col-md-6">
+                    <label for="{{ filter_form.librenms_hostname.id_for_label }}" class="form-label">{{ filter_form.librenms_hostname.label }}</label>
+                    {{ filter_form.librenms_hostname }}
+                    {% if filter_form.librenms_hostname.help_text %}
+                      <small class="form-text text-muted">{{ filter_form.librenms_hostname.help_text }}</small>
+                    {% endif %}
+                  </div>
+                </div>
+                <div class="row mb-3">
+                  <div class="col-md-6">
+                    <label for="{{ filter_form.librenms_sysname.id_for_label }}" class="form-label">{{ filter_form.librenms_sysname.label }}</label>
+                    {{ filter_form.librenms_sysname }}
+                    {% if filter_form.librenms_sysname.help_text %}
+                      <small class="form-text text-muted">{{ filter_form.librenms_sysname.help_text }}</small>
+                    {% endif %}
+                  </div>
+                  <div class="col-md-6">
+                    <label for="{{ filter_form.librenms_hardware.id_for_label }}" class="form-label">{{ filter_form.librenms_hardware.label }}</label>
+                    {{ filter_form.librenms_hardware }}
+                    {% if filter_form.librenms_hardware.help_text %}
+                      <small class="form-text text-muted">{{ filter_form.librenms_hardware.help_text }}</small>
+                    {% endif %}
+                  </div>
+                </div>
+                <div class="row mb-3">
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      {{ filter_form.exclude_existing }}
+                      <label class="form-check-label" for="{{ filter_form.exclude_existing.id_for_label }}">
+                        {{ filter_form.exclude_existing.label }}
+                      </label>
+                      {% if filter_form.exclude_existing.help_text %}
+                        <small class="form-text text-muted d-block">{{ filter_form.exclude_existing.help_text }}</small>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      {{ filter_form.show_disabled }}
+                      <label class="form-check-label" for="{{ filter_form.show_disabled.id_for_label }}">
+                        {{ filter_form.show_disabled.label }}
+                      </label>
+                      {% if filter_form.show_disabled.help_text %}
+                        <small class="form-text text-muted d-block">{{ filter_form.show_disabled.help_text }}</small>
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+                <div class="row mb-3">
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      {{ filter_form.enable_vc_detection }}
+                      <label class="form-check-label" for="{{ filter_form.enable_vc_detection.id_for_label }}">
+                        {{ filter_form.enable_vc_detection.label }}
+                      </label>
+                      {% if filter_form.enable_vc_detection.help_text %}
+                        <small class="form-text text-muted d-block">{{ filter_form.enable_vc_detection.help_text }}</small>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      {{ filter_form.clear_cache }}
+                      <label class="form-check-label" for="{{ filter_form.clear_cache.id_for_label }}">
+                        {{ filter_form.clear_cache.label }}
+                      </label>
+                      {% if filter_form.clear_cache.help_text %}
+                        <small class="form-text text-muted d-block">{{ filter_form.clear_cache.help_text }}</small>
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+                <div class="p-3 my-3 bg-primary-subtle border border-primary rounded-1">
+                  <div class="form-check">
+                    {{ filter_form.use_background_job }}
+                    <label class="form-check-label" for="{{ filter_form.use_background_job.id_for_label }}">
+                      {{ filter_form.use_background_job.label }}
+                    </label>
+                    {% if filter_form.use_background_job.help_text %}
+                      <small class="form-text text-muted d-block">{{ filter_form.use_background_job.help_text }}</small>
+                    {% endif %}
+                  </div>
+                </div>
+                <div class="text-end">
+                  <button type="submit" class="btn btn-primary" id="apply-filters-btn">
+                    <i class="mdi mdi-filter"></i> Apply Filters
+                  </button>
+                  <a href="{% url 'plugins:netbox_librenms_plugin:librenms_import' %}" class="btn btn-secondary">
+                    <i class="mdi mdi-close"></i> Clear
+                  </a>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {# Cached Searches Section #}
+  {% if cached_searches %}
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h6 class="card-title mb-0">
+        Active Cached Searches
+        <span id="cached-searches-badge">{% badge cached_searches|length bg_color="primary" %}</span>
+      </h6>
+      <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#cached-searches-collapse" aria-expanded="true" aria-controls="cached-searches-collapse">
+        <i class="mdi mdi-clock-fast"></i> Toggle Cached Searches
+      </button>
+    </div>
+    <div class="collapse show" id="cached-searches-collapse">
+      <div class="card-body p-2">
+        <div class="d-flex flex-wrap gap-2">
+          {% for search in cached_searches %}
+            <a href="?apply_filters=1{% for key, value in search.filters.items %}&librenms_{{ key }}={{ value|urlencode }}{% endfor %}{% if search.vc_enabled %}&enable_vc_detection=1{% endif %}"
+               class="btn btn-sm btn-outline-secondary"
+               style="text-decoration: none;"
+               title="Click to load this cached search">
+              <i class="mdi mdi-filter-outline"></i>
+              {% with display_data=search.display_filters|default:search.filters %}
+                {% for key, value in display_data.items %}
+                  {% if not forloop.first %} <span class="text-muted">|</span> {% endif %}
+                  {{ value }}
+                {% endfor %}
+              {% endwith %}
+              {% if search.vc_enabled %}
+                <span class="text-muted">| VC</span>
+              {% endif %}
+              <span class="text-muted ms-2">({{ search.device_count }} devices, <span class="cached-search-countdown" data-cache-timestamp="{{ search.cached_at }}" data-cache-timeout="{{ search.cache_timeout }}">{{ search.remaining_seconds }}s</span> left)</span>
+            </a>
+          {% endfor %}
+        </div>
+        <small class="text-muted d-block mt-2">
+          <i class="mdi mdi-information-outline"></i> Click any cached search to load those results again.
+        </small>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {# Applied filters #}
+  {% if filter_form %}
+    {% applied_filters model filter_form request.GET %}
+  {% endif %}
+
+  <style>
+    /* Allow dropdown menus to extend beyond table container */
+    .device-import-table-wrapper {
+      overflow-x: auto;
+      overflow-y: visible;
+      /* Add space below table for dropdowns in last rows */
+      padding-bottom: 200px;
+      /* Pull up pagination to remove visual gap */
+      margin-bottom: -200px;
+    }
+
+    /* Ensure card doesn't clip overflowing dropdowns */
+    .device-import-table-wrapper + .pagination {
+      position: relative;
+      z-index: 1;
+    }
+  </style>
+
+  {# Results Section #}
+  {% if table.page.paginator.count == 0 %}
+    <div class="alert alert-warning mb-3">
+        <h6 class="alert-heading">
+            <i class="mdi mdi-alert"></i> No Results Found
+        </h6>
+        <p class="mb-0">
+            No devices found matching your filters. Try adjusting your search criteria above.
+        </p>
+    </div>
+  {% else %}
+    {# Bulk import toolbar #}
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <button type="button" class="btn btn-outline-primary" id="select-all-ready">
+                <i class="mdi mdi-checkbox-multiple-marked"></i> Select All Ready
+            </button>
+            <button type="button" class="btn btn-outline-secondary" id="select-none">
+                <i class="mdi mdi-checkbox-multiple-blank-outline"></i> Deselect All
+            </button>
+            <span class="text-muted" id="selection-count">
+                <i class="mdi mdi-information"></i> 0 devices selected
+            </span>
+        </div>
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        {# Cache expiration info - before Settings section #}
+        {% if filters_submitted and table.rows %}
+          {% if cache_metadata_missing %}
+          <div class="d-flex align-items-center gap-1 text-warning small" title="Cache metadata not found. This may indicate a cache synchronization issue.">
+              <i class="mdi mdi-alert"></i>
+              <span>Cache status: <strong>unavailable</strong></span>
+          </div>
+          <span class="text-muted">|</span>
+          {% elif cache_timestamp and cache_timeout %}
+          <div class="d-flex align-items-center gap-1 text-muted small" id="cache-info-display"
+               data-cache-timestamp="{{ cache_timestamp }}"
+               data-cache-timeout="{{ cache_timeout }}">
+              <i class="mdi mdi-clock-outline"></i>
+              <span>Cache expires in <strong id="cache-expiry-countdown">{{ cache_timeout }}s</strong></span>
+          </div>
+          <span class="text-muted">|</span>
+          {% endif %}
+        {% endif %}
+        {# Import Settings #}
+        <div class="d-flex align-items-center gap-2 border-start ps-2">
+            <strong class="small">Settings:</strong>
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if settings.use_sysname_default %}checked{% endif %}
+                       data-bs-toggle="tooltip"
+                       title="Use SNMP sysName instead of LibreNMS hostname">
+                <label class="form-check-label small" for="use-sysname-toggle">
+                    Use sysName
+                </label>
+            </div>
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if settings.strip_domain_default %}checked{% endif %}
+                       data-bs-toggle="tooltip"
+                       title="Remove domain suffix (e.g., 'switch01.example.com' → 'switch01'). IP addresses preserved.">
+                <label class="form-check-label small" for="strip-domain-toggle">
+                    Strip domain
+                </label>
+            </div>
+        </div>
+        <button type="button" class="btn btn-success" id="bulk-import-btn" disabled
+          hx-post="{% url 'plugins:netbox_librenms_plugin:bulk_import_confirm' %}"
+          hx-target="#htmx-modal-content"
+          hx-swap="innerHTML"
+          hx-include="#import-selection-form, #use-sysname-toggle, #strip-domain-toggle">
+        <span class="d-inline-flex align-items-center gap-1">
+          <i class="mdi mdi-download"></i>
+          <span>Import Selected (<span id="import-count">0</span>)</span>
+        </span>
+        <span class="spinner-border spinner-border-sm ms-2 htmx-indicator" role="status" aria-hidden="true" style="display: none;"></span>
+        </button>
+      </div>
+    </div>
+  {% endif %}
+
+    <form method="post" class="form form-horizontal" id="import-selection-form">
+    {% csrf_token %}
+    <input type="hidden" name="return_url" value="{% if return_url %}{{ return_url }}{% else %}{{ request.path }}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}{% endif %}" />
+
+    {# Objects table #}
+    <div class="card">
+      <div class="htmx-container" id="object_list">
+        {% include 'inc/paginator.html' with htmx=True table=table paginator=table.paginator page=table.page %}
+        <div class="table-responsive device-import-table-wrapper">
+          {% include 'inc/table.html' %}
+        </div>
+        {% include 'inc/paginator.html' with htmx=True table=table paginator=table.paginator page=table.page %}
+      </div>
+    </div>
+    {# /Objects table #}
+
+  </form>
+
+    {# HTMX Modal for import actions #}
+  <div class="modal fade" id="htmx-modal" tabindex="-1" aria-labelledby="htmxModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content" id="htmx-modal-content">
+        {# Content loaded via HTMX #}
+        <div class="modal-body text-center">
+          <div class="spinner-border" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Filter Processing Modal #}
+  <div class="modal fade" id="filter-processing-modal" tabindex="-1" aria-labelledby="filterProcessingLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-body text-center py-4">
+          <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+          <h5 class="mb-2">Applying Filters</h5>
+          <p class="text-muted mb-1" id="filter-progress-message">Fetching LibreNMS data and processing filters...</p>
+          <p class="text-info mb-3" id="filter-device-count" style="display: none;">
+            <strong>LibreNMS Devices:</strong> <span id="filter-device-count-value">0</span>
+          </p>
+          <button type="button" class="btn btn-secondary btn-sm" id="cancel-filter-btn">
+            <i class="mdi mdi-close"></i> Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+{% endblock %}
+

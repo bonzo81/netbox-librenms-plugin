@@ -5,12 +5,11 @@
 {% block title %}LibreNMS Status Check{% endblock %}
 
 {% block content %}
-    
+
     {% if table.page.paginator.count == 0 %}
     <div class="text-muted mb-3">
         Select filters to check device status in LibreNMS. Click the status to view device LibreNMS sync details.
     </div>
     {% endif %}
     {{ block.super }}
-    
 {% endblock %}

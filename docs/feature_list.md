@@ -1,4 +1,20 @@
-# Features List
+### [Device Import](librenms_import/overview.md)
+
+* Search and discover devices from LibreNMS using flexible filters
+* Validate device prerequisites before import (Site, Device Type, Device Role)
+* Import devices as physical Devices or Virtual Machines
+* Smart matching for Sites, Device Types, and Platforms
+* Bulk import support
+* Automatic Virtual Chassis creation for stackable devices
+* Background job processing for large device sets
+* Duplicate detection to prevent re-importing existing devices
+
+### Plugin Settings
+
+* Multi-server LibreNMS configuration support
+* Configurable device naming defaults (sysName vs hostname)
+* Domain stripping options during import for cleaner device names
+* Virtual Chassis member naming pattern customization during import
 
 ### Device
 
@@ -15,7 +31,7 @@
 * Member-specific interface synchronization
 * Bulk member editing capabilities
 
-### Interface
+### Interface Sync {#interface-sync}
 
 * Create or Update interface in NetBox from LibreNMS interface data
   * Name
@@ -27,12 +43,12 @@
   * MTU
 * Sync all or specific fields
 
-### Cable
+### Cable Sync {#cable-sync}
 
 * Create Cable connection in NetBox from LibreNMS links data
 * Best results when the [custom field](usage_tips/custom_field.md) `librenms_id` is populated on interfaces
 
-### IP Address
+### IP Address Sync {#ip-address-sync}
 
 * Create IP address objects in Netbox from LibreNMS device IP data
 * Best results when the [custom field](usage_tips/custom_field.md) `librenms_id` is populated on interfaces

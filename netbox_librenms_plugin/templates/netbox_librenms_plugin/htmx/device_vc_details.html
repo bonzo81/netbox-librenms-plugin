@@ -1,0 +1,121 @@
+{# HTMX template for virtual chassis details modal #}
+{# Shows virtual chassis/stack information for a LibreNMS device #}
+
+<div class="modal-header">
+  <h5 class="modal-title">
+    <i class="mdi mdi-server-network"></i> Virtual Chassis: {{ libre_device.hostname }}
+  </h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+
+<div class="modal-body">
+
+  {# Device Summary #}
+  <div class="card mb-3">
+    <div class="card-header">
+      <i class="mdi mdi-server"></i> LibreNMS Device Information
+    </div>
+    <div class="card-body">
+      <dl class="row mb-0">
+        <dt class="col-sm-3">Hostname:</dt>
+        <dd class="col-sm-9"><strong>{{ libre_device.hostname }}</strong></dd>
+
+        <dt class="col-sm-3">System Name:</dt>
+        <dd class="col-sm-9">{{ libre_device.sysName|default:"N/A" }}</dd>
+
+        <dt class="col-sm-3">LibreNMS ID:</dt>
+        <dd class="col-sm-9">{{ libre_device.device_id }}</dd>
+
+        <dt class="col-sm-3">Hardware:</dt>
+        <dd class="col-sm-9">{{ libre_device.hardware|default:"N/A" }}</dd>
+
+        <dt class="col-sm-3">OS:</dt>
+        <dd class="col-sm-9">{{ libre_device.os|default:"N/A" }}</dd>
+      </dl>
+    </div>
+  </div>
+
+  {# Virtual Chassis Detection Error #}
+  {% if vc_data.detection_error %}
+  <div class="alert alert-warning">
+    <h6 class="alert-heading">
+      <i class="mdi mdi-alert"></i> Virtual Chassis Detection Error
+    </h6>
+    <p class="mb-0">
+      Unable to detect virtual chassis information: <strong>{{ vc_data.detection_error }}</strong>
+    </p>
+  </div>
+  {% endif %}
+
+  {# Virtual Chassis Details #}
+  {% if vc_data.is_stack %}
+  <div class="card mb-3">
+    <div class="card-header">
+      <i class="mdi mdi-switch"></i> Virtual Chassis Stack
+    </div>
+    <div class="card-body">
+      <p class="mb-3">
+        This device is part of a <strong>{{ vc_data.member_count }}-member</strong> stack/virtual chassis.
+      </p>
+
+      {% if vc_data.members %}
+      <h6 class="mb-3">Stack Members:</h6>
+      <div class="border rounded">
+        <div class="px-3 pb-2">
+          <ul class="list-unstyled mb-0 small">
+            {% for member in vc_data.members %}
+              <li class="py-3 {% if not forloop.last %}border-bottom{% endif %}">
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <span class="text-muted me-2">
+                    {% if member.position or member.position == 0 %}
+                      Pos {{ member.position|add:'1' }}
+                    {% else %}
+                      Pos —
+                    {% endif %}
+                  </span>
+                  <code class="flex-grow-1 mb-0">{{ member.suggested_name|default:member.name|default:"(unknown)" }}</code>
+                  {% if forloop.first %}
+                    <span class="badge bg-success text-white">Master</span>
+                  {% endif %}
+                </div>
+                <div class="text-muted mt-2 d-flex flex-wrap gap-3">
+                  {% if member.model %}
+                    <span><strong>Model:</strong> {{ member.model }}</span>
+                  {% endif %}
+                  {% if member.serial %}
+                    <span><strong>Serial:</strong> <code>{{ member.serial }}</code></span>
+                  {% endif %}
+                  {% if not member.model and not member.serial %}
+                    <span>No additional metadata</span>
+                  {% endif %}
+                </div>
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+      {% else %}
+      <p class="text-muted mb-0">
+        <i class="mdi mdi-information-outline"></i> No member details available.
+      </p>
+      {% endif %}
+    </div>
+  </div>
+  {% elif not vc_data.detection_error %}
+  <div class="alert alert-info">
+    <h6 class="alert-heading">
+      <i class="mdi mdi-information-outline"></i> Not a Virtual Chassis
+    </h6>
+    <p class="mb-0">
+      This device does not appear to be part of a virtual chassis or stack.
+    </p>
+  </div>
+  {% endif %}
+
+</div>
+
+<div class="modal-footer">
+  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+    <i class="mdi mdi-close"></i> Close
+  </button>
+</div>

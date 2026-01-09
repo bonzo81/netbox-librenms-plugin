@@ -2,29 +2,21 @@ from dcim.models import Device, Interface, MACAddress
 from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Q
-from django.http import Http404
+from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.utils import (
-    convert_speed_to_kbps,
-    get_interface_name_field,
-)
+from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field
 from netbox_librenms_plugin.views.mixins import CacheMixin
 
 
 class SyncInterfacesView(CacheMixin, View):
-    """
-    Sync selected interfaces from LibreNMS to NetBox for Devices and Virtual Machines.
-    """
+    """Sync selected interfaces from LibreNMS into NetBox."""
 
     def post(self, request, object_type, object_id):
-        """Handle POST request to sync interfaces."""
-        # Use the correct URL name based on object type
         url_name = (
             "dcim:device_librenms_sync"
             if object_type == "device"
@@ -33,7 +25,6 @@ class SyncInterfacesView(CacheMixin, View):
         obj = self.get_object(object_type, object_id)
 
         interface_name_field = get_interface_name_field(request)
-
         selected_interfaces = self.get_selected_interfaces(
             request, interface_name_field
         )
@@ -63,25 +54,20 @@ class SyncInterfacesView(CacheMixin, View):
         )
 
     def get_object(self, object_type, object_id):
-        """Retrieve the object (Device or VirtualMachine)."""
         if object_type == "device":
             return get_object_or_404(Device, pk=object_id)
-        elif object_type == "virtualmachine":
+        if object_type == "virtualmachine":
             return get_object_or_404(VirtualMachine, pk=object_id)
-        else:
-            raise Http404("Invalid object type.")
+        raise Http404("Invalid object type.")
 
     def get_selected_interfaces(self, request, interface_name_field):
-        """Retrieve and validate selected interfaces from the request."""
         selected_interfaces = request.POST.getlist("select")
         if not selected_interfaces:
             messages.error(request, "No interfaces selected for synchronization.")
             return None
-
         return selected_interfaces
 
     def get_cached_ports_data(self, request, obj):
-        """Retrieve and validate cached ports data."""
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
         if not cached_data:
             messages.warning(
@@ -99,7 +85,6 @@ class SyncInterfacesView(CacheMixin, View):
         exclude_columns,
         interface_name_field,
     ):
-        """Sync the selected interfaces."""
         with transaction.atomic():
             for port in ports_data:
                 port_name = port.get(interface_name_field)
@@ -112,12 +97,9 @@ class SyncInterfacesView(CacheMixin, View):
     def sync_interface(
         self, obj, librenms_interface, exclude_columns, interface_name_field
     ):
-        """Sync a single interface from LibreNMS to NetBox."""
-
         interface_name = librenms_interface.get(interface_name_field)
 
         if isinstance(obj, Device):
-            # Get the selected device ID from POST data
             device_selection_key = f"device_selection_{interface_name}"
             selected_device_id = self.request.POST.get(device_selection_key)
 
@@ -136,12 +118,10 @@ class SyncInterfacesView(CacheMixin, View):
         else:
             raise ValueError("Invalid object type.")
 
-        # Determine NetBox interface type (only for devices)
         netbox_type = None
         if isinstance(obj, Device):
             netbox_type = self.get_netbox_interface_type(librenms_interface)
 
-        # Update interface attributes
         self.update_interface_attributes(
             interface,
             librenms_interface,
@@ -163,7 +143,6 @@ class SyncInterfacesView(CacheMixin, View):
         interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
-        """Determine the NetBox interface type based on LibreNMS data and mappings."""
         speed = convert_speed_to_kbps(librenms_interface["ifSpeed"])
         mappings = InterfaceTypeMapping.objects.filter(
             librenms_type=librenms_interface["ifType"]
@@ -184,16 +163,13 @@ class SyncInterfacesView(CacheMixin, View):
         return mapping.netbox_type if mapping else "other"
 
     def handle_mac_address(self, interface, ifPhysAddress):
-        """Create and associate MAC address with interface."""
         if ifPhysAddress:
-            # First check if MAC already exists on this interface
             existing_mac = interface.mac_addresses.filter(
                 mac_address=ifPhysAddress
             ).first()
             if existing_mac:
                 mac_obj = existing_mac
             else:
-                # Create new MAC address if not found on interface
                 mac_obj = MACAddress.objects.create(mac_address=ifPhysAddress)
 
             interface.mac_addresses.add(mac_obj)
@@ -207,11 +183,8 @@ class SyncInterfacesView(CacheMixin, View):
         exclude_columns,
         interface_name_field,
     ):
-        """Update the attributes of the NetBox interface based on LibreNMS data."""
-        # Check if the interface is a Device interface or VM interface
         is_device_interface = isinstance(interface, Interface)
 
-        # Generate the mapping dynamically based on interface_name_field
         LIBRENMS_TO_NETBOX_MAPPING = {
             interface_name_field: "name",
             "ifType": "type",
@@ -228,25 +201,104 @@ class SyncInterfacesView(CacheMixin, View):
                 speed = convert_speed_to_kbps(librenms_interface.get(librenms_key))
                 setattr(interface, netbox_key, speed)
             elif librenms_key == "ifType":
-                # Only set the 'type' attribute if it's a Device interface
                 if is_device_interface and hasattr(interface, netbox_key):
                     setattr(interface, netbox_key, netbox_type)
             elif librenms_key == "ifAlias":
-                # Update description if it's different from the interface name
                 interface_name = librenms_interface.get(interface_name_field)
                 if librenms_interface.get("ifAlias") != interface_name:
                     setattr(interface, netbox_key, librenms_interface.get(librenms_key))
             else:
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))
 
-        # Check if librenms_id custom field exists
         if "librenms_id" in interface.cf:
             interface.custom_field_data["librenms_id"] = librenms_interface.get(
                 "port_id"
             )
 
-        # Handle new MAC address object in NetBox v4.2
         ifPhysAddress = librenms_interface.get("ifPhysAddress")
         self.handle_mac_address(interface, ifPhysAddress)
 
         interface.save()
+
+
+class DeleteNetBoxInterfacesView(CacheMixin, View):
+    """Delete interfaces that exist only in NetBox."""
+
+    def post(self, request, object_type, object_id):
+        if object_type == "device":
+            obj = get_object_or_404(Device, pk=object_id)
+        elif object_type == "virtualmachine":
+            obj = get_object_or_404(VirtualMachine, pk=object_id)
+        else:
+            return JsonResponse({"error": "Invalid object type"}, status=400)
+
+        interface_ids = request.POST.getlist("interface_ids")
+
+        if not interface_ids:
+            return JsonResponse(
+                {"error": "No interfaces selected for deletion"}, status=400
+            )
+
+        deleted_count = 0
+        errors = []
+
+        try:
+            with transaction.atomic():
+                for interface_id in interface_ids:
+                    try:
+                        if object_type == "device":
+                            interface = Interface.objects.get(id=interface_id)
+                            if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                                valid_device_ids = [
+                                    member.id
+                                    for member in obj.virtual_chassis.members.all()
+                                ]
+                                if interface.device_id not in valid_device_ids:
+                                    errors.append(
+                                        "Interface {} does not belong to this device or its virtual chassis".format(
+                                            interface.name
+                                        )
+                                    )
+                                    continue
+                            elif interface.device_id != obj.id:
+                                errors.append(
+                                    f"Interface {interface.name} does not belong to this device"
+                                )
+                                continue
+                        else:
+                            interface = VMInterface.objects.get(id=interface_id)
+                            if interface.virtual_machine_id != obj.id:
+                                errors.append(
+                                    f"Interface {interface.name} does not belong to this virtual machine"
+                                )
+                                continue
+
+                        interface_name = interface.name
+                        interface.delete()
+                        deleted_count += 1
+
+                    except (Interface.DoesNotExist, VMInterface.DoesNotExist):
+                        errors.append(f"Interface with ID {interface_id} not found")
+                        continue
+                    except Exception as exc:  # pragma: no cover - defensive
+                        errors.append(
+                            f"Error deleting interface {interface_name}: {str(exc)}"
+                        )
+                        continue
+
+        except Exception as exc:  # pragma: no cover
+            return JsonResponse(
+                {"error": f"Transaction failed: {str(exc)}"}, status=500
+            )
+
+        response_data = {
+            "status": "success",
+            "deleted_count": deleted_count,
+            "message": f"Successfully deleted {deleted_count} interface(s)",
+        }
+
+        if errors:
+            response_data["errors"] = errors
+            response_data["message"] += f" with {len(errors)} error(s)"
+
+        return JsonResponse(response_data)

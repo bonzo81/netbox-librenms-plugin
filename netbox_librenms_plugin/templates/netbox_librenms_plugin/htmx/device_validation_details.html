@@ -1,0 +1,353 @@
+{# HTMX template for device validation details modal #}
+{# Shows detailed reasons why a device cannot be imported #}
+
+<div class="modal-header">
+  <h5 class="modal-title">
+    <i class="mdi mdi-information-outline"></i> Import Validation: {{ libre_device.hostname }}
+  </h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+
+<div class="modal-body">
+
+  {# Device Summary #}
+  <div class="card mb-3">
+    <div class="card-header">
+      <i class="mdi mdi-server"></i> LibreNMS Device Information
+    </div>
+    <div class="card-body">
+      <dl class="row mb-0">
+        <dt class="col-sm-3">Hostname:</dt>
+        <dd class="col-sm-9"><strong>{{ libre_device.hostname }}</strong></dd>
+
+        <dt class="col-sm-3">System Name:</dt>
+        <dd class="col-sm-9">{{ libre_device.sysName|default:"N/A" }}</dd>
+
+        <dt class="col-sm-3">LibreNMS ID:</dt>
+        <dd class="col-sm-9">{{ libre_device.device_id }}</dd>
+
+        <dt class="col-sm-3">IP Address:</dt>
+        <dd class="col-sm-9">{{ libre_device.ip|default:"N/A" }}</dd>
+
+        <dt class="col-sm-3">Hardware:</dt>
+        <dd class="col-sm-9">{{ libre_device.hardware|default:"N/A" }}</dd>
+
+        <dt class="col-sm-3">OS:</dt>
+        <dd class="col-sm-9">{{ libre_device.os|default:"N/A" }}</dd>
+
+        <dt class="col-sm-3">Location:</dt>
+        <dd class="col-sm-9">{{ libre_device.location|default:"N/A" }}</dd>
+
+        <dt class="col-sm-3">Status:</dt>
+        <dd class="col-sm-9">
+          {% if libre_device.status == 1 %}
+            <span class="badge bg-success text-white"><i class="mdi mdi-check"></i> Up</span>
+          {% elif libre_device.status == 0 %}
+            <span class="badge bg-danger text-white"><i class="mdi mdi-close"></i> Down</span>
+          {% else %}
+            <span class="badge bg-secondary text-white"><i class="mdi mdi-help"></i> Unknown</span>
+          {% endif %}
+        </dd>
+      </dl>
+    </div>
+  </div>
+
+  {# Validation Status #}
+  <div class="row mb-3">
+    <div class="col-md-12">
+      {% if validation.existing_device %}
+        {% if validation.existing_match_type == 'librenms_id' %}
+          {# Device was imported via this plugin #}
+          <div class="alert alert-info">
+            <h6 class="alert-heading">
+              <i class="mdi mdi-check-decagram"></i> Device Already Imported
+            </h6>
+            <p>
+              This device has already been imported to NetBox as
+              <strong><a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" target="_blank">
+                {{ validation.existing_device.name }}
+              </a></strong>
+            </p>
+            <p class="mb-0">
+              <i class="mdi mdi-information-outline"></i>
+              Matched by LibreNMS ID ({{ libre_device.device_id }}) - device is linked and synchronized.
+            </p>
+          </div>
+        {% elif validation.existing_match_type == 'hostname' %}
+          {# Device exists with same hostname but wasn't imported from LibreNMS #}
+          <div class="alert alert-warning">
+            <h6 class="alert-heading">
+              <i class="mdi mdi-link-variant"></i> Device Exists (Hostname Match)
+            </h6>
+            <p>
+              A device with the same hostname exists in NetBox as
+              <strong><a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" target="_blank">
+                {{ validation.existing_device.name }}
+              </a></strong>
+            </p>
+            <p class="mb-0">
+              <i class="mdi mdi-alert"></i>
+              Matched by hostname only - this device is not linked to LibreNMS.
+              If this is the same device, consider adding the LibreNMS ID custom field manually.
+            </p>
+          </div>
+        {% elif validation.existing_match_type == 'primary_ip' %}
+          {# Device exists with same IP but wasn't imported from LibreNMS #}
+          <div class="alert alert-warning">
+            <h6 class="alert-heading">
+              <i class="mdi mdi-ip-network"></i> Device Exists (IP Match)
+            </h6>
+            <p>
+              A device with the same IP address ({{ libre_device.ip }}) exists in NetBox as
+              <strong><a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" target="_blank">
+                {{ validation.existing_device.name }}
+              </a></strong>
+            </p>
+            <p class="mb-0">
+              <i class="mdi mdi-alert"></i>
+              Matched by IP address only - verify this is the same device.
+              If correct, consider adding the LibreNMS ID custom field manually.
+            </p>
+          </div>
+        {% else %}
+          {# Fallback for unknown match type #}
+          <div class="alert alert-info">
+            <h6 class="alert-heading">
+              <i class="mdi mdi-link"></i> Device Already Exists
+            </h6>
+            <p>
+              This device already exists in NetBox as
+              <strong><a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" target="_blank">
+                {{ validation.existing_device.name }}
+              </a></strong>
+            </p>
+            <p class="mb-0">
+              No import is needed.
+            </p>
+          </div>
+        {% endif %}
+      {% elif validation.is_ready %}
+        <div class="alert alert-success">
+          <h6 class="alert-heading">
+            <i class="mdi mdi-check-circle"></i> Ready to Import
+          </h6>
+          <p class="mb-0">
+            All prerequisites are met. This device can be imported into NetBox without any issues.
+          </p>
+        </div>
+      {% elif validation.can_import %}
+        <div class="alert alert-warning">
+          <h6 class="alert-heading">
+            <i class="mdi mdi-alert"></i> Can Import with Warnings
+          </h6>
+          <p class="mb-0">
+            This device can be imported, but there are some warnings to review below.
+          </p>
+        </div>
+      {% else %}
+        <div class="alert alert-danger">
+          <h6 class="alert-heading">
+            <i class="mdi mdi-close-circle"></i> Cannot Import
+          </h6>
+          <p class="mb-0">
+            This device cannot be imported due to validation issues listed below.
+          </p>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# Validation Details #}
+  <div class="card mb-3">
+    <div class="card-header">
+      <i class="mdi mdi-database-import"></i> NetBox Import Matching
+    </div>
+    <div class="card-body">
+      <p class="text-muted mb-3">
+        <small>
+          The following NetBox objects will be used when importing this
+          {% if validation.import_as_vm %}<strong>Virtual Machine</strong>{% else %}<strong>Device</strong>{% endif %}:
+        </small>
+      </p>
+      <table class="table table-sm table-borderless mb-0">
+        <tbody>
+          {% if validation.import_as_vm %}
+            {# VM-specific fields #}
+            <tr>
+              <td width="30%"><strong>Import Type:</strong></td>
+              <td>
+                <i class="mdi mdi-cloud text-info"></i>
+                <span class="badge bg-info text-white">Virtual Machine</span>
+              </td>
+            </tr>
+
+            <tr>
+              <td><strong>Cluster:</strong></td>
+              <td>
+                {% if validation.cluster.cluster %}
+                  <i class="mdi mdi-check-circle text-success"></i>
+                  <span class="badge bg-success text-white">{{ validation.cluster.cluster.name }}</span>
+                {% else %}
+                  <i class="mdi mdi-close-circle text-danger"></i>
+                  <span class="text-danger">No cluster assigned (required for VMs)</span>
+                {% endif %}
+              </td>
+            </tr>
+
+            <tr>
+              <td><strong>Role:</strong></td>
+              <td>
+                {% if validation.device_role.role %}
+                  <i class="mdi mdi-check-circle text-success"></i>
+                  <span class="badge bg-success text-white">{{ validation.device_role.role.name }}</span>
+                {% else %}
+                  <i class="mdi mdi-information-outline text-secondary"></i>
+                  <span class="text-secondary">Optional - not assigned</span>
+                {% endif %}
+              </td>
+            </tr>
+
+          {% else %}
+            {# Device-specific fields #}
+            <tr>
+              <td width="30%"><strong>Import Type:</strong></td>
+              <td>
+                <i class="mdi mdi-server text-primary"></i>
+                <span class="badge bg-primary text-white">Device</span>
+              </td>
+            </tr>
+
+            <tr>
+              <td><strong>Site:</strong></td>
+              <td>
+                {% if validation.site.site %}
+                  <i class="mdi mdi-check-circle text-success"></i>
+                  <span class="badge bg-success text-white">{{ validation.site.site.name }}</span>
+                {% else %}
+                  <i class="mdi mdi-close-circle text-danger"></i>
+                  <span class="text-danger">No matching site found</span>
+                {% endif %}
+              </td>
+            </tr>
+
+            <tr>
+              <td><strong>Device Type:</strong></td>
+              <td>
+                {% if validation.device_type.device_type %}
+                  <i class="mdi mdi-check-circle text-success"></i>
+                  <span class="badge bg-success text-white">{{ validation.device_type.device_type }}</span>
+                {% else %}
+                  <i class="mdi mdi-close-circle text-danger"></i>
+                  <span class="text-danger">No matching device type found</span>
+                {% endif %}
+              </td>
+            </tr>
+
+            <tr>
+              <td><strong>Device Role:</strong></td>
+              <td>
+                {% if validation.device_role.role %}
+                  <i class="mdi mdi-check-circle text-success"></i>
+                  <span class="badge bg-success text-white">{{ validation.device_role.role.name }}</span>
+                {% else %}
+                  <i class="mdi mdi-close-circle text-danger"></i>
+                  <span class="text-danger">No device role assigned</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endif %}
+
+          {# Common fields for both Device and VM #}
+          <tr>
+            <td><strong>Platform:</strong></td>
+            <td>
+              {% if validation.platform.platform %}
+                <i class="mdi mdi-check-circle text-success"></i>
+                <span class="badge bg-success text-white">{{ validation.platform.platform.name }}</span>
+              {% else %}
+                <i class="mdi mdi-information-outline text-secondary"></i>
+                <span class="text-secondary">Optional - will be auto-mapped if available</span>
+              {% endif %}
+            </td>
+          </tr>
+
+          {% if not validation.import_as_vm %}
+          <tr>
+            <td><strong>Rack:</strong></td>
+            <td>
+              {% if validation.rack.rack %}
+                <i class="mdi mdi-check-circle text-success"></i>
+                <span class="badge bg-success text-white">
+                  {% if validation.rack.rack.location %}
+                    {{ validation.rack.rack.location.name }} - {{ validation.rack.rack.name }}
+                  {% else %}
+                    {{ validation.rack.rack.name }}
+                  {% endif %}
+                </span>
+              {% else %}
+                <i class="mdi mdi-information-outline text-secondary"></i>
+                <span class="text-secondary">Optional - not assigned</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
+
+          <tr>
+            <td><strong>Primary IP:</strong></td>
+            <td>
+              {% if libre_device.ip %}
+                <i class="mdi mdi-check-circle text-success"></i>
+                {{ libre_device.ip }}
+              {% else %}
+                <i class="mdi mdi-information-outline text-secondary"></i>
+                <span class="text-secondary">No primary IP - will import without</span>
+              {% endif %}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {# Warnings #}
+  {% if validation.warnings %}
+  <div class="card mb-3">
+    <div class="card-header">
+      <i class="mdi mdi-alert"></i> Warnings ({{ validation.warnings|length }})
+    </div>
+    <div class="card-body">
+      <p>These warnings won't prevent import but should be reviewed:</p>
+      <ul>
+        {% for warning in validation.warnings %}
+          <li><strong>{{ warning }}</strong></li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+
+<div class="modal-footer">
+  {% if validation.existing_device %}
+    {% if validation.import_as_vm or validation.existing_device.cluster %}
+      {# It's a VM #}
+      <a href="{% url 'virtualization:virtualmachine' pk=validation.existing_device.pk %}"
+         class="btn btn-primary"
+         target="_blank">
+        <i class="mdi mdi-open-in-new"></i> View VM in NetBox
+      </a>
+    {% else %}
+      {# It's a Device #}
+      <a href="{% url 'dcim:device' pk=validation.existing_device.pk %}"
+         class="btn btn-primary"
+         target="_blank">
+        <i class="mdi mdi-open-in-new"></i> View Device in NetBox
+      </a>
+    {% endif %}
+  {% endif %}
+
+  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+    <i class="mdi mdi-close"></i> Close
+  </button>
+</div>

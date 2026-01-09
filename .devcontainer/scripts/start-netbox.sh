@@ -21,11 +21,57 @@ else
   echo "🐛 Debug: ACCESS_URL is set to: $ACCESS_URL"
 fi
 
+# Kill any orphaned RQ workers (not tracked by PID file)
+echo "🧹 Cleaning up orphaned processes..."
+ORPHAN_RQ_PIDS=$(pgrep -f "python.*rqworker" 2>/dev/null)
+if [ -n "$ORPHAN_RQ_PIDS" ]; then
+  echo "   Found orphaned RQ workers, killing..."
+  pkill -9 -f "python.*rqworker" 2>/dev/null
+  sleep 1
+fi
+
+# Kill any orphaned NetBox runserver processes
+ORPHAN_NETBOX_PIDS=$(pgrep -f "python.*runserver.*8000" 2>/dev/null)
+if [ -n "$ORPHAN_NETBOX_PIDS" ]; then
+  echo "   Found orphaned NetBox servers, killing..."
+  pkill -9 -f "python.*runserver.*8000" 2>/dev/null
+  sleep 1
+fi
+
+# Stop any tracked processes from PID files
+if [ -f /tmp/netbox.pid ]; then
+  OLD_PID=$(cat /tmp/netbox.pid 2>/dev/null)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    kill "$OLD_PID" 2>/dev/null || kill -9 "$OLD_PID" 2>/dev/null
+  fi
+  rm -f /tmp/netbox.pid
+fi
+
+if [ -f /tmp/rqworker.pid ]; then
+  OLD_PID=$(cat /tmp/rqworker.pid 2>/dev/null)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    kill "$OLD_PID" 2>/dev/null || kill -9 "$OLD_PID" 2>/dev/null
+  fi
+  rm -f /tmp/rqworker.pid
+fi
+
 # Activate NetBox virtual environment
 source /opt/netbox/venv/bin/activate
 
 # Navigate to NetBox directory
 cd /opt/netbox/netbox
+
+# Start RQ worker in background
+echo "⚙️  Starting RQ worker..."
+(
+  source /opt/netbox/venv/bin/activate
+  cd /opt/netbox/netbox
+  python manage.py rqworker --verbosity=1
+) > /tmp/rqworker.log 2>&1 &
+
+RQ_PID=$!
+echo $RQ_PID > /tmp/rqworker.pid
+echo "✅ RQ worker started (PID: $RQ_PID)"
 
 if [ "$BACKGROUND" = true ]; then
   echo "🚀 Starting NetBox in background"

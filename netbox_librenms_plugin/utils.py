@@ -167,15 +167,8 @@ def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
 def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
     """
     Match LibreNMS hardware string to a NetBox DeviceType.
-    
-    This function implements a prioritized matching strategy to find the best
-    DeviceType match for a given LibreNMS hardware value.
-    
-    Matching Priority:
-    1. Part number exact match (case-insensitive) - Most specific identifier
-    2. Model name contains hardware value (case-insensitive) - Handles vendor prefixes
-    3. Model name exact match (case-insensitive) - Direct model name match
-    4. Slug match - Fallback using slugified hardware name
+
+    Only performs exact matching on part_number and model fields (case-insensitive).
 
     Args:
         hardware_name (str): Hardware string from LibreNMS API (e.g., 'C9200L-48P-4X')
@@ -184,57 +177,34 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
         dict: Dictionary containing:
             - matched (bool): Whether a match was found
             - device_type (DeviceType|None): The matched DeviceType object
-            - match_type (str|None): How the match was found
-              ('part_number', 'contains', 'exact', 'slug', or None)
-            
-    Examples:
-        >>> result = match_librenms_hardware_to_device_type('C9200L-48P-4X')
-        >>> if result['matched']:
-        ...     print(f"Matched via {result['match_type']}: {result['device_type']}")
-        Matched via part_number: Catalyst 9200L-48P-4X
-        
-        >>> result = match_librenms_hardware_to_device_type('NonExistent')
-        >>> result['matched']
-        False
+            - match_type (str|None): Always 'exact' if found, None otherwise
     """
     from dcim.models import DeviceType
-    from django.utils.text import slugify
 
     if not hardware_name or hardware_name == "-":
         return {"matched": False, "device_type": None, "match_type": None}
 
-    # 1. Try part number exact match (highest priority)
+    # Try part number exact match
     try:
         device_type = DeviceType.objects.get(part_number__iexact=hardware_name)
-        return {"matched": True, "device_type": device_type, "match_type": "part_number"}
+        return {
+            "matched": True,
+            "device_type": device_type,
+            "match_type": "exact",
+        }
     except DeviceType.DoesNotExist:
         pass
     except DeviceType.MultipleObjectsReturned:
-        # If multiple matches, return the first one
-        device_type = DeviceType.objects.filter(part_number__iexact=hardware_name).first()
-        return {"matched": True, "device_type": device_type, "match_type": "part_number"}
+        device_type = DeviceType.objects.filter(
+            part_number__iexact=hardware_name
+        ).first()
+        return {
+            "matched": True,
+            "device_type": device_type,
+            "match_type": "exact",
+        }
 
-    # 2. Try model name contains hardware value
-    # (for cases like 'C9200L-48P-4X' in 'Catalyst 9200L-48P-4X')
-    try:
-        device_types = DeviceType.objects.filter(model__icontains=hardware_name)
-        if device_types.count() == 1:
-            return {"matched": True, "device_type": device_types.first(), "match_type": "contains"}
-        # If multiple matches, prefer exact word match or shorter model name
-        elif device_types.count() > 1:
-            # Try to find one where hardware_name is a complete word in the model
-            for dt in device_types:
-                # Check if hardware_name appears as a standalone part (separated by spaces or hyphens)
-                pattern = r'\b' + re.escape(hardware_name) + r'\b'
-                if re.search(pattern, dt.model, re.IGNORECASE):
-                    return {"matched": True, "device_type": dt, "match_type": "contains"}
-            # If no exact word match, return the shortest model name (likely most specific)
-            device_type = min(device_types, key=lambda x: len(x.model))
-            return {"matched": True, "device_type": device_type, "match_type": "contains"}
-    except DeviceType.DoesNotExist:
-        pass
-
-    # 3. Try exact model match (case-insensitive)
+    # Try exact model match (case-insensitive)
     try:
         device_type = DeviceType.objects.get(model__iexact=hardware_name)
         return {"matched": True, "device_type": device_type, "match_type": "exact"}
@@ -244,15 +214,71 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
         device_type = DeviceType.objects.filter(model__iexact=hardware_name).first()
         return {"matched": True, "device_type": device_type, "match_type": "exact"}
 
-    # 4. Try slug match (lowest priority)
-    hardware_slug = slugify(hardware_name)
-    try:
-        device_type = DeviceType.objects.get(slug=hardware_slug)
-        return {"matched": True, "device_type": device_type, "match_type": "slug"}
-    except DeviceType.DoesNotExist:
-        pass
-    except DeviceType.MultipleObjectsReturned:
-        device_type = DeviceType.objects.filter(slug=hardware_slug).first()
-        return {"matched": True, "device_type": device_type, "match_type": "slug"}
-
     return {"matched": False, "device_type": None, "match_type": None}
+
+
+def find_matching_site(librenms_location: str) -> dict:
+    """
+    Find exact matching NetBox site for a LibreNMS location.
+
+    Only performs exact name matching (case-insensitive).
+
+    Args:
+        librenms_location (str): Location string from LibreNMS
+
+    Returns:
+        dict: Dictionary containing:
+            - found (bool): Whether a match was found
+            - site (Site|None): The matched Site object
+            - match_type (str|None): Always 'exact' if found, None otherwise
+            - confidence (float): Always 1.0 if found, 0.0 otherwise
+    """
+    from dcim.models import Site
+
+    if not librenms_location or librenms_location == "-":
+        return {"found": False, "site": None, "match_type": None, "confidence": 0.0}
+
+    # Try case-insensitive exact match
+    try:
+        site = Site.objects.get(name__iexact=librenms_location)
+        return {"found": True, "site": site, "match_type": "exact", "confidence": 1.0}
+    except Site.DoesNotExist:
+        pass
+    except Site.MultipleObjectsReturned:
+        site = Site.objects.filter(name__iexact=librenms_location).first()
+        return {"found": True, "site": site, "match_type": "exact", "confidence": 1.0}
+
+    return {"found": False, "site": None, "match_type": None, "confidence": 0.0}
+
+
+def find_matching_platform(librenms_os: str) -> dict:
+    """
+    Find exact matching NetBox platform for a LibreNMS OS.
+
+    Only performs exact name matching (case-insensitive).
+
+    Args:
+        librenms_os (str): OS string from LibreNMS (e.g., 'ios', 'linux', 'junos')
+
+    Returns:
+        dict: Dictionary containing:
+            - found (bool): Whether a match was found
+            - platform (Platform|None): The matched Platform object
+            - match_type (str|None): Always 'exact' if found, None otherwise
+    """
+    from dcim.models import Platform
+
+    if not librenms_os or librenms_os == "-":
+        return {"found": False, "platform": None, "match_type": None}
+
+    # Try case-insensitive exact name match
+    try:
+        platform = Platform.objects.get(name__iexact=librenms_os)
+        return {"found": True, "platform": platform, "match_type": "exact"}
+    except Platform.DoesNotExist:
+        pass
+    except Platform.MultipleObjectsReturned:
+        platform = Platform.objects.filter(name__iexact=librenms_os).first()
+        return {"found": True, "platform": platform, "match_type": "exact"}
+
+    return {"found": False, "platform": None, "match_type": None}

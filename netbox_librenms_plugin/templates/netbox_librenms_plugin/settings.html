@@ -1,79 +1,105 @@
 {% extends 'generic/object_edit.html' %}
 {% load form_helpers %}
-{% block title %}LibreNMS Settings{% endblock %}
+{% block title %}Plugin Settings{% endblock %}
+
+{% block tabs %}
+    <ul class="nav nav-tabs" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="config-tab" data-bs-toggle="tab" data-bs-target="#config" type="button" role="tab" aria-controls="config" aria-selected="true">
+                <i class="ti ti-server-2 me-1"></i> Server Config
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="import-settings-tab" data-bs-toggle="tab" data-bs-target="#import-settings" type="button" role="tab" aria-controls="import-settings" aria-selected="false">
+                <i class="ti ti-download me-1"></i> Import Settings
+            </button>
+        </li>
+    </ul>
+{% endblock tabs %}
+
 {% block content %}
-    <!-- Settings Form Section -->
-    <div class="row justify-content-start">
-        <div class="col-lg-5 col-xl-4">
-            <form action="" method="post" class="form h-100" enctype="multipart/form-data">
+    <div class="tab-content" data-active-tab="{{ active_tab|default:'' }}">
+        <!-- Server Config Tab -->
+        <div class="tab-pane fade show active" id="config" role="tabpanel" aria-labelledby="config-tab">
+            <form action="" method="post" class="form" enctype="multipart/form-data">
                 {% csrf_token %}
-                <div class="card h-100">
-                    <div class="card-header">
-                        <h3 class="card-title">
-                            <i class="ti ti-server-2 me-2"></i>
-                            LibreNMS Server Settings
-                        </h3>
-                    </div>
-                    <div class="card-body d-flex flex-column">
-                        <div class="mb-3 flex-grow-1">
-                            <p class="text-muted mb-3">
-                                Configure which LibreNMS server to use for synchronization operations.
-                                Multiple servers can be configured in the NetBox configuration file.
-                            </p>
-                            {% render_field form.selected_server %}
+                <input type="hidden" name="form_type" value="server_config">
+
+                <div class="row justify-content-start">
+                    <div class="col-lg-5 col-xl-4">
+                        <div class="card h-100">
+                            <div class="card-header">
+                                <h3 class="card-title">
+                                    <i class="ti ti-server-2 me-2"></i>
+                                    LibreNMS Server Settings
+                                </h3>
+                            </div>
+                            <div class="card-body d-flex flex-column">
+                                <div class="mb-3 flex-grow-1">
+                                    <p class="text-muted mb-3">
+                                        Configure which LibreNMS server to use for synchronization operations.
+                                        Multiple servers can be configured in the NetBox configuration file.
+                                    </p>
+                                    {% render_field server_form.selected_server %}
+                                </div>
+                                <div class="text-end mt-auto">
+                                    <button type="submit" id="save-server-btn" class="btn btn-primary" disabled>
+                                        <i class="ti ti-check me-1"></i> Save Server Config
+                                    </button>
+                                </div>
+                            </div>
                         </div>
-                        <div class="text-end mt-auto">
-                            <button type="submit" id="save-settings-btn" class="btn btn-primary" disabled>
-                                <i class="ti ti-check me-1"></i> Save Settings
-                            </button>
-                        </div>
                     </div>
-                </div>
-            </form>
-        </div>
-        <!-- Connection Test Card -->
-        <div class="col-lg-5 col-xl-4">
-            <div class="card h-100">
-                <div class="card-header">
-                    <h3 class="card-title">
-                        <i class="ti ti-network me-2"></i>
-                        Connection Test
-                    </h3>
-                </div>
-                <div class="card-body d-flex flex-column">
-                    <div class="flex-grow-1">
-                        <p class="text-muted mb-3">Test the connection to the selected LibreNMS server to verify configuration.</p>
-                        <button type="button"
-                                id="test-connection-btn"
-                                class="btn btn-outline-info w-100">
-                            <i class="ti ti-network me-1"></i> Test Connection
-                        </button>
-                        <!-- Test result area -->
-                        <div id="test-result" class="mt-3 d-none"></div>
+                <!-- Connection Test Card -->
+                <div class="col-lg-5 col-xl-4">
+                    <div class="card h-100">
+                        <div class="card-header">
+                            <h3 class="card-title">
+                                <i class="ti ti-network me-2"></i>
+                                Connection Test
+                            </h3>
+                        </div>
+                        <div class="card-body d-flex flex-column">
+                            <div class="flex-grow-1">
+                                <p class="text-muted mb-3">Test the connection to the selected LibreNMS server to verify configuration.</p>
+                                <button type="button"
+                                        id="test-connection-btn"
+                                        class="btn btn-outline-info w-100"
+                                        hx-post="{% url 'plugins:netbox_librenms_plugin:test_connection' %}"
+                                        hx-target="#test-result"
+                                        hx-swap="innerHTML"
+                                        hx-include="[name='selected_server']">
+                                    <i class="ti ti-network me-1"></i> Test Connection
+                                    <span class="spinner-border spinner-border-sm ms-1 htmx-indicator" role="status" style="display: none;"></span>
+                                </button>
+                                <!-- Test result area -->
+                                <div id="test-result" class="mt-3"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
-    </div>
-    <!-- Spacing between sections -->
-    <div class="my-4"></div>
-    <!-- Configuration Example Section -->
-    <div class="row">
-        <div class="col-lg-10 col-xl-8">
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">
-                        <i class="ti ti-code me-2"></i>
-                        Configuration Example
-                    </h3>
-                </div>
-                <div class="card-body">
-                    <p class="mb-3">
-                        To configure multiple LibreNMS servers, update your NetBox
-                        <code>configuration.py</code>:
-                    </p>
-                    <div class="highlight">
-                        <pre class="mb-3"><code>PLUGINS_CONFIG = {
+
+            <!-- Spacing between sections -->
+            <div class="my-4"></div>
+
+            <!-- Configuration Example Section -->
+            <div class="row">
+                <div class="col-lg-10 col-xl-8">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">
+                                <i class="ti ti-code me-2"></i>
+                                Configuration Example
+                            </h3>
+                        </div>
+                        <div class="card-body">
+                            <p class="mb-3">
+                                To configure multiple LibreNMS servers, update your NetBox
+                                <code>configuration.py</code>:
+                            </p>
+                            <div class="highlight">
+                                <pre class="mb-3"><code>PLUGINS_CONFIG = {
     'netbox_librenms_plugin': {
         'servers': {
             'production': {
@@ -95,101 +121,214 @@
         }
     }
 }</code></pre>
-                    </div>
-                    <div class="alert alert-info">
-                        <i class="ti ti-info-circle me-2"></i>
-                        <strong>Note:</strong> For backward compatibility, the legacy single-server configuration
-                        is still supported if no "servers" configuration is provided.
+                            </div>
+                            <div class="alert alert-info">
+                                <i class="ti ti-info-circle me-2"></i>
+                                <strong>Note:</strong> For backward compatibility, the legacy single-server configuration
+                                is still supported if no "servers" configuration is provided.
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
+            </form>
+        </div>
+
+        <!-- Import Settings Tab -->
+        <div class="tab-pane fade" id="import-settings" role="tabpanel" aria-labelledby="import-settings-tab">
+            <form action="" method="post" class="form" enctype="multipart/form-data">
+                {% csrf_token %}
+                <input type="hidden" name="form_type" value="import_settings">
+
+                <div class="row justify-content-start">
+                    <!-- Left Column: Device Naming and Virtual Chassis -->
+                    <div class="col-lg-6">
+                        <!-- Device Naming Defaults Card -->
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <h3 class="card-title">
+                                    <i class="ti ti-edit me-2"></i>
+                                    Device Naming Defaults
+                                </h3>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted mb-3">
+                                    Configure default naming preferences for imported devices. These settings apply to all device imports but can be overridden during individual imports.
+                                </p>
+
+                                <div class="row">
+                                    <div class="col-12">
+                                        <div class="form-group mb-3">
+                                            <div class="form-check form-switch">
+                                                {{ import_form.use_sysname_default }}
+                                                <label class="form-check-label" for="{{ import_form.use_sysname_default.id_for_label }}">
+                                                    {{ import_form.use_sysname_default.label }}
+                                                </label>
+                                                {% if import_form.use_sysname_default.help_text %}
+                                                    <small class="form-text text-muted d-block">{{ import_form.use_sysname_default.help_text }}</small>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+
+                                        <div class="form-group mb-3">
+                                            <div class="form-check form-switch">
+                                                {{ import_form.strip_domain_default }}
+                                                <label class="form-check-label" for="{{ import_form.strip_domain_default.id_for_label }}">
+                                                    {{ import_form.strip_domain_default.label }}
+                                                </label>
+                                                {% if import_form.strip_domain_default.help_text %}
+                                                    <small class="form-text text-muted d-block">{{ import_form.strip_domain_default.help_text }}</small>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Virtual Chassis Card -->
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <h3 class="card-title">
+                                    <i class="ti ti-switch me-2"></i>
+                                    Virtual Chassis Member Naming
+                                </h3>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted mb-3">
+                                    Configure how virtual chassis member devices are named during import.
+                                </p>
+
+                                <div class="row">
+                                    <div class="col-12">
+                                        <div class="form-group mb-3">
+                                            <label for="{{ import_form.vc_member_name_pattern.id_for_label }}" class="form-label">
+                                                {{ import_form.vc_member_name_pattern.label }}
+                                            </label>
+                                            {{ import_form.vc_member_name_pattern }}
+                                            {% if import_form.vc_member_name_pattern.errors %}
+                                                <div class="invalid-feedback d-block">
+                                                    {{ import_form.vc_member_name_pattern.errors }}
+                                                </div>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="row">
+                                    <div class="col-12">
+                                        <div class="alert alert-info mb-0">
+                                            <p class="small mb-2"><strong>Available placeholders:</strong></p>
+                                            <ul class="mb-3 small" style="padding-left: 1.2rem;">
+                                                <li><code>{position}</code> - VC position number</li>
+                                                <li><code>{serial}</code> - Member serial number</li>
+                                            </ul>
+                                            <p class="small mb-0"><strong>Note:</strong> The pattern is appended to the master device name. At least one placeholder is required to ensure each member gets a unique name.</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="row">
+                                    <div class="col-12">
+                                        <p class="small mb-2"><strong>Examples:</strong></p>
+                                        <ul class="mb-0 small" style="padding-left: 1.2rem;">
+                                            <li><code>-M{position}</code> → switch01-M1, switch01-M2</li>
+                                            <li><code> ({position})</code> → switch01 (1), switch01 (2)</li>
+                                            <li><code>-SW{position}</code> → switch01-SW1, switch01-SW2</li>
+                                            <li><code> [{serial}]</code> → switch01 [ABC123], switch01 [ABC124]</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Save Button -->
+                <div class="row justify-content-start">
+                    <div class="col-lg-6">
+                        <div class="text-end">
+                            <button type="submit" id="save-import-btn" class="btn btn-primary" disabled>
+                                <i class="ti ti-check me-1"></i> Save Import Settings
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </form>
         </div>
     </div>
-    <script>
+
+<!-- Spacing -->
+<div class="my-4"></div>
+
+<script>
 document.addEventListener('DOMContentLoaded', function() {
-    const testBtn = document.getElementById('test-connection-btn');
-    const testResult = document.getElementById('test-result');
+    // Auto-select the correct tab if there was a validation error
+    // Uses the same pattern as librenms_sync.js for consistency
+    const tabContent = document.querySelector('.tab-content');
+    const activeTab = tabContent ? tabContent.dataset.activeTab : '';
+
+    if (activeTab === 'import_settings') {
+        const importTab = document.getElementById('import-settings-tab');
+        const importPane = document.getElementById('import-settings');
+        const configTab = document.getElementById('config-tab');
+        const configPane = document.getElementById('config');
+
+        if (importTab && importPane && configTab && configPane) {
+            // Deactivate config tab
+            configTab.classList.remove('active');
+            configTab.setAttribute('aria-selected', 'false');
+            configPane.classList.remove('show', 'active');
+
+            // Activate import settings tab
+            importTab.classList.add('active');
+            importTab.setAttribute('aria-selected', 'true');
+            importPane.classList.add('show', 'active');
+        }
+    }
+
     const serverSelect = document.getElementById('id_selected_server');
-    const saveBtn = document.getElementById('save-settings-btn');
-    
-    // Store the initial value to detect changes
-    const initialValue = serverSelect.value;
-    
-    // Enable/disable save button based on changes
-    function updateSaveButton() {
-        const hasChanges = serverSelect.value !== initialValue;
-        saveBtn.disabled = !hasChanges;
-        
-        if (hasChanges) {
-            saveBtn.classList.remove('btn-secondary');
-            saveBtn.classList.add('btn-primary');
-        } else {
-            saveBtn.classList.remove('btn-primary');
-            saveBtn.classList.add('btn-secondary');
-        }
+    const vcPatternInput = document.getElementById('id_vc_member_name_pattern');
+    const saveServerBtn = document.getElementById('save-server-btn');
+    const saveImportBtn = document.getElementById('save-import-btn');
+    const useSysnameCheckbox = document.getElementById('id_use_sysname_default');
+    const stripDomainCheckbox = document.getElementById('id_strip_domain_default');
+
+    // Store the initial values to detect changes
+    const initialServerValue = serverSelect.value;
+    const initialVcPatternValue = vcPatternInput.value;
+    const initialUseSysnameValue = useSysnameCheckbox ? useSysnameCheckbox.checked : true;
+    const initialStripDomainValue = stripDomainCheckbox ? stripDomainCheckbox.checked : false;
+
+    // Enable/disable server save button based on changes
+    function updateServerSaveButton() {
+        const hasChanges = serverSelect.value !== initialServerValue;
+        saveServerBtn.disabled = !hasChanges;
+        saveServerBtn.classList.toggle('btn-primary', hasChanges);
+        saveServerBtn.classList.toggle('btn-secondary', !hasChanges);
     }
-    
-    // Listen for changes on the server select
-    serverSelect.addEventListener('change', updateSaveButton);
-    
-    // Initialize button state
-    updateSaveButton();
-    
-    testBtn.addEventListener('click', function() {
-        const selectedServer = serverSelect.value;
-        
-        if (!selectedServer) {
-            showTestResult('error', 'Please select a server first.');
-            return;
-        }
-        
-        // Disable button and show loading state
-        testBtn.disabled = true;
-        testBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span> Testing...';
-        
-        // Clear previous results
-        testResult.classList.add('d-none');
-        
-        // Make AJAX request
-        fetch('{% url "plugins:netbox_librenms_plugin:test_connection" %}', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': '{{ csrf_token }}'
-            },
-            body: JSON.stringify({
-                'server_key': selectedServer
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                let message = `<strong>Connection successful!</strong><br>`;
-                if (data.system_info) {
-                    message += `LibreNMS Version: ${data.system_info.version}<br>`;
-                    message += `Database: ${data.system_info.database}<br>`;
-                    message += `PHP Version: ${data.system_info.php_version}`;
-                }
-                showTestResult('success', message);
-            } else {
-                showTestResult('error', `<strong>Connection failed:</strong><br>${data.error || 'Unknown error'}`);
-            }
-        })
-        .catch(error => {
-            showTestResult('error', `<strong>Network error:</strong><br>${error.message}`);
-        })
-        .finally(() => {
-            // Re-enable button
-            testBtn.disabled = false;
-            testBtn.innerHTML = '<i class="ti ti-network me-1"></i> Test Connection';
-        });
-    });
-    
-    function showTestResult(type, message) {
-        testResult.className = `mt-2 alert alert-${type === 'success' ? 'success' : 'danger'}`;
-        testResult.innerHTML = message;
-        testResult.classList.remove('d-none');
+
+    // Enable/disable import save button based on changes
+    function updateImportSaveButton() {
+        const vcPatternChanged = vcPatternInput.value !== initialVcPatternValue;
+        const useSysnameChanged = useSysnameCheckbox ? (useSysnameCheckbox.checked !== initialUseSysnameValue) : false;
+        const stripDomainChanged = stripDomainCheckbox ? (stripDomainCheckbox.checked !== initialStripDomainValue) : false;
+        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged;
+        saveImportBtn.disabled = !hasChanges;
+        saveImportBtn.classList.toggle('btn-primary', hasChanges);
+        saveImportBtn.classList.toggle('btn-secondary', !hasChanges);
     }
+
+    // Listen for changes on respective form fields
+    serverSelect.addEventListener('change', updateServerSaveButton);
+    vcPatternInput.addEventListener('input', updateImportSaveButton);
+    if (useSysnameCheckbox) useSysnameCheckbox.addEventListener('change', updateImportSaveButton);
+    if (stripDomainCheckbox) stripDomainCheckbox.addEventListener('change', updateImportSaveButton);
+
+    // Initialize button states
+    updateServerSaveButton();
+    updateImportSaveButton();
 });
-    </script>
+</script>
 {% endblock %}

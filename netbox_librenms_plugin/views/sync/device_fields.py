@@ -8,14 +8,10 @@ from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
 
 class UpdateDeviceSerialView(LibreNMSAPIMixin, View):
-    """
-    Update device serial number from LibreNMS to NetBox.
-    """
+    """Update NetBox device serial number from LibreNMS."""
 
     def post(self, request, pk):
-        """Handle POST request to update device serial."""
         device = get_object_or_404(Device, pk=pk)
-
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if not self.librenms_id:
@@ -24,7 +20,6 @@ class UpdateDeviceSerialView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Fetch device info from LibreNMS
         success, device_info = self.librenms_api.get_device_info(self.librenms_id)
 
         if not success or not device_info:
@@ -41,7 +36,6 @@ class UpdateDeviceSerialView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Update device serial
         old_serial = device.serial
         device.serial = serial
         device.save()
@@ -52,23 +46,16 @@ class UpdateDeviceSerialView(LibreNMSAPIMixin, View):
                 f"Device serial updated from '{old_serial}' to '{serial}'",
             )
         else:
-            messages.success(
-                request,
-                f"Device serial set to '{serial}'",
-            )
+            messages.success(request, f"Device serial set to '{serial}'")
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
 
 class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
-    """
-    Update device type from LibreNMS hardware match to NetBox.
-    """
+    """Update NetBox DeviceType using LibreNMS hardware metadata."""
 
     def post(self, request, pk):
-        """Handle POST request to update device type."""
         device = get_object_or_404(Device, pk=pk)
-
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if not self.librenms_id:
@@ -77,7 +64,6 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Fetch device info
         success, device_info = self.librenms_api.get_device_info(self.librenms_id)
 
         if not success or not device_info:
@@ -94,10 +80,9 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Try to match device type using utility function
         match_result = match_librenms_hardware_to_device_type(hardware)
-        
-        if not match_result['matched']:
+
+        if not match_result["matched"]:
             messages.error(
                 request,
                 f"No matching DeviceType found for hardware '{hardware}'",
@@ -106,8 +91,7 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Update device type
-        device_type = match_result['device_type']
+        device_type = match_result["device_type"]
         old_device_type = device.device_type
         device.device_type = device_type
         device.save()
@@ -121,16 +105,10 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
 
 
 class UpdateDevicePlatformView(LibreNMSAPIMixin, View):
-    """
-    Update device platform from LibreNMS OS info to NetBox.
-    Platform must already exist in NetBox.
-    Platform matching is based on OS name only (not version).
-    """
+    """Update NetBox Platform based on LibreNMS OS info."""
 
     def post(self, request, pk):
-        """Handle POST request to update device platform."""
         device = get_object_or_404(Device, pk=pk)
-
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if not self.librenms_id:
@@ -139,7 +117,6 @@ class UpdateDevicePlatformView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Fetch device info
         success, device_info = self.librenms_api.get_device_info(self.librenms_id)
 
         if not success or not device_info:
@@ -156,22 +133,21 @@ class UpdateDevicePlatformView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Platform name is just the OS (not OS + version)
         platform_name = os_name
 
-        # Find platform
         try:
             platform = Platform.objects.get(name__iexact=platform_name)
         except Platform.DoesNotExist:
             messages.error(
                 request,
-                f"Platform '{platform_name}' does not exist in NetBox. Use 'Create & Sync' button to create it first.",
+                "Platform '{}' does not exist in NetBox. Use 'Create & Sync' button to create it first.".format(
+                    platform_name
+                ),
             )
             return redirect(
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Update device platform
         old_platform = device.platform
         device.platform = platform
         device.save()
@@ -182,21 +158,15 @@ class UpdateDevicePlatformView(LibreNMSAPIMixin, View):
                 f"Device platform updated from '{old_platform}' to '{platform}'",
             )
         else:
-            messages.success(
-                request,
-                f"Device platform set to '{platform}'",
-            )
+            messages.success(request, f"Device platform set to '{platform}'")
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
 
 class CreateAndAssignPlatformView(LibreNMSAPIMixin, View):
-    """
-    Create a new platform from LibreNMS OS info and assign to device.
-    """
+    """Create a new Platform and assign it to the device."""
 
     def post(self, request, pk):
-        """Handle POST request to create platform and assign to device."""
         device = get_object_or_404(Device, pk=pk)
 
         platform_name = request.POST.get("platform_name")
@@ -208,7 +178,6 @@ class CreateAndAssignPlatformView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Check if platform already exists
         if Platform.objects.filter(name__iexact=platform_name).exists():
             messages.warning(
                 request,
@@ -218,7 +187,6 @@ class CreateAndAssignPlatformView(LibreNMSAPIMixin, View):
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Get manufacturer if provided
         manufacturer = None
         if manufacturer_id:
             try:
@@ -226,13 +194,11 @@ class CreateAndAssignPlatformView(LibreNMSAPIMixin, View):
             except Manufacturer.DoesNotExist:
                 pass
 
-        # Create platform
         platform = Platform.objects.create(
             name=platform_name,
             manufacturer=manufacturer,
         )
 
-        # Assign to device
         device.platform = platform
         device.save()
 
@@ -245,43 +211,32 @@ class CreateAndAssignPlatformView(LibreNMSAPIMixin, View):
 
 
 class AssignVCSerialView(LibreNMSAPIMixin, View):
-    """
-    View to assign multiple serial numbers to VC members from LibreNMS inventory.
-    Handles batch assignment of all serials in one POST request.
-    """
+    """Assign serial numbers to each virtual chassis member."""
 
     def post(self, request, pk):
-        """Handle POST request to assign multiple serial numbers to VC members."""
         device = get_object_or_404(Device, pk=pk)
 
-        # Verify device is part of VC
         if not device.virtual_chassis:
             messages.error(request, "Device is not part of a virtual chassis")
             return redirect(
                 "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
             )
 
-        # Process all serial assignments from the form
-        # Form submits: serial_1, member_id_1, serial_2, member_id_2, etc.
         assignments_made = 0
         errors = []
 
-        # Get all the serial/member pairs from POST data
         counter = 1
         while f"serial_{counter}" in request.POST:
             serial = request.POST.get(f"serial_{counter}")
             member_id = request.POST.get(f"member_id_{counter}")
 
-            # Skip if no member selected for this serial
             if not member_id:
                 counter += 1
                 continue
 
             try:
-                # Get member device
                 member = Device.objects.get(pk=member_id)
 
-                # Verify member is part of same VC
                 if (
                     not member.virtual_chassis
                     or member.virtual_chassis.pk != device.virtual_chassis.pk
@@ -292,7 +247,6 @@ class AssignVCSerialView(LibreNMSAPIMixin, View):
                     counter += 1
                     continue
 
-                # Update member serial
                 member.serial = serial
                 member.save()
 
@@ -300,12 +254,13 @@ class AssignVCSerialView(LibreNMSAPIMixin, View):
 
             except Device.DoesNotExist:
                 errors.append(f"Device with ID {member_id} not found")
-            except Exception as e:
-                errors.append(f"Error assigning serial to member {member_id}: {str(e)}")
+            except Exception as exc:  # pragma: no cover - defensive guard
+                errors.append(
+                    f"Error assigning serial to member {member_id}: {str(exc)}"
+                )
 
             counter += 1
 
-        # Show results
         if assignments_made > 0:
             messages.success(
                 request,

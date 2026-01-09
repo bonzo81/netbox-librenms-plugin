@@ -573,7 +573,7 @@
 
                 <!-- SNMPv2c form -->
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
-                    id="snmpv2-form">
+                    id="snmpv2-form" name="snmpv2-form" autocomplete="off">
                     {% csrf_token %}
                     <input type="hidden" name="snmp_version" value="v2c">
                     <div class="mb-3">
@@ -613,7 +613,7 @@
 
                 <!-- SNMPv3 form -->
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
-                    id="snmpv3-form" style="display: none;">
+                    id="snmpv3-form" name="snmpv3-form" autocomplete="off" style="display: none;">
                     {% csrf_token %}
                     <input type="hidden" name="snmp_version" value="v3">
 

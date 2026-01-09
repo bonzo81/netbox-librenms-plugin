@@ -1,0 +1,206 @@
+{# Confirmation modal content for bulk imports #}
+<div class="modal-header">
+  <h5 class="modal-title">
+    <i class="mdi mdi-download"></i> Confirm Import
+  </h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<div class="modal-body">
+  <p class="mb-3">Review the devices that will be created in NetBox.</p>
+
+  {% if errors %}
+    <div class="alert alert-warning" role="alert">
+      <i class="mdi mdi-alert"></i>
+      {{ errors|join:', ' }}
+    </div>
+  {% endif %}
+
+  {% for entry in devices %}
+    {% with vc=entry.validation.virtual_chassis %}
+      <div class="border rounded-3 p-2 mb-2">
+        {% if vc.is_stack and vc.members %}
+          <button class="d-flex flex-wrap align-items-center gap-2 w-100 text-start border-0 bg-transparent p-0 collapsed"
+                  type="button"
+                  data-bs-toggle="collapse"
+                  data-bs-target="#bulk-vc-{{ entry.device_id }}"
+                  aria-expanded="false">
+        {% else %}
+          <div class="d-flex flex-wrap align-items-center gap-2">
+        {% endif %}
+            <i class="mdi mdi-{{ entry.is_vm|yesno:'cloud,server' }} fs-4 text-primary"></i>
+            <div>
+              <div class="fw-semibold">{{ entry.device_name }}</div>
+              <div class="small text-muted">{{ entry.is_vm|yesno:'Virtual Machine,Device' }}</div>
+            </div>
+            {% if entry.role %}
+              <span class="badge text-white ms-1" style="background-color: #{{ entry.role.color|default:'6c757d' }};">{{ entry.role.name }}</span>
+            {% endif %}
+            {% if vc.is_stack %}
+              <span class="badge bg-info text-white text-uppercase fw-semibold small">
+                <i class="mdi mdi-switch"></i>
+                VC{% if vc.member_count %} · {{ vc.member_count }}{% endif %}
+              </span>
+              {% if vc.members %}
+                <i class="mdi mdi-chevron-down ms-auto"></i>
+              {% endif %}
+            {% endif %}
+        {% if vc.is_stack and vc.members %}
+          </button>
+        {% else %}
+          </div>
+        {% endif %}
+
+        <div class="text-muted small mt-1 d-flex flex-wrap gap-3">
+          {% if entry.cluster %}<span><strong>Cluster:</strong> {{ entry.cluster.name }}</span>{% endif %}
+          {% if entry.rack %}
+            <span>
+              <strong>Rack:</strong>
+              {% if entry.rack.location %}{{ entry.rack.location.name }} – {% endif %}
+              {{ entry.rack.name }}
+            </span>
+          {% endif %}
+        </div>
+
+        {% if entry.validation.issues %}
+          <div class="alert alert-warning py-2 px-3 mt-3 mb-0 small">
+            <i class="mdi mdi-alert"></i>
+            {{ entry.validation.issues|join:'; ' }}
+          </div>
+        {% endif %}
+
+        {% if vc.is_stack and vc.members %}
+          <div class="collapse mt-2" id="bulk-vc-{{ entry.device_id }}">
+            <div class="border rounded">
+              <div class="px-3 pb-2">
+                <ul class="list-unstyled mb-0 small">
+                  {% for member in vc.members %}
+                    <li class="d-flex flex-wrap align-items-center py-2 {% if not forloop.last %}border-bottom{% endif %}">
+                      <span class="text-muted me-2">
+                        {% if member.position or member.position == 0 %}
+                          Pos {{ member.position|add:'1' }}
+                        {% else %}
+                          Pos —
+                        {% endif %}
+                      </span>
+                      <div class="flex-grow-1 d-flex align-items-center gap-2">
+                        <code class="flex-grow-1 mb-0">{{ member.suggested_name }}
+                        {% if forloop.first %}
+                          <span class="badge bg-success text-white">Master</span>
+                        {% endif %}
+                        </code>
+                      </div>
+                      {% if member.serial %}
+                        <span class="text-muted">SN {{ member.serial }}</span>
+                      {% endif %}
+                    </li>
+                  {% endfor %}
+                </ul>
+              </div>
+            </div>
+          </div>
+        {% elif vc.is_stack and vc.detection_error %}
+          <div class="alert alert-warning py-2 px-3 mt-3 mb-0 small">
+            <i class="mdi mdi-alert"></i>
+            Unable to display virtual chassis members: {{ vc.detection_error }}
+          </div>
+        {% endif %}
+      </div>
+    {% endwith %}
+  {% endfor %}
+</div>
+<div class="modal-body pt-0">
+  <div class="p-3 bg-primary-subtle border border-primary rounded-1">
+    <div class="form-check">
+      <input type="checkbox" name="use_background_job" id="use-background-job-checkbox" class="form-check-input" checked>
+      <label class="form-check-label" for="use-background-job-checkbox">
+        Run as background job
+      </label>
+      <small class="form-text text-muted d-block mt-1">
+        Recommended: Jobs are logged and can be cancelled.
+      </small>
+    </div>
+  </div>
+</div>
+<div class="modal-footer">
+  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+    <i class="mdi mdi-close"></i> Cancel
+  </button>
+  <form class="d-inline-flex align-items-center gap-2"
+        id="bulk-import-confirm-form"
+        hx-post="{% url 'plugins:netbox_librenms_plugin:bulk_import_devices' %}"
+        hx-target="body"
+        hx-swap="none">
+    {% csrf_token %}
+    {% for entry in devices %}
+      <input type="hidden" name="select" value="{{ entry.device_id }}">
+      {% if entry.role %}<input type="hidden" name="role_{{ entry.device_id }}" value="{{ entry.role.pk }}">{% endif %}
+      {% if entry.cluster %}<input type="hidden" name="cluster_{{ entry.device_id }}" value="{{ entry.cluster.pk }}">{% endif %}
+      {% if entry.rack %}<input type="hidden" name="rack_{{ entry.device_id }}" value="{{ entry.rack.pk }}">{% endif %}
+    {% endfor %}
+    <input type="hidden" name="use_sysname" value="{{ use_sysname|yesno:'true,false' }}">
+    <input type="hidden" name="strip_domain" value="{{ strip_domain|yesno:'true,false' }}">
+    <input type="hidden" name="use_background_job" id="use-background-job-hidden" value="on">
+    <button type="submit" class="btn btn-success d-inline-flex align-items-center gap-1" data-bulk-confirm-submit>
+      <span data-state="idle" class="d-inline-flex align-items-center gap-1">
+        <i class="mdi mdi-download"></i>
+        Import {{ device_count }} device{{ device_count|pluralize }}
+      </span>
+      <span data-state="loading" class="d-none align-items-center gap-1">
+        <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+        Importing...
+      </span>
+    </button>
+  </form>
+</div>
+
+<script>
+  (function() {
+    if (window.__bulkConfirmHandlersAttached) {
+      return;
+    }
+    window.__bulkConfirmHandlersAttached = true;
+
+    const formId = 'bulk-import-confirm-form';
+
+    function toggleButtonState(isLoading) {
+      const form = document.getElementById(formId);
+      if (!form) {
+        return;
+      }
+      const button = form.querySelector('[data-bulk-confirm-submit]');
+      if (!button) {
+        return;
+      }
+      const idle = button.querySelector('[data-state="idle"]');
+      const loading = button.querySelector('[data-state="loading"]');
+      button.disabled = isLoading;
+      if (idle) {
+        idle.classList.toggle('d-none', isLoading);
+      }
+      if (loading) {
+        loading.classList.toggle('d-none', !isLoading);
+      }
+    }
+
+    // Sync checkbox with hidden input
+    const checkbox = document.getElementById('use-background-job-checkbox');
+    const hiddenInput = document.getElementById('use-background-job-hidden');
+    if (checkbox && hiddenInput) {
+      checkbox.addEventListener('change', function() {
+        hiddenInput.value = checkbox.checked ? 'on' : 'off';
+      });
+    }
+
+    document.addEventListener('htmx:beforeRequest', function(event) {
+      if (event.target && event.target.id === formId) {
+        toggleButtonState(true);
+      }
+    });
+
+    document.addEventListener('htmx:afterRequest', function(event) {
+      if (event.target && event.target.id === formId) {
+        toggleButtonState(false);
+      }
+    });
+  })();
+</script>
