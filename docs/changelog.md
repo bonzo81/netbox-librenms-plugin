@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0 (2026-01-09)
+
+## Major Features
+- **LibreNMS Bulk Device Import**: Complete workflow for importing devices from LibreNMS with HTMX-based UI, validation, and background job processing
+- **Background Job Support**: Asynchronous processing for large device imports with real-time status tracking and cancellation
+- **Enhanced Caching**: Improved caching system with expiration countdown, metadata storage, and multi-server isolation
+- **Virtual Chassis Detection**: Automatic detection and handling of virtual chassis during import
+
+- Add hardware and exclude-existing filters to device import
+- Client-side table sorting for import page
+- Active LibreNMS server display on import page
+- Improved logging patterns and documentation
+- Cache management with discard controls
+- Refactored settings page with HTMX (removed fetch-based JavaScript)
+- Enhanced virtual chassis sync device detection logic
+- Better error handling and connection exhaustion prevention
+
+## Development
+- Improved dev container with RQ worker management
+- Comprehensive test coverage for background jobs
+- Enhanced copilot instructions for AI-assisted development
+- Better process management and reload scripts
+
+## Documentation
+- Extensive import documentation (overview, process, settings, validation, search)
+- Background job architecture documentation
+- Improved README and workflow guides
+- Virtual chassis usage documentation
+
 ## 0.3.18 (2025-11-21)
 
 ### Improvements
