@@ -11,6 +11,8 @@ from django.views import View
 from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
+    bulk_import_vms,
+    fetch_device_with_cache,
     get_import_device_cache_key,
     get_librenms_device_by_id,
     get_virtual_chassis_data,
@@ -101,12 +103,7 @@ class DeviceImportHelperMixin:
         is_vm = bool(cluster_id)
 
         # Try to use cached device data from table load (eliminates redundant API calls)
-        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-        libre_device = cache.get(cache_key)
-
-        if not libre_device:
-            # Fallback to API fetch if cache expired or not populated
-            libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
+        libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
         if not libre_device:
             return None, None, selections
@@ -242,19 +239,11 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
             seen_ids.add(device_id)
 
             # Try to use cached device data from table load or role changes
-            cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-            libre_device = cache.get(cache_key)
-            from_cache = bool(libre_device)
+            libre_device = fetch_device_with_cache(device_id, self.librenms_api)
+            from_cache = libre_device is not None
 
-            if not libre_device:
-                # Fallback to API fetch if cache expired or not populated
+            if not from_cache:
                 cache_expired_count += 1
-                libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
-                if libre_device:
-                    # Cache for later use during actual import
-                    cache.set(
-                        cache_key, libre_device, timeout=self.librenms_api.cache_timeout
-                    )
 
             if not libre_device:
                 errors.append(f"Device ID {device_id} not found in LibreNMS")
@@ -464,8 +453,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         # Build cache of already-fetched device data to avoid redundant API calls
         libre_devices_cache = {}
         for device_id in parsed_ids:
-            cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-            cached_device = cache.get(cache_key)
+            cached_device = fetch_device_with_cache(device_id, self.librenms_api)
             if cached_device:
                 libre_devices_cache[device_id] = cached_device
 
@@ -531,8 +519,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         # Build cache of already-fetched device data to avoid redundant API calls
         libre_devices_cache_sync = {}
         for device_id in parsed_ids:
-            cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-            cached_device = cache.get(cache_key)
+            cached_device = fetch_device_with_cache(device_id, self.librenms_api)
             if cached_device:
                 libre_devices_cache_sync[device_id] = cached_device
 
@@ -558,97 +545,12 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
 
             # Import VMs if any
             if vm_ids_to_import:
-                from dcim.models import DeviceRole
-                from virtualization.models import Cluster
-
-                from netbox_librenms_plugin.import_utils import (
-                    create_vm_from_librenms,
+                vm_result = bulk_import_vms(
+                    vm_imports,
+                    self.librenms_api,
+                    sync_options,
+                    libre_devices_cache_sync,
                 )
-
-                for vm_id in vm_ids_to_import:
-                    try:
-                        # Try to use cached device data first
-                        cache_key = get_import_device_cache_key(vm_id, self.librenms_api.server_key)
-                        libre_device = libre_devices_cache_sync.get(vm_id) or cache.get(
-                            cache_key
-                        )
-
-                        if not libre_device:
-                            libre_device = get_librenms_device_by_id(
-                                self.librenms_api, vm_id
-                            )
-
-                        if not libre_device:
-                            vm_result["failed"].append(
-                                {
-                                    "device_id": vm_id,
-                                    "error": f"Device {vm_id} not found in LibreNMS",
-                                }
-                            )
-                            continue
-
-                        # Validate as VM
-                        validation = validate_device_for_import(
-                            libre_device, import_as_vm=True, api=self.librenms_api
-                        )
-
-                        # Check if VM already exists
-                        if validation.get("existing_device"):
-                            vm_result["skipped"].append(
-                                {
-                                    "device_id": vm_id,
-                                    "reason": f"VM already exists: {validation['existing_device'].name}",
-                                }
-                            )
-                            continue
-
-                        # Apply manual cluster selection
-                        vm_mappings = vm_imports[vm_id]
-                        cluster_id = vm_mappings.get("cluster_id")
-                        role_id = vm_mappings.get("device_role_id")
-
-                        if cluster_id:
-                            cluster = Cluster.objects.filter(id=cluster_id).first()
-                            if cluster:
-                                apply_cluster_to_validation(validation, cluster)
-
-                        role = None
-                        if role_id:
-                            role = DeviceRole.objects.filter(id=role_id).first()
-                            if role:
-                                apply_role_to_validation(validation, role, is_vm=True)
-
-                        # Create the VM
-                        use_sysname = sync_options.get("use_sysname", True)
-                        strip_domain = sync_options.get("strip_domain", False)
-
-                        vm_name = _determine_device_name(
-                            libre_device,
-                            use_sysname=use_sysname,
-                            strip_domain=strip_domain,
-                            device_id=vm_id,
-                        )
-
-                        # Update validation with the final name
-                        libre_device["_computed_name"] = vm_name
-
-                        vm = create_vm_from_librenms(
-                            libre_device, validation, use_sysname=use_sysname, role=role
-                        )
-
-                        vm_result["success"].append(
-                            {
-                                "device_id": vm_id,
-                                "device": vm,
-                                "message": f"VM {vm.name} created successfully",
-                            }
-                        )
-
-                    except Exception as vm_error:
-                        logger.exception(f"Failed to import VM {vm_id}")
-                        vm_result["failed"].append(
-                            {"device_id": vm_id, "error": str(vm_error)}
-                        )
 
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.exception("Error during bulk import")
@@ -700,15 +602,11 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
             # Re-validate and render each imported device with fresh status
             for device_id in imported_device_ids:
                 # Fetch device from cache or API
-                cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-                libre_device = libre_devices_cache_sync.get(device_id) or cache.get(
-                    cache_key
+                libre_device = fetch_device_with_cache(
+                    device_id,
+                    self.librenms_api,
+                    libre_devices_cache=libre_devices_cache_sync,
                 )
-
-                if not libre_device:
-                    libre_device = get_librenms_device_by_id(
-                        self.librenms_api, device_id
-                    )
 
                 if libre_device:
                     # Determine if this was imported as VM or device
@@ -727,6 +625,9 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
 
                     # Update cache with fresh validation
                     libre_device["_validation"] = validation
+                    cache_key = get_import_device_cache_key(
+                        device_id, self.librenms_api.server_key
+                    )
                     cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
 
                     # Render updated row
@@ -752,157 +653,6 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                 headers={"HX-Trigger": '{"closeModal": null}'},
             )
 
-        return redirect("plugins:netbox_librenms_plugin:librenms_import")
-
-
-class LoadImportJobResultsView(LibreNMSAPIMixin, View):
-    """Load and display results from a completed import background job."""
-
-    def get(self, request, job_id):
-        """
-        Load completed import job results and update table rows via HTMX.
-
-        Args:
-            request: Django request object
-            job_id: Integer PK of completed ImportDevicesJob
-
-        Returns:
-            HttpResponse with HTMX fragments for imported device rows
-        """
-        from core.models import Job
-
-        from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-
-        try:
-            job = Job.objects.get(pk=job_id)
-        except Job.DoesNotExist:
-            messages.error(request, f"Import job {job_id} not found")
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
-
-        # Handle both string status and choice field object
-        status_value = job.status.value if hasattr(job.status, "value") else job.status
-        status_label = job.status.label if hasattr(job.status, "label") else job.status
-
-        if status_value != "completed":
-            messages.warning(
-                request,
-                f"Import job is {status_label}, not completed. Please wait or check Jobs interface.",
-            )
-            return redirect("plugins:netbox_librenms_plugin:librenms_import")
-
-        # Load results from job data
-        job_data = job.data or {}
-        imported_device_pks = job_data.get("imported_device_pks", [])
-        imported_vm_pks = job_data.get("imported_vm_pks", [])
-        imported_libre_device_ids = job_data.get("imported_libre_device_ids", [])
-        imported_libre_vm_ids = job_data.get("imported_libre_vm_ids", [])
-        server_key = job_data.get("server_key")
-        success_count = job_data.get("success_count", 0)
-        failed_count = job_data.get("failed_count", 0)
-        skipped_count = job_data.get("skipped_count", 0)
-        vc_created_count = job_data.get("virtual_chassis_created", 0)
-        errors = job_data.get("errors", [])
-
-        # Display summary messages
-        if success_count:
-            msg = f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}"
-            if vc_created_count:
-                msg += f" ({vc_created_count} virtual chassis created)"
-            messages.success(request, msg)
-
-        if failed_count:
-            messages.error(
-                request,
-                f"Failed to import {failed_count} device{'s' if failed_count != 1 else ''}. Check job logs for details.",
-            )
-
-        if skipped_count:
-            messages.warning(
-                request,
-                f"Skipped {skipped_count} existing device{'s' if skipped_count != 1 else ''}",
-            )
-
-        # Log errors if any
-        for error_item in errors[:10]:  # Limit to first 10 errors in messages
-            device_id = error_item.get("device_id")
-            error_msg = error_item.get("error", "Unknown error")
-            logger.error(
-                f"Import job {job_id}: Device {device_id} failed - {error_msg}"
-            )
-
-        # For HTMX requests, render updated table rows
-        if request.headers.get("HX-Request"):
-            updated_rows_html = []
-
-            # All imported LibreNMS device IDs
-            all_imported_ids = imported_libre_device_ids + imported_libre_vm_ids
-
-            if all_imported_ids:
-                # Re-fetch and re-validate each imported device
-                for device_id in all_imported_ids:
-                    try:
-                        # Fetch device from cache or API
-                        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-                        libre_device = cache.get(cache_key)
-
-                        if not libre_device:
-                            libre_device = get_librenms_device_by_id(
-                                self.librenms_api, device_id
-                            )
-
-                        if libre_device:
-                            # Determine if this was imported as VM or device
-                            is_vm = device_id in imported_libre_vm_ids
-
-                            # Re-validate with fresh status (will now show as imported)
-                            validation = validate_device_for_import(
-                                libre_device,
-                                import_as_vm=is_vm,
-                                api=None,  # No VC detection needed for already-imported devices
-                                include_vc_detection=False,
-                            )
-                            validation["import_as_vm"] = is_vm
-
-                            # Update cache with fresh validation
-                            libre_device["_validation"] = validation
-                            cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
-
-                            # Render updated row
-                            table = DeviceImportTable([libre_device])
-                            context = {
-                                "record": libre_device,
-                                "table": table,
-                                "cluster_id": None,
-                                "role_id": None,
-                                "rack_id": None,
-                            }
-
-                            row_html = render(
-                                request,
-                                "netbox_librenms_plugin/htmx/device_import_row.html",
-                                context,
-                            ).content.decode("utf-8")
-                            updated_rows_html.append(row_html)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to render updated row for device {device_id}: {e}"
-                        )
-                        continue
-
-            if updated_rows_html:
-                # Return concatenated row HTML with closeModal trigger
-                return HttpResponse(
-                    "\n".join(updated_rows_html),
-                    headers={"HX-Trigger": '{"closeModal": null}'},
-                )
-            else:
-                # No rows to update, just trigger a page reload
-                return HttpResponse(
-                    "",
-                    headers={"HX-Refresh": "true"},
-                )
-
-        # Non-HTMX request: redirect to import page
         return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
 
