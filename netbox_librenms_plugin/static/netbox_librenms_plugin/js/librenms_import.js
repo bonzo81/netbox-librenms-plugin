@@ -37,6 +37,179 @@
     const MODAL_AUTO_CLOSE_MS = 3000;
 
     // ============================================
+    // MODAL MANAGER CLASS
+    // ============================================
+
+    /**
+     * Modal Manager - Centralized Bootstrap modal handling with fallback support.
+     * Tracks modal instances and provides consistent show/hide behavior across all modals.
+     * Eliminates code duplication and provides state tracking.
+     */
+    class ModalManager {
+        constructor(modalElement) {
+            this.modal = modalElement;
+            this.instance = null;
+            this.backdropElement = null;
+            this.isVisible = false;
+        }
+
+        /**
+         * Show the modal using best available method.
+         * @returns {boolean} Success status
+         */
+        show() {
+            if (!this.modal) return false;
+
+            // Try Bootstrap 5 (preferred)
+            if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+                this.instance = bootstrap.Modal.getInstance(this.modal) || new bootstrap.Modal(this.modal);
+                this.instance.show();
+                this.isVisible = true;
+                return true;
+            }
+
+            // Try window.bootstrap (alternate)
+            if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal) {
+                this.instance = window.bootstrap.Modal.getInstance(this.modal) || new window.bootstrap.Modal(this.modal);
+                this.instance.show();
+                this.isVisible = true;
+                return true;
+            }
+
+            // Fallback: Manual DOM manipulation
+            this._showManual();
+            this.isVisible = true;
+            return true;
+        }
+
+        /**
+         * Hide the modal using best available method.
+         * @returns {boolean} Success status
+         */
+        hide() {
+            if (!this.modal) return false;
+
+            // Try Bootstrap instance
+            if (this.instance && typeof this.instance.hide === 'function') {
+                this.instance.hide();
+                this.isVisible = false;
+                return true;
+            }
+
+            // Fallback: Manual
+            this._hideManual();
+            this.isVisible = false;
+            return true;
+        }
+
+        /**
+         * Manual show implementation (no Bootstrap).
+         * @private
+         */
+        _showManual() {
+            if (!this.modal.classList.contains('show')) {
+                this.modal.classList.add('show');
+                this.modal.style.display = 'block';
+                this.modal.removeAttribute('aria-hidden');
+                this.modal.setAttribute('aria-modal', 'true');
+            }
+
+            if (!document.body.classList.contains('modal-open')) {
+                document.body.classList.add('modal-open');
+            }
+
+            if (!this.backdropElement && !document.querySelector('.modal-backdrop')) {
+                this.backdropElement = document.createElement('div');
+                this.backdropElement.className = 'modal-backdrop fade show';
+                document.body.appendChild(this.backdropElement);
+            }
+        }
+
+        /**
+         * Manual hide implementation (no Bootstrap).
+         * @private
+         */
+        _hideManual() {
+            this.modal.classList.remove('show');
+            this.modal.style.display = '';
+            this.modal.setAttribute('aria-hidden', 'true');
+            this.modal.removeAttribute('aria-modal');
+            document.body.classList.remove('modal-open');
+
+            if (this.backdropElement) {
+                this.backdropElement.remove();
+                this.backdropElement = null;
+            } else {
+                const backdrop = document.querySelector('.modal-backdrop');
+                if (backdrop) {
+                    backdrop.remove();
+                }
+            }
+        }
+
+        /**
+         * Update modal content and styling.
+         * @param {Object} options - Content update options
+         */
+        updateContent(options = {}) {
+            const {
+                title = null,
+                message = null,
+                messageHTML = null,
+                showSpinner = true,
+                messageClasses = ['text-muted'],
+                removeClasses = []
+            } = options;
+
+            const spinner = this.modal.querySelector('.spinner-border');
+            const titleEl = this.modal.querySelector('h5');
+            const messageEl = this.modal.querySelector('[id$="-message"]');
+
+            if (spinner) {
+                spinner.style.display = showSpinner ? 'block' : 'none';
+            }
+
+            if (titleEl && title !== null) {
+                titleEl.textContent = title;
+            }
+
+            if (messageEl) {
+                if (removeClasses.length > 0) {
+                    removeClasses.forEach(cls => messageEl.classList.remove(cls));
+                }
+                if (messageClasses.length > 0) {
+                    messageClasses.forEach(cls => messageEl.classList.add(cls));
+                }
+                if (messageHTML !== null) {
+                    messageEl.innerHTML = messageHTML;
+                } else if (message !== null) {
+                    messageEl.textContent = message;
+                }
+            }
+        }
+
+        /**
+         * Check if modal is currently visible.
+         * @returns {boolean}
+         */
+        get visible() {
+            return this.isVisible;
+        }
+
+        /**
+         * Cleanup and remove modal instance.
+         */
+        dispose() {
+            if (this.instance && typeof this.instance.dispose === 'function') {
+                this.instance.dispose();
+            }
+            this._hideManual(); // Ensure manual cleanup
+            this.instance = null;
+            this.isVisible = false;
+        }
+    }
+
+    // ============================================
     // UTILITY FUNCTIONS
     // ============================================
 
@@ -67,115 +240,39 @@
 
     /**
      * Show a Bootstrap modal with fallback support.
-     * Handles Bootstrap 5, legacy Bootstrap, jQuery, and manual DOM manipulation.
+     * Legacy wrapper for HTMX handlers - prefer ModalManager for new code.
      *
      * @param {HTMLElement} modalElement - The modal element to show
-     * @param {Object} fallbackBackdropRef - Reference object to store fallback backdrop
+     * @param {Object} fallbackBackdropRef - Reference object to store fallback backdrop (deprecated)
      */
     function showModal(modalElement, fallbackBackdropRef) {
         if (!modalElement) {
             return;
         }
 
-        // Try Bootstrap 5 (preferred)
-        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-            let instance = bootstrap.Modal.getInstance?.(modalElement) || null;
-            if (!instance) {
-                instance = new bootstrap.Modal(modalElement);
-            }
-            instance.show();
-            return;
-        }
-
-        // Try window.bootstrap (alternate Bootstrap 5 reference)
-        if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal) {
-            let instance = window.bootstrap.Modal.getInstance?.(modalElement) || null;
-            if (!instance) {
-                instance = new window.bootstrap.Modal(modalElement);
-            }
-            instance.show();
-            return;
-        }
-
-        // Try jQuery Bootstrap (legacy)
-        if (typeof $ !== 'undefined' && typeof $(modalElement).modal === 'function') {
-            $(modalElement).modal('show');
-            return;
-        }
-
-        // Fallback: Manual DOM manipulation
-        if (!modalElement.classList.contains('show')) {
-            modalElement.classList.add('show');
-            modalElement.style.display = 'block';
-            modalElement.removeAttribute('aria-hidden');
-            modalElement.setAttribute('aria-modal', 'true');
-        }
-
-        if (!document.body.classList.contains('modal-open')) {
-            document.body.classList.add('modal-open');
-        }
-
-        if (!document.querySelector('.modal-backdrop')) {
-            const backdrop = document.createElement('div');
-            backdrop.className = 'modal-backdrop fade show';
-            document.body.appendChild(backdrop);
-            if (fallbackBackdropRef) {
-                fallbackBackdropRef.element = backdrop;
-            }
+        const manager = new ModalManager(modalElement);
+        manager.show();
+        
+        // Store backdrop reference for legacy compatibility
+        if (fallbackBackdropRef && manager.backdropElement) {
+            fallbackBackdropRef.element = manager.backdropElement;
         }
     }
 
     /**
      * Hide a Bootstrap modal with fallback support.
+     * Legacy wrapper for HTMX handlers - prefer ModalManager for new code.
      *
      * @param {HTMLElement} modalElement - The modal element to hide
-     * @param {Object} fallbackBackdropRef - Reference object containing fallback backdrop
+     * @param {Object} fallbackBackdropRef - Reference object containing fallback backdrop (deprecated)
      */
     function hideModal(modalElement, fallbackBackdropRef) {
         if (!modalElement) {
             return;
         }
 
-        // Try Bootstrap 5 (preferred)
-        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-            const instance = bootstrap.Modal.getInstance?.(modalElement);
-            if (instance) {
-                instance.hide();
-                return;
-            }
-        }
-
-        // Try window.bootstrap (alternate Bootstrap 5 reference)
-        if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal) {
-            const instance = window.bootstrap.Modal.getInstance?.(modalElement);
-            if (instance) {
-                instance.hide();
-                return;
-            }
-        }
-
-        // Try jQuery Bootstrap (legacy)
-        if (typeof $ !== 'undefined' && typeof $(modalElement).modal === 'function') {
-            $(modalElement).modal('hide');
-            return;
-        }
-
-        // Fallback: Manual DOM manipulation
-        modalElement.classList.remove('show');
-        modalElement.style.display = '';
-        modalElement.setAttribute('aria-hidden', 'true');
-        modalElement.removeAttribute('aria-modal');
-        document.body.classList.remove('modal-open');
-
-        if (fallbackBackdropRef && fallbackBackdropRef.element) {
-            fallbackBackdropRef.element.remove();
-            fallbackBackdropRef.element = null;
-        } else {
-            const backdrop = document.querySelector('.modal-backdrop');
-            if (backdrop) {
-                backdrop.remove();
-            }
-        }
+        const manager = new ModalManager(modalElement);
+        manager.hide();
     }
 
     // ============================================
@@ -262,9 +359,9 @@
                             cancelBtn.textContent = 'Completed';
 
                             const modal = document.getElementById('filter-processing-modal');
-                            if (modal && modal._bsModal) {
-                                modal._bsModal.hide();
-                                delete modal._bsModal;
+                            if (modal) {
+                                const manager = new ModalManager(modal);
+                                manager.hide();
                             }
 
                             setTimeout(() => {
@@ -308,9 +405,9 @@
                                             cancelBtn.textContent = 'Cancelled';
 
                                             const modal = document.getElementById('filter-processing-modal');
-                                            if (modal && modal._bsModal) {
-                                                modal._bsModal.hide();
-                                                delete modal._bsModal;
+                                            if (modal) {
+                                                const manager = new ModalManager(modal);
+                                                manager.hide();
                                             }
 
                                             setTimeout(() => {
@@ -329,9 +426,9 @@
                                     cancelBtn.textContent = 'Stopped';
 
                                     const modal = document.getElementById('filter-processing-modal');
-                                    if (modal && modal._bsModal) {
-                                        modal._bsModal.hide();
-                                        delete modal._bsModal;
+                                    if (modal) {
+                                        const manager = new ModalManager(modal);
+                                        manager.hide();
                                     }
 
                                     setTimeout(() => {
@@ -346,9 +443,9 @@
                                 cancelBtn.textContent = 'Completed';
 
                                 const modal = document.getElementById('filter-processing-modal');
-                                if (modal && modal._bsModal) {
-                                    modal._bsModal.hide();
-                                    delete modal._bsModal;
+                                if (modal) {
+                                    const manager = new ModalManager(modal);
+                                    manager.hide();
                                 }
 
                                 setTimeout(() => {
@@ -365,9 +462,9 @@
                             cancelBtn.disabled = false;
 
                             const modal = document.getElementById('filter-processing-modal');
-                            if (modal && modal._bsModal) {
-                                modal._bsModal.hide();
-                                delete modal._bsModal;
+                            if (modal) {
+                                const manager = new ModalManager(modal);
+                                manager.hide();
                             }
 
                             setTimeout(() => window.location.href = baseUrl, 1000);
@@ -450,9 +547,9 @@
                         pollingStopped = true; // Stop future polls
 
                         const modal = document.getElementById('filter-processing-modal');
-                        if (modal && modal._bsModal) {
-                            modal._bsModal.hide();
-                            delete modal._bsModal;
+                        if (modal) {
+                            const manager = new ModalManager(modal);
+                            manager.hide();
                         }
 
                         // Small delay to let modal close before redirect
@@ -464,9 +561,9 @@
                         pollingStopped = true;
 
                         const modal = document.getElementById('filter-processing-modal');
-                        if (modal && modal._bsModal) {
-                            modal._bsModal.hide();
-                            delete modal._bsModal;
+                        if (modal) {
+                            const manager = new ModalManager(modal);
+                            manager.hide();
                         }
 
                         setTimeout(() => window.location.href = baseUrl, 100);
@@ -474,9 +571,9 @@
                         pollingStopped = true;
 
                         const modal = document.getElementById('filter-processing-modal');
-                        if (modal && modal._bsModal) {
-                            modal._bsModal.hide();
-                            delete modal._bsModal;
+                        if (modal) {
+                            const manager = new ModalManager(modal);
+                            manager.hide();
                         }
 
                         const errorMsg = data.data?.error;
@@ -488,9 +585,9 @@
                         pollingStopped = true;
 
                         const modal = document.getElementById('filter-processing-modal');
-                        if (modal && modal._bsModal) {
-                            modal._bsModal.hide();
-                            delete modal._bsModal;
+                        if (modal) {
+                            const manager = new ModalManager(modal);
+                            manager.hide();
                         }
 
                         const errorMsg = data.data?.error || 'Job encountered an error. Please try again.';
@@ -528,11 +625,19 @@
             return;
         }
 
+        // Initialize modal manager
+        const filterModal = document.getElementById('filter-processing-modal');
+        const filterModalManager = filterModal ? new ModalManager(filterModal) : null;
+
         // AbortController for cancelling the filter request
         let currentAbortController = null;
 
         filterForm.addEventListener('submit', function (e) {
             e.preventDefault();
+
+            if (!filterModalManager) {
+                return;
+            }
 
             // Validate that at least one filter is set before proceeding
             const filterFields = [
@@ -548,67 +653,37 @@
                 return field && field.value && field.value.trim() !== '';
             });
 
-            const filterModal = document.getElementById('filter-processing-modal');
-            let modalInstance;
-
             if (!hasFilter) {
                 // Show validation error in modal
-                if (filterModal) {
-                    // Hide spinner and show error message
-                    const spinner = filterModal.querySelector('.spinner-border');
-                    const messageTitle = filterModal.querySelector('h5');
-                    const messageText = document.getElementById('filter-progress-message');
-                    const deviceCount = document.getElementById('filter-device-count');
-                    const cancelBtn = document.getElementById('cancel-filter-btn');
+                const deviceCount = document.getElementById('filter-device-count');
+                const cancelBtn = document.getElementById('cancel-filter-btn');
 
-                    if (spinner) spinner.style.display = 'none';
-                    if (messageTitle) messageTitle.textContent = 'Filter Required';
-                    if (messageText) {
-                        messageText.innerHTML = '<i class="mdi mdi-alert text-warning"></i> Please select at least one LibreNMS filter before applying the search.';
-                        messageText.classList.remove('text-muted');
-                        messageText.classList.add('text-warning');
-                    }
-                    if (deviceCount) deviceCount.style.display = 'none';
-                    if (cancelBtn) {
-                        cancelBtn.innerHTML = '<i class="mdi mdi-close"></i> Close';
-                        cancelBtn.onclick = function () {
-                            if (modalInstance) {
-                                modalInstance.hide();
-                            } else {
-                                filterModal.classList.remove('show');
-                                filterModal.style.display = 'none';
-                                document.body.classList.remove('modal-open');
-                                const backdrop = document.getElementById('filter-modal-backdrop');
-                                if (backdrop) backdrop.remove();
-                            }
-                            // Reset modal content for next use
-                            if (spinner) spinner.style.display = 'block';
-                            if (messageTitle) messageTitle.textContent = 'Applying Filters';
-                            if (messageText) {
-                                messageText.textContent = 'Fetching LibreNMS data and processing filters...';
-                                messageText.classList.remove('text-warning');
-                                messageText.classList.add('text-muted');
-                            }
-                        };
-                    }
+                filterModalManager.updateContent({
+                    title: 'Filter Required',
+                    messageHTML: '<i class="mdi mdi-alert text-warning"></i> Please select at least one LibreNMS filter before applying the search.',
+                    showSpinner: false,
+                    messageClasses: ['text-warning'],
+                    removeClasses: ['text-muted']
+                });
 
-                    // Show modal
-                    if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-                        modalInstance = new bootstrap.Modal(filterModal);
-                        modalInstance.show();
-                        filterModal._bsModal = modalInstance;
-                    } else {
-                        filterModal.classList.add('show');
-                        filterModal.style.display = 'block';
-                        filterModal.setAttribute('aria-modal', 'true');
-                        filterModal.removeAttribute('aria-hidden');
-                        document.body.classList.add('modal-open');
-                        const backdrop = document.createElement('div');
-                        backdrop.className = 'modal-backdrop fade show';
-                        backdrop.id = 'filter-modal-backdrop';
-                        document.body.appendChild(backdrop);
-                    }
+                if (deviceCount) deviceCount.style.display = 'none';
+                
+                if (cancelBtn) {
+                    cancelBtn.innerHTML = '<i class="mdi mdi-close"></i> Close';
+                    cancelBtn.onclick = function () {
+                        filterModalManager.hide();
+                        // Reset modal content for next use
+                        filterModalManager.updateContent({
+                            title: 'Applying Filters',
+                            message: 'Fetching LibreNMS data and processing filters...',
+                            showSpinner: true,
+                            messageClasses: ['text-muted'],
+                            removeClasses: ['text-warning']
+                        });
+                    };
                 }
+
+                filterModalManager.show();
                 return;
             }
 
@@ -629,27 +704,7 @@
             currentAbortController = new AbortController();
 
             // Show filter processing modal
-            if (filterModal) {
-                if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-                    modalInstance = new bootstrap.Modal(filterModal);
-                    modalInstance.show();
-                    // Store instance on element for later retrieval
-                    filterModal._bsModal = modalInstance;
-                } else {
-                    // Fallback for manual modal display
-                    filterModal.classList.add('show');
-                    filterModal.style.display = 'block';
-                    filterModal.setAttribute('aria-modal', 'true');
-                    filterModal.removeAttribute('aria-hidden');
-                    document.body.classList.add('modal-open');
-
-                    // Add backdrop
-                    const backdrop = document.createElement('div');
-                    backdrop.className = 'modal-backdrop fade show';
-                    backdrop.id = 'filter-modal-backdrop';
-                    document.body.appendChild(backdrop);
-                }
-            }
+            filterModalManager.show();
 
             // Handle cancel button - actually abort the request
             const cancelBtn = document.getElementById('cancel-filter-btn');
@@ -668,20 +723,7 @@
                     }
 
                     // Hide modal
-                    if (modalInstance) {
-                        modalInstance.hide();
-                    } else {
-                        // Fallback manual hide
-                        filterModal.classList.remove('show');
-                        filterModal.style.display = 'none';
-                        filterModal.removeAttribute('aria-modal');
-                        filterModal.setAttribute('aria-hidden', 'true');
-                        document.body.classList.remove('modal-open');
-                        const backdrop = document.getElementById('filter-modal-backdrop');
-                        if (backdrop) {
-                            backdrop.remove();
-                        }
-                    }
+                    filterModalManager.hide();
                 };
             }
 
@@ -775,17 +817,7 @@
                     }
 
                     // Hide modal on error
-                    if (modalInstance) {
-                        modalInstance.hide();
-                    } else {
-                        filterModal.classList.remove('show');
-                        filterModal.style.display = 'none';
-                        document.body.classList.remove('modal-open');
-                        const backdrop = document.getElementById('filter-modal-backdrop');
-                        if (backdrop) {
-                            backdrop.remove();
-                        }
-                    }
+                    filterModalManager.hide();
                     currentAbortController = null;
                 });
         });
