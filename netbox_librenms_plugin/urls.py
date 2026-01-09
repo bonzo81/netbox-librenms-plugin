@@ -28,7 +28,6 @@ from .views import (
     InterfaceTypeMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
-    LoadImportJobResultsView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleIPAddressVerifyView,
@@ -201,11 +200,7 @@ urlpatterns = [
         name="bulk_import_confirm",
     ),
     path(
-        "device-import/job/<int:job_id>/results/",
-        LoadImportJobResultsView.as_view(),
-        name="load_import_job_results",
-    ),
-    path(
+
         "device-import/validation/<str:device_id>/",
         DeviceValidationDetailsView.as_view(),
         name="device_validation_details",
