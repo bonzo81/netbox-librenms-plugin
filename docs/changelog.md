@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 (2026-01-12)
+
+### Fixes
+* Fix librenms_id custom field to use integer values in import process
+
 ## 0.4.0 (2026-01-09)
 
 ## Major Features

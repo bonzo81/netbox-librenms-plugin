@@ -733,17 +733,14 @@ def validate_device_for_import(
         from virtualization.models import VirtualMachine
 
         # Check for existing VM first (by librenms_id custom field)
-        existing_vm = VirtualMachine.objects.filter(
-            custom_field_data__librenms_id=str(librenms_id)
-        ).first()
-        if not existing_vm and isinstance(librenms_id, str):
-            try:
-                existing_vm = VirtualMachine.objects.filter(
-                    custom_field_data__librenms_id=int(librenms_id)
-                ).first()
-            except (ValueError, TypeError):
-                # librenms_id is not convertible to int; no match will be found
-                pass
+        # Always query with int to match custom field type
+        try:
+            existing_vm = VirtualMachine.objects.filter(
+                custom_field_data__librenms_id=int(librenms_id)
+            ).first()
+        except (ValueError, TypeError):
+            # librenms_id is not convertible to int; no match will be found
+            existing_vm = None
 
         if existing_vm:
             logger.info(
@@ -759,17 +756,14 @@ def validate_device_for_import(
             return result
 
         # Check for existing Device (by librenms_id custom field)
-        existing_device = Device.objects.filter(
-            custom_field_data__librenms_id=str(librenms_id)
-        ).first()
-        if not existing_device and isinstance(librenms_id, str):
-            try:
-                existing_device = Device.objects.filter(
-                    custom_field_data__librenms_id=int(librenms_id)
-                ).first()
-            except (ValueError, TypeError):
-                # librenms_id is not convertible to int; no match will be found
-                pass
+        # Always query with int to match custom field type
+        try:
+            existing_device = Device.objects.filter(
+                custom_field_data__librenms_id=int(librenms_id)
+            ).first()
+        except (ValueError, TypeError):
+            # librenms_id is not convertible to int; no match will be found
+            existing_device = None
 
         if existing_device:
             logger.info(
@@ -1208,7 +1202,7 @@ def import_single_device(
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-                "custom_field_data": {"librenms_id": str(device_id)},
+                "custom_field_data": {"librenms_id": int(device_id)},
             }
 
             # Add optional fields
@@ -1636,7 +1630,7 @@ def create_vm_from_librenms(
         role=role,  # Optional VM role
         platform=platform,
         comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-        custom_field_data={"librenms_id": str(libre_device["device_id"])},
+        custom_field_data={"librenms_id": int(libre_device["device_id"])},
     )
 
     logger.info(
