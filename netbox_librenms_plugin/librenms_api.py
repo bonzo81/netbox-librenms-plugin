@@ -288,7 +288,7 @@ class LibreNMSAPI:
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/devices/{hostname}/oxidized",
+                f"{self.librenms_url}/api/v0/devices/{hostname}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
@@ -621,9 +621,9 @@ class LibreNMSAPI:
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/resources/locations",
+                f"{self.librenms_url}/api/v0/ports/{port_id}",
                 headers=self.headers,
-                timeout=EXTENDED_API_TIMEOUT,
+                timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
