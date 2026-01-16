@@ -265,7 +265,7 @@ class LibreNMSAPI:
         """
         try:
             response = requests.get(
-                f"{self.librenms_url}/api/v0/resources/fdb/{mac_address}",
+                f"{self.librenms_url}/api/v0/devices/{ip_address}",
                 headers=self.headers,
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
