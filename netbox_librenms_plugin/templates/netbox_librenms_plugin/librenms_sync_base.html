@@ -575,7 +575,7 @@
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
                     id="snmpv2-form" name="snmpv2-form" autocomplete="off">
                     {% csrf_token %}
-                    <input type="hidden" name="snmp_version" value="v2c">
+                    {{ v2form.snmp_version }}
                     <div class="mb-3">
                         {{ v2form.hostname.label_tag }}
                         {{ v2form.hostname }}
@@ -615,7 +615,7 @@
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
                     id="snmpv3-form" name="snmpv3-form" autocomplete="off" style="display: none;">
                     {% csrf_token %}
-                    <input type="hidden" name="snmp_version" value="v3">
+                    {{ v3form.snmp_version }}
 
                     <div class="row">
                         <!-- Left Column: Common fields (same as SNMPv2c) -->

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 (2026-01-16)
+
+### Fixes
+* Fix device sync not working after update (Issue #199)
+* Fix API endpoints for hostname lookup and port retrieval that were incorrectly changed
+* Fix NameError in get_device_id_by_ip method - correct undefined 'mac_address' variable error (Issue #197)
+
 ## 0.4.1 (2026-01-12)
 
 ### Fixes
