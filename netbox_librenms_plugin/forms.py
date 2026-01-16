@@ -243,7 +243,7 @@ class AddToLIbreSNMPV2(forms.Form):
         max_length=255,
         required=True,
     )
-    snmp_version = forms.CharField(widget=forms.HiddenInput())
+    snmp_version = forms.CharField(widget=forms.HiddenInput(), initial="v2c")
     community = forms.CharField(label="SNMP Community", max_length=255, required=True)
     port = forms.IntegerField(
         label="SNMP Port",
