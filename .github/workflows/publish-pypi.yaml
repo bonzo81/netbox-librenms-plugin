@@ -1,7 +1,12 @@
 # see: https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/
 name: Publish Python 🐍 distribution 📦 to PyPI
 
-on: push
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - '*'
 
 jobs:
   build:
