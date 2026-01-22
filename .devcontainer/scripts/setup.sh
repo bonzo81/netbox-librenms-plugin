@@ -28,7 +28,7 @@ fi
 echo "🔧 Installing development dependencies..."
 apt-get update -qq
 apt-get install -y -qq net-tools
-$PIP_CMD install pytest pytest-django ruff
+$PIP_CMD install pytest pytest-django ruff pre-commit
 
 # Detect plugin workspace directory (must contain pyproject.toml)
 if [ -f "$PWD/pyproject.toml" ]; then
@@ -156,6 +156,11 @@ else:
 
 echo "📊 Collecting static files..."
 python manage.py collectstatic --noinput >/dev/null 2>&1 || true
+
+# Set up pre-commit hooks
+echo "🪝 Installing pre-commit hooks..."
+cd "$PLUGIN_WS_DIR"
+pre-commit install --install-hooks 2>/dev/null || echo "⚠️  Pre-commit hook installation failed (may already be installed)"
 
 # Ensure scripts are executable
 chmod +x "$PLUGIN_WS_DIR/.devcontainer/scripts/start-netbox.sh" || true

@@ -36,3 +36,30 @@ exclude = ["site*", "tests*"]
 
 [tool.setuptools.package-data]
 netbox_librenms_plugin = ["templates/**"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "netbox.settings"
+pythonpath = ["/opt/netbox/netbox"]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+markers = [
+    "django_db: mark test as requiring database access",
+]
+addopts = "-v --tb=short --reuse-db"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Follow NetBox conventions - ignore certain rules
+ignore = [
+    "E501",  # Line too long (strongly encouraged but not enforced)
+    "F403",  # Undefined local with import star
+    "F405",  # Undefined local with import star usage
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Allow re-exports in __init__.py files
+"__init__.py" = ["F401"]
