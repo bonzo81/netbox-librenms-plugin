@@ -58,9 +58,15 @@ jobs:
         working-directory: netbox-librenms-plugin
         run: |
           # Include tests directory for test execution
+          echo "=== BEFORE sed ==="
+          cat pyproject.toml | grep -A2 "\[tool.setuptools.packages.find\]"
           sed -i 's/^exclude/#exclude/' pyproject.toml
+          echo "=== AFTER sed ==="
           cat pyproject.toml | grep -A2 "\[tool.setuptools.packages.find\]"
           pip install .
+          echo "=== Checking installed package ==="
+          python -c "import netbox_librenms_plugin; print(netbox_librenms_plugin.__file__)"
+          ls -la $(python -c "import netbox_librenms_plugin; import os; print(os.path.dirname(netbox_librenms_plugin.__file__))")
 
       - name: Install NetBox dependencies
         working-directory: netbox
