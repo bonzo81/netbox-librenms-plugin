@@ -52,7 +52,7 @@ jobs:
       - name: Install NetBox LibreNMS Plugin
         working-directory: netbox-librenms-plugin
         run: |
-          pip install .
+          pip install -e .
           pip install pytest pytest-django
 
       - name: Set up configuration
