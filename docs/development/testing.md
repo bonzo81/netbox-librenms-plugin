@@ -13,7 +13,7 @@ make unittest
 Or run pytest directly:
 
 ```bash
-pytest tests/ -v
+pytest netbox_librenms_plugin/tests/ -v
 ```
 
 ## Test Structure
@@ -22,18 +22,18 @@ The test suite covers all major plugin functionality. Tests are organized by the
 
 | Test File | What It Tests |
 |-----------|---------------|
-| [test_librenms_api.py](../../tests/test_librenms_api.py) | LibreNMS API client—connections, device operations, locations, ports, and error handling |
-| [test_import_utils.py](../../tests/test_import_utils.py) | Device import logic—filtering, validation, and data transformation |
-| [test_import_validation_helpers.py](../../tests/test_import_validation_helpers.py) | Field validation for sites, roles, platforms, and device types |
-| [test_utils.py](../../tests/test_utils.py) | General utilities—name matching, speed conversion, and data formatting |
-| [test_background_jobs.py](../../tests/test_background_jobs.py) | Background job execution and view decision logic |
+| [test_librenms_api.py](../../netbox_librenms_plugin/tests/test_librenms_api.py) | LibreNMS API client—connections, device operations, locations, ports, and error handling |
+| [test_import_utils.py](../../netbox_librenms_plugin/tests/test_import_utils.py) | Device import logic—filtering, validation, and data transformation |
+| [test_import_validation_helpers.py](../../netbox_librenms_plugin/tests/test_import_validation_helpers.py) | Field validation for sites, roles, platforms, and device types |
+| [test_utils.py](../../netbox_librenms_plugin/tests/test_utils.py) | General utilities—name matching, speed conversion, and data formatting |
+| [test_background_jobs.py](../../netbox_librenms_plugin/tests/test_background_jobs.py) | Background job execution and view decision logic |
 
 Supporting files:
 
 | File | Purpose |
 |------|---------|
-| [conftest.py](../../tests/conftest.py) | Shared pytest fixtures |
-| [test_librenms_api_helpers.py](../../tests/test_librenms_api_helpers.py) | Auto-use fixture for API configuration mocking |
+| [conftest.py](../../netbox_librenms_plugin/tests/conftest.py) | Shared pytest fixtures |
+| [test_librenms_api_helpers.py](../../netbox_librenms_plugin/tests/test_librenms_api_helpers.py) | Auto-use fixture for API configuration mocking |
 
 ## Running Tests
 
@@ -41,42 +41,42 @@ Supporting files:
 
 ```bash
 # Run a specific test file
-pytest tests/test_librenms_api.py -v
+pytest netbox_librenms_plugin/tests/test_librenms_api.py -v
 
 # Run a specific test class
-pytest tests/test_librenms_api.py::TestLibreNMSAPIConnection -v
+pytest netbox_librenms_plugin/tests/test_librenms_api.py::TestLibreNMSAPIConnection -v
 
 # Run a specific test method
-pytest tests/test_librenms_api.py::TestLibreNMSAPIConnection::test_connection_success -v
+pytest netbox_librenms_plugin/tests/test_librenms_api.py::TestLibreNMSAPIConnection::test_connection_success -v
 ```
 
 ### Running Tests by Area
 
 ```bash
 # API client tests
-pytest tests/test_librenms_api.py -v
+pytest netbox_librenms_plugin/tests/test_librenms_api.py -v
 
 # Import and validation tests
-pytest tests/test_import_utils.py tests/test_import_validation_helpers.py tests/test_utils.py -v
+pytest netbox_librenms_plugin/tests/test_import_utils.py netbox_librenms_plugin/tests/test_import_validation_helpers.py netbox_librenms_plugin/tests/test_utils.py -v
 
 # Background job tests
-pytest tests/test_background_jobs.py -v
+pytest netbox_librenms_plugin/tests/test_background_jobs.py -v
 ```
 
 ### Debugging Failed Tests
 
 ```bash
 # Show full traceback
-pytest tests/ -v --tb=long
+pytest netbox_librenms_plugin/tests/ -v --tb=long
 
 # Show print statements during tests
-pytest tests/ -v -s
+pytest netbox_librenms_plugin/tests/ -v -s
 
 # Stop on first failure
-pytest tests/ -v -x
+pytest netbox_librenms_plugin/tests/ -v -x
 
 # Re-run only failed tests from last run
-pytest tests/ -v --lf
+pytest netbox_librenms_plugin/tests/ -v --lf
 ```
 
 ## Testing Philosophy
@@ -150,7 +150,7 @@ device.primary_ip.address.ip = "192.168.1.1"
 
 ### Available Fixtures
 
-These fixtures are defined in [conftest.py](../../tests/conftest.py):
+These fixtures are defined in [conftest.py](../../netbox_librenms_plugin/tests/conftest.py):
 
 - `mock_librenms_config` — Automatically mocks plugin configuration for all tests
 - `mock_response_factory` — Factory for creating mock HTTP responses

@@ -32,7 +32,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["netbox_librenms_plugin*"]
-exclude = ["site*", "tests*"]
+exclude = ["site*"]
 
 [tool.setuptools.package-data]
 netbox_librenms_plugin = ["templates/**"]
@@ -40,7 +40,7 @@ netbox_librenms_plugin = ["templates/**"]
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "netbox.settings"
 pythonpath = ["/opt/netbox/netbox"]
-testpaths = ["tests"]
+testpaths = ["netbox_librenms_plugin/tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"

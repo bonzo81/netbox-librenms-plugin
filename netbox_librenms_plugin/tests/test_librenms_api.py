@@ -11,7 +11,7 @@ import pytest
 import requests
 
 # Import the autouse fixture from helpers
-pytest_plugins = ["tests.test_librenms_api_helpers"]
+pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
 
 # =============================================================================
@@ -564,7 +564,7 @@ class TestLibreNMSAPIDeviceLookup:
 class TestLibreNMSAPIDeviceOperations:
     """Test device CRUD operations."""
 
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
     def test_add_device_success(self, mock_post, mock_librenms_config):
@@ -687,7 +687,7 @@ class TestLibreNMSAPIDeviceOperations:
 class TestLibreNMSAPILocationOperations:
     """Test location CRUD operations."""
 
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_locations_success(self, mock_get, mock_librenms_config):
@@ -782,7 +782,7 @@ class TestLibreNMSAPILocationOperations:
 class TestLibreNMSAPIPortsAndInventory:
     """Test ports and inventory operations."""
 
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_ports_all(self, mock_get, mock_librenms_config):
@@ -940,7 +940,7 @@ class TestLibreNMSAPIPortsAndInventory:
 class TestLibreNMSAPIPollerAndDevices:
     """Test poller groups and device listing operations."""
 
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_poller_groups_success(self, mock_get, mock_librenms_config):
@@ -1016,7 +1016,7 @@ class TestLibreNMSAPIPollerAndDevices:
 class TestLibreNMSAPIErrorHandling:
     """Test error handling and edge cases."""
 
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_network_error_handling(self, mock_get, mock_librenms_config):

@@ -4,14 +4,15 @@ sources = netbox_librenms_plugin
 test: format lint unittest
 
 format:
-	ruff format $(sources) tests
-	ruff check --select I --fix $(sources) tests
+	ruff format $(sources)
+	ruff check --select I --fix $(sources)
 
 lint:
-	ruff check $(sources) tests
+	ruff check $(sources)
 
 unittest:
-	pytest tests/ -v
+	pytest netbox_librenms_plugin/tests/ -v
+
 
 pre-commit:
 	pre-commit run --all-files
