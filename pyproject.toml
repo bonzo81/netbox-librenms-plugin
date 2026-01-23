@@ -44,10 +44,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-markers = [
-    "django_db: mark test as requiring database access",
-]
-addopts = "-v --tb=short --reuse-db"
+addopts = "-v --tb=short"
 
 [tool.ruff]
 line-length = 120
