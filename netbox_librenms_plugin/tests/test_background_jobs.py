@@ -324,9 +324,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_device_only_import(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
+    def test_run_device_only_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """Import devices without VMs."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
@@ -413,9 +411,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_mixed_device_and_vm_import(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
+    def test_run_mixed_device_and_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """Import both devices and VMs."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
@@ -463,9 +459,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_with_sync_options(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
+    def test_run_with_sync_options(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """Sync options passed to bulk import."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
@@ -502,9 +496,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_with_manual_mappings(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
+    def test_run_with_manual_mappings(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """Manual mappings passed correctly."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
@@ -537,9 +529,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_stores_imported_pks(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
+    def test_run_stores_imported_pks(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """Imported device/VM PKs stored in job.data."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
@@ -564,9 +554,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_stores_libre_device_ids(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
+    def test_run_stores_libre_device_ids(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """LibreNMS device IDs stored for re-render."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
@@ -591,9 +579,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_aggregates_errors(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
+    def test_run_aggregates_errors(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """Device and VM errors are combined in job.data."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
@@ -627,9 +613,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
-    def test_run_handles_all_failures(
-        self, mock_api_class, mock_bulk_devices, mock_bulk_vms
-    ):
+    def test_run_handles_all_failures(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """All imports fail gracefully."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
@@ -668,9 +652,7 @@ class TestLoadJobResults:
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
     @patch("core.models.Job")
-    def test_load_success_uses_correct_cache_keys(
-        self, mock_job_class, mock_get_key, mock_cache
-    ):
+    def test_load_success_uses_correct_cache_keys(self, mock_job_class, mock_get_key, mock_cache):
         """Load uses get_validated_device_cache_key with job data."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -719,9 +701,7 @@ class TestLoadJobResults:
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
     @patch("core.models.Job")
-    def test_load_extracts_filters_from_job_data(
-        self, mock_job_class, mock_get_key, mock_cache
-    ):
+    def test_load_extracts_filters_from_job_data(self, mock_job_class, mock_get_key, mock_cache):
         """Filters, server_key, vc_enabled extracted from job data."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -753,9 +733,7 @@ class TestLoadJobResults:
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
     @patch("core.models.Job")
-    def test_load_returns_cached_devices(
-        self, mock_job_class, mock_get_key, mock_cache
-    ):
+    def test_load_returns_cached_devices(self, mock_job_class, mock_get_key, mock_cache):
         """Devices retrieved from cache."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -841,9 +819,7 @@ class TestLoadJobResults:
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
     @patch("core.models.Job")
-    def test_load_expired_cache_returns_empty(
-        self, mock_job_class, mock_get_key, mock_cache
-    ):
+    def test_load_expired_cache_returns_empty(self, mock_job_class, mock_get_key, mock_cache):
         """All cache misses returns empty list."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -871,9 +847,7 @@ class TestLoadJobResults:
     @patch("netbox_librenms_plugin.views.imports.list.cache")
     @patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key")
     @patch("core.models.Job")
-    def test_load_partial_cache_returns_available(
-        self, mock_job_class, mock_get_key, mock_cache
-    ):
+    def test_load_partial_cache_returns_available(self, mock_job_class, mock_get_key, mock_cache):
         """Some expired, returns available devices."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 

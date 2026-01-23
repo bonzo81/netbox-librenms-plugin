@@ -68,9 +68,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             sync_device_has_primary_ip = False
 
             if librenms_sync_device:
-                sync_device_has_librenms_id = bool(
-                    librenms_sync_device.cf.get("librenms_id")
-                )
+                sync_device_has_librenms_id = bool(librenms_sync_device.cf.get("librenms_id"))
                 sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
 
             context.update(
@@ -112,9 +110,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 **librenms_info["librenms_device_details"],
                 "interface_name_field": interface_name_field,
                 "platform_info": platform_info,
-                "vc_inventory_serials": librenms_info["librenms_device_details"].get(
-                    "vc_inventory_serials", []
-                ),
+                "vc_inventory_serials": librenms_info["librenms_device_details"].get("vc_inventory_serials", []),
                 "manufacturers": manufacturers,
             }
         )
@@ -180,14 +176,8 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                     librenms_device_details["vc_inventory_serials"] = vc_serials
 
                 # Get just the hostname part from LibreNMS FQDN if present
-                librenms_host = (
-                    librenms_hostname.split(".")[0].lower()
-                    if librenms_hostname
-                    else None
-                )
-                netbox_host = (
-                    netbox_hostname.split(".")[0].lower() if netbox_hostname else None
-                )
+                librenms_host = librenms_hostname.split(".")[0].lower() if librenms_hostname else None
+                netbox_host = netbox_hostname.split(".")[0].lower() if netbox_hostname else None
 
                 # Check for matching IP or hostname
                 # If IP matches, we have a match
@@ -201,22 +191,14 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                     if netbox_host_normalized == librenms_host:
                         found_in_librenms = True
                     # For VC members with explicit librenms_id, validate hostname similarity
-                    elif (
-                        hasattr(obj, "virtual_chassis")
-                        and obj.virtual_chassis
-                        and obj.cf.get("librenms_id")
-                    ):
+                    elif hasattr(obj, "virtual_chassis") and obj.virtual_chassis and obj.cf.get("librenms_id"):
                         # Extract base hostname (before any VC numbering like -1, -2, etc.)
                         # This handles cases where VC members in NetBox (e.g., "switch-1 (1)")
                         # point to the primary device in LibreNMS (e.g., "switch-1")
                         netbox_base = re.sub(r"[-_]?\d+$", "", netbox_host_normalized)
                         librenms_base = re.sub(r"[-_]?\d+$", "", librenms_host)
 
-                        if (
-                            netbox_base
-                            and librenms_base
-                            and netbox_base == librenms_base
-                        ):
+                        if netbox_base and librenms_base and netbox_base == librenms_base:
                             # Base hostnames match (e.g., "switch" matches "switch")
                             found_in_librenms = True
                         else:
@@ -276,9 +258,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             return []
 
         # Filter for chassis components
-        chassis_components = [
-            item for item in inventory if item.get("entPhysicalClass") == "chassis"
-        ]
+        chassis_components = [item for item in inventory if item.get("entPhysicalClass") == "chassis"]
 
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
@@ -330,12 +310,8 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         """
         from dcim.models import Platform
 
-        librenms_os = librenms_info["librenms_device_details"].get(
-            "librenms_device_os", "-"
-        )
-        librenms_version = librenms_info["librenms_device_details"].get(
-            "librenms_device_version", "-"
-        )
+        librenms_os = librenms_info["librenms_device_details"].get("librenms_device_os", "-")
+        librenms_version = librenms_info["librenms_device_details"].get("librenms_device_version", "-")
 
         # Platform name is just the OS (not OS + version)
         platform_name = librenms_os if librenms_os != "-" else None

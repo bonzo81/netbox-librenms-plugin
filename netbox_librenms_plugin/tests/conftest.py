@@ -49,9 +49,7 @@ def mock_librenms_api(mock_multi_server_config):
     """Pre-configured LibreNMSAPI instance with mocked dependencies."""
     with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config:
         mock_config.return_value = mock_multi_server_config
-        with patch(
-            "netbox_librenms_plugin.librenms_api.LibreNMSSettings"
-        ) as mock_settings:
+        with patch("netbox_librenms_plugin.librenms_api.LibreNMSSettings") as mock_settings:
             mock_settings.objects.filter.return_value.first.return_value = None
             from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -117,9 +115,7 @@ def mock_response_factory():
 @pytest.fixture
 def mock_success_response(mock_response_factory):
     """Standard successful API response."""
-    return mock_response_factory(
-        status_code=200, json_data={"status": "ok", "message": "Success"}
-    )
+    return mock_response_factory(status_code=200, json_data={"status": "ok", "message": "Success"})
 
 
 @pytest.fixture
@@ -155,9 +151,7 @@ def mock_error_response(mock_response_factory):
 @pytest.fixture
 def mock_auth_error_response(mock_response_factory):
     """Authentication error response (401)."""
-    return mock_response_factory(
-        status_code=401, json_data={"status": "error", "message": "Unauthorized"}
-    )
+    return mock_response_factory(status_code=401, json_data={"status": "error", "message": "Unauthorized"})
 
 
 # =============================================================================

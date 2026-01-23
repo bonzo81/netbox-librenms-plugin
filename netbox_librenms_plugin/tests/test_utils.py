@@ -356,9 +356,7 @@ class TestPaginationHelpers:
 
     @patch("netbox_librenms_plugin.utils.get_config")
     @patch("netbox_librenms_plugin.utils.netbox_get_paginate_count")
-    def test_get_table_paginate_count_from_request(
-        self, mock_netbox_paginate, mock_config
-    ):
+    def test_get_table_paginate_count_from_request(self, mock_netbox_paginate, mock_config):
         """Custom per_page from request is used."""
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
@@ -433,6 +431,4 @@ class TestInterfaceNameField:
         result = get_interface_name_field(mock_request)
 
         assert result == "ifAlias"
-        mock_plugin_config.assert_called_with(
-            "netbox_librenms_plugin", "interface_name_field"
-        )
+        mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")

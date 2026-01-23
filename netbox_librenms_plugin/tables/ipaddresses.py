@@ -88,9 +88,7 @@ class IPAddressTable(tables.Table):
                 record["ip_address"],
             )
         elif value == "matched":
-            return format_html(
-                '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>'
-            )
+            return format_html('<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>')
         elif record.get("interface_url"):
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-primary" onclick="document.getElementById(\'selected_ip\').value=\'{}\'">'

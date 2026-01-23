@@ -204,9 +204,7 @@ class TestDeviceRetrieval:
 
         from netbox_librenms_plugin.import_utils import get_librenms_devices_for_import
 
-        devices = get_librenms_devices_for_import(
-            api=mock_api, filters={}, force_refresh=True
-        )
+        devices = get_librenms_devices_for_import(api=mock_api, filters={}, force_refresh=True)
 
         mock_api.list_devices.assert_called_once()
         assert len(devices) == 1
@@ -239,9 +237,7 @@ class TestDeviceRetrieval:
 
         from netbox_librenms_plugin.import_utils import get_device_count_for_filters
 
-        count = get_device_count_for_filters(
-            api=mock_api, filters={}, show_disabled=False
-        )
+        count = get_device_count_for_filters(api=mock_api, filters={}, show_disabled=False)
 
         assert count == 2
 
@@ -258,9 +254,7 @@ class TestDeviceRetrieval:
         """Generate cache key without VC enabled."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
 
-        key = get_validated_device_cache_key(
-            server_key="default", filters={}, device_id=100, vc_enabled=False
-        )
+        key = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=False)
 
         assert "novc" in key
 
@@ -268,12 +262,8 @@ class TestDeviceRetrieval:
         """Generate cache key with VC enabled."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
 
-        key_vc = get_validated_device_cache_key(
-            server_key="default", filters={}, device_id=100, vc_enabled=True
-        )
-        key_novc = get_validated_device_cache_key(
-            server_key="default", filters={}, device_id=100, vc_enabled=False
-        )
+        key_vc = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=True)
+        key_novc = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=False)
 
         # Keys should be different based on VC setting
         assert key_vc != key_novc
@@ -1057,9 +1047,7 @@ class TestDeviceValidation:
         mock_clusters = [MagicMock(id=1, name="VMware Cluster")]
         # Cluster is imported locally in the VM path, so we need to mock it there
         mock_cluster_local.objects.all.return_value = mock_clusters
-        mock_cache.get.return_value = (
-            None  # Force cache miss to trigger Cluster.objects.all()
-        )
+        mock_cache.get.return_value = None  # Force cache miss to trigger Cluster.objects.all()
         mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
@@ -1070,9 +1058,7 @@ class TestDeviceValidation:
             "hostname": "vm-01",
         }
 
-        result = validate_device_for_import(
-            device_data, import_as_vm=True, include_vc_detection=False
-        )
+        result = validate_device_for_import(device_data, import_as_vm=True, include_vc_detection=False)
 
         assert result["import_as_vm"] is True
         assert result["cluster"]["available_clusters"] == mock_clusters

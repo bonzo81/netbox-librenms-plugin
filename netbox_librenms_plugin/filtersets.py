@@ -26,11 +26,7 @@ class SiteLocationFilterSet:
     def _filter_queryset(self, search_term):
         """Filter queryset by search term."""
         search_term = str(search_term).lower()
-        return [
-            item
-            for item in self.queryset
-            if self._matches_search_criteria(item, search_term)
-        ]
+        return [item for item in self.queryset if self._matches_search_criteria(item, search_term)]
 
     def _matches_search_criteria(self, item, search_term):
         """Check if item matches search criteria."""
@@ -52,11 +48,7 @@ class SiteLocationFilterSet:
             q = forms.CharField(
                 required=False,
                 label="Search sites and locations",
-                widget=forms.TextInput(
-                    attrs={
-                        "placeholder": "Search by site name, coordinates or location"
-                    }
-                ),
+                widget=forms.TextInput(attrs={"placeholder": "Search by site name, coordinates or location"}),
             )
 
         return FilterForm(self.form_data)

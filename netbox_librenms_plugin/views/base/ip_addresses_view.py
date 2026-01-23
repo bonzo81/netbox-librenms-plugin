@@ -57,14 +57,10 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
                 continue
 
             # Get or fetch port data (with caching)
-            port_info = self._get_port_info(
-                ip_entry["port_id"], port_data_cache, interface_name_field
-            )
+            port_info = self._get_port_info(ip_entry["port_id"], port_data_cache, interface_name_field)
 
             # Create enriched IP structure with base data
-            enriched_ip = self._create_base_ip_entry(
-                ip_entry, obj, prefetched_data["vrfs"]
-            )
+            enriched_ip = self._create_base_ip_entry(ip_entry, obj, prefetched_data["vrfs"])
 
             # Get LibreNMS interface name if available
             librenms_interface_name = None
@@ -118,8 +114,7 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
 
         # Get all IP addresses
         ip_addresses_map = {
-            str(ip.address): ip
-            for ip in IPAddress.objects.select_related("assigned_object_type", "vrf")
+            str(ip.address): ip for ip in IPAddress.objects.select_related("assigned_object_type", "vrf")
         }
 
         # Get all VRFs
@@ -176,9 +171,7 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
             "vrfs": vrfs,
         }
 
-    def _enrich_existing_ip(
-        self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data
-    ):
+    def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
         """Add information for IP addresses that exist in NetBox"""
         enriched_ip["ip_url"] = ip_address.get_absolute_url()
         enriched_ip["exists"] = True
@@ -205,18 +198,13 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
                 return
 
         # Check if interface matches by name
-        if (
-            librenms_interface_name
-            and assigned_interface.name == librenms_interface_name
-        ):
+        if librenms_interface_name and assigned_interface.name == librenms_interface_name:
             enriched_ip["status"] = "matched"
             # Add interface information
             enriched_ip["interface_name"] = assigned_interface.name
             enriched_ip["interface_url"] = assigned_interface.get_absolute_url()
 
-    def _add_interface_info_to_ip(
-        self, enriched_ip, port_id, librenms_interface_name, prefetched_data
-    ):
+    def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
         """Add interface information to the IP entry regardless of IP status"""
         # First try to match by LibreNMS ID (highest priority)
         if port_id in prefetched_data["interfaces_by_librenms_id"]:
@@ -226,10 +214,7 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
             return
 
         # Then try to match by interface name
-        if (
-            librenms_interface_name
-            and librenms_interface_name in prefetched_data["interfaces_by_name"]
-        ):
+        if librenms_interface_name and librenms_interface_name in prefetched_data["interfaces_by_name"]:
             interface = prefetched_data["interfaces_by_name"][librenms_interface_name]
             # Don't overwrite the interface name from LibreNMS but do add the URL
             enriched_ip["interface_url"] = interface.get_absolute_url()
@@ -288,9 +273,7 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
         interface_name_field = get_interface_name_field(request)
-        context = self._prepare_context(
-            request, obj, interface_name_field, fetch_fresh=False
-        )
+        context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table
             context = {"table": None, "object": obj, "cache_expiry": None}
@@ -300,9 +283,7 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
         """Handle POST request for IP address sync view."""
         obj = self.get_object(pk)
         interface_name_field = get_interface_name_field(request)
-        context = self._prepare_context(
-            request, obj, interface_name_field, fetch_fresh=True
-        )
+        context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=True)
 
         if context is None:
             messages.error(request, "No IP addresses found in LibreNMS")
@@ -344,9 +325,7 @@ class SingleIPAddressVerifyView(CacheMixin, View):
             if obj:
                 return obj
 
-            raise Http404(
-                f"Object with ID {object_id} not found in Device or VirtualMachine models"
-            )
+            raise Http404(f"Object with ID {object_id} not found in Device or VirtualMachine models")
 
     def _parse_ip_address(self, ip_address):
         """
@@ -371,9 +350,7 @@ class SingleIPAddressVerifyView(CacheMixin, View):
             return None, None, None
 
         for ip_entry in cached_data.get("ip_addresses", []):
-            if ip_entry["ip_address"] == address and str(
-                ip_entry["prefix_length"]
-            ) == str(prefix_len):
+            if ip_entry["ip_address"] == address and str(ip_entry["prefix_length"]) == str(prefix_len):
                 return (ip_entry, ip_entry.get("vrf_id"), ip_entry.get("port_id"))
 
         return None, None, None
@@ -391,20 +368,14 @@ class SingleIPAddressVerifyView(CacheMixin, View):
 
         # IP exists in some VRF, check if it exists in the specified VRF
         if vrf_id is not None:
-            existing_in_vrf = IPAddress.objects.filter(
-                address=ip_with_mask, vrf__id=vrf_id
-            ).exists()
+            existing_in_vrf = IPAddress.objects.filter(address=ip_with_mask, vrf__id=vrf_id).exists()
         else:
             # Check for global VRF (None)
-            existing_in_vrf = IPAddress.objects.filter(
-                address=ip_with_mask, vrf__isnull=True
-            ).exists()
+            existing_in_vrf = IPAddress.objects.filter(address=ip_with_mask, vrf__isnull=True).exists()
 
         return True, existing_in_vrf, existing_ip.get_absolute_url()
 
-    def _determine_status(
-        self, exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id
-    ):
+    def _determine_status(self, exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id):
         """
         Determine the status of an IP address based on existence and VRF.
         """
@@ -439,14 +410,10 @@ class SingleIPAddressVerifyView(CacheMixin, View):
             object_type = data.get("object_type")
 
             if not ip_address:
-                return JsonResponse(
-                    {"status": "error", "message": "No IP address provided"}, status=400
-                )
+                return JsonResponse({"status": "error", "message": "No IP address provided"}, status=400)
 
             if not object_id:
-                return JsonResponse(
-                    {"status": "error", "message": "No object ID provided"}, status=400
-                )
+                return JsonResponse({"status": "error", "message": "No object ID provided"}, status=400)
 
             # Get the object (Device or VirtualMachine)
             try:
@@ -495,9 +462,7 @@ class SingleIPAddressVerifyView(CacheMixin, View):
                     updated_record["interface_url"] = interface.get_absolute_url()
 
             # Check if IP exists in NetBox
-            exists_any_vrf, exists_specific_vrf, ip_url = self._find_existing_ip(
-                address_no_mask, prefix_len, vrf_id
-            )
+            exists_any_vrf, exists_specific_vrf, ip_url = self._find_existing_ip(address_no_mask, prefix_len, vrf_id)
 
             if exists_any_vrf:
                 updated_record["exists"] = True

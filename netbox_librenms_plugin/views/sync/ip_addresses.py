@@ -63,9 +63,7 @@ class SyncIPAddressesView(CacheMixin, View):
             messages.error(request, "No IP addresses selected for synchronization.")
             return redirect(self.get_ip_tab_url(obj))
 
-        results = self.process_ip_sync(
-            request, selected_ips, cached_ips, obj, object_type
-        )
+        results = self.process_ip_sync(request, selected_ips, cached_ips, obj, object_type)
         self.display_sync_results(request, results)
 
         return redirect(self.get_ip_tab_url(obj))
@@ -76,9 +74,7 @@ class SyncIPAddressesView(CacheMixin, View):
         with transaction.atomic():
             for ip_address in selected_ips:
                 try:
-                    ip_data = next(
-                        ip for ip in cached_ips if ip["ip_address"] == ip_address
-                    )
+                    ip_data = next(ip for ip in cached_ips if ip["ip_address"] == ip_address)
 
                     vrf = self.get_vrf_selection(request, ip_address)
 
@@ -95,10 +91,7 @@ class SyncIPAddressesView(CacheMixin, View):
                     existing_ip = IPAddress.objects.filter(address=ip_with_mask).first()
 
                     if existing_ip:
-                        if (
-                            existing_ip.assigned_object != interface
-                            or existing_ip.vrf != vrf
-                        ):
+                        if existing_ip.assigned_object != interface or existing_ip.vrf != vrf:
                             existing_ip.assigned_object = interface
                             existing_ip.vrf = vrf
                             existing_ip.save()
@@ -121,19 +114,13 @@ class SyncIPAddressesView(CacheMixin, View):
 
     def display_sync_results(self, request, results):
         if results["created"]:
-            messages.success(
-                request, f"Created IP addresses: {', '.join(results['created'])}"
-            )
+            messages.success(request, f"Created IP addresses: {', '.join(results['created'])}")
         if results["updated"]:
-            messages.success(
-                request, f"Updated IP addresses: {', '.join(results['updated'])}"
-            )
+            messages.success(request, f"Updated IP addresses: {', '.join(results['updated'])}")
         if results["unchanged"]:
             messages.warning(
                 request,
                 f"IP addresses already exist: {', '.join(results['unchanged'])}",
             )
         if results["failed"]:
-            messages.error(
-                request, f"Failed to sync IP addresses: {', '.join(results['failed'])}"
-            )
+            messages.error(request, f"Failed to sync IP addresses: {', '.join(results['failed'])}")

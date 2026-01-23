@@ -41,29 +41,23 @@ class LibreNMSSyncConfig(PluginConfig):
         """Validate multi-server configuration."""
         if not servers_config or not isinstance(servers_config, dict):
             raise ImproperlyConfigured(
-                f"Plugin {self.name} requires at least one server configuration "
-                "in the 'servers' section."
+                f"Plugin {self.name} requires at least one server configuration in the 'servers' section."
             )
 
         for server_key, server_config in servers_config.items():
             if not isinstance(server_config, dict):
-                raise ImproperlyConfigured(
-                    f"Plugin {self.name} server '{server_key}' must be a dictionary."
-                )
+                raise ImproperlyConfigured(f"Plugin {self.name} server '{server_key}' must be a dictionary.")
 
             for setting in ["librenms_url", "api_token"]:
                 if setting not in server_config:
-                    raise ImproperlyConfigured(
-                        f"Plugin {self.name} server '{server_key}' requires '{setting}'."
-                    )
+                    raise ImproperlyConfigured(f"Plugin {self.name} server '{server_key}' requires '{setting}'.")
 
     def _validate_legacy_config(self, plugin_config):
         """Validate legacy single-server configuration."""
         for setting in ["librenms_url", "api_token"]:
             if setting not in plugin_config:
                 raise ImproperlyConfigured(
-                    f"Plugin {self.name} requires either 'servers' configuration "
-                    f"or legacy '{setting}' setting."
+                    f"Plugin {self.name} requires either 'servers' configuration or legacy '{setting}' setting."
                 )
 
 

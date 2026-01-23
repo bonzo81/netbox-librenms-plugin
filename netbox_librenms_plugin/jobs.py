@@ -75,9 +75,7 @@ class FilterDevicesJob(JobRunner):
 
         # Initialize API client
         api = LibreNMSAPI(server_key=server_key)
-        self.logger.info(
-            f"LibreNMS API initialized (cache timeout: {api.cache_timeout}s)"
-        )
+        self.logger.info(f"LibreNMS API initialized (cache timeout: {api.cache_timeout}s)")
 
         # Process filters using shared function
         validated_devices = process_device_filters(
@@ -180,9 +178,7 @@ class ImportDevicesJob(JobRunner):
 
         total_count = len(device_ids) + len(vm_imports)
         self.logger.info(f"Starting LibreNMS import job for {total_count} devices/VMs")
-        self.logger.info(
-            f"Device imports: {len(device_ids)}, VM imports: {len(vm_imports)}"
-        )
+        self.logger.info(f"Device imports: {len(device_ids)}, VM imports: {len(vm_imports)}")
         if server_key:
             self.logger.info(f"Using LibreNMS server: {server_key}")
 
@@ -213,39 +209,19 @@ class ImportDevicesJob(JobRunner):
             self.logger.info(f"Importing {len(vm_imports)} VMs...")
             from netbox_librenms_plugin.import_utils import bulk_import_vms
 
-            vm_result = bulk_import_vms(
-                vm_imports, api, sync_options, libre_devices_cache, job=self
-            )
+            vm_result = bulk_import_vms(vm_imports, api, sync_options, libre_devices_cache, job=self)
 
         # Combine results
-        imported_device_pks = [
-            item["device"].pk
-            for item in device_result.get("success", [])
-            if item.get("device")
-        ]
-        imported_vm_pks = [
-            item["device"].pk
-            for item in vm_result.get("success", [])
-            if item.get("device")
-        ]
+        imported_device_pks = [item["device"].pk for item in device_result.get("success", []) if item.get("device")]
+        imported_vm_pks = [item["device"].pk for item in vm_result.get("success", []) if item.get("device")]
 
         # Also store LibreNMS device IDs for re-rendering table rows
-        imported_libre_device_ids = [
-            item["device_id"] for item in device_result.get("success", [])
-        ]
-        imported_libre_vm_ids = [
-            item["device_id"] for item in vm_result.get("success", [])
-        ]
+        imported_libre_device_ids = [item["device_id"] for item in device_result.get("success", [])]
+        imported_libre_vm_ids = [item["device_id"] for item in vm_result.get("success", [])]
 
-        success_count = len(device_result.get("success", [])) + len(
-            vm_result.get("success", [])
-        )
-        failed_count = len(device_result.get("failed", [])) + len(
-            vm_result.get("failed", [])
-        )
-        skipped_count = len(device_result.get("skipped", [])) + len(
-            vm_result.get("skipped", [])
-        )
+        success_count = len(device_result.get("success", [])) + len(vm_result.get("success", []))
+        failed_count = len(device_result.get("failed", [])) + len(vm_result.get("failed", []))
+        skipped_count = len(device_result.get("skipped", [])) + len(vm_result.get("skipped", []))
 
         all_errors = device_result.get("failed", []) + vm_result.get("failed", [])
 

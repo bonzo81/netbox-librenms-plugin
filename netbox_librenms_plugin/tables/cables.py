@@ -22,20 +22,14 @@ class LibreNMSCableTable(tables.Table):
         attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
     )
 
-    local_port = tables.Column(
-        verbose_name="Local Port", attrs={"td": {"data-col": "local_port"}}
-    )
+    local_port = tables.Column(verbose_name="Local Port", attrs={"td": {"data-col": "local_port"}})
     remote_port = tables.Column(
         accessor="remote_port_name",
         verbose_name="Remote Port",
         attrs={"td": {"data-col": "remote_port"}},
     )
-    remote_device = tables.Column(
-        verbose_name="Remote Device", attrs={"td": {"data-col": "remote_device"}}
-    )
-    cable_status = tables.Column(
-        verbose_name="Cable Status", attrs={"td": {"data-col": "cable_status"}}
-    )
+    remote_device = tables.Column(verbose_name="Remote Device", attrs={"td": {"data-col": "remote_device"}})
+    cable_status = tables.Column(verbose_name="Cable Status", attrs={"td": {"data-col": "cable_status"}})
     actions = tables.TemplateColumn(
         template_code="""
         {% if record.can_create_cable %}

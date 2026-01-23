@@ -16,25 +16,19 @@ class UpdateDeviceSerialView(LibreNMSAPIMixin, View):
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         success, device_info = self.librenms_api.get_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         serial = device_info.get("serial")
 
         if not serial or serial == "-":
             messages.warning(request, "No serial number available in LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         old_serial = device.serial
         device.serial = serial
@@ -60,25 +54,19 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         success, device_info = self.librenms_api.get_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         hardware = device_info.get("hardware")
 
         if not hardware:
             messages.warning(request, "No hardware information available in LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         match_result = match_librenms_hardware_to_device_type(hardware)
 
@@ -87,9 +75,7 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
                 request,
                 f"No matching DeviceType found for hardware '{hardware}'",
             )
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         device_type = match_result["device_type"]
         old_device_type = device.device_type
@@ -113,25 +99,19 @@ class UpdateDevicePlatformView(LibreNMSAPIMixin, View):
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         success, device_info = self.librenms_api.get_device_info(self.librenms_id)
 
         if not success or not device_info:
             messages.error(request, "Failed to retrieve device info from LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         os_name = device_info.get("os")
 
         if not os_name:
             messages.warning(request, "No OS information available in LibreNMS")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         platform_name = os_name
 
@@ -144,9 +124,7 @@ class UpdateDevicePlatformView(LibreNMSAPIMixin, View):
                     platform_name
                 ),
             )
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         old_platform = device.platform
         device.platform = platform
@@ -174,18 +152,14 @@ class CreateAndAssignPlatformView(LibreNMSAPIMixin, View):
 
         if not platform_name:
             messages.error(request, "Platform name is required")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         if Platform.objects.filter(name__iexact=platform_name).exists():
             messages.warning(
                 request,
                 f"Platform '{platform_name}' already exists. Use the regular sync button.",
             )
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         manufacturer = None
         if manufacturer_id:
@@ -218,9 +192,7 @@ class AssignVCSerialView(LibreNMSAPIMixin, View):
 
         if not device.virtual_chassis:
             messages.error(request, "Device is not part of a virtual chassis")
-            return redirect(
-                "plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk
-            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         assignments_made = 0
         errors = []
@@ -237,13 +209,8 @@ class AssignVCSerialView(LibreNMSAPIMixin, View):
             try:
                 member = Device.objects.get(pk=member_id)
 
-                if (
-                    not member.virtual_chassis
-                    or member.virtual_chassis.pk != device.virtual_chassis.pk
-                ):
-                    errors.append(
-                        f"{member.name} is not part of the same virtual chassis"
-                    )
+                if not member.virtual_chassis or member.virtual_chassis.pk != device.virtual_chassis.pk:
+                    errors.append(f"{member.name} is not part of the same virtual chassis")
                     counter += 1
                     continue
 
@@ -255,9 +222,7 @@ class AssignVCSerialView(LibreNMSAPIMixin, View):
             except Device.DoesNotExist:
                 errors.append(f"Device with ID {member_id} not found")
             except Exception as exc:  # pragma: no cover - defensive guard
-                errors.append(
-                    f"Error assigning serial to member {member_id}: {str(exc)}"
-                )
+                errors.append(f"Error assigning serial to member {member_id}: {str(exc)}")
 
             counter += 1
 

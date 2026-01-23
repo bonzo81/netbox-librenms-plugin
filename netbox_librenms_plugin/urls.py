@@ -200,7 +200,6 @@ urlpatterns = [
         name="bulk_import_confirm",
     ),
     path(
-
         "device-import/validation/<str:device_id>/",
         DeviceValidationDetailsView.as_view(),
         name="device_validation_details",

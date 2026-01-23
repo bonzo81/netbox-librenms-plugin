@@ -82,9 +82,7 @@ class DeviceImportHelperMixin:
         # but is now changing role/rack (so we fetch it now)
         return True
 
-    def get_validated_device_with_selections(
-        self, device_id: int, request
-    ) -> tuple[dict | None, dict | None, dict]:
+    def get_validated_device_with_selections(self, device_id: int, request) -> tuple[dict | None, dict | None, dict]:
         """
         Get LibreNMS device, validate it, and apply user selections.
 
@@ -125,9 +123,7 @@ class DeviceImportHelperMixin:
 
         return libre_device, validation, selections
 
-    def render_device_row(
-        self, request, libre_device: dict, validation: dict, selections: dict
-    ):
+    def render_device_row(self, request, libre_device: dict, validation: dict, selections: dict):
         """
         Render device import table row with updated validation.
 
@@ -255,9 +251,7 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
             rack_id = selections["rack_id"]
             is_vm = bool(cluster_id)
 
-            validation = validate_device_for_import(
-                libre_device, import_as_vm=is_vm, api=self.librenms_api
-            )
+            validation = validate_device_for_import(libre_device, import_as_vm=is_vm, api=self.librenms_api)
 
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
@@ -397,9 +391,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         }
 
         manual_mappings_per_device: dict[int, dict[str, int]] = {}
-        vm_imports: dict[
-            int, dict[str, int]
-        ] = {}  # Track which devices to import as VMs
+        vm_imports: dict[int, dict[str, int]] = {}  # Track which devices to import as VMs
 
         for device_id in parsed_ids:
             mappings = {}
@@ -499,17 +491,13 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                     # This matches the "Clear" button behavior
                     return HttpResponse(
                         "",
-                        headers={
-                            "HX-Redirect": "/plugins/librenms_plugin/librenms-import/"
-                        },
+                        headers={"HX-Redirect": "/plugins/librenms_plugin/librenms-import/"},
                     )
                 else:
                     return redirect("plugins:netbox_librenms_plugin:librenms_import")
             else:
                 # No workers available - warn user and proceed synchronously
-                logger.warning(
-                    "No RQ workers available for import job, falling back to synchronous import"
-                )
+                logger.warning("No RQ workers available for import job, falling back to synchronous import")
                 messages.warning(
                     request,
                     f"Background job requested but no workers available. Importing {total_import_count} devices synchronously...",
@@ -560,33 +548,24 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         # Combine results
-        success_count = len(device_result.get("success", [])) + len(
-            vm_result.get("success", [])
-        )
-        failed_count = len(device_result.get("failed", [])) + len(
-            vm_result.get("failed", [])
-        )
-        skipped_count = len(device_result.get("skipped", [])) + len(
-            vm_result.get("skipped", [])
-        )
+        success_count = len(device_result.get("success", [])) + len(vm_result.get("success", []))
+        failed_count = len(device_result.get("failed", [])) + len(vm_result.get("failed", []))
+        skipped_count = len(device_result.get("skipped", [])) + len(vm_result.get("skipped", []))
 
         if success_count:
             messages.success(
                 request,
-                f"Successfully imported {success_count} LibreNMS device"
-                f"{'s' if success_count != 1 else ''}",
+                f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}",
             )
         if failed_count:
             messages.error(
                 request,
-                f"Failed to import {failed_count} device"
-                f"{'s' if failed_count != 1 else ''}",
+                f"Failed to import {failed_count} device{'s' if failed_count != 1 else ''}",
             )
         if skipped_count:
             messages.warning(
                 request,
-                f"Skipped {skipped_count} existing device"
-                f"{'s' if skipped_count != 1 else ''}",
+                f"Skipped {skipped_count} existing device{'s' if skipped_count != 1 else ''}",
             )
 
         if request.headers.get("HX-Request"):
@@ -595,9 +574,9 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
             updated_rows_html = []
 
             # Collect all successfully imported device IDs (devices + VMs)
-            imported_device_ids = [
-                item["device_id"] for item in device_result.get("success", [])
-            ] + [item["device_id"] for item in vm_result.get("success", [])]
+            imported_device_ids = [item["device_id"] for item in device_result.get("success", [])] + [
+                item["device_id"] for item in vm_result.get("success", [])
+            ]
 
             # Re-validate and render each imported device with fresh status
             for device_id in imported_device_ids:
@@ -610,9 +589,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
 
                 if libre_device:
                     # Determine if this was imported as VM or device
-                    is_vm = device_id in [
-                        item["device_id"] for item in vm_result.get("success", [])
-                    ]
+                    is_vm = device_id in [item["device_id"] for item in vm_result.get("success", [])]
 
                     # Re-validate with fresh status (will now show as imported)
                     validation = validate_device_for_import(
@@ -625,9 +602,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
 
                     # Update cache with fresh validation
                     libre_device["_validation"] = validation
-                    cache_key = get_import_device_cache_key(
-                        device_id, self.librenms_api.server_key
-                    )
+                    cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
                     cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
 
                     # Render updated row
@@ -685,9 +660,7 @@ class DeviceValidationDetailsView(LibreNMSAPIMixin, DeviceImportHelperMixin, Vie
     """HTMX view to show detailed validation information."""
 
     def get(self, request, device_id):
-        libre_device, validation, selections = (
-            self.get_validated_device_with_selections(device_id, request)
-        )
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
             return HttpResponse(
@@ -711,9 +684,7 @@ class DeviceRoleUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a role is selected."""
 
     def post(self, request, device_id):
-        libre_device, validation, selections = (
-            self.get_validated_device_with_selections(device_id, request)
-        )
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
             return HttpResponse("Device not found", status=404)
@@ -725,9 +696,7 @@ class DeviceClusterUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a cluster is selected/deselected."""
 
     def post(self, request, device_id):
-        libre_device, validation, selections = (
-            self.get_validated_device_with_selections(device_id, request)
-        )
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
             return HttpResponse("Device not found", status=404)
@@ -739,9 +708,7 @@ class DeviceRackUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a rack is selected."""
 
     def post(self, request, device_id):
-        libre_device, validation, selections = (
-            self.get_validated_device_with_selections(device_id, request)
-        )
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
             return HttpResponse("Device not found", status=404)

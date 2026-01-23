@@ -48,9 +48,7 @@ class LibreNMSSettingsView(PermissionRequiredMixin, View):
         if form_type == "server_config":
             # Process server configuration form
             server_form = ServerConfigForm(request.POST, instance=settings)
-            import_form = ImportSettingsForm(
-                instance=settings
-            )  # Unbound form for display
+            import_form = ImportSettingsForm(instance=settings)  # Unbound form for display
 
             if server_form.is_valid():
                 server_form.save()
@@ -62,9 +60,7 @@ class LibreNMSSettingsView(PermissionRequiredMixin, View):
 
         elif form_type == "import_settings":
             # Process import settings form
-            server_form = ServerConfigForm(
-                instance=settings
-            )  # Unbound form for display
+            server_form = ServerConfigForm(instance=settings)  # Unbound form for display
             import_form = ImportSettingsForm(request.POST, instance=settings)
 
             if import_form.is_valid():

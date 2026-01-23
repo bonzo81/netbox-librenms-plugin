@@ -21,9 +21,7 @@ class SyncCablesView(CacheMixin, View):
             return None
 
         for interface in selected_data:
-            device_id = (
-                request.POST.get(f"device_selection_{interface}") or initial_device.id
-            )
+            device_id = request.POST.get(f"device_selection_{interface}") or initial_device.id
             selected_interfaces.append({"device_id": device_id, "interface": interface})
 
         return selected_interfaces
@@ -46,8 +44,7 @@ class SyncCablesView(CacheMixin, View):
 
     def check_existing_cable(self, local_interface, remote_interface):
         return Cable.objects.filter(
-            Q(terminations__termination_id=local_interface.pk)
-            | Q(terminations__termination_id=remote_interface.pk)
+            Q(terminations__termination_id=local_interface.pk) | Q(terminations__termination_id=remote_interface.pk)
         ).exists()
 
     def validate_prerequisites(self, cached_links, selected_interfaces):
@@ -66,11 +63,7 @@ class SyncCablesView(CacheMixin, View):
 
     def process_single_interface(self, interface, cached_links):
         try:
-            link_data = next(
-                link
-                for link in cached_links
-                if link["local_port"] == interface["interface"]
-            )
+            link_data = next(link for link in cached_links if link["local_port"] == interface["interface"])
             return self.handle_cable_creation(link_data, interface)
         except StopIteration:
             return {"status": "invalid"}
@@ -89,12 +82,8 @@ class SyncCablesView(CacheMixin, View):
             return {"status": "invalid", "interface": interface["interface"]}
 
         try:
-            local_interface = Interface.objects.get(
-                pk=link_data["netbox_local_interface_id"]
-            )
-            remote_interface = Interface.objects.get(
-                pk=link_data["netbox_remote_interface_id"]
-            )
+            local_interface = Interface.objects.get(pk=link_data["netbox_local_interface_id"])
+            remote_interface = Interface.objects.get(pk=link_data["netbox_remote_interface_id"])
 
             if self.check_existing_cable(local_interface, remote_interface):
                 return {"status": "duplicate", "interface": interface["interface"]}
@@ -136,8 +125,7 @@ class SyncCablesView(CacheMixin, View):
         if results["missing_remote"]:
             messages.error(
                 request,
-                "Remote device or interface not found in NetBox for: "
-                f"{', '.join(results['missing_remote'])}",
+                f"Remote device or interface not found in NetBox for: {', '.join(results['missing_remote'])}",
             )
         if results["invalid"]:
             messages.error(

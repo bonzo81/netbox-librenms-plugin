@@ -25,9 +25,7 @@ class SyncInterfacesView(CacheMixin, View):
         obj = self.get_object(object_type, object_id)
 
         interface_name_field = get_interface_name_field(request)
-        selected_interfaces = self.get_selected_interfaces(
-            request, interface_name_field
-        )
+        selected_interfaces = self.get_selected_interfaces(request, interface_name_field)
         exclude_columns = request.POST.getlist("exclude_columns")
 
         if selected_interfaces is None:
@@ -43,14 +41,11 @@ class SyncInterfacesView(CacheMixin, View):
                 + f"?tab=interfaces&interface_name_field={interface_name_field}"
             )
 
-        self.sync_selected_interfaces(
-            obj, selected_interfaces, ports_data, exclude_columns, interface_name_field
-        )
+        self.sync_selected_interfaces(obj, selected_interfaces, ports_data, exclude_columns, interface_name_field)
 
         messages.success(request, "Selected interfaces synced successfully.")
         return redirect(
-            reverse(url_name, kwargs={"pk": object_id})
-            + f"?tab=interfaces&interface_name_field={interface_name_field}"
+            reverse(url_name, kwargs={"pk": object_id}) + f"?tab=interfaces&interface_name_field={interface_name_field}"
         )
 
     def get_object(self, object_type, object_id):
@@ -90,13 +85,9 @@ class SyncInterfacesView(CacheMixin, View):
                 port_name = port.get(interface_name_field)
 
                 if port_name in selected_interfaces:
-                    self.sync_interface(
-                        obj, port, exclude_columns, interface_name_field
-                    )
+                    self.sync_interface(obj, port, exclude_columns, interface_name_field)
 
-    def sync_interface(
-        self, obj, librenms_interface, exclude_columns, interface_name_field
-    ):
+    def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         interface_name = librenms_interface.get(interface_name_field)
 
         if isinstance(obj, Device):
@@ -108,13 +99,9 @@ class SyncInterfacesView(CacheMixin, View):
             else:
                 target_device = obj
 
-            interface, _ = Interface.objects.get_or_create(
-                device=target_device, name=interface_name
-            )
+            interface, _ = Interface.objects.get_or_create(device=target_device, name=interface_name)
         elif isinstance(obj, VirtualMachine):
-            interface, _ = VMInterface.objects.get_or_create(
-                virtual_machine=obj, name=interface_name
-            )
+            interface, _ = VMInterface.objects.get_or_create(virtual_machine=obj, name=interface_name)
         else:
             raise ValueError("Invalid object type.")
 
@@ -144,19 +131,11 @@ class SyncInterfacesView(CacheMixin, View):
 
     def get_netbox_interface_type(self, librenms_interface):
         speed = convert_speed_to_kbps(librenms_interface["ifSpeed"])
-        mappings = InterfaceTypeMapping.objects.filter(
-            librenms_type=librenms_interface["ifType"]
-        )
+        mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface["ifType"])
 
         if speed is not None:
-            speed_mapping = (
-                mappings.filter(librenms_speed__lte=speed)
-                .order_by("-librenms_speed")
-                .first()
-            )
-            mapping = (
-                speed_mapping or mappings.filter(librenms_speed__isnull=True).first()
-            )
+            speed_mapping = mappings.filter(librenms_speed__lte=speed).order_by("-librenms_speed").first()
+            mapping = speed_mapping or mappings.filter(librenms_speed__isnull=True).first()
         else:
             mapping = mappings.filter(librenms_speed__isnull=True).first()
 
@@ -164,9 +143,7 @@ class SyncInterfacesView(CacheMixin, View):
 
     def handle_mac_address(self, interface, ifPhysAddress):
         if ifPhysAddress:
-            existing_mac = interface.mac_addresses.filter(
-                mac_address=ifPhysAddress
-            ).first()
+            existing_mac = interface.mac_addresses.filter(mac_address=ifPhysAddress).first()
             if existing_mac:
                 mac_obj = existing_mac
             else:
@@ -211,9 +188,7 @@ class SyncInterfacesView(CacheMixin, View):
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))
 
         if "librenms_id" in interface.cf:
-            interface.custom_field_data["librenms_id"] = librenms_interface.get(
-                "port_id"
-            )
+            interface.custom_field_data["librenms_id"] = librenms_interface.get("port_id")
 
         ifPhysAddress = librenms_interface.get("ifPhysAddress")
         self.handle_mac_address(interface, ifPhysAddress)
@@ -235,9 +210,7 @@ class DeleteNetBoxInterfacesView(CacheMixin, View):
         interface_ids = request.POST.getlist("interface_ids")
 
         if not interface_ids:
-            return JsonResponse(
-                {"error": "No interfaces selected for deletion"}, status=400
-            )
+            return JsonResponse({"error": "No interfaces selected for deletion"}, status=400)
 
         deleted_count = 0
         errors = []
@@ -249,10 +222,7 @@ class DeleteNetBoxInterfacesView(CacheMixin, View):
                         if object_type == "device":
                             interface = Interface.objects.get(id=interface_id)
                             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                                valid_device_ids = [
-                                    member.id
-                                    for member in obj.virtual_chassis.members.all()
-                                ]
+                                valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
                                 if interface.device_id not in valid_device_ids:
                                     errors.append(
                                         "Interface {} does not belong to this device or its virtual chassis".format(
@@ -261,16 +231,12 @@ class DeleteNetBoxInterfacesView(CacheMixin, View):
                                     )
                                     continue
                             elif interface.device_id != obj.id:
-                                errors.append(
-                                    f"Interface {interface.name} does not belong to this device"
-                                )
+                                errors.append(f"Interface {interface.name} does not belong to this device")
                                 continue
                         else:
                             interface = VMInterface.objects.get(id=interface_id)
                             if interface.virtual_machine_id != obj.id:
-                                errors.append(
-                                    f"Interface {interface.name} does not belong to this virtual machine"
-                                )
+                                errors.append(f"Interface {interface.name} does not belong to this virtual machine")
                                 continue
 
                         interface_name = interface.name
@@ -281,15 +247,11 @@ class DeleteNetBoxInterfacesView(CacheMixin, View):
                         errors.append(f"Interface with ID {interface_id} not found")
                         continue
                     except Exception as exc:  # pragma: no cover - defensive
-                        errors.append(
-                            f"Error deleting interface {interface_name}: {str(exc)}"
-                        )
+                        errors.append(f"Error deleting interface {interface_name}: {str(exc)}")
                         continue
 
         except Exception as exc:  # pragma: no cover
-            return JsonResponse(
-                {"error": f"Transaction failed: {str(exc)}"}, status=500
-            )
+            return JsonResponse({"error": f"Transaction failed: {str(exc)}"}, status=500)
 
         response_data = {
             "status": "success",

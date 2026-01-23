@@ -42,9 +42,7 @@ def format_mac_address(mac_address: str) -> str:
     if len(mac_address) != 12:
         return "Invalid MAC Address"  # Return a message if the address is not valid
 
-    formatted_mac = ":".join(
-        mac_address[i : i + 2] for i in range(0, len(mac_address), 2)
-    )
+    formatted_mac = ":".join(mac_address[i : i + 2] for i in range(0, len(mac_address), 2))
     return formatted_mac.upper()
 
 
@@ -195,9 +193,7 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
     except DeviceType.DoesNotExist:
         pass
     except DeviceType.MultipleObjectsReturned:
-        device_type = DeviceType.objects.filter(
-            part_number__iexact=hardware_name
-        ).first()
+        device_type = DeviceType.objects.filter(part_number__iexact=hardware_name).first()
         return {
             "matched": True,
             "device_type": device_type,

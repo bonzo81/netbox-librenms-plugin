@@ -152,15 +152,13 @@ class ImportSettingsForm(NetBoxModelForm):
             # Check result isn't empty or just whitespace
             if not test_result.strip():
                 raise forms.ValidationError(
-                    "The pattern results in an empty suffix. "
-                    "Please include some text content in the pattern."
+                    "The pattern results in an empty suffix. Please include some text content in the pattern."
                 )
 
         except KeyError as e:
             # This should be caught by check above, but just in case
             raise forms.ValidationError(
-                f"Invalid placeholder in pattern: {e}. "
-                f"Valid options are: {{position}}, {{serial}}"
+                f"Invalid placeholder in pattern: {e}. Valid options are: {{position}}, {{serial}}"
             )
         except (ValueError, IndexError) as e:
             raise forms.ValidationError(f"Invalid pattern syntax: {str(e)}")
@@ -460,16 +458,10 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
             del self.fields["filter_id"]
 
     site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
-    location = DynamicModelMultipleChoiceField(
-        queryset=Location.objects.all(), required=False
-    )
+    location = DynamicModelMultipleChoiceField(queryset=Location.objects.all(), required=False)
     rack = DynamicModelMultipleChoiceField(queryset=Rack.objects.all(), required=False)
-    device_type = DynamicModelMultipleChoiceField(
-        queryset=DeviceType.objects.all(), required=False
-    )
-    role = DynamicModelMultipleChoiceField(
-        queryset=DeviceRole.objects.all(), required=False
-    )
+    device_type = DynamicModelMultipleChoiceField(queryset=DeviceType.objects.all(), required=False)
+    role = DynamicModelMultipleChoiceField(queryset=DeviceRole.objects.all(), required=False)
 
     model = Device
 
@@ -584,11 +576,7 @@ class LibreNMSImportFilterForm(forms.Form):
             has_filters = any(data.get(field) for field in filter_fields)
 
             # Apply default only on initial load (no filters, no job_id)
-            if (
-                "use_background_job" not in data
-                and not data.get("job_id")
-                and not has_filters
-            ):
+            if "use_background_job" not in data and not data.get("job_id") and not has_filters:
                 data["use_background_job"] = "on"
             args = (data,) + args[1:]
 
@@ -611,9 +599,7 @@ class LibreNMSImportFilterForm(forms.Form):
             )
 
             if not any(cleaned_data.get(field) for field in filter_fields):
-                raise forms.ValidationError(
-                    "Please select at least one LibreNMS filter before applying the search."
-                )
+                raise forms.ValidationError("Please select at least one LibreNMS filter before applying the search.")
 
         return cleaned_data
 
@@ -671,13 +657,9 @@ class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
         if "filter_id" in self.fields:
             del self.fields["filter_id"]
 
-    virtualmachine = DynamicModelMultipleChoiceField(
-        queryset=VirtualMachine.objects.all(), required=False
-    )
+    virtualmachine = DynamicModelMultipleChoiceField(queryset=VirtualMachine.objects.all(), required=False)
     site = DynamicModelMultipleChoiceField(queryset=Site.objects.all(), required=False)
-    cluster = DynamicModelMultipleChoiceField(
-        queryset=Cluster.objects.all(), required=False
-    )
+    cluster = DynamicModelMultipleChoiceField(queryset=Cluster.objects.all(), required=False)
 
     model = VirtualMachine
 
@@ -691,9 +673,7 @@ class DeviceImportConfigForm(forms.Form):
     device_id = forms.IntegerField(widget=forms.HiddenInput(), required=True)
     hostname = forms.CharField(disabled=True, required=False, label="Device Hostname")
     hardware = forms.CharField(disabled=True, required=False, label="Hardware")
-    librenms_location = forms.CharField(
-        disabled=True, required=False, label="LibreNMS Location"
-    )
+    librenms_location = forms.CharField(disabled=True, required=False, label="LibreNMS Location")
 
     # Required mappings
     site = forms.ModelChoiceField(
@@ -788,9 +768,7 @@ class DeviceImportConfigForm(forms.Form):
         if suggested_device_type:
             self.fields["device_type"].initial = suggested_device_type
         elif validation and validation.get("device_type", {}).get("device_type"):
-            self.fields["device_type"].initial = validation["device_type"][
-                "device_type"
-            ]
+            self.fields["device_type"].initial = validation["device_type"]["device_type"]
 
         if suggested_role:
             self.fields["device_role"].initial = suggested_role
