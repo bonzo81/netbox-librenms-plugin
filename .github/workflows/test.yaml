@@ -16,13 +16,13 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.12', '3.13', '3.14']
-    
+
     services:
       redis:
         image: redis
         ports:
           - 6379:6379
-      
+
       postgres:
         image: postgres
         env:
@@ -35,7 +35,7 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-    
+
     steps:
       - name: Checkout plugin code
         uses: actions/checkout@v4
@@ -52,7 +52,7 @@ jobs:
         with:
           repository: netbox-community/netbox
           path: netbox
-          ref: develop
+          ref: main
 
       - name: Install plugin
         working-directory: netbox-librenms-plugin
@@ -71,7 +71,7 @@ jobs:
         working-directory: netbox/netbox
         run: |
           cp netbox/configuration_testing.py netbox/configuration.py
-          
+
       - name: Run tests
         working-directory: netbox
         run: |
