@@ -108,11 +108,7 @@ class DeviceImportTable(tables.Table):
             return
 
         # Get the ordering field and direction
-        order_by = (
-            self.order_by[0]
-            if isinstance(self.order_by, (list, tuple))
-            else self.order_by
-        )
+        order_by = self.order_by[0] if isinstance(self.order_by, (list, tuple)) else self.order_by
         reverse = order_by.startswith("-")
         field = order_by.lstrip("-")
 
@@ -214,8 +210,7 @@ class DeviceImportTable(tables.Table):
             )
         else:
             return mark_safe(
-                '<input type="checkbox" disabled '
-                'class="form-check-input" title="Cannot import this device">'
+                '<input type="checkbox" disabled class="form-check-input" title="Cannot import this device">'
             )
 
     def render_hostname(self, value, record):
@@ -237,9 +232,7 @@ class DeviceImportTable(tables.Table):
         if existing and isinstance(existing, VirtualMachine):
             # VM already exists - show its cluster (cluster is required for VMs)
             cluster = existing.cluster
-            return mark_safe(
-                f'<span class="badge bg-info text-white">{cluster.name}</span>'
-            )
+            return mark_safe(f'<span class="badge bg-info text-white">{cluster.name}</span>')
 
         # If Device already exists (not VM), show it's not a VM
         if existing:
@@ -250,18 +243,14 @@ class DeviceImportTable(tables.Table):
 
         # Check if a cluster has been selected (from validation)
         selected_cluster_id = None
-        if validation.get("cluster", {}).get("found") and validation.get(
-            "cluster", {}
-        ).get("cluster"):
+        if validation.get("cluster", {}).get("found") and validation.get("cluster", {}).get("cluster"):
             selected_cluster_id = validation["cluster"]["cluster"].pk
 
         # Build dropdown with HTMX attributes to update the row
         options = ['<option value="">-- Device (not VM) --</option>']
         for cluster in clusters:
             selected = " selected" if cluster.pk == selected_cluster_id else ""
-            options.append(
-                f'<option value="{cluster.pk}"{selected}>{cluster.name}</option>'
-            )
+            options.append(f'<option value="{cluster.pk}"{selected}>{cluster.name}</option>')
 
         # Add HTMX attributes to update the entire row when cluster is selected
         from django.urls import reverse
@@ -308,8 +297,7 @@ class DeviceImportTable(tables.Table):
             # Use the role's color if available, otherwise fallback to info
             color = role.color if hasattr(role, "color") and role.color else "6c757d"
             return mark_safe(
-                f'<span class="badge" style="background-color: #{color}; color: white;">'
-                f"{role.name}</span>"
+                f'<span class="badge" style="background-color: #{color}; color: white;">{role.name}</span>'
             )
 
         # Use cached roles to avoid N queries
@@ -317,9 +305,7 @@ class DeviceImportTable(tables.Table):
 
         # Check if a role has been selected (from validation)
         selected_role_id = None
-        if validation.get("device_role", {}).get("found") and validation.get(
-            "device_role", {}
-        ).get("role"):
+        if validation.get("device_role", {}).get("found") and validation.get("device_role", {}).get("role"):
             selected_role_id = validation["device_role"]["role"].pk
 
         # Build dropdown with different text based on import type
@@ -380,9 +366,7 @@ class DeviceImportTable(tables.Table):
         if existing and hasattr(existing, "rack") and existing.rack:
             rack = existing.rack
             location_name = rack.location.name if rack.location else "No Location"
-            return mark_safe(
-                f'<span class="badge bg-info text-white">{location_name} - {rack.name}</span>'
-            )
+            return mark_safe(f'<span class="badge bg-info text-white">{location_name} - {rack.name}</span>')
 
         # If device exists but no rack assigned
         if existing:
@@ -407,9 +391,7 @@ class DeviceImportTable(tables.Table):
             location_name = rack.location.name if rack.location else "No Location"
             display_text = f"{location_name} - {rack.name}"
             selected = " selected" if rack.pk == selected_rack_id else ""
-            options.append(
-                f'<option value="{rack.pk}"{selected}>{escape(display_text)}</option>'
-            )
+            options.append(f'<option value="{rack.pk}"{selected}>{escape(display_text)}</option>')
 
         # Add HTMX attributes to update the entire row when rack is selected
         from django.urls import reverse
@@ -527,9 +509,7 @@ class DeviceImportTable(tables.Table):
                 f'<i class="mdi mdi-alert-circle"></i> Details</button>'
             )
 
-        return mark_safe(
-            '<div class="btn-group btn-group-sm">' + " ".join(buttons) + "</div>"
-        )
+        return mark_safe('<div class="btn-group btn-group-sm">' + " ".join(buttons) + "</div>")
 
     def render_virtual_chassis(self, value, record):
         """Render Virtual Chassis status and details button."""
@@ -594,15 +574,11 @@ class DeviceImportTable(tables.Table):
         params = []
 
         # Add cluster_id if this is a VM import
-        if validation.get("cluster", {}).get("found") and validation.get(
-            "cluster", {}
-        ).get("cluster"):
+        if validation.get("cluster", {}).get("found") and validation.get("cluster", {}).get("cluster"):
             cluster_id = validation["cluster"]["cluster"].id
             params.append(f"cluster_id={cluster_id}")
         # Add role_id if device role is found
-        elif validation.get("device_role", {}).get("found") and validation.get(
-            "device_role", {}
-        ).get("role"):
+        elif validation.get("device_role", {}).get("found") and validation.get("device_role", {}).get("role"):
             role_id = validation["device_role"]["role"].id
             params.append(f"role_id={role_id}")
 

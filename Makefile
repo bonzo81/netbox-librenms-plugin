@@ -1,14 +1,18 @@
-sources = NetBox Librenms Plugin
+sources = netbox_librenms_plugin
 
 .PHONY: test format lint unittest pre-commit clean
 test: format lint unittest
 
 format:
-	isort $(sources) tests
-	black $(sources) tests
+	ruff format $(sources)
+	ruff check --select I --fix $(sources)
 
 lint:
-	flake8 $(sources) tests
+	ruff check $(sources)
+
+unittest:
+	pytest netbox_librenms_plugin/tests/ -v
+
 
 pre-commit:
 	pre-commit run --all-files

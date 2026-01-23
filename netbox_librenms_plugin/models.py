@@ -59,9 +59,7 @@ class InterfaceTypeMapping(NetBoxModel):
     )
 
     def get_absolute_url(self):
-        return reverse(
-            "plugins:netbox_librenms_plugin:interfacetypemapping_detail", args=[self.pk]
-        )
+        return reverse("plugins:netbox_librenms_plugin:interfacetypemapping_detail", args=[self.pk])
 
     class Meta:
         unique_together = ["librenms_type", "librenms_speed"]

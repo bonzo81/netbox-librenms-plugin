@@ -106,14 +106,10 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             if device:
                 validated_devices.append(device)
             else:
-                logger.warning(
-                    f"Device {device_id} from job {job_id} not in cache (may have expired)"
-                )
+                logger.warning(f"Device {device_id} from job {job_id} not in cache (may have expired)")
 
         if not validated_devices and device_ids:
-            logger.error(
-                f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache."
-            )
+            logger.error(f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache.")
 
         return validated_devices
 
@@ -185,9 +181,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
 
             if form_valid:
                 self._filter_form_data = filter_form.cleaned_data
-                self._vc_detection_enabled = self._filter_form_data.get(
-                    "enable_vc_detection"
-                )
+                self._vc_detection_enabled = self._filter_form_data.get("enable_vc_detection")
                 self._cache_cleared = self._filter_form_data.get("clear_cache")
             elif filters_submitted:
                 non_field_errors = filter_form.non_field_errors()
@@ -199,12 +193,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         # Check if this should be processed as a background job
         # Skip if we're loading results from a completed job (job_id in URL)
         # IMPORTANT: Only process if form is valid (filter requirement enforced)
-        if (
-            filters_submitted
-            and form_valid
-            and not self._job_results_loaded
-            and not request.GET.get("job_id")
-        ):
+        if filters_submitted and form_valid and not self._job_results_loaded and not request.GET.get("job_id"):
             # Build filter dict
             libre_filters = {}
 
@@ -249,9 +238,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
                     api=self.librenms_api,
                     filters=libre_filters,
                     clear_cache=self._cache_cleared,
-                    show_disabled=bool(
-                        self._filter_form_data.get("show_disabled", False)
-                    ),
+                    show_disabled=bool(self._filter_form_data.get("show_disabled", False)),
                 )
             except Exception as e:
                 logger.error(f"Error getting device count: {e}")
@@ -273,9 +260,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
                         vc_detection_enabled=self._vc_detection_enabled,
                         clear_cache=self._cache_cleared,
                         show_disabled=bool(self._filter_form_data.get("show_disabled")),
-                        exclude_existing=bool(
-                            self._filter_form_data.get("exclude_existing")
-                        ),
+                        exclude_existing=bool(self._filter_form_data.get("exclude_existing")),
                         server_key=self.librenms_api.server_key,
                     )
 
@@ -297,9 +282,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
                     )
                 else:
                     # Fallback to synchronous processing
-                    logger.warning(
-                        "RQ workers not running, falling back to synchronous processing"
-                    )
+                    logger.warning("RQ workers not running, falling back to synchronous processing")
                     messages.warning(
                         request,
                         "Background job system unavailable. Processing may take longer than usual.",
@@ -373,9 +356,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             else getattr(self, "_vc_detection_enabled", False)
         )
         clear_cache = (
-            data_source.get("clear_cache")
-            if "clear_cache" in data_source
-            else getattr(self, "_cache_cleared", False)
+            data_source.get("clear_cache") if "clear_cache" in data_source else getattr(self, "_cache_cleared", False)
         )
         self._vc_detection_enabled = vc_detection_enabled
         self._cache_cleared = clear_cache

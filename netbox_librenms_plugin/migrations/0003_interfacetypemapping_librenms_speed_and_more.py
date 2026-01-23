@@ -4,7 +4,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("netbox_librenms_plugin", "0002_interfacetypemapping_created_and_more"),
     ]

@@ -37,9 +37,7 @@ class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
         """
         # Only get devices if filters are applied
         if self.request.GET:
-            queryset = Device.objects.select_related(
-                "device_type__manufacturer"
-            ).prefetch_related(
+            queryset = Device.objects.select_related("device_type__manufacturer").prefetch_related(
                 "site",
                 "location",
                 "rack",
@@ -65,9 +63,7 @@ class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
                 case_when.append(When(pk=device_id, then=Value(status)))
 
             queryset = queryset.annotate(
-                librenms_status=Case(
-                    *case_when, default=Value(None), output_field=BooleanField()
-                )
+                librenms_status=Case(*case_when, default=Value(None), output_field=BooleanField())
             )
 
             return queryset
@@ -112,9 +108,7 @@ class VMStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
                 case_when.append(When(pk=vm_id, then=Value(status)))
 
             queryset = queryset.annotate(
-                librenms_status=Case(
-                    *case_when, default=Value(None), output_field=BooleanField()
-                )
+                librenms_status=Case(*case_when, default=Value(None), output_field=BooleanField())
             )
 
             return queryset

@@ -107,18 +107,10 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
                 if "filters" in metadata:
                     display_filters = metadata["filters"].copy()
                     # Convert location ID to location name
-                    if (
-                        "location" in display_filters
-                        and display_filters["location"] in location_choices
-                    ):
-                        display_filters["location"] = location_choices[
-                            display_filters["location"]
-                        ]
+                    if "location" in display_filters and display_filters["location"] in location_choices:
+                        display_filters["location"] = location_choices[display_filters["location"]]
                     # Convert type code to display name
-                    if (
-                        "type" in display_filters
-                        and display_filters["type"] in type_choices
-                    ):
+                    if "type" in display_filters and display_filters["type"] in type_choices:
                         display_filters["type"] = type_choices[display_filters["type"]]
                     metadata["display_filters"] = display_filters
                 else:
@@ -138,9 +130,7 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
     return active_searches
 
 
-def get_validated_device_cache_key(
-    server_key: str, filters: dict, device_id: int | str, vc_enabled: bool
-) -> str:
+def get_validated_device_cache_key(server_key: str, filters: dict, device_id: int | str, vc_enabled: bool) -> str:
     """
     Generate a consistent cache key for validated device data.
 
@@ -167,9 +157,7 @@ def get_validated_device_cache_key(
     return f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}"
 
 
-def get_import_device_cache_key(
-    device_id: int | str, server_key: str = "default"
-) -> str:
+def get_import_device_cache_key(device_id: int | str, server_key: str = "default") -> str:
     """
     Generate cache key for raw LibreNMS device data.
 
@@ -292,9 +280,7 @@ def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
     return f"librenms_vc_detection_{_VC_CACHE_VERSION}_{server_key}_{device_id}"
 
 
-def get_virtual_chassis_data(
-    api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False
-) -> dict:
+def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False) -> dict:
     """Fetch (and cache) virtual chassis data for a LibreNMS device."""
 
     if not api or device_id is None:
@@ -310,20 +296,14 @@ def get_virtual_chassis_data(
     if detection_data and "detection_error" not in detection_data:
         detection_data["detection_error"] = None
 
-    cache_value = (
-        _clone_virtual_chassis_data(detection_data)
-        if detection_data
-        else empty_virtual_chassis_data()
-    )
+    cache_value = _clone_virtual_chassis_data(detection_data) if detection_data else empty_virtual_chassis_data()
 
     cache_timeout = getattr(api, "cache_timeout", 300) or 300
     cache.set(cache_key, cache_value, timeout=cache_timeout)
     return _clone_virtual_chassis_data(cache_value)
 
 
-def prefetch_vc_data_for_devices(
-    api: LibreNMSAPI, device_ids: List[int], *, force_refresh: bool = False
-) -> None:
+def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, force_refresh: bool = False) -> None:
     """
     Pre-warm the virtual chassis cache for multiple devices.
 
@@ -381,9 +361,7 @@ def get_device_count_for_filters(
     Returns:
         int: Count of devices matching filters
     """
-    devices = get_librenms_devices_for_import(
-        api, filters=filters, force_refresh=clear_cache
-    )
+    devices = get_librenms_devices_for_import(api, filters=filters, force_refresh=clear_cache)
 
     # Filter out disabled devices if requested
     if not show_disabled:
@@ -592,21 +570,15 @@ def _apply_client_filters(devices: List[dict], filters: dict) -> List[dict]:
 
     if filters.get("hostname"):
         hostname_filter = filters["hostname"].lower()
-        filtered = [
-            d for d in filtered if hostname_filter in d.get("hostname", "").lower()
-        ]
+        filtered = [d for d in filtered if hostname_filter in d.get("hostname", "").lower()]
 
     if filters.get("sysname"):
         sysname_filter = filters["sysname"].lower()
-        filtered = [
-            d for d in filtered if sysname_filter in d.get("sysName", "").lower()
-        ]
+        filtered = [d for d in filtered if sysname_filter in d.get("sysName", "").lower()]
 
     if filters.get("hardware"):
         hardware_filter = filters["hardware"].lower()
-        filtered = [
-            d for d in filtered if hardware_filter in (d.get("hardware") or "").lower()
-        ]
+        filtered = [d for d in filtered if hardware_filter in (d.get("hardware") or "").lower()]
 
     return filtered
 
@@ -735,45 +707,33 @@ def validate_device_for_import(
         # Check for existing VM first (by librenms_id custom field)
         # Always query with int to match custom field type
         try:
-            existing_vm = VirtualMachine.objects.filter(
-                custom_field_data__librenms_id=int(librenms_id)
-            ).first()
+            existing_vm = VirtualMachine.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
         except (ValueError, TypeError):
             # librenms_id is not convertible to int; no match will be found
             existing_vm = None
 
         if existing_vm:
-            logger.info(
-                f"Found existing VM: {existing_vm.name} (matched by librenms_id={librenms_id})"
-            )
+            logger.info(f"Found existing VM: {existing_vm.name} (matched by librenms_id={librenms_id})")
             result["existing_device"] = existing_vm
             result["existing_match_type"] = "librenms_id"
             result["import_as_vm"] = True  # Force VM mode since VM exists
-            result["warnings"].append(
-                f"VM already imported to NetBox as '{existing_vm.name}'"
-            )
+            result["warnings"].append(f"VM already imported to NetBox as '{existing_vm.name}'")
             result["can_import"] = False
             return result
 
         # Check for existing Device (by librenms_id custom field)
         # Always query with int to match custom field type
         try:
-            existing_device = Device.objects.filter(
-                custom_field_data__librenms_id=int(librenms_id)
-            ).first()
+            existing_device = Device.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
         except (ValueError, TypeError):
             # librenms_id is not convertible to int; no match will be found
             existing_device = None
 
         if existing_device:
-            logger.info(
-                f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})"
-            )
+            logger.info(f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})")
             result["existing_device"] = existing_device
             result["existing_match_type"] = "librenms_id"
-            result["warnings"].append(
-                f"Device already imported to NetBox as '{existing_device.name}'"
-            )
+            result["warnings"].append(f"Device already imported to NetBox as '{existing_device.name}'")
             result["can_import"] = False
             return result
 
@@ -818,15 +778,9 @@ def validate_device_for_import(
         if primary_ip and not import_as_vm:
             from ipam.models import IPAddress
 
-            existing_ip = IPAddress.objects.filter(
-                address__startswith=primary_ip
-            ).first()
+            existing_ip = IPAddress.objects.filter(address__startswith=primary_ip).first()
             if existing_ip and existing_ip.assigned_object:
-                device = (
-                    existing_ip.assigned_object.device
-                    if hasattr(existing_ip.assigned_object, "device")
-                    else None
-                )
+                device = existing_ip.assigned_object.device if hasattr(existing_ip.assigned_object, "device") else None
                 if device:
                     result["existing_device"] = device
                     result["existing_match_type"] = "primary_ip"
@@ -842,9 +796,7 @@ def validate_device_for_import(
             from virtualization.models import Cluster
 
             result["cluster"]["found"] = False
-            result["issues"].append(
-                "Cluster must be manually selected before importing as VM"
-            )
+            result["issues"].append("Cluster must be manually selected before importing as VM")
             # Provide list of available clusters for user selection (cached)
             cache_key = "librenms_import_all_clusters"
             all_clusters = cache.get(cache_key)
@@ -867,9 +819,7 @@ def validate_device_for_import(
             result["site"] = site_match
 
             if not site_match["found"]:
-                result["issues"].append(
-                    f"No matching site found for location: '{location}'"
-                )
+                result["issues"].append(f"No matching site found for location: '{location}'")
                 # Get alternative suggestions
                 if location:
                     all_sites = Site.objects.all()[:10]  # Limit for performance
@@ -881,9 +831,7 @@ def validate_device_for_import(
             result["device_type"] = dt_match
 
             if not dt_match["matched"]:
-                result["issues"].append(
-                    f"No matching device type found for hardware: '{hardware}'"
-                )
+                result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
                 # Get some device types for user to choose from
                 all_device_types = DeviceType.objects.all()[:10]
                 result["device_type"]["suggestions"] = [
@@ -901,16 +849,10 @@ def validate_device_for_import(
                 result["device_type"]["match_type"] = dt_match["match_type"]
 
             # 4. DeviceRole (required) - Must be manually selected by user
-            logger.debug(
-                f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}"
-            )
+            logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
             result["device_role"]["found"] = False
-            result["issues"].append(
-                "Device role must be manually selected before import"
-            )
-            logger.debug(
-                f"[{hostname}] Issues AFTER adding role issue: {result['issues']}"
-            )
+            result["issues"].append("Device role must be manually selected before import")
+            logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
             # Provide list of available roles for user selection (cached)
             cache_key = "librenms_import_all_roles"
             all_roles = cache.get(cache_key)
@@ -946,9 +888,7 @@ def validate_device_for_import(
 
                 result["rack"]["available_racks"] = available_racks
                 # Rack is optional, don't add to issues
-                result["rack"]["found"] = (
-                    True  # Mark as "found" even if None (optional field)
-                )
+                result["rack"]["found"] = True  # Mark as "found" even if None (optional field)
 
             # Skip VM-specific validations for devices
             result["cluster"]["found"] = True  # Not required for devices
@@ -970,21 +910,15 @@ def validate_device_for_import(
         if serial and serial != "-":
             existing_serial = Device.objects.filter(serial=serial).first()
             if existing_serial:
-                result["warnings"].append(
-                    f"Serial number {serial} already exists on device: {existing_serial.name}"
-                )
+                result["warnings"].append(f"Serial number {serial} already exists on device: {existing_serial.name}")
 
         # 7. Virtual chassis detection (only for devices, not VMs)
         if include_vc_detection and not import_as_vm and api is not None:
             device_id = libre_device.get("device_id")
             if device_id:
                 try:
-                    logger.debug(
-                        f"Calling get_virtual_chassis_data for device {device_id}"
-                    )
-                    vc_detection = get_virtual_chassis_data(
-                        api, device_id, force_refresh=force_vc_refresh
-                    )
+                    logger.debug(f"Calling get_virtual_chassis_data for device {device_id}")
+                    vc_detection = get_virtual_chassis_data(api, device_id, force_refresh=force_vc_refresh)
                     logger.debug(
                         f"VC detection result: is_stack={vc_detection.get('is_stack')}, "
                         f"member_count={vc_detection.get('member_count')}, "
@@ -998,9 +932,7 @@ def validate_device_for_import(
                                 f"{vc_detection['member_count']} members"
                             )
                 except Exception as e:
-                    logger.exception(
-                        f"Exception during VC detection for device {hostname}: {e}"
-                    )
+                    logger.exception(f"Exception during VC detection for device {hostname}: {e}")
                     result["virtual_chassis"]["detection_error"] = str(e)
             else:
                 logger.debug(f"No device_id found for {hostname}")
@@ -1029,9 +961,7 @@ def validate_device_for_import(
         return result
 
     except Exception as e:
-        logger.exception(
-            f"Error validating device for import: {libre_device.get('hostname', 'unknown')}"
-        )
+        logger.exception(f"Error validating device for import: {libre_device.get('hostname', 'unknown')}")
         result["issues"].append(f"Validation error: {str(e)}")
         return result
 
@@ -1116,21 +1046,9 @@ def import_single_device(
         rack = validation.get("rack", {}).get("rack")
 
         if manual_mappings:
-            site = (
-                Site.objects.filter(id=manual_mappings.get("site_id")).first() or site
-            )
-            device_type = (
-                DeviceType.objects.filter(
-                    id=manual_mappings.get("device_type_id")
-                ).first()
-                or device_type
-            )
-            device_role = (
-                DeviceRole.objects.filter(
-                    id=manual_mappings.get("device_role_id")
-                ).first()
-                or device_role
-            )
+            site = Site.objects.filter(id=manual_mappings.get("site_id")).first() or site
+            device_type = DeviceType.objects.filter(id=manual_mappings.get("device_type_id")).first() or device_type
+            device_role = DeviceRole.objects.filter(id=manual_mappings.get("device_role_id")).first() or device_role
 
             platform_id = manual_mappings.get("platform_id")
             if platform_id:
@@ -1140,12 +1058,7 @@ def import_single_device(
 
             rack_id = manual_mappings.get("rack_id")
             if rack_id:
-                rack = (
-                    Rack.objects.select_related("location", "site")
-                    .filter(id=rack_id)
-                    .first()
-                    or rack
-                )
+                rack = Rack.objects.select_related("location", "site").filter(id=rack_id).first() or rack
 
         rack = rack or validation.get("rack", {}).get("rack")
 
@@ -1178,12 +1091,8 @@ def import_single_device(
         # Create device in NetBox
         with transaction.atomic():
             # Determine device name based on sync options
-            use_sysname = (
-                sync_options.get("use_sysname", True) if sync_options else True
-            )
-            strip_domain = (
-                sync_options.get("strip_domain", False) if sync_options else False
-            )
+            use_sysname = sync_options.get("use_sysname", True) if sync_options else True
+            strip_domain = sync_options.get("strip_domain", False) if sync_options else False
 
             device_name = _determine_device_name(
                 libre_device,
@@ -1221,9 +1130,7 @@ def import_single_device(
                 from dcim.models import Location
 
                 # Try to find matching location within the site
-                location = Location.objects.filter(
-                    site=site, name__iexact=location_name
-                ).first()
+                location = Location.objects.filter(site=site, name__iexact=location_name).first()
                 if location:
                     device_data["location"] = location
 
@@ -1241,9 +1148,7 @@ def import_single_device(
             if sync_options.get("sync_interfaces", True):
                 # This is simplified - would need proper request context
                 # For now, just log that it should be done
-                logger.info(
-                    f"Interface sync should be performed for device {device.name}"
-                )
+                logger.info(f"Interface sync should be performed for device {device.name}")
 
             # Sync cables
             if sync_options.get("sync_cables", True):
@@ -1251,9 +1156,7 @@ def import_single_device(
 
             # Sync IP addresses
             if sync_options.get("sync_ips", True):
-                logger.info(
-                    f"IP address sync should be performed for device {device.name}"
-                )
+                logger.info(f"IP address sync should be performed for device {device.name}")
 
         except Exception as e:
             logger.warning(f"Error during post-import sync: {str(e)}")
@@ -1334,14 +1237,10 @@ def bulk_import_devices_shared(
             # Refresh job from DB to get current status
             job.job.refresh_from_db()
             job_status = job.job.status
-            status_value = (
-                job_status.value if hasattr(job_status, "value") else job_status
-            )
+            status_value = job_status.value if hasattr(job_status, "value") else job_status
             if status_value in (JobStatusChoices.STATUS_FAILED, "failed", "errored"):
                 if job.logger:
-                    job.logger.warning(
-                        f"Import job cancelled at device {idx} of {total}"
-                    )
+                    job.logger.warning(f"Import job cancelled at device {idx} of {total}")
                 else:
                     logger.warning(f"Import cancelled at device {idx} of {total}")
                 break
@@ -1374,15 +1273,9 @@ def bulk_import_devices_shared(
             # Get site and device_type from validation
             if validation["site"].get("found") and validation["site"].get("site"):
                 device_mappings["site_id"] = validation["site"]["site"].id
-            if validation["device_type"].get("found") and validation["device_type"].get(
-                "device_type"
-            ):
-                device_mappings["device_type_id"] = validation["device_type"][
-                    "device_type"
-                ].id
-            if validation["platform"].get("found") and validation["platform"].get(
-                "platform"
-            ):
+            if validation["device_type"].get("found") and validation["device_type"].get("device_type"):
+                device_mappings["device_type_id"] = validation["device_type"]["device_type"].id
+            if validation["platform"].get("found") and validation["platform"].get("platform"):
                 device_mappings["platform_id"] = validation["platform"]["platform"].id
 
             # Override with any manual mappings provided for this device
@@ -1442,9 +1335,7 @@ def bulk_import_devices_shared(
             else:  # Failed to import
                 failed_list.append({"device_id": device_id, "error": result["error"]})
                 if job and job.logger:
-                    job.logger.error(
-                        f"Failed to import device {device_id}: {result['error']}"
-                    )
+                    job.logger.error(f"Failed to import device {device_id}: {result['error']}")
 
         except Exception as e:
             error_msg = f"Unexpected error importing device {device_id}: {str(e)}"
@@ -1583,9 +1474,7 @@ def fetch_device_with_cache(
     return libre_device
 
 
-def create_vm_from_librenms(
-    libre_device: dict, validation: dict, use_sysname: bool = True, role=None
-):
+def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: bool = True, role=None):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
 
@@ -1633,9 +1522,7 @@ def create_vm_from_librenms(
         custom_field_data={"librenms_id": int(libre_device["device_id"])},
     )
 
-    logger.info(
-        f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}"
-    )
+    logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm
 
 
@@ -1694,9 +1581,7 @@ def bulk_import_vms(
         if job and idx % 5 == 0:
             job.job.refresh_from_db()
             job_status = job.job.status
-            status_value = (
-                job_status.value if hasattr(job_status, "value") else job_status
-            )
+            status_value = job_status.value if hasattr(job_status, "value") else job_status
             if status_value in ("failed", "errored"):
                 log.warning(f"Job cancelled at VM {idx} of {len(vm_ids)}")
                 break
@@ -1704,9 +1589,7 @@ def bulk_import_vms(
 
         try:
             # Fetch device data (uses cache helper)
-            libre_device = fetch_device_with_cache(
-                vm_id, api, api.server_key, libre_devices_cache
-            )
+            libre_device = fetch_device_with_cache(vm_id, api, api.server_key, libre_devices_cache)
 
             if not libre_device:
                 result["failed"].append(
@@ -1719,9 +1602,7 @@ def bulk_import_vms(
                 continue
 
             # Validate as VM
-            validation = validate_device_for_import(
-                libre_device, import_as_vm=True, api=api
-            )
+            validation = validate_device_for_import(libre_device, import_as_vm=True, api=api)
 
             # Check if VM already exists
             if validation.get("existing_device"):
@@ -1751,12 +1632,8 @@ def bulk_import_vms(
                     apply_role_to_validation(validation, role, is_vm=True)
 
             # Determine VM name
-            use_sysname = (
-                sync_options.get("use_sysname", True) if sync_options else True
-            )
-            strip_domain = (
-                sync_options.get("strip_domain", False) if sync_options else False
-            )
+            use_sysname = sync_options.get("use_sysname", True) if sync_options else True
+            strip_domain = sync_options.get("strip_domain", False) if sync_options else False
 
             vm_name = _determine_device_name(
                 libre_device,
@@ -1769,9 +1646,7 @@ def bulk_import_vms(
             libre_device["_computed_name"] = vm_name
 
             # Create VM
-            vm = create_vm_from_librenms(
-                libre_device, validation, use_sysname=use_sysname, role=role
-            )
+            vm = create_vm_from_librenms(libre_device, validation, use_sysname=use_sysname, role=role)
 
             result["success"].append(
                 {
@@ -1831,9 +1706,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             master_name = device_info.get("sysName") or device_info.get("hostname")
 
         # Step 1: Get root level items
-        success, root_items = api.get_inventory_filtered(
-            device_id, ent_physical_contained_in=0
-        )
+        success, root_items = api.get_inventory_filtered(device_id, ent_physical_contained_in=0)
 
         if not success or not root_items:
             logger.debug(f"No root inventory items found for device {device_id}")
@@ -1846,9 +1719,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             item_class = item.get("entPhysicalClass")
             if item_class in ["stack", "chassis"]:
                 parent_index = item.get("entPhysicalIndex")
-                logger.debug(
-                    f"VC detection: Found parent container at index {parent_index} for device {device_id}"
-                )
+                logger.debug(f"VC detection: Found parent container at index {parent_index} for device {device_id}")
                 break
 
         if not parent_index:
@@ -1865,11 +1736,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             return None
 
         # Filter for chassis only (in case API filter didn't work)
-        chassis_items = [
-            item
-            for item in (child_items or [])
-            if item.get("entPhysicalClass") == "chassis"
-        ]
+        chassis_items = [item for item in (child_items or []) if item.get("entPhysicalClass") == "chassis"]
 
         # Step 4: Multiple chassis = stack
         if len(chassis_items) <= 1:
@@ -1894,9 +1761,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
 
             # Generate suggested name if we have master name
             if master_name:
-                member_data["suggested_name"] = _generate_vc_member_name(
-                    master_name, position + 1
-                )
+                member_data["suggested_name"] = _generate_vc_member_name(master_name, position + 1)
             else:
                 member_data["suggested_name"] = f"Member-{position + 1}"
 
@@ -1905,9 +1770,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         # Sort by position
         members.sort(key=lambda m: m["position"])
 
-        logger.info(
-            f"Detected stack with {len(members)} members for device {device_id}"
-        )
+        logger.info(f"Detected stack with {len(members)} members for device {device_id}")
 
         return {"is_stack": True, "member_count": len(members), "members": members}
 
@@ -1916,9 +1779,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         return None
 
 
-def _generate_vc_member_name(
-    master_name: str, position: int, serial: str = None
-) -> str:
+def _generate_vc_member_name(master_name: str, position: int, serial: str = None) -> str:
     """
     Generate name for VC member device using configured pattern from settings.
 
@@ -1944,9 +1805,7 @@ def _generate_vc_member_name(
         settings = LibreNMSSettings.objects.first()
         pattern = settings.vc_member_name_pattern if settings else "-M{position}"
     except Exception as e:
-        logger.warning(
-            f"Could not load VC member name pattern from settings: {e}. Using default."
-        )
+        logger.warning(f"Could not load VC member name pattern from settings: {e}. Using default.")
         pattern = "-M{position}"
 
     # Prepare format variables
@@ -1961,9 +1820,7 @@ def _generate_vc_member_name(
         formatted_suffix = pattern.format(**format_vars)
         return f"{master_name}{formatted_suffix}"
     except KeyError as e:
-        logger.error(
-            f"Invalid placeholder in VC naming pattern '{pattern}': {e}. Using default."
-        )
+        logger.error(f"Invalid placeholder in VC naming pattern '{pattern}': {e}. Using default.")
         return f"{master_name}-M{position}"
 
 
@@ -1992,16 +1849,12 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
             base_position = idx
         position = base_position + 1  # Convert to 1-based position
         member["position"] = base_position
-        member["suggested_name"] = _generate_vc_member_name(
-            master_name, position, serial=member.get("serial")
-        )
+        member["suggested_name"] = _generate_vc_member_name(master_name, position, serial=member.get("serial"))
 
     return vc_data
 
 
-def create_virtual_chassis_with_members(
-    master_device: Device, members_info: list, libre_device: dict
-):
+def create_virtual_chassis_with_members(master_device: Device, members_info: list, libre_device: dict):
     """
     Create Virtual Chassis and member devices from detection info.
 
@@ -2036,16 +1889,10 @@ def create_virtual_chassis_with_members(
     try:
         with transaction.atomic():
             # Rename master device to include position 1 pattern
-            master_device_new_name = _generate_vc_member_name(
-                original_master_name, 1, serial=master_device.serial
-            )
+            master_device_new_name = _generate_vc_member_name(original_master_name, 1, serial=master_device.serial)
 
             # Check if renamed master conflicts with existing device
-            if (
-                Device.objects.filter(name=master_device_new_name)
-                .exclude(pk=master_device.pk)
-                .exists()
-            ):
+            if Device.objects.filter(name=master_device_new_name).exclude(pk=master_device.pk).exists():
                 logger.warning(
                     f"Cannot rename master to '{master_device_new_name}' - name already exists. "
                     f"Keeping original name '{original_master_name}'"
@@ -2081,27 +1928,19 @@ def create_virtual_chassis_with_members(
 
                 member_rack = master_device.rack
                 member_location = master_device.location or (
-                    member_rack.location
-                    if member_rack and member_rack.location
-                    else None
+                    member_rack.location if member_rack and member_rack.location else None
                 )
 
                 # Check for duplicate serial
                 if serial and Device.objects.filter(serial=serial).exists():
-                    logger.warning(
-                        f"Device with serial '{serial}' already exists, skipping VC member creation"
-                    )
+                    logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
                     continue
 
-                member_name = _generate_vc_member_name(
-                    master_base_name, position, serial=serial
-                )
+                member_name = _generate_vc_member_name(master_base_name, position, serial=serial)
 
                 # Check for duplicate name
                 if Device.objects.filter(name=member_name).exists():
-                    logger.warning(
-                        f"Device with name '{member_name}' already exists, skipping VC member creation"
-                    )
+                    logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
                     continue
 
                 Device.objects.create(
@@ -2122,9 +1961,7 @@ def create_virtual_chassis_with_members(
                 position += 1
 
             # Validate member count
-            expected_members = len(
-                [m for m in members_info if m.get("serial") != master_device.serial]
-            )
+            expected_members = len([m for m in members_info if m.get("serial") != master_device.serial])
             if members_created < expected_members:
                 logger.warning(
                     f"Created {members_created} members but expected {expected_members}. "
@@ -2141,8 +1978,7 @@ def create_virtual_chassis_with_members(
     except Exception as e:
         # Rollback master device to original state
         logger.error(
-            f"Virtual Chassis creation failed for device {master_device.name}: {e}. "
-            f"Rolling back master device changes."
+            f"Virtual Chassis creation failed for device {master_device.name}: {e}. Rolling back master device changes."
         )
         master_device.name = original_master_name
         master_device.virtual_chassis = original_vc
@@ -2214,8 +2050,7 @@ def process_device_filters(
         device_ids = [d["device_id"] for d in libre_devices]
         if job:
             job.logger.info(
-                f"Pre-fetching virtual chassis data for {len(device_ids)} devices. "
-                "This may take some time..."
+                f"Pre-fetching virtual chassis data for {len(device_ids)} devices. This may take some time..."
             )
         else:
             logger.info(f"Pre-fetching VC data for {len(device_ids)} devices")
@@ -2259,9 +2094,7 @@ def process_device_filters(
 
     for idx, device in enumerate(libre_devices, 1):
         # Check for job termination or client disconnect periodically
-        if (
-            idx % 5 == 0 or idx == 1
-        ):  # Check more frequently (every 5 devices + first device)
+        if idx % 5 == 0 or idx == 1:  # Check more frequently (every 5 devices + first device)
             if job:
                 # Check if job was terminated via stop API
                 # CRITICAL: Check the RQ job status in Redis, not just the DB model
@@ -2271,9 +2104,7 @@ def process_device_filters(
                     from rq.job import Job as RQJob
 
                     queue = get_queue("default")
-                    rq_job = RQJob.fetch(
-                        str(job.job.job_id), connection=queue.connection
-                    )
+                    rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
 
                     # Check if RQ job is in a stopped state
                     if rq_job.is_failed or rq_job.is_stopped:
@@ -2285,9 +2116,7 @@ def process_device_filters(
                     # If we can't check RQ status, fall back to DB status check
                     job.job.refresh_from_db()
                     if job.job.status == JobStatusChoices.STATUS_FAILED:
-                        job.logger.info(
-                            f"Job stopped at device {idx}/{total}. Exiting gracefully."
-                        )
+                        job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
                         return []
             elif request:
                 # Check for client disconnect
@@ -2295,9 +2124,7 @@ def process_device_filters(
                     if hasattr(request, "META") and request.META.get("wsgi.input"):
                         pass
                 except (BrokenPipeError, ConnectionError, IOError):
-                    logger.info(
-                        f"Client disconnected during validation at device {idx}"
-                    )
+                    logger.info(f"Client disconnected during validation at device {idx}")
                     return []
 
         # Drop any cached validation/meta keys before recomputing
@@ -2413,9 +2240,7 @@ def process_device_filters(
                 f"{filtered_count} filtered out (existing devices excluded)"
             )
         else:
-            job.logger.info(
-                f"Validation complete: {len(validated_devices)} devices ready for import"
-            )
+            job.logger.info(f"Validation complete: {len(validated_devices)} devices ready for import")
     else:
         logger.info(f"Processed {len(validated_devices)} validated devices")
 

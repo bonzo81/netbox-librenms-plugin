@@ -133,9 +133,7 @@ def remove_validation_issue(validation: dict, keyword: str) -> None:
         >>> remove_validation_issue(validation, "role")
         # Removes "Device role must be manually selected before import"
     """
-    validation["issues"] = [
-        issue for issue in validation["issues"] if keyword.lower() not in issue.lower()
-    ]
+    validation["issues"] = [issue for issue in validation["issues"] if keyword.lower() not in issue.lower()]
 
 
 def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None:
@@ -159,9 +157,7 @@ def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None
     validation["can_import"] = len(validation["issues"]) == 0
 
     if is_vm:
-        validation["is_ready"] = (
-            validation["can_import"] and validation["cluster"]["found"]
-        )
+        validation["is_ready"] = validation["can_import"] and validation["cluster"]["found"]
     else:
         validation["is_ready"] = (
             validation["can_import"]

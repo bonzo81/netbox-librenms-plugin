@@ -70,20 +70,14 @@ class LibreNMSInterfaceTable(tables.Table):
         verbose_name="Interface Type",
         attrs={"td": {"data-col": "type"}},
     )
-    speed = tables.Column(
-        accessor="ifSpeed", verbose_name="Speed", attrs={"td": {"data-col": "speed"}}
-    )
+    speed = tables.Column(accessor="ifSpeed", verbose_name="Speed", attrs={"td": {"data-col": "speed"}})
     mac_address = tables.Column(
         accessor="ifPhysAddress",
         verbose_name="MAC Address",
         attrs={"td": {"data-col": "mac_address"}},
     )
-    mtu = tables.Column(
-        accessor="ifMtu", verbose_name="MTU", attrs={"td": {"data-col": "mtu"}}
-    )
-    enabled = BooleanColumn(
-        verbose_name="Enabled", attrs={"td": {"data-col": "enabled"}}
-    )
+    mtu = tables.Column(accessor="ifMtu", verbose_name="MTU", attrs={"td": {"data-col": "mtu"}})
+    enabled = BooleanColumn(verbose_name="Enabled", attrs={"td": {"data-col": "enabled"}})
     description = tables.Column(
         accessor="ifAlias",
         verbose_name="Description",
@@ -98,9 +92,7 @@ class LibreNMSInterfaceTable(tables.Table):
     def render_speed(self, value, record):
         """Render interface speed with appropriate styling based on comparison with NetBox"""
         kbps_value = convert_speed_to_kbps(value)
-        return self._render_field(
-            humanize_speed(kbps_value), record, "ifSpeed", "speed"
-        )
+        return self._render_field(humanize_speed(kbps_value), record, "ifSpeed", "speed")
 
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox"""
@@ -197,9 +189,7 @@ class LibreNMSInterfaceTable(tables.Table):
         if not netbox_interface:
             return False
 
-        interface_macs = [
-            mac.mac_address for mac in netbox_interface.mac_addresses.all()
-        ]
+        interface_macs = [mac.mac_address for mac in netbox_interface.mac_addresses.all()]
         return librenms_mac in interface_macs
 
     def _render_field(self, value, record, librenms_key, netbox_key):
@@ -244,13 +234,9 @@ class LibreNMSInterfaceTable(tables.Table):
         if netbox_interface:
             netbox_type = getattr(netbox_interface, "type", None)
             if mapping and mapping.netbox_type == netbox_type:
-                return format_html(
-                    '<span class="text-success">{}</span>', combined_display
-                )
+                return format_html('<span class="text-success">{}</span>', combined_display)
             elif mapping:
-                return format_html(
-                    '<span class="text-warning">{}</span>', combined_display
-                )
+                return format_html('<span class="text-warning">{}</span>', combined_display)
 
         return format_html('<span class="text-danger">{}</span>', combined_display)
 
@@ -258,9 +244,7 @@ class LibreNMSInterfaceTable(tables.Table):
         """Get interface type mapping based on type and speed"""
 
         # First try exact match with type and speed
-        mapping = InterfaceTypeMapping.objects.filter(
-            librenms_type=librenms_type, librenms_speed=speed
-        ).first()
+        mapping = InterfaceTypeMapping.objects.filter(librenms_type=librenms_type, librenms_speed=speed).first()
 
         # If no match found, fall back to type-only match
         if not mapping:
@@ -281,9 +265,7 @@ class LibreNMSInterfaceTable(tables.Table):
             )
         else:
             display = value
-            icon = format_html(
-                '<i class="mdi mdi-link-variant-off" title="No mapping to NetBox type"></i>'
-            )
+            icon = format_html('<i class="mdi mdi-link-variant-off" title="No mapping to NetBox type"></i>')
         return display, icon
 
     def format_interface_data(self, port_data, device):
@@ -292,25 +274,18 @@ class LibreNMSInterfaceTable(tables.Table):
         # Add NetBox interface data
         interface_name = port_data.get(self.interface_name_field)
 
-        port_data["netbox_interface"] = device.interfaces.filter(
-            name=interface_name
-        ).first()
+        port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
 
         # Clear description if it matches interface name
-        if (
-            port_data["ifAlias"] == port_data["ifName"]
-            or port_data["ifAlias"] == port_data["ifDescr"]
-        ):
+        if port_data["ifAlias"] == port_data["ifName"] or port_data["ifAlias"] == port_data["ifDescr"]:
             port_data["ifAlias"] = ""
 
         formatted_data = {
             "name": self.render_name(interface_name, port_data),
             "type": self.render_type(port_data["ifType"], port_data),
             "speed": self.render_speed(port_data["ifSpeed"], port_data),
-            "mac_address": self.render_mac_address(
-                port_data["ifPhysAddress"], port_data
-            ),
+            "mac_address": self.render_mac_address(port_data["ifPhysAddress"], port_data),
             "mtu": self.render_mtu(port_data["ifMtu"], port_data),
             "enabled": self.render_enabled(port_data["ifAdminStatus"], port_data),
             "description": self.render_description(port_data["ifAlias"], port_data),
@@ -342,9 +317,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
     )
 
     def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
-        super().__init__(
-            *args, device=device, interface_name_field=interface_name_field, **kwargs
-        )
+        super().__init__(*args, device=device, interface_name_field=interface_name_field, **kwargs)
         # Ensure device_selection column is visible
         if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
             self.columns.show("device_selection")
@@ -384,9 +357,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
 
     def format_interface_data(self, port_data, device):
         formatted_data = super().format_interface_data(port_data, device)
-        formatted_data["device_selection"] = self.render_device_selection(
-            None, port_data
-        )
+        formatted_data["device_selection"] = self.render_device_selection(None, port_data)
         return formatted_data
 
     class Meta:

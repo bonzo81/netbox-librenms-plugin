@@ -54,11 +54,7 @@ class LibreNMSAPIMixin:
 
             servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
 
-            if (
-                servers_config
-                and isinstance(servers_config, dict)
-                and server_key in servers_config
-            ):
+            if servers_config and isinstance(servers_config, dict) and server_key in servers_config:
                 # Multi-server configuration
                 config = servers_config[server_key]
                 return {

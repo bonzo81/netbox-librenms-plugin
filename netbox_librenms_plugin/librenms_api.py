@@ -42,11 +42,7 @@ class LibreNMSAPI:
         # Get server configuration
         servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
 
-        if (
-            servers_config
-            and isinstance(servers_config, dict)
-            and server_key in servers_config
-        ):
+        if servers_config and isinstance(servers_config, dict) and server_key in servers_config:
             # Multi-server configuration
             config = servers_config[server_key]
             self.librenms_url = config["librenms_url"]
@@ -55,21 +51,13 @@ class LibreNMSAPI:
             self.verify_ssl = config.get("verify_ssl", True)
         else:
             # Fallback to legacy single-server configuration
-            self.librenms_url = get_plugin_config(
-                "netbox_librenms_plugin", "librenms_url"
-            )
+            self.librenms_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
             self.api_token = get_plugin_config("netbox_librenms_plugin", "api_token")
-            self.cache_timeout = get_plugin_config(
-                "netbox_librenms_plugin", "cache_timeout", 300
-            )
-            self.verify_ssl = get_plugin_config(
-                "netbox_librenms_plugin", "verify_ssl", True
-            )
+            self.cache_timeout = get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
+            self.verify_ssl = get_plugin_config("netbox_librenms_plugin", "verify_ssl", True)
 
         if not self.librenms_url or not self.api_token:
-            raise ValueError(
-                f"LibreNMS URL or API token is not configured for server '{server_key}'."
-            )
+            raise ValueError(f"LibreNMS URL or API token is not configured for server '{server_key}'.")
 
         self.headers = {"X-Auth-Token": self.api_token}
 
@@ -338,9 +326,7 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/ports",
                 headers=self.headers,
-                params={
-                    "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu"
-                },
+                params={"columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu"},
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
@@ -702,9 +688,7 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return False, str(e)
 
-    def get_inventory_filtered(
-        self, device_id, ent_physical_class=None, ent_physical_contained_in=None
-    ):
+    def get_inventory_filtered(self, device_id, ent_physical_class=None, ent_physical_contained_in=None):
         """
         Fetch filtered inventory from LibreNMS with optional filtering.
         Uses query parameters if supported, falls back to client-side filtering.
@@ -758,9 +742,7 @@ class LibreNMSAPI:
             # If filtered endpoint returned empty but we have filters,
             # try /all endpoint and filter client-side
             if params:
-                logger.debug(
-                    "Filtered inventory API returned no results, falling back to client-side filtering"
-                )
+                logger.debug("Filtered inventory API returned no results, falling back to client-side filtering")
                 success, all_inventory = self.get_device_inventory(device_id)
 
                 if not success:
@@ -769,17 +751,12 @@ class LibreNMSAPI:
                 # Apply client-side filters
                 filtered = all_inventory
                 if ent_physical_class:
-                    filtered = [
-                        item
-                        for item in filtered
-                        if item.get("entPhysicalClass") == ent_physical_class
-                    ]
+                    filtered = [item for item in filtered if item.get("entPhysicalClass") == ent_physical_class]
                 if ent_physical_contained_in is not None:
                     filtered = [
                         item
                         for item in filtered
-                        if str(item.get("entPhysicalContainedIn"))
-                        == str(ent_physical_contained_in)
+                        if str(item.get("entPhysicalContainedIn")) == str(ent_physical_contained_in)
                     ]
 
                 return True, filtered

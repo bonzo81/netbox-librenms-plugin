@@ -81,9 +81,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         # First try matching by LibreNMS ID
         if remote_device_id:
             try:
-                device = Device.objects.get(
-                    custom_field_data__librenms_id=remote_device_id
-                )
+                device = Device.objects.get(custom_field_data__librenms_id=remote_device_id)
                 return device, True, None
             except Device.DoesNotExist:
                 pass
@@ -124,21 +122,15 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
                 # First try to find interface by librenms_id
                 if local_port_id:
-                    interface = chassis_member.interfaces.filter(
-                        custom_field_data__librenms_id=local_port_id
-                    ).first()
+                    interface = chassis_member.interfaces.filter(custom_field_data__librenms_id=local_port_id).first()
 
                 # Only if librenms_id match fails, try matching by name
                 if not interface:
-                    interface = chassis_member.interfaces.filter(
-                        name=local_port
-                    ).first()
+                    interface = chassis_member.interfaces.filter(name=local_port).first()
             else:
                 # First try to find interface by librenms_id
                 if local_port_id:
-                    interface = obj.interfaces.filter(
-                        custom_field_data__librenms_id=local_port_id
-                    ).first()
+                    interface = obj.interfaces.filter(custom_field_data__librenms_id=local_port_id).first()
 
                 # Only if librenms_id match fails, try matching by name
                 if not interface:
@@ -167,9 +159,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
                 # If not found by librenms_id, fall back to name matching on the correct chassis member
                 if not netbox_remote_interface:
-                    netbox_remote_interface = chassis_member.interfaces.filter(
-                        name=remote_port
-                    ).first()
+                    netbox_remote_interface = chassis_member.interfaces.filter(name=remote_port).first()
             else:
                 # Non-virtual chassis case
                 # First try to find interface by librenms_id
@@ -180,14 +170,10 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
                 # If not found by librenms_id, fall back to name matching
                 if not netbox_remote_interface:
-                    netbox_remote_interface = device.interfaces.filter(
-                        name=remote_port
-                    ).first()
+                    netbox_remote_interface = device.interfaces.filter(name=remote_port).first()
 
             if netbox_remote_interface:
-                link["remote_port_url"] = reverse(
-                    "dcim:interface", args=[netbox_remote_interface.pk]
-                )
+                link["remote_port_url"] = reverse("dcim:interface", args=[netbox_remote_interface.pk])
                 link["netbox_remote_interface_id"] = netbox_remote_interface.pk
                 link["remote_port_name"] = netbox_remote_interface.name
 
@@ -228,9 +214,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
 
     def process_remote_device(self, link, remote_hostname, remote_device_id):
         """Process remote device data and add remote device URL if device exists in NetBox"""
-        device, found, error_message = self.get_device_by_id_or_name(
-            remote_device_id, remote_hostname
-        )
+        device, found, error_message = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
         if found:
             link.update(
                 {
@@ -243,9 +227,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         link.update(
             {
                 "remote_port_name": link["remote_port"],
-                "cable_status": error_message
-                if error_message
-                else "Device Not Found in NetBox",
+                "cable_status": error_message if error_message else "Device Not Found in NetBox",
                 "can_create_cable": False,
             }
         )
@@ -258,9 +240,7 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
             link["device_id"] = obj.id
 
             if remote_hostname := link.get("remote_device"):
-                link = self.process_remote_device(
-                    link, remote_hostname, link.get("remote_device_id")
-                )
+                link = self.process_remote_device(link, remote_hostname, link.get("remote_device_id"))
                 if link.get("netbox_remote_device_id"):
                     link = self.check_cable_status(link)
 
@@ -372,11 +352,7 @@ class SingleCableVerifyView(BaseCableTableView):
                 primary_device = selected_device.virtual_chassis.master
                 if not primary_device or not primary_device.primary_ip:
                     primary_device = next(
-                        (
-                            member
-                            for member in selected_device.virtual_chassis.members.all()
-                            if member.primary_ip
-                        ),
+                        (member for member in selected_device.virtual_chassis.members.all() if member.primary_ip),
                         None,
                     )
             else:
@@ -386,11 +362,7 @@ class SingleCableVerifyView(BaseCableTableView):
 
             if cached_links:
                 link_data = next(
-                    (
-                        link
-                        for link in cached_links.get("links", [])
-                        if link["local_port"] == local_port
-                    ),
+                    (link for link in cached_links.get("links", []) if link["local_port"] == local_port),
                     None,
                 )
                 if link_data:
@@ -403,18 +375,14 @@ class SingleCableVerifyView(BaseCableTableView):
 
                     # If not found by librenms_id, try matching by name
                     if not interface:
-                        interface = selected_device.interfaces.filter(
-                            name=local_port
-                        ).first()
+                        interface = selected_device.interfaces.filter(name=local_port).first()
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk
 
                         # Check remote device existence first
                         remote_device_name = link_data.get("remote_device", "")
-                        if remote_device_name and not link_data.get(
-                            "remote_device_url"
-                        ):
+                        if remote_device_name and not link_data.get("remote_device_url"):
                             formatted_row["cable_status"] = "Device Not Found in NetBox"
                         else:
                             link_data = self.check_cable_status(link_data)
@@ -423,9 +391,7 @@ class SingleCableVerifyView(BaseCableTableView):
                         formatted_row["local_port"] = (
                             f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{local_port}</a>'
                         )
-                        remote_port_name = link_data.get(
-                            "remote_port_name", link_data.get("remote_port", "")
-                        )
+                        remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
                         formatted_row["remote_port"] = (
                             f'<a href="{link_data["remote_port_url"]}">{remote_port_name}</a>'
                             if link_data.get("remote_port_url")
@@ -454,9 +420,7 @@ class SingleCableVerifyView(BaseCableTableView):
                     else:
                         formatted_row["local_port"] = local_port
                         # Keep remote port name visible, add URL if available
-                        remote_port_name = link_data.get(
-                            "remote_port_name", link_data.get("remote_port", "")
-                        )
+                        remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
                         formatted_row["remote_port"] = (
                             f'<a href="{link_data["remote_port_url"]}">{remote_port_name}</a>'
                             if link_data.get("remote_port_url")
@@ -471,17 +435,11 @@ class SingleCableVerifyView(BaseCableTableView):
                         )
 
                         # First check if remote device exists in NetBox
-                        if remote_device_name and not link_data.get(
-                            "remote_device_url"
-                        ):
+                        if remote_device_name and not link_data.get("remote_device_url"):
                             formatted_row["cable_status"] = "Device Not Found in NetBox"
                         # Then check interface status
-                        elif link_data.get("remote_device_url") and link_data.get(
-                            "remote_port_url"
-                        ):
-                            formatted_row["cable_status"] = (
-                                "Local Interface Not Found in NetBox"
-                            )
+                        elif link_data.get("remote_device_url") and link_data.get("remote_port_url"):
+                            formatted_row["cable_status"] = "Local Interface Not Found in NetBox"
                         else:
                             formatted_row["cable_status"] = "Missing Interface"
 

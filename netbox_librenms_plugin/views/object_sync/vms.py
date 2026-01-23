@@ -46,9 +46,7 @@ class VMInterfaceTableView(BaseInterfaceTableView):
         return obj.interfaces.all()
 
     def get_redirect_url(self, obj):
-        return reverse(
-            "plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": obj.pk}
-        )
+        return reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": obj.pk})
 
 
 class VMIPAddressTableView(BaseIPAddressTableView):

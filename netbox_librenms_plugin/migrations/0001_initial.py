@@ -4,7 +4,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = []
@@ -15,9 +14,7 @@ class Migration(migrations.Migration):
             fields=[
                 (
                     "id",
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False
-                    ),
+                    models.BigAutoField(auto_created=True, primary_key=True, serialize=False),
                 ),
                 ("librenms_type", models.CharField(max_length=100, unique=True)),
                 ("netbox_type", models.CharField(default="other", max_length=50)),

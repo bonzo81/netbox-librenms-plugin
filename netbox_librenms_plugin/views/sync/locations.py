@@ -29,9 +29,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         queryset = self.get_queryset()
-        context["filter_form"] = self.filterset(
-            self.request.GET, queryset=queryset
-        ).form
+        context["filter_form"] = self.filterset(self.request.GET, queryset=queryset).form
         return context
 
     def get_queryset(self):
@@ -40,18 +38,14 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         if not success or not isinstance(librenms_locations, list):
             return []
 
-        sync_data = [
-            self.create_sync_data(site, librenms_locations) for site in netbox_sites
-        ]
+        sync_data = [self.create_sync_data(site, librenms_locations) for site in netbox_sites]
 
         if self.request.GET and self.filterset:
             return self.filterset(self.request.GET, queryset=sync_data).qs
 
         if "q" in self.request.GET:
             query = self.request.GET.get("q", "").lower()
-            sync_data = [
-                item for item in sync_data if query in item.netbox_site.name.lower()
-            ]
+            sync_data = [item for item in sync_data if query in item.netbox_site.name.lower()]
 
         return sync_data
 
@@ -72,22 +66,15 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
 
     def match_site_with_location(self, site, librenms_locations):
         for location in librenms_locations:
-            if (
-                location["location"].lower() == site.name.lower()
-                or location["location"].lower() == site.slug.lower()
-            ):
+            if location["location"].lower() == site.name.lower() or location["location"].lower() == site.slug.lower():
                 return location
         return None
 
     def check_coordinates_match(self, site_lat, site_lng, librenms_lat, librenms_lng):
         if None in (site_lat, site_lng, librenms_lat, librenms_lng):
             return False
-        lat_match = (
-            abs(float(site_lat) - float(librenms_lat)) < self.COORDINATE_TOLERANCE
-        )
-        lng_match = (
-            abs(float(site_lng) - float(librenms_lng)) < self.COORDINATE_TOLERANCE
-        )
+        lat_match = abs(float(site_lat) - float(librenms_lat)) < self.COORDINATE_TOLERANCE
+        lng_match = abs(float(site_lng) - float(librenms_lng)) < self.COORDINATE_TOLERANCE
         return lat_match and lng_match
 
     def post(self, request):
@@ -120,9 +107,7 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         location_data = self.build_location_data(site)
         success, message = self.librenms_api.add_location(location_data)
         if success:
-            messages.success(
-                request, f"Location '{site.name}' created in LibreNMS successfully."
-            )
+            messages.success(request, f"Location '{site.name}' created in LibreNMS successfully.")
         else:
             messages.error(
                 request,
@@ -145,19 +130,13 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
 
         matched_location = self.match_site_with_location(site, librenms_locations)
         if not matched_location:
-            messages.error(
-                request, f"Could not find matching location for site '{site.name}'"
-            )
+            messages.error(request, f"Could not find matching location for site '{site.name}'")
             return redirect("plugins:netbox_librenms_plugin:site_location_sync")
 
         location_data = self.build_location_data(site, include_name=False)
-        success, message = self.librenms_api.update_location(
-            matched_location["location"], location_data
-        )
+        success, message = self.librenms_api.update_location(matched_location["location"], location_data)
         if success:
-            messages.success(
-                request, f"Location '{site.name}' updated in LibreNMS successfully."
-            )
+            messages.success(request, f"Location '{site.name}' updated in LibreNMS successfully.")
         else:
             messages.error(
                 request,

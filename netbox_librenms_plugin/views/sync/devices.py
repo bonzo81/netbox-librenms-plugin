@@ -14,9 +14,7 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
     def get_form_class(self):
         snmp_version = self.request.POST.get("snmp_version")
         if not snmp_version:
-            snmp_version = self.request.POST.get(
-                "v2-snmp_version"
-            ) or self.request.POST.get("v3-snmp_version")
+            snmp_version = self.request.POST.get("v2-snmp_version") or self.request.POST.get("v3-snmp_version")
 
         if snmp_version == "v2c":
             return AddToLIbreSNMPV2
@@ -107,9 +105,7 @@ class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
                 "field": ["location", "override_sysLocation"],
                 "data": [device.site.name, "1"],
             }
-            success, message = librenms_api.update_device_field(
-                self.librenms_id, field_data
-            )
+            success, message = librenms_api.update_device_field(self.librenms_id, field_data)
 
             if success:
                 messages.success(
@@ -117,9 +113,7 @@ class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
                     f"Device location updated in LibreNMS to {device.site.name}",
                 )
             else:
-                messages.error(
-                    request, f"Failed to update device location in LibreNMS: {message}"
-                )
+                messages.error(request, f"Failed to update device location in LibreNMS: {message}")
         else:
             messages.warning(request, "Device has no associated site in NetBox")
 

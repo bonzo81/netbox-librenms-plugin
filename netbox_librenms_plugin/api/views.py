@@ -53,17 +53,11 @@ def sync_job_status(request, job_pk):
             if not job.completed:
                 job.completed = timezone.now()
             job.save(update_fields=["status", "completed"])
-            logger.info(
-                f"Synced Job #{job.pk}: DB status updated to failed (RQ: {rq_status})"
-            )
-            return JsonResponse(
-                {"status": "updated", "db_status": job.status, "rq_status": rq_status}
-            )
+            logger.info(f"Synced Job #{job.pk}: DB status updated to failed (RQ: {rq_status})")
+            return JsonResponse({"status": "updated", "db_status": job.status, "rq_status": rq_status})
         else:
             # Job still active in RQ
-            return JsonResponse(
-                {"status": "no_change", "db_status": job.status, "rq_status": rq_status}
-            )
+            return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": rq_status})
     except Exception as e:
         # Job not in RQ queue - mark as failed
         logger.warning(f"Job #{job.pk} not found in RQ: {e}")
@@ -72,9 +66,5 @@ def sync_job_status(request, job_pk):
             if not job.completed:
                 job.completed = timezone.now()
             job.save(update_fields=["status", "completed"])
-            return JsonResponse(
-                {"status": "updated", "db_status": job.status, "rq_status": "not_found"}
-            )
-        return JsonResponse(
-            {"status": "no_change", "db_status": job.status, "rq_status": "not_found"}
-        )
+            return JsonResponse({"status": "updated", "db_status": job.status, "rq_status": "not_found"})
+        return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": "not_found"})

@@ -118,16 +118,12 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                 for member in obj.virtual_chassis.members.all():
                     interfaces_by_device[member.id] = {
                         interface.name: interface
-                        for interface in self.get_interfaces(member).select_related(
-                            self.get_select_related_field(obj)
-                        )
+                        for interface in self.get_interfaces(member).select_related(self.get_select_related_field(obj))
                     }
             else:
                 interfaces_by_device[obj.id] = {
                     interface.name: interface
-                    for interface in self.get_interfaces(obj).select_related(
-                        self.get_select_related_field(obj)
-                    )
+                    for interface in self.get_interfaces(obj).select_related(self.get_select_related_field(obj))
                 }
 
             for port in ports_data:
@@ -142,9 +138,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
                 )
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    chassis_member = get_virtual_chassis_member(
-                        obj, port[interface_name_field]
-                    )
+                    chassis_member = get_virtual_chassis_member(obj, port[interface_name_field])
                     device_interfaces = interfaces_by_device.get(chassis_member.id, {})
                 else:
                     device_interfaces = interfaces_by_device[obj.id]
@@ -161,9 +155,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
 
             # Identify NetBox-only interfaces (interfaces in NetBox but not in LibreNMS)
             librenms_interface_names = {
-                port.get(interface_name_field)
-                for port in ports_data
-                if port.get(interface_name_field)
+                port.get(interface_name_field) for port in ports_data if port.get(interface_name_field)
             }
 
             netbox_only_interfaces = []
@@ -199,11 +191,7 @@ class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
         cache_ttl = cache.ttl(self.get_cache_key(obj, "ports"))
-        cache_expiry = (
-            timezone.now() + timezone.timedelta(seconds=cache_ttl)
-            if cache_ttl is not None
-            else None
-        )
+        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None else None
 
         return {
             "object": obj,

@@ -9,7 +9,5 @@ router = NetBoxRouter()
 router.register("interface-type-mappings", views.InterfaceTypeMappingViewSet)
 
 urlpatterns = [
-    path(
-        "jobs/<int:job_pk>/sync-status/", views.sync_job_status, name="sync_job_status"
-    ),
+    path("jobs/<int:job_pk>/sync-status/", views.sync_job_status, name="sync_job_status"),
 ] + router.urls
