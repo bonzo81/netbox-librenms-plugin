@@ -1,8 +1,14 @@
 name: Test with all supported NetBox versions
 
 on:
-  - push
-  - pull_request
+  push:
+    branches:
+      - master
+      - develop
+  pull_request:
+    branches:
+      - master
+      - develop
 
 jobs:
   test-netbox:
