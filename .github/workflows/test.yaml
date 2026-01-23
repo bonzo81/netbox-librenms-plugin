@@ -72,6 +72,6 @@ jobs:
           cp netbox/configuration_testing.py netbox/configuration.py
 
       - name: Run tests
-        working-directory: netbox
+        working-directory: netbox-librenms-plugin
         run: |
-          python netbox/manage.py test netbox_librenms_plugin.tests --parallel auto -v2
+          pytest netbox_librenms_plugin/tests/ -v
