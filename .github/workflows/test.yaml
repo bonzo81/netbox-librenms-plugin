@@ -64,6 +64,7 @@ jobs:
         working-directory: netbox-librenms-plugin
         run: |
           pip install .
+          pip install -r requirements_dev.txt
 
       - name: Configure NetBox
         working-directory: netbox/netbox
