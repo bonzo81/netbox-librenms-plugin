@@ -58,7 +58,8 @@ jobs:
         working-directory: netbox-librenms-plugin
         run: |
           # Include tests directory for test execution
-          sed -i 's/exclude = \["site\*", "tests\*"\]/exclude = ["site*"]/g' pyproject.toml
+          sed -i 's/"tests\*", //' pyproject.toml
+          cat pyproject.toml | grep exclude
           pip install .
 
       - name: Install NetBox dependencies
