@@ -14,10 +14,7 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
     def get_form_class(self):
         snmp_version = self.request.POST.get("snmp_version")
         if not snmp_version:
-            snmp_version = (
-                self.request.POST.get("v1v2-snmp_version")
-                or self.request.POST.get("v3-snmp_version")
-            )
+            snmp_version = self.request.POST.get("v1v2-snmp_version") or self.request.POST.get("v3-snmp_version")
 
         if snmp_version in ("v1", "v2c"):
             return AddToLIbreSNMPV1V2
@@ -33,10 +30,7 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
         self.object = self.get_object(object_id)
         form_class = self.get_form_class()
 
-        snmp_version = (
-            request.POST.get("v1v2-snmp_version")
-            or request.POST.get("v3-snmp_version")
-        )
+        snmp_version = request.POST.get("v1v2-snmp_version") or request.POST.get("v3-snmp_version")
         prefix = "v1v2" if snmp_version in ("v1", "v2c") else "v3"
 
         form = form_class(request.POST, prefix=prefix)
