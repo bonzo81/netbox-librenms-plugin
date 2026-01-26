@@ -22,7 +22,7 @@ jobs:
           pip install ruff
 
       - name: Run Ruff linting
-        run: ruff check .
+        run: ruff check --output-format=github --show-fixes .
 
       - name: Run Ruff formatting check
-        run: ruff format --check .
+        run: ruff format --check --diff .
