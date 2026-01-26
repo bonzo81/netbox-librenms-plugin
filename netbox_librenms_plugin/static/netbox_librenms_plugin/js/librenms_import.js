@@ -252,7 +252,7 @@
 
         const manager = new ModalManager(modalElement);
         manager.show();
-        
+
         // Store backdrop reference for legacy compatibility
         if (fallbackBackdropRef && manager.backdropElement) {
             fallbackBackdropRef.element = manager.backdropElement;
@@ -667,7 +667,7 @@
                 });
 
                 if (deviceCount) deviceCount.style.display = 'none';
-                
+
                 if (cancelBtn) {
                     cancelBtn.innerHTML = '<i class="mdi mdi-close"></i> Close';
                     cancelBtn.onclick = function () {

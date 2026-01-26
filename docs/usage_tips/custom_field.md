@@ -30,7 +30,7 @@ Follow these steps to create the `librenms_id` custom field in NetBox:
 
 3. **Configure the Custom Field:**
 
-    - **Object Types:** 
+    - **Object Types:**
         - Check **dcim > device**
         - Check **virtualization > virtual machine**
         - Check **dcim > interface**

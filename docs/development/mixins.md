@@ -30,4 +30,3 @@ class MyCustomView(LibreNMSAPIMixin, CacheMixin, SomeBaseView):
 ```
 
 Mixins can be combined as needed. Place mixins before the main base view to ensure their methods and properties are available.
-

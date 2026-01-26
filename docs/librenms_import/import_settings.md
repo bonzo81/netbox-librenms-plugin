@@ -56,4 +56,3 @@ When using bulk import, you can override the default settings in the confirmatio
 - Test different naming conventions before changing global defaults
 
 The override only affects the current import operation and doesn't change your saved defaults.
-

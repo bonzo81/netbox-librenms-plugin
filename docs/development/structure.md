@@ -23,5 +23,3 @@ This document provides an overview of the NetBox LibreNMS Plugin's codebase orga
       - `js/` — JavaScript files
 - `tests/` — Test suite
 - `docs/` — Documentation
-
-
