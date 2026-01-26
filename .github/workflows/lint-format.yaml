@@ -2,25 +2,19 @@ name: Lint and Format
 
 on:
   push:
-    branches:
-      - master
-      - develop
   pull_request:
-    branches:
-      - master
-      - develop
 
 jobs:
   format-and-lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
@@ -29,13 +23,6 @@ jobs:
 
       - name: Run Ruff linting
         run: ruff check .
-        continue-on-error: true
 
       - name: Run Ruff formatting check
         run: ruff format --check .
-        continue-on-error: true
-
-      - name: Report formatting issues
-        if: always()
-        run: |
-          echo "If there are any formatting issues, run 'ruff check --fix .' and 'ruff format .' locally and push the changes."
