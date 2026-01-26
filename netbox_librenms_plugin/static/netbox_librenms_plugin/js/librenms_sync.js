@@ -640,21 +640,23 @@ function initializeTabs() {
 
 /**
  * Toggle SNMP form visibility based on selected version.
- * Shows either SNMPv2c or SNMPv3 configuration form.
+ * Shows either SNMPv1/v2c or SNMPv3 configuration form.
  */
 function toggleSNMPForms() {
-    const snmpSelect = document.querySelector('#add-device-modal select.form-select');
+    const snmpSelect = document.getElementById('snmp-version-select');
     if (!snmpSelect) return;
     const version = snmpSelect.value;
 
-    const v2Form = document.getElementById('snmpv2-form');
+    const v1v2Form = document.getElementById('snmpv1v2-form');
     const v3Form = document.getElementById('snmpv3-form');
 
-    if (version === 'v2c') {
-        v2Form.style.display = 'block';
+    if (!v1v2Form || !v3Form) return;
+
+    if (version === 'v1v2c') {
+        v1v2Form.style.display = 'block';
         v3Form.style.display = 'none';
-    } else {
-        v2Form.style.display = 'none';
+    } else if (version === 'v3') {
+        v1v2Form.style.display = 'none';
         v3Form.style.display = 'block';
     }
 }
@@ -664,7 +666,7 @@ function toggleSNMPForms() {
  * Sets up version toggle and displays correct form.
  */
 function initializeSNMPModalScripts() {
-    const snmpSelect = document.querySelector('#add-device-modal select.form-select');
+    const snmpSelect = document.getElementById('snmp-version-select');
     if (snmpSelect) {
         snmpSelect.addEventListener('change', toggleSNMPForms);
         // Initial call to set the correct form visibility

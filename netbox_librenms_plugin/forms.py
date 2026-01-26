@@ -230,10 +230,11 @@ class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     model = InterfaceTypeMapping
 
 
-class AddToLIbreSNMPV2(forms.Form):
+class AddToLIbreSNMPV1V2(forms.Form):
     """
-    Form for adding devices to LibreNMS using SNMPv2 authentication.
+    Form for adding devices to LibreNMS using SNMPv1 or SNMPv2c authentication.
     Collects hostname/IP and SNMP community string information.
+    The SNMP version (v1 or v2c) is selected via a toggle button in the template.
     """
 
     hostname = forms.CharField(
@@ -241,7 +242,6 @@ class AddToLIbreSNMPV2(forms.Form):
         max_length=255,
         required=True,
     )
-    snmp_version = forms.CharField(widget=forms.HiddenInput(), initial="v2c")
     community = forms.CharField(label="SNMP Community", max_length=255, required=True)
     port = forms.IntegerField(
         label="SNMP Port",

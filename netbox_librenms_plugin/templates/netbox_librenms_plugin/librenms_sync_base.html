@@ -565,48 +565,57 @@
                 <!-- SNMP Version Selector -->
                 <div class="mb-3">
                     <label class="form-label">SNMP Version</label>
-                    <select class="form-select" onchange="toggleSNMPForms(this.value)">
-                        <option value="v2c">SNMPv2c</option>
+                    <select class="form-select" id="snmp-version-select" onchange="toggleSNMPForms()">
+                        <option value="v1v2c" selected>SNMPv1/v2c</option>
                         <option value="v3">SNMPv3</option>
                     </select>
                 </div>
 
-                <!-- SNMPv2c form -->
+                <!-- SNMPv1/v2c form -->
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
-                    id="snmpv2-form" name="snmpv2-form">
+                    id="snmpv1v2-form" name="snmpv1v2-form" style="display: block;">
                     {% csrf_token %}
-                    {{ v2form.snmp_version }}
+                    <!-- v1/v2c Toggle Button -->
                     <div class="mb-3">
-                        {{ v2form.hostname.label_tag }}
-                        {{ v2form.hostname }}
+                        <label class="form-label">Protocol Version</label>
+                        <div class="btn-group" role="group" aria-label="SNMP v1/v2c toggle">
+                            <input type="radio" class="btn-check" name="v1v2-snmp_version" id="snmp-v1-toggle" value="v1" autocomplete="off">
+                            <label class="btn btn-outline-primary" for="snmp-v1-toggle">v1</label>
+                            <input type="radio" class="btn-check" name="v1v2-snmp_version" id="snmp-v2c-toggle" value="v2c" autocomplete="off" checked>
+                            <label class="btn btn-outline-primary" for="snmp-v2c-toggle">v2c</label>
+                        </div>
                     </div>
                     <div class="mb-3">
-                        {{ v2form.community.label_tag }}
-                        {{ v2form.community }}
+                        {{ v1v2form.hostname.label_tag }}
+                        {{ v1v2form.hostname }}
                     </div>
                     <div class="mb-3">
-                        {{ v2form.port.label_tag }}
-                        {{ v2form.port }}
-                        <div class="form-text">{{ v2form.port.help_text }}</div>
+                        {{ v1v2form.community.label_tag }}
+                        {{ v1v2form.community }}
                     </div>
                     <div class="mb-3">
-                        {{ v2form.transport.label_tag }}
-                        {{ v2form.transport }}
+                        {{ v1v2form.port.label_tag }}
+                        {{ v1v2form.port }}
+                        <div class="form-text">{{ v1v2form.port.help_text }}</div>
                     </div>
                     <div class="mb-3">
-                        {{ v2form.port_association_mode.label_tag }}
-                        {{ v2form.port_association_mode }}
-                        <div class="form-text">{{ v2form.port_association_mode.help_text }}</div>
+                        {{ v1v2form.transport.label_tag }}
+                        {{ v1v2form.transport }}
                     </div>
                     <div class="mb-3">
-                        {{ v2form.poller_group.label_tag }}
-                        {{ v2form.poller_group }}
-                        <div class="form-text">{{ v2form.poller_group.help_text }}</div>
+                        {{ v1v2form.port_association_mode.label_tag }}
+                        {{ v1v2form.port_association_mode }}
+                        <div class="form-text">{{ v1v2form.port_association_mode.help_text }}</div>
+                    </div>
+                    <div class="mb-3">
+                        {{ v1v2form.poller_group.label_tag }}
+                        {{ v1v2form.poller_group }}
+                        <div class="form-text">{{ v1v2form.poller_group.help_text }}</div>
                     </div>
                     <div class="mb-3 form-check">
-                        {{ v2form.force_add }}
-                        {{ v2form.force_add.label_tag }}
-                        <div class="form-text">{{ v2form.force_add.help_text }}</div>
+                        {{ v1v2form.force_add }}
+                        {{ v1v2form.force_add.label_tag }}
+                        <div class="form-text">{{ v1v2form.force_add.help_text }}</div>
                     </div>
                     <button type="submit" class="btn btn-primary">Add Device</button>
                 </form>
