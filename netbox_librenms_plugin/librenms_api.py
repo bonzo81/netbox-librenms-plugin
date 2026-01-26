@@ -347,13 +347,13 @@ class LibreNMSAPI:
         Args:
             Dictionary containing device data including:
                 - hostname: Device hostname or IP
-                - snmp_version: SNMP version (v2c or v3)
+                - snmp_version: SNMP version (v1, v2c, or v3)
                 - force_add: Skip checks for duplicate device and SNMP reachability (optional, default False)
                 - port: SNMP port (optional, defaults to config value)
                 - transport: SNMP transport protocol (optional: udp, tcp, udp6, tcp6)
                 - port_association_mode: Port identification method (optional: ifIndex, ifName, ifDescr, ifAlias)
                 - poller_group: Poller group ID (optional, defaults to 0)
-                - community: SNMP community string (for v2c)
+                - community: SNMP community string (for v1 or v2c)
                 - authlevel, authname, authpass, authalgo, cryptopass, cryptoalgo: SNMP v3 parameters
 
         Returns:
@@ -375,7 +375,7 @@ class LibreNMSAPI:
         if data.get("poller_group") is not None:
             payload["poller_group"] = data["poller_group"]
 
-        if data["snmp_version"] == "v2c":
+        if data["snmp_version"] in ("v1", "v2c"):
             payload["community"] = data["community"]
         elif data["snmp_version"] == "v3":
             payload.update(

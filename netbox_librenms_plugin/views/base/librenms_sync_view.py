@@ -3,7 +3,7 @@ import re
 from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
-from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
+from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_sync_device,
@@ -101,7 +101,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
                 "ip_sync": ip_context,
-                "v2form": AddToLIbreSNMPV2(prefix="v2"),
+                "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
                 "found_in_librenms": librenms_info.get("found_in_librenms"),

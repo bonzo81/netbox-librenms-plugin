@@ -590,6 +590,34 @@ class TestLibreNMSAPIDeviceOperations:
         assert result[1] == "Device added successfully."
 
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    def test_add_device_snmpv1_success(self, mock_post, mock_librenms_config):
+        """Verify successful device addition using SNMPv1."""
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {
+            "status": "ok",
+            "message": "Device added successfully",
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        result = api.add_device(
+            data={
+                "hostname": "legacy-device.example.com",
+                "snmp_version": "v1",
+                "community": "public",
+            }
+        )
+
+        assert result[0] is True
+        assert result[1] == "Device added successfully."
+        # Verify the payload includes correct snmpver and community
+        call_args = mock_post.call_args
+        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        assert payload["snmpver"] == "v1"
+        assert payload["community"] == "public"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.post")
     def test_add_device_duplicate_error(self, mock_post, mock_librenms_config):
         """Verify duplicate device handling."""
         mock_post.return_value.status_code = 500
@@ -611,6 +639,46 @@ class TestLibreNMSAPIDeviceOperations:
 
         assert result[0] is False
         assert "Device already exists" in result[1]
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    def test_add_device_snmpv3_success(self, mock_post, mock_librenms_config):
+        """Verify successful device addition using SNMPv3 with all required fields."""
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {
+            "status": "ok",
+            "message": "Device added successfully",
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        result = api.add_device(
+            data={
+                "hostname": "secure-device.example.com",
+                "snmp_version": "v3",
+                "authlevel": "authPriv",
+                "authname": "snmpuser",
+                "authpass": "authpassword123",
+                "authalgo": "SHA",
+                "cryptopass": "cryptopassword456",
+                "cryptoalgo": "AES",
+            }
+        )
+
+        assert result[0] is True
+        assert result[1] == "Device added successfully."
+        # Verify the payload includes correct snmpver and all v3 fields
+        call_args = mock_post.call_args
+        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        assert payload["snmpver"] == "v3"
+        assert payload["authlevel"] == "authPriv"
+        assert payload["authname"] == "snmpuser"
+        assert payload["authpass"] == "authpassword123"
+        assert payload["authalgo"] == "SHA"
+        assert payload["cryptopass"] == "cryptopassword456"
+        assert payload["cryptoalgo"] == "AES"
+        # Ensure community is NOT included for v3
+        assert "community" not in payload
 
     @patch("netbox_librenms_plugin.librenms_api.requests.patch")
     def test_update_device_field_success(self, mock_patch, mock_librenms_config):
