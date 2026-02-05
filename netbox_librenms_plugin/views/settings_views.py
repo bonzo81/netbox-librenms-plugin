@@ -1,5 +1,4 @@
 from django.contrib import messages
-from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.views import View
@@ -7,15 +6,15 @@ from django.views import View
 from netbox_librenms_plugin.forms import ImportSettingsForm, ServerConfigForm
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
 
-class LibreNMSSettingsView(PermissionRequiredMixin, View):
+class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
     """
     View for managing plugin settings including server selection and import options.
     Uses two separate forms for cleaner validation and separation of concerns.
     """
 
-    permission_required = "netbox_librenms_plugin.change_librenmssettings"
     template_name = "netbox_librenms_plugin/settings.html"
 
     def get(self, request):
@@ -39,6 +38,10 @@ class LibreNMSSettingsView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Handle form submission - process the appropriate form based on form_type."""
+        # Check write permission for POST actions
+        if error := self.require_write_permission():
+            return error
+
         # Get or create the settings object
         settings, created = LibreNMSSettings.objects.get_or_create()
 
@@ -89,7 +92,7 @@ class LibreNMSSettingsView(PermissionRequiredMixin, View):
         )
 
 
-class TestLibreNMSConnectionView(View):
+class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
     """
     HTMX view to test LibreNMS server connection.
     Returns HTML fragment instead of JSON for HTMX compatibility.

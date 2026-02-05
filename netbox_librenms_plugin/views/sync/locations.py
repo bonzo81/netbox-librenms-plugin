@@ -8,10 +8,10 @@ from django_tables2 import SingleTableView
 
 from netbox_librenms_plugin.filtersets import SiteLocationFilterSet
 from netbox_librenms_plugin.tables.locations import SiteLocationSyncTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
+class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTableView):
     """Synchronize NetBox Sites with LibreNMS locations."""
 
     table_class = SiteLocationSyncTable
@@ -78,6 +78,10 @@ class SyncSiteLocationView(LibreNMSAPIMixin, SingleTableView):
         return lat_match and lng_match
 
     def post(self, request):
+        # Check write permission before modifying LibreNMS locations
+        if error := self.require_write_permission():
+            return error
+
         action = request.POST.get("action")
         pk = request.POST.get("pk")
         if not pk:

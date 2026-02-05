@@ -11,11 +11,11 @@ class SiteLocationSyncTable(tables.Table):
     """
 
     netbox_site = tables.Column(linkify=True)
-    latitude = tables.Column(accessor="netbox_site.latitude")
-    longitude = tables.Column(accessor="netbox_site.longitude")
-    librenms_location = tables.Column(accessor="librenms_location.location", verbose_name="LibreNMS Location")
-    librenms_latitude = tables.Column(accessor="librenms_location.lat", verbose_name="LibreNMS Latitude")
-    librenms_longitude = tables.Column(accessor="librenms_location.lng", verbose_name="LibreNMS Longitude")
+    latitude = tables.Column(accessor="netbox_site__latitude")
+    longitude = tables.Column(accessor="netbox_site__longitude")
+    librenms_location = tables.Column(accessor="librenms_location__location", verbose_name="LibreNMS Location")
+    librenms_latitude = tables.Column(accessor="librenms_location__lat", verbose_name="LibreNMS Latitude")
+    librenms_longitude = tables.Column(accessor="librenms_location__lng", verbose_name="LibreNMS Longitude")
     actions = tables.Column(empty_values=())
 
     def render_latitude(self, value, record):

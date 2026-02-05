@@ -9,11 +9,18 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.views.mixins import CacheMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
-class SyncIPAddressesView(CacheMixin, View):
+class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Synchronize IP addresses from LibreNMS cache into NetBox."""
+
+    required_object_permissions = {
+        "POST": [
+            ("add", IPAddress),
+            ("change", IPAddress),
+        ],
+    }
 
     def get_selected_ips(self, request):
         return [x for x in request.POST.getlist("select") if x]
@@ -50,6 +57,10 @@ class SyncIPAddressesView(CacheMixin, View):
         return f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
 
     def post(self, request, object_type, pk):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         obj = self.get_object(object_type, pk)
 
         selected_ips = self.get_selected_ips(request)

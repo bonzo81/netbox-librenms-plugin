@@ -4,13 +4,21 @@ from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 
 from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
-class UpdateDeviceSerialView(LibreNMSAPIMixin, View):
+class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update NetBox device serial number from LibreNMS."""
 
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
     def post(self, request, pk):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         device = get_object_or_404(Device, pk=pk)
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
@@ -45,10 +53,18 @@ class UpdateDeviceSerialView(LibreNMSAPIMixin, View):
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
 
-class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
+class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update NetBox DeviceType using LibreNMS hardware metadata."""
 
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
     def post(self, request, pk):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         device = get_object_or_404(Device, pk=pk)
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
@@ -90,10 +106,18 @@ class UpdateDeviceTypeView(LibreNMSAPIMixin, View):
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
 
-class UpdateDevicePlatformView(LibreNMSAPIMixin, View):
+class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update NetBox Platform based on LibreNMS OS info."""
 
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
     def post(self, request, pk):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         device = get_object_or_404(Device, pk=pk)
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
@@ -141,10 +165,21 @@ class UpdateDevicePlatformView(LibreNMSAPIMixin, View):
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
 
-class CreateAndAssignPlatformView(LibreNMSAPIMixin, View):
+class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Create a new Platform and assign it to the device."""
 
+    required_object_permissions = {
+        "POST": [
+            ("change", Device),
+            ("add", Platform),
+        ],
+    }
+
     def post(self, request, pk):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         device = get_object_or_404(Device, pk=pk)
 
         platform_name = request.POST.get("platform_name")
@@ -184,10 +219,18 @@ class CreateAndAssignPlatformView(LibreNMSAPIMixin, View):
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
 
-class AssignVCSerialView(LibreNMSAPIMixin, View):
+class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Assign serial numbers to each virtual chassis member."""
 
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
     def post(self, request, pk):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         device = get_object_or_404(Device, pk=pk)
 
         if not device.virtual_chassis:

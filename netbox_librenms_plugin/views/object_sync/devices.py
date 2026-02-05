@@ -8,6 +8,7 @@ from django.urls import reverse
 from django.views import View
 from utilities.views import ViewTab, register_model_view
 
+from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,
@@ -22,7 +23,7 @@ from ..base.cables_view import BaseCableTableView
 from ..base.interfaces_view import BaseInterfaceTableView
 from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
-from ..mixins import CacheMixin
+from ..mixins import CacheMixin, LibreNMSPermissionMixin
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
@@ -31,7 +32,7 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
 
     queryset = Device.objects.all()
     model = Device
-    tab = ViewTab(label="LibreNMS Sync", permission="dcim.view_device")
+    tab = ViewTab(label="LibreNMS Sync", permission=PERM_VIEW_PLUGIN)
 
     def get_interface_context(self, request, obj):
         interface_name_field = get_interface_name_field(request)
@@ -68,7 +69,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
         return table
 
 
-class SingleInterfaceVerifyView(CacheMixin, View):
+class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     """Verify single interface data for a device via cached LibreNMS payload."""
 
     def post(self, request):

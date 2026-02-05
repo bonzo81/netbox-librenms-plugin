@@ -4,6 +4,7 @@ import logging
 
 from django.contrib import messages
 from django.core.cache import cache
+from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.views import View
@@ -27,7 +28,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
 
@@ -204,10 +205,14 @@ def _apply_user_selections_to_validation(
                 apply_rack_to_validation(validation, rack)
 
 
-class BulkImportConfirmView(LibreNMSAPIMixin, View):
+class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to confirm bulk imports before execution."""
 
     def post(self, request):
+        # Check write permission before showing import confirmation
+        if error := self.require_write_permission():
+            return error
+
         device_ids = request.POST.getlist("select")
         if not device_ids:
             return HttpResponse(
@@ -352,7 +357,7 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
         )
 
 
-class BulkImportDevicesView(LibreNMSAPIMixin, View):
+class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """Handle bulk import requests coming from the LibreNMS import table."""
 
     def should_use_background_job_for_import(self, request):
@@ -362,15 +367,25 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         Import jobs provide active cancellation and keep the browser responsive
         during bulk imports.
 
+        Note: Non-superusers automatically fall back to synchronous mode because
+        the /api/core/background-tasks/ endpoint requires superuser access.
+
         Args:
             request: Django request object containing POST data
 
         Returns:
             bool: True if background job should be used, False for synchronous
         """
+        # Non-superusers cannot poll background-tasks API (requires IsSuperuser)
+        if not request.user.is_superuser:
+            return False
         return request.POST.get("use_background_job") == "on"
 
     def post(self, request):  # noqa: PLR0912 - branching keeps responses explicit
+        # Check write permission before any import operation
+        if error := self.require_write_permission():
+            return error
+
         device_ids = request.POST.getlist("select")
         if not device_ids:
             messages.error(request, "No devices selected for import")
@@ -529,6 +544,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                     sync_options=sync_options,
                     manual_mappings_per_device=manual_mappings_per_device,  # type: ignore
                     libre_devices_cache=libre_devices_cache_sync,
+                    user=request.user,  # Pass user for permission checks
                 )
 
             # Import VMs if any
@@ -538,7 +554,19 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                     self.librenms_api,
                     sync_options,
                     libre_devices_cache_sync,
+                    user=request.user,  # Pass user for permission checks
                 )
+
+        except PermissionDenied as exc:
+            # Handle permission errors with a user-friendly message
+            logger.warning(f"Permission denied during import: {exc}")
+            if request.headers.get("HX-Request"):
+                return HttpResponse(
+                    f'<div class="alert alert-danger"><i class="mdi mdi-alert-circle"></i> {exc}</div>',
+                    status=403,
+                )
+            messages.error(request, str(exc))
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.exception("Error during bulk import")
@@ -631,7 +659,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
 
-class DeviceVCDetailsView(LibreNMSAPIMixin, View):
+class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to show virtual chassis details."""
 
     def get(self, request, device_id):
@@ -656,7 +684,7 @@ class DeviceVCDetailsView(LibreNMSAPIMixin, View):
         )
 
 
-class DeviceValidationDetailsView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to show detailed validation information."""
 
     def get(self, request, device_id):
@@ -680,7 +708,7 @@ class DeviceValidationDetailsView(LibreNMSAPIMixin, DeviceImportHelperMixin, Vie
         )
 
 
-class DeviceRoleUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceRoleUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a role is selected."""
 
     def post(self, request, device_id):
@@ -692,7 +720,7 @@ class DeviceRoleUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
         return self.render_device_row(request, libre_device, validation, selections)
 
 
-class DeviceClusterUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceClusterUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a cluster is selected/deselected."""
 
     def post(self, request, device_id):
@@ -704,7 +732,7 @@ class DeviceClusterUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
         return self.render_device_row(request, libre_device, validation, selections)
 
 
-class DeviceRackUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a rack is selected."""
 
     def post(self, request, device_id):

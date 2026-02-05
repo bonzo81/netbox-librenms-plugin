@@ -9,10 +9,10 @@ from netbox_librenms_plugin.utils import (
     get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
+class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
     Base view for LibreNMS sync information.
     """

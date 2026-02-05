@@ -1,4 +1,181 @@
+from django.contrib import messages
+from django.contrib.auth.mixins import PermissionRequiredMixin
+from django.http import HttpResponse
+from django.shortcuts import redirect
+from utilities.permissions import get_permission_for_model
+
+from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+
+class LibreNMSPermissionMixin(PermissionRequiredMixin):
+    """
+    Mixin for views requiring LibreNMS plugin permissions.
+
+    All plugin views require 'view_librenmssettings' to access the page.
+    Write actions require 'change_librenmssettings' plus any relevant
+    NetBox object permissions.
+    """
+
+    permission_required = PERM_VIEW_PLUGIN
+
+    def has_write_permission(self):
+        """Check if user can perform write actions."""
+        return self.request.user.has_perm(PERM_CHANGE_PLUGIN)
+
+    def require_write_permission(self, error_message=None):
+        """
+        Check write permission and return error response if denied.
+
+        Handles both HTMX and regular requests appropriately:
+        - HTMX: Returns HX-Redirect to referrer with toast message
+        - Regular: Returns redirect to referrer with flash message
+
+        Returns:
+            None if permitted, or appropriate response if denied
+        """
+        if not self.has_write_permission():
+            msg = error_message or "You do not have permission to perform this action."
+            messages.error(self.request, msg)
+
+            # Get the referrer URL, fallback to a safe default
+            referrer = self.request.META.get("HTTP_REFERER", "/")
+
+            # Check if this is an HTMX request
+            if self.request.headers.get("HX-Request"):
+                return HttpResponse("", headers={"HX-Redirect": referrer})
+
+            return redirect(referrer)
+        return None
+
+    def require_write_permission_json(self, error_message=None):
+        """
+        Check write permission and return JSON error response if denied.
+
+        Use this method for AJAX/HTMX endpoints that return JsonResponse.
+        Does not set flash messages since JSON clients handle errors differently.
+
+        Returns:
+            None if permitted, or JsonResponse with 403 status if denied
+        """
+        from django.http import JsonResponse
+
+        if not self.has_write_permission():
+            msg = error_message or "You do not have permission to perform this action."
+            return JsonResponse({"error": msg}, status=403)
+        return None
+
+
+class NetBoxObjectPermissionMixin:
+    """
+    Mixin for views requiring specific NetBox object permissions.
+
+    Define required_object_permissions as a dict mapping HTTP methods
+    to lists of (action, model) tuples.
+
+    Example:
+        required_object_permissions = {
+            'POST': [
+                ('add', Interface),
+                ('change', Interface),
+            ],
+        }
+    """
+
+    required_object_permissions = {}
+
+    def check_object_permissions(self, method):
+        """
+        Check all required object permissions for the given HTTP method.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+
+        Returns:
+            tuple: (has_all: bool, missing: list[str])
+        """
+        requirements = self.required_object_permissions.get(method, [])
+        missing = []
+
+        for action, model in requirements:
+            perm = get_permission_for_model(model, action)
+            if not self.request.user.has_perm(perm):
+                missing.append(perm)
+
+        return (len(missing) == 0, missing)
+
+    def require_object_permissions(self, method):
+        """
+        Require all object permissions for the method, returning error response if denied.
+
+        Handles both HTMX and regular requests appropriately:
+        - HTMX: Returns HX-Redirect to referrer with flash message
+        - Regular: Returns redirect to referrer with flash message
+
+        Returns:
+            None if permitted, or appropriate response if denied
+        """
+        has_perms, missing = self.check_object_permissions(method)
+        if not has_perms:
+            missing_str = ", ".join(missing)
+            msg = f"Missing permissions: {missing_str}"
+            messages.error(self.request, msg)
+
+            # Get the referrer URL, fallback to a safe default
+            referrer = self.request.META.get("HTTP_REFERER", "/")
+
+            # Check if this is an HTMX request
+            if self.request.headers.get("HX-Request"):
+                return HttpResponse("", headers={"HX-Redirect": referrer})
+
+            return redirect(referrer)
+        return None
+
+    def require_object_permissions_json(self, method):
+        """
+        Require all object permissions for the method, returning JSON error if denied.
+
+        Use this method for AJAX/HTMX endpoints that return JsonResponse.
+        Does not set flash messages since JSON clients handle errors differently.
+
+        Returns:
+            None if permitted, or JsonResponse with 403 status if denied
+        """
+        from django.http import JsonResponse
+
+        has_perms, missing = self.check_object_permissions(method)
+        if not has_perms:
+            missing_str = ", ".join(missing)
+            return JsonResponse({"error": f"Missing permissions: {missing_str}"}, status=403)
+        return None
+
+    def require_all_permissions(self, method="POST"):
+        """
+        Check both plugin write and NetBox object permissions.
+
+        Combines require_write_permission() and require_object_permissions()
+        into a single call. Handles HTMX and regular requests.
+
+        Returns:
+            None if permitted, or appropriate error response if denied
+        """
+        if error := self.require_write_permission():
+            return error
+        return self.require_object_permissions(method)
+
+    def require_all_permissions_json(self, method="POST"):
+        """
+        Check both plugin write and NetBox object permissions, returning JSON errors.
+
+        Combines require_write_permission_json() and require_object_permissions_json()
+        into a single call for JSON/AJAX endpoints.
+
+        Returns:
+            None if permitted, or JsonResponse with 403 status if denied
+        """
+        if error := self.require_write_permission_json():
+            return error
+        return self.require_object_permissions_json(method)
 
 
 class LibreNMSAPIMixin:

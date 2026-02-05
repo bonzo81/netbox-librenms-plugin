@@ -6,6 +6,7 @@ This module provides functions for:
 - Retrieving filtered LibreNMS devices
 - Importing single and multiple devices
 - Smart matching of NetBox objects
+- Permission checking for import operations
 """
 
 import logging
@@ -14,6 +15,7 @@ from typing import List
 from core.choices import JobStatusChoices
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.utils import timezone
 from virtualization.models import Cluster
@@ -26,6 +28,52 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Permission Check Helpers
+# =============================================================================
+
+
+def check_user_permissions(user, permissions):
+    """
+    Check if user has all required permissions.
+
+    Args:
+        user: The user object to check permissions for
+        permissions: List of permission strings (e.g., ['dcim.add_device', 'dcim.add_interface'])
+
+    Returns:
+        tuple: (has_all_permissions: bool, missing_permissions: list[str])
+
+    Raises:
+        PermissionDenied: If user is None (no user context available)
+    """
+    if user is None:
+        raise PermissionDenied("No user context available for permission check")
+
+    missing = [perm for perm in permissions if not user.has_perm(perm)]
+    return (len(missing) == 0, missing)
+
+
+def require_permissions(user, permissions, action_description="perform this action"):
+    """
+    Require user has all permissions, raising PermissionDenied if not.
+
+    Args:
+        user: The user object to check permissions for
+        permissions: List of permission strings
+        action_description: Human-readable description for error message
+
+    Raises:
+        PermissionDenied: If user lacks any required permission
+    """
+    has_perms, missing = check_user_permissions(user, permissions)
+    if not has_perms:
+        missing_str = ", ".join(missing)
+        raise PermissionDenied(
+            f"You do not have permission to {action_description}. Missing permissions: {missing_str}"
+        )
 
 
 def get_cache_metadata_key(server_key: str, filters: dict, vc_enabled: bool) -> str:
@@ -1188,6 +1236,7 @@ def bulk_import_devices_shared(
     manual_mappings_per_device: dict = None,
     libre_devices_cache: dict = None,
     job=None,
+    user=None,
 ) -> dict:
     """
     Shared function for importing multiple LibreNMS devices to NetBox.
@@ -1204,6 +1253,8 @@ def bulk_import_devices_shared(
         libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             to avoid redundant API calls. Example: {123: {...device_data...}}
         job: Optional JobRunner instance for progress logging and cancellation checks
+        user: User performing the import (for permission checks). If job is provided,
+            user is extracted from job.job.user if not explicitly passed.
 
     Returns:
         dict: Bulk import result with structure:
@@ -1215,12 +1266,23 @@ def bulk_import_devices_shared(
                 'virtual_chassis_created': int  # Number of VCs created
             }
 
+    Raises:
+        PermissionDenied: If user lacks required permissions
+
     Example:
         >>> # Synchronous usage
-        >>> result = bulk_import_devices_shared([1, 2, 3, 4, 5])
+        >>> result = bulk_import_devices_shared([1, 2, 3, 4, 5], user=request.user)
         >>> # Background job usage
         >>> result = bulk_import_devices_shared([1, 2, 3], job=self)
     """
+    # Extract user from job if not explicitly provided
+    if user is None and job is not None:
+        user = getattr(job.job, "user", None)
+
+    # Check permissions at start of bulk operation
+    required_perms = ["dcim.add_device", "dcim.add_interface"]
+    require_permissions(user, required_perms, "import devices")
+
     total = len(device_ids)
     success_list = []
     failed_list = []
@@ -1360,6 +1422,7 @@ def bulk_import_devices(
     sync_options: dict = None,
     manual_mappings_per_device: dict = None,
     libre_devices_cache: dict = None,
+    user=None,
 ) -> dict:
     """
     Import multiple LibreNMS devices to NetBox (synchronous).
@@ -1375,6 +1438,7 @@ def bulk_import_devices(
             Example: {1179: {'device_role_id': 5}, 1180: {'device_role_id': 3}}
         libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             to avoid redundant API calls. Example: {123: {...device_data...}}
+        user: User performing the import (for permission checks)
 
     Returns:
         dict: Bulk import result with structure:
@@ -1385,6 +1449,9 @@ def bulk_import_devices(
                 'skipped': List[dict],  # Skipped devices (already exist, etc.)
                 'virtual_chassis_created': int  # Number of VCs created
             }
+
+    Raises:
+        PermissionDenied: If user lacks required permissions
     """
     return bulk_import_devices_shared(
         device_ids=device_ids,
@@ -1393,6 +1460,7 @@ def bulk_import_devices(
         manual_mappings_per_device=manual_mappings_per_device,
         libre_devices_cache=libre_devices_cache,
         job=None,  # No job context for synchronous imports
+        user=user,
     )
 
 
@@ -1532,6 +1600,7 @@ def bulk_import_vms(
     sync_options: dict = None,
     libre_devices_cache: dict = None,
     job=None,
+    user=None,
 ) -> dict:
     """
     Import multiple LibreNMS devices as VMs in NetBox.
@@ -1549,6 +1618,8 @@ def bulk_import_vms(
         sync_options: Optional dict with use_sysname, strip_domain settings
         libre_devices_cache: Optional pre-fetched device data cache
         job: Optional JobRunner instance for background job logging/cancellation
+        user: User performing the import (for permission checks). If job is provided,
+            user is extracted from job.job.user if not explicitly passed.
 
     Returns:
         Dict with keys:
@@ -1556,10 +1627,13 @@ def bulk_import_vms(
             - failed: List of {"device_id": int, "error": str}
             - skipped: List of {"device_id": int, "reason": str}
 
+    Raises:
+        PermissionDenied: If user lacks required permissions
+
     Example:
         >>> # Synchronous import from view
         >>> vm_imports = {123: {"cluster_id": 5, "device_role_id": 2}}
-        >>> result = bulk_import_vms(vm_imports, api, sync_options)
+        >>> result = bulk_import_vms(vm_imports, api, sync_options, user=request.user)
         >>> print(f"Created {len(result['success'])} VMs")
         >>>
         >>> # Background job import
@@ -1569,6 +1643,13 @@ def bulk_import_vms(
         apply_cluster_to_validation,
         apply_role_to_validation,
     )
+
+    # Extract user from job if not explicitly provided
+    if user is None and job is not None:
+        user = getattr(job.job, "user", None)
+
+    # Check permissions at start of bulk operation
+    require_permissions(user, ["virtualization.add_virtualmachine"], "import VMs")
 
     result = {"success": [], "failed": [], "skipped": []}
     vm_ids = list(vm_imports.keys())
