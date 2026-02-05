@@ -14,6 +14,12 @@ description: Frontend patterns for templates, HTMX, and static assets
 - Modals use Tabler (Bootstrap-like) but **without** `bootstrap.Modal` helpers.
 - Buttons target the `htmx-modal-content` element and JavaScript in `librenms_import.html` toggles the wrapper.
 - Do not reintroduce `data-bs-toggle` or duplicate modal IDs.
+- The import page uses `ModalManager` class and `filterModalManager` instance—always use this reference in fetch callbacks, not undefined `modalInstance` variables.
+
+## JavaScript Fetch Patterns
+- Always check `response.ok` before processing fetch responses to catch HTTP errors.
+- In catch blocks, show `error.message` for debugging rather than generic messages.
+- The import filter form uses fetch with `Accept: application/json, text/html`—JSON for background jobs, HTML for synchronous mode.
 
 ## Form Controls
 - Device import dropdowns rely on TomSelect decorators set up elsewhere.
