@@ -90,6 +90,7 @@ class DeviceImportTable(tables.Table):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
         # Cache querysets to avoid N queries per render
         from dcim.models import DeviceRole
         from virtualization.models import Cluster
@@ -425,6 +426,7 @@ class DeviceImportTable(tables.Table):
         """
         Render action buttons for import using HTMX.
         Shows Import button if can import, otherwise shows Preview/Configure.
+        Permission checks are handled by backend require_write_permission() which shows toast.
         """
         validation = record.get("_validation", {})
         device_id = record.get("device_id")

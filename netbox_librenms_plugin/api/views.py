@@ -4,11 +4,13 @@ from core.choices import JobStatusChoices
 from core.models import Job
 from django.http import JsonResponse
 from django.utils import timezone
-from django.views.decorators.http import require_http_methods
 from django_rq import get_queue
 from netbox.api.viewsets import NetBoxModelViewSet
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import BasePermission
 from rq.job import Job as RQJob
 
+from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 
 from .serializers import InterfaceTypeMappingSerializer
@@ -16,12 +18,28 @@ from .serializers import InterfaceTypeMappingSerializer
 logger = logging.getLogger(__name__)
 
 
+class LibreNMSPluginPermission(BasePermission):
+    """
+    Permission class for LibreNMS plugin API endpoints.
+
+    - GET requests require view_librenmssettings
+    - All other requests require change_librenmssettings
+    """
+
+    def has_permission(self, request, view):
+        if request.method == "GET":
+            return request.user.has_perm(PERM_VIEW_PLUGIN)
+        return request.user.has_perm(PERM_CHANGE_PLUGIN)
+
+
 class InterfaceTypeMappingViewSet(NetBoxModelViewSet):
+    permission_classes = [LibreNMSPluginPermission]
     queryset = InterfaceTypeMapping.objects.all()
     serializer_class = InterfaceTypeMappingSerializer
 
 
-@require_http_methods(["POST"])
+@api_view(["POST"])
+@permission_classes([LibreNMSPluginPermission])
 def sync_job_status(request, job_pk):
     """
     Sync database Job status with RQ job status.

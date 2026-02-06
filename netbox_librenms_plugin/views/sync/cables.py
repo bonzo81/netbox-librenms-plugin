@@ -7,11 +7,18 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
 
-from netbox_librenms_plugin.views.mixins import CacheMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
-class SyncCablesView(CacheMixin, View):
+class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Create NetBox cables using cached LibreNMS link data."""
+
+    required_object_permissions = {
+        "POST": [
+            ("add", Cable),
+            ("change", Cable),
+        ],
+    }
 
     def get_selected_interfaces(self, request, initial_device):
         selected_interfaces = []
@@ -105,6 +112,10 @@ class SyncCablesView(CacheMixin, View):
         return results
 
     def post(self, request, pk):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         initial_device = get_object_or_404(Device, pk=pk)
         selected_interfaces = self.get_selected_interfaces(request, initial_device)
         cached_links = self.get_cached_links_data(request, initial_device)

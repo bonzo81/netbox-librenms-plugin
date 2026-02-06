@@ -12,10 +12,10 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import get_interface_name_field
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
+class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for synchronizing IP address information from LibreNMS.
     """
@@ -301,7 +301,7 @@ class BaseIPAddressTableView(LibreNMSAPIMixin, CacheMixin, View):
         )
 
 
-class SingleIPAddressVerifyView(CacheMixin, View):
+class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     """
     View for verifying single IP address data with different VRF.
     """

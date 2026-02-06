@@ -15,11 +15,13 @@ class TestShouldUseBackgroundJob:
     """Test background job decision logic."""
 
     def test_checkbox_checked_returns_true(self):
-        """When use_background_job form field is True, return True."""
+        """When use_background_job form field is True, return True for superusers."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view = LibreNMSImportView()
         view._filter_form_data = {"use_background_job": True}
+        view.request = MagicMock()
+        view.request.user.is_superuser = True
 
         assert view.should_use_background_job() is True
 
@@ -29,26 +31,44 @@ class TestShouldUseBackgroundJob:
 
         view = LibreNMSImportView()
         view._filter_form_data = {"use_background_job": False}
+        view.request = MagicMock()
+        view.request.user.is_superuser = True
 
         assert view.should_use_background_job() is False
 
     def test_default_when_field_missing(self):
-        """When field is missing, default to True."""
+        """When field is missing, default to True for superusers."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view = LibreNMSImportView()
         view._filter_form_data = {"some_other_field": "value"}
+        view.request = MagicMock()
+        view.request.user.is_superuser = True
 
         assert view.should_use_background_job() is True
 
     def test_empty_form_data_returns_default(self):
-        """Empty form data returns default True."""
+        """Empty form data returns default True for superusers."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view = LibreNMSImportView()
         view._filter_form_data = {}
+        view.request = MagicMock()
+        view.request.user.is_superuser = True
 
         assert view.should_use_background_job() is True
+
+    def test_non_superuser_always_returns_false(self):
+        """Non-superuser users always get synchronous mode."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        view = LibreNMSImportView()
+        view._filter_form_data = {"use_background_job": True}
+        view.request = MagicMock()
+        view.request.user.is_superuser = False
+
+        # Even when checkbox is True, non-superusers get False
+        assert view.should_use_background_job() is False
 
 
 def create_mock_job_runner(job_class, job_pk=123):

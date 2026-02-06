@@ -14,10 +14,10 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_virtual_chassis_member,
 )
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
+class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for synchronizing cable information from LibreNMS.
     """

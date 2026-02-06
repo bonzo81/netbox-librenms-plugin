@@ -201,6 +201,7 @@ class ImportDevicesJob(JobRunner):
                 manual_mappings_per_device=manual_mappings_per_device,
                 libre_devices_cache=libre_devices_cache,
                 job=self,  # Pass job context for logging and cancellation
+                user=self.job.user,  # Pass user for permission checks
             )
 
         # Import VMs
@@ -209,7 +210,9 @@ class ImportDevicesJob(JobRunner):
             self.logger.info(f"Importing {len(vm_imports)} VMs...")
             from netbox_librenms_plugin.import_utils import bulk_import_vms
 
-            vm_result = bulk_import_vms(vm_imports, api, sync_options, libre_devices_cache, job=self)
+            vm_result = bulk_import_vms(
+                vm_imports, api, sync_options, libre_devices_cache, job=self, user=self.job.user
+            )
 
         # Combine results
         imported_device_pks = [item["device"].pk for item in device_result.get("success", []) if item.get("device")]

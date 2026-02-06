@@ -9,9 +9,10 @@ from netbox_librenms_plugin.forms import (
 )
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tables.mappings import InterfaceTypeMappingTable
+from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
 
-class InterfaceTypeMappingListView(generic.ObjectListView):
+class InterfaceTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
     """
     Provides a view for listing all `InterfaceTypeMapping` objects.
     """
@@ -23,7 +24,7 @@ class InterfaceTypeMappingListView(generic.ObjectListView):
     template_name = "netbox_librenms_plugin/interfacetypemapping_list.html"
 
 
-class InterfaceTypeMappingCreateView(generic.ObjectEditView):
+class InterfaceTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
     """
     Provides a view for creating a new `InterfaceTypeMapping` object.
     """
@@ -33,7 +34,7 @@ class InterfaceTypeMappingCreateView(generic.ObjectEditView):
 
 
 @register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
-class InterfaceTypeMappingBulkImportView(generic.BulkImportView):
+class InterfaceTypeMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
     """
     Provides a view for bulk importing `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
     Supports three import methods: direct import, file upload, and data file.
@@ -43,7 +44,7 @@ class InterfaceTypeMappingBulkImportView(generic.BulkImportView):
     model_form = InterfaceTypeMappingImportForm
 
 
-class InterfaceTypeMappingView(generic.ObjectView):
+class InterfaceTypeMappingView(LibreNMSPermissionMixin, generic.ObjectView):
     """
     Provides a view for displaying details of a specific `InterfaceTypeMapping` object.
     """
@@ -51,7 +52,7 @@ class InterfaceTypeMappingView(generic.ObjectView):
     queryset = InterfaceTypeMapping.objects.all()
 
 
-class InterfaceTypeMappingEditView(generic.ObjectEditView):
+class InterfaceTypeMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
     """
     Provides a view for editing a specific `InterfaceTypeMapping` object.
     """
@@ -60,7 +61,7 @@ class InterfaceTypeMappingEditView(generic.ObjectEditView):
     form = InterfaceTypeMappingForm
 
 
-class InterfaceTypeMappingDeleteView(generic.ObjectDeleteView):
+class InterfaceTypeMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
     """
     Provides a view for deleting a specific `InterfaceTypeMapping` object.
     """
@@ -68,7 +69,7 @@ class InterfaceTypeMappingDeleteView(generic.ObjectDeleteView):
     queryset = InterfaceTypeMapping.objects.all()
 
 
-class InterfaceTypeMappingBulkDeleteView(generic.BulkDeleteView):
+class InterfaceTypeMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
     """
     Provides a view for deleting multiple `InterfaceTypeMapping` objects.
     """
@@ -77,7 +78,7 @@ class InterfaceTypeMappingBulkDeleteView(generic.BulkDeleteView):
     table = InterfaceTypeMappingTable
 
 
-class InterfaceTypeMappingChangeLogView(generic.ObjectChangeLogView):
+class InterfaceTypeMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
     """
     Provides a view for displaying the change log of a specific `InterfaceTypeMapping` object.
     """

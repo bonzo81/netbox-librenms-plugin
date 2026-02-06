@@ -15,12 +15,12 @@ from netbox_librenms_plugin.import_utils import (
 )
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
 
 
-class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
+class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """Import devices from LibreNMS into NetBox with validation metadata."""
 
     queryset = Device.objects.none()
@@ -49,9 +49,15 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         - Job tracking in NetBox Jobs interface
         - Results cached for later retrieval
 
+        Note: Non-superusers automatically fall back to synchronous mode because
+        the /api/core/background-tasks/ endpoint requires superuser access.
+
         Returns:
             bool: True if background job should be used, False for synchronous
         """
+        # Non-superusers cannot poll background-tasks API (requires IsSuperuser)
+        if not self.request.user.is_superuser:
+            return False
         return self._filter_form_data.get("use_background_job", True)
 
     def _load_job_results(self, job_id):
@@ -319,6 +325,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             "cache_metadata_missing": getattr(self, "_cache_metadata_missing", False),
             "cached_searches": cached_searches,
             "librenms_server_info": self.get_server_info(),
+            "can_use_background_jobs": request.user.is_superuser,
         }
         return render(request, self.template_name, context)
 
@@ -332,7 +339,10 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             self._import_data = self._get_import_queryset()
 
         data = self._import_data
-        table = DeviceImportTable(data, order_by=request.GET.get("sort"))
+        table = DeviceImportTable(
+            data,
+            order_by=request.GET.get("sort"),
+        )
         return table
 
     def _get_import_queryset(self):

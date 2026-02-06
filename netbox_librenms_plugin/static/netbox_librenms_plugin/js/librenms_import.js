@@ -765,6 +765,10 @@
                 }
             })
                 .then(response => {
+                    // Check for HTTP errors first
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
                     // Check if response is JSON (background job) or HTML (synchronous)
                     const contentType = response.headers.get('content-type');
                     if (contentType && contentType.includes('application/json')) {
@@ -789,15 +793,11 @@
                         } else {
                             // Unexpected JSON response
                             alert('Unexpected response from server. Please try again.');
-                            if (modalInstance) {
-                                modalInstance.hide();
-                            }
+                            filterModalManager.hide();
                         }
                     } else if (result.type === 'html') {
                         // Synchronous response - navigate to the URL to reload with results
-                        if (modalInstance) {
-                            modalInstance.hide();
-                        }
+                        filterModalManager.hide();
                         // Navigate to the results URL, allowing proper browser history
                         window.location.href = finalUrl;
                     }
@@ -813,7 +813,9 @@
                         // Request was cancelled by user - silent
                     } else {
                         console.error('Error fetching filtered results:', error);
-                        alert('Error loading filtered results. Please try again.');
+                        // Show more specific error if available
+                        const errorMsg = error.message || 'Error loading filtered results. Please try again.';
+                        alert(errorMsg);
                     }
 
                     // Hide modal on error

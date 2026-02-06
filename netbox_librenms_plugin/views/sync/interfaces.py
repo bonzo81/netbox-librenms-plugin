@@ -10,13 +10,29 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field
-from netbox_librenms_plugin.views.mixins import CacheMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
-class SyncInterfacesView(CacheMixin, View):
+class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Sync selected interfaces from LibreNMS into NetBox."""
 
+    def get_required_permissions_for_object_type(self, object_type):
+        """Return the required permissions based on object type."""
+        if object_type == "device":
+            return [("add", Interface), ("change", Interface)]
+        else:
+            return [("add", VMInterface), ("change", VMInterface)]
+
     def post(self, request, object_type, object_id):
+        # Set permissions dynamically based on object type
+        self.required_object_permissions = {
+            "POST": self.get_required_permissions_for_object_type(object_type),
+        }
+
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         url_name = (
             "dcim:device_librenms_sync"
             if object_type == "device"
@@ -196,10 +212,30 @@ class SyncInterfacesView(CacheMixin, View):
         interface.save()
 
 
-class DeleteNetBoxInterfacesView(CacheMixin, View):
+class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Delete interfaces that exist only in NetBox."""
 
+    def get_required_permissions_for_object_type(self, object_type):
+        """Return the required permissions based on object type."""
+        if object_type == "device":
+            return [("delete", Interface)]
+        else:
+            return [("delete", VMInterface)]
+
     def post(self, request, object_type, object_id):
+        # Check plugin write permission first
+        if error := self.require_write_permission_json():
+            return error
+
+        # Set permissions dynamically based on object type
+        self.required_object_permissions = {
+            "POST": self.get_required_permissions_for_object_type(object_type),
+        }
+
+        # Check NetBox object permissions
+        if error := self.require_object_permissions_json("POST"):
+            return error
+
         if object_type == "device":
             obj = get_object_or_404(Device, pk=object_id)
         elif object_type == "virtualmachine":

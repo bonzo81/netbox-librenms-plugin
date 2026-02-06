@@ -12,12 +12,12 @@ from netbox_librenms_plugin.forms import (
 )
 from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
 
 
-class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
+class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
     Check the status of NetBox devices in LibreNMS.
     Shows NetBox devices with their LibreNMS status.
@@ -71,7 +71,7 @@ class DeviceStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
         return Device.objects.none()
 
 
-class VMStatusListView(LibreNMSAPIMixin, generic.ObjectListView):
+class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
     Check the status of virtual machines in NetBox against LibreNMS
     """

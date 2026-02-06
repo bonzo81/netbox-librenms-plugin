@@ -5,10 +5,10 @@ from django.views import View
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
+class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """Add a NetBox device or VM to LibreNMS via the API."""
 
     def get_form_class(self):
@@ -27,6 +27,10 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
             return VirtualMachine.objects.get(pk=object_id)
 
     def post(self, request, object_id):
+        # Check write permission before adding device to LibreNMS
+        if error := self.require_write_permission():
+            return error
+
         self.object = self.get_object(object_id)
         form_class = self.get_form_class()
 
@@ -93,10 +97,14 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
         return redirect(self.object.get_absolute_url())
 
 
-class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
+class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """Update the LibreNMS site/location based on the NetBox site."""
 
     def post(self, request, pk):
+        # Check write permission before updating location in LibreNMS
+        if error := self.require_write_permission():
+            return error
+
         device = get_object_or_404(Device, pk=pk)
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 

@@ -8,10 +8,10 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_virtual_chassis_member,
 )
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class BaseInterfaceTableView(LibreNMSAPIMixin, CacheMixin, View):
+class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for fetching interface data from LibreNMS and generating table data.
     """

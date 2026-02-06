@@ -10,6 +10,7 @@ nav:
     - Initial Setup: usage_tips/README.md
     - Custom Field Setup: usage_tips/custom_field.md
     - Multi-Server Setup: usage_tips/multi_server_configuration.md
+    - Permissions & Access: usage_tips/permissions.md
     - Suggested Workflow: usage_tips/suggested_workflow.md
   - Import Devices:
     - Overview: librenms_import/overview.md

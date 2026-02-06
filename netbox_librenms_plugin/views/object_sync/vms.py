@@ -2,6 +2,7 @@ from django.urls import reverse
 from utilities.views import ViewTab, register_model_view
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
 from netbox_librenms_plugin.utils import get_interface_name_field
 
@@ -18,7 +19,7 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
     model = VirtualMachine
     tab = ViewTab(
         label="LibreNMS Sync",
-        permission="virtualization.view_virtualmachine",
+        permission=PERM_VIEW_PLUGIN,
     )
 
     def get_interface_context(self, request, obj):
