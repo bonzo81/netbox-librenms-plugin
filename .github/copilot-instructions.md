@@ -26,6 +26,15 @@
 - API serializers (`api/serializers.py`) mirror models for external consumption. Update serializers and `api/views.py` together to avoid contract drift.
 - Navigation and menu items are registered in `navigation.py`; extend there for new sections so NetBox renders links correctly.
 
+## Permission System
+- Uses two-tier permissions via `LibreNMSSettings` model: `view_librenmssettings` (read) and `change_librenmssettings` (write). See `docs/development/permissions.md`.
+- All views inherit `LibreNMSPermissionMixin` from `views/mixins.py`. Permission constants live in `constants.py`.
+- **Sync POST handlers** must call `require_write_permission()` at the start and return early if it returns a response.
+- `require_write_permission()` handles HTMX requests with `HX-Redirect` header; regular requests get standard redirect.
+- API endpoints use `LibreNMSPluginPermission` class in `api/views.py` (GET=view, others=change).
+- Navigation menu permissions are set in `navigation.py` using permission constants.
+- **Background job polling requires superuser** (NetBox core restriction on `/api/core/background-tasks/`). Non-superusers automatically fall back to synchronous mode—see `should_use_background_job()` methods.
+
 ## When in Doubt
 - Check docs in `docs/development/` for structure, view inheritance, mixins, and template conventions before introducing new patterns.
 - Review the existing sync views (e.g., `views/sync/interfaces.py`) as reference implementations for data flow and caching patterns.

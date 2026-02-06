@@ -27,5 +27,11 @@ description: Background job architecture and task management patterns
 - Handle all RQ status values explicitly to avoid infinite polling
 - Use `cancelInProgress` flag to prevent polling interference during cancellation
 
+## Superuser Requirement for Background Jobs
+- NetBox's `/api/core/background-tasks/` endpoint requires **superuser** (`IsSuperuser` in `BaseRQViewSet`).
+- Non-superuser users cannot poll job status; they get 403 Forbidden.
+- The plugin automatically falls back to synchronous mode for non-superusers—see `should_use_background_job()` in `list.py` and `actions.py`.
+- This is a NetBox core design decision, not a plugin limitation. No amount of permissions (including `core.view_job`) bypasses it.
+
 ## Custom Sync Endpoint
 `api/views.py::sync_job_status()` syncs database Job status with RQ job status, needed because NetBox worker doesn't always update DB when jobs stop before processing starts.
