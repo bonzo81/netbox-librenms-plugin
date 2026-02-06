@@ -2,7 +2,13 @@ name: Lint and Format
 
 on:
   push:
+    branches:
+      - master
+      - develop
   pull_request:
+    branches:
+      - master
+      - develop
 
 jobs:
   format-and-lint:
@@ -14,7 +20,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.9'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -22,7 +29,22 @@ jobs:
           pip install ruff
 
       - name: Run Ruff linting
-        run: ruff check --output-format=github --show-fixes .
+        run: |
+          echo "::group::Ruff Linting"
+          ruff check . --output-format=github
+          echo "::endgroup::"
 
       - name: Run Ruff formatting check
-        run: ruff format --check --diff .
+        run: |
+          echo "::group::Ruff Formatting"
+          ruff format --check .
+          echo "::endgroup::"
+
+      - name: Report formatting issues
+        if: failure()
+        run: |
+          echo "::error::Formatting or linting issues detected!"
+          echo "To fix locally, run:"
+          echo "  ruff check --fix ."
+          echo "  ruff format ."
+          echo "Then commit and push the changes."
