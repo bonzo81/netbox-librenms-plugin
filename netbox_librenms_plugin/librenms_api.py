@@ -37,10 +37,30 @@ class LibreNMSAPI:
 
         # Default to 'default' if still no server_key
         server_key = server_key or "default"
-        self.server_key = server_key
 
         # Get server configuration
         servers_config = get_plugin_config("netbox_librenms_plugin", "servers")
+
+        # If the requested server_key doesn't exist but there are configured servers,
+        # only fall back to the first available server when using the auto-default key.
+        # If a specific (non-default) server_key was requested but not found, raise
+        # immediately to avoid silently using the wrong LibreNMS instance.
+        if servers_config and isinstance(servers_config, dict) and server_key not in servers_config:
+            if server_key != "default":
+                available = list(servers_config.keys())
+                raise KeyError(
+                    f"Server '{server_key}' not found in LibreNMS plugin configuration. Available servers: {available}"
+                )
+            first_key = next(iter(servers_config), None)
+            if first_key:
+                logger.info(
+                    "Server '%s' not found in config, falling back to '%s'",
+                    server_key,
+                    first_key,
+                )
+                server_key = first_key
+
+        self.server_key = server_key
 
         if servers_config and isinstance(servers_config, dict) and server_key in servers_config:
             # Multi-server configuration

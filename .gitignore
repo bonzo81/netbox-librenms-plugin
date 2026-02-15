@@ -285,3 +285,7 @@ cython_debug/
 .devcontainer/config/plugin-config.py
 .devcontainer/config/extra-configuration.py
 .devcontainer/config/extra-plugins.py
+# Proxy CA certificates (keep local)
+ca-bundle.crt
+*.pem
+.github/hooks/

@@ -7,6 +7,74 @@ echo "👤 Current user: $(whoami)"
 NETBOX_VERSION=${NETBOX_VERSION:-"latest"}
 echo "📦 Using NetBox Docker image: netboxcommunity/netbox:${NETBOX_VERSION}"
 
+# ---------------------------------------------------------------------------
+# Detect plugin workspace directory (must contain pyproject.toml).
+# Prints the resolved path to stdout on success, or an empty string on
+# failure.  Always exits 0 — callers must check for an empty result.
+# ---------------------------------------------------------------------------
+detect_plugin_workspace() {
+  if [ -f "$PWD/pyproject.toml" ]; then
+    echo "$PWD"
+  elif [ -d "/workspaces/netbox-librenms-plugin" ] && [ -f "/workspaces/netbox-librenms-plugin/pyproject.toml" ]; then
+    echo "/workspaces/netbox-librenms-plugin"
+  else
+    local candidate
+    candidate=$(find /workspaces -maxdepth 2 -type f -name pyproject.toml 2>/dev/null | head -n1 | xargs -r dirname || true)
+    if [ -n "$candidate" ] && [ -f "$candidate/pyproject.toml" ]; then
+      echo "$candidate"
+    else
+      echo ""
+    fi
+  fi
+}
+
+# Configure proxy for apt and pip if proxy environment variables are set
+if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
+  echo "🌐 Configuring proxy settings..."
+
+  # Configure apt proxy
+  if [ -n "$HTTP_PROXY" ]; then
+    echo "Acquire::http::Proxy \"$HTTP_PROXY\";" > /etc/apt/apt.conf.d/80proxy
+    echo "  ✓ apt HTTP proxy: $HTTP_PROXY"
+  fi
+  if [ -n "$HTTPS_PROXY" ]; then
+    echo "Acquire::https::Proxy \"$HTTPS_PROXY\";" >> /etc/apt/apt.conf.d/80proxy
+    echo "  ✓ apt HTTPS proxy: $HTTPS_PROXY"
+  fi
+
+  # Configure pip proxy via environment (already set, but ensure it's exported)
+  export HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+
+  # Install custom CA certificate into the system trust store (for MITM proxies)
+  PLUGIN_WS_DIR_EARLY="$(detect_plugin_workspace)"
+  [ -z "$PLUGIN_WS_DIR_EARLY" ] && PLUGIN_WS_DIR_EARLY="/workspaces/netbox-librenms-plugin"
+  CA_BUNDLE_SRC="$PLUGIN_WS_DIR_EARLY/ca-bundle.crt"
+  if [ -f "$CA_BUNDLE_SRC" ]; then
+    echo "🔐 Installing custom CA certificate into system trust store..."
+    mkdir -p /usr/local/share/ca-certificates
+    cp "$CA_BUNDLE_SRC" /usr/local/share/ca-certificates/proxy-ca-bundle.crt
+    update-ca-certificates 2>/dev/null
+    echo "  ✓ CA certificate installed into system trust store"
+    # Point environment variables to the system bundle
+    export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+  else
+    echo "  ℹ️  No ca-bundle.crt found at $CA_BUNDLE_SRC, skipping CA install"
+    # Only disable git SSL verification if explicitly opted-in via ALLOW_GIT_SSL_DISABLE.
+    # Silently disabling SSL is a security risk; prefer providing a CA bundle instead.
+    if [ "${ALLOW_GIT_SSL_DISABLE:-false}" = "true" ]; then
+      git config --global http.sslVerify false
+      echo "  ⚠️  git SSL verification disabled globally (ALLOW_GIT_SSL_DISABLE=true)"
+    else
+      echo "  ⚠️  No CA bundle found and git SSL verification was NOT disabled."
+      echo "     If you need to disable it, set ALLOW_GIT_SSL_DISABLE=true in .devcontainer/.env"
+      echo "     Preferred: provide a ca-bundle.crt in the workspace root instead."
+    fi
+  fi
+fi
+
 # Verify NetBox virtual environment exists
 if [ ! -f "/opt/netbox/venv/bin/activate" ]; then
     echo "❌ NetBox virtual environment not found at /opt/netbox/venv/"
@@ -27,23 +95,37 @@ fi
 # Install dev tools
 echo "🔧 Installing development dependencies..."
 apt-get update -qq
-apt-get install -y -qq net-tools
+apt-get install -y -qq net-tools git
 $PIP_CMD install pytest pytest-django ruff pre-commit
 
-# Detect plugin workspace directory (must contain pyproject.toml)
-if [ -f "$PWD/pyproject.toml" ]; then
-  PLUGIN_WS_DIR="$PWD"
-elif [ -d "/workspaces/netbox-librenms-plugin" ] && [ -f "/workspaces/netbox-librenms-plugin/pyproject.toml" ]; then
-  PLUGIN_WS_DIR="/workspaces/netbox-librenms-plugin"
-else
-  CANDIDATE_DIR=$(find /workspaces -maxdepth 2 -type f -name pyproject.toml 2>/dev/null | head -n1 | xargs dirname || true)
-  if [ -n "$CANDIDATE_DIR" ] && [ -f "$CANDIDATE_DIR/pyproject.toml" ]; then
-    PLUGIN_WS_DIR="$CANDIDATE_DIR"
-  else
-    echo "❌ Could not locate plugin workspace directory (pyproject.toml not found)."
-    echo "   Checked: $PWD and /workspaces/*"
-    exit 1
-  fi
+# Install GitHub CLI (gh)
+# NOTE: The chained && commands below mean a partial failure (e.g. wget succeeds
+# but apt-get install gh fails) may leave artifacts (keyring, sources list, temp
+# file).  This is acceptable here because it only runs during container build —
+# a rebuild will retry from scratch.  If this block is ever moved to a runtime
+# script, consider adding a trap or explicit cleanup on error.
+if ! command -v gh >/dev/null 2>&1; then
+  echo "🔧 Installing GitHub CLI..."
+  (type -p wget >/dev/null || apt-get install -y -qq wget) \
+    && mkdir -p -m 755 /etc/apt/keyrings \
+    && out=$(mktemp) \
+    && wget -qO "$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && cat "$out" | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update -qq \
+    && apt-get install -y -qq gh \
+    && rm -f "$out" \
+    && echo "  ✓ GitHub CLI installed: $(gh --version | head -1)" \
+    || echo "⚠️  GitHub CLI installation failed (non-fatal)"
+fi
+
+# Detect plugin workspace directory using the shared helper
+PLUGIN_WS_DIR="$(detect_plugin_workspace)"
+if [ -z "$PLUGIN_WS_DIR" ]; then
+  echo "❌ Could not locate plugin workspace directory (pyproject.toml not found)."
+  echo "   Checked: $PWD and /workspaces/*"
+  exit 1
 fi
 echo "📂 Plugin workspace: $PLUGIN_WS_DIR"
 
@@ -160,42 +242,27 @@ python manage.py collectstatic --noinput >/dev/null 2>&1 || true
 # Set up pre-commit hooks
 echo "🪝 Installing pre-commit hooks..."
 cd "$PLUGIN_WS_DIR"
+git config --global --add safe.directory "$PLUGIN_WS_DIR"
 pre-commit install --install-hooks 2>/dev/null || echo "⚠️  Pre-commit hook installation failed (may already be installed)"
 
 # Ensure scripts are executable
 chmod +x "$PLUGIN_WS_DIR/.devcontainer/scripts/start-netbox.sh" || true
 chmod +x "$PLUGIN_WS_DIR/.devcontainer/scripts/diagnose.sh" || true
+chmod +x "$PLUGIN_WS_DIR/.devcontainer/scripts/load-aliases.sh" || true
 
-# Aliases for convenience
-cat >> ~/.bashrc << EOF
-# NetBox LibreNMS Plugin Development Aliases
-export PATH="/opt/netbox/venv/bin:\$PATH"
-export DEBUG="\${DEBUG:-True}"
-PLUGIN_DIR="$PLUGIN_WS_DIR"
-alias netbox-run-bg="\$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh --background"
-alias netbox-run="\$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh"
-alias netbox-restart="netbox-stop && sleep 1 && netbox-run-bg"
-alias netbox-reload="cd \$PLUGIN_DIR && (command -v uv >/dev/null 2>&1 && uv pip install -e . || pip install -e .) && netbox-restart"
-alias netbox-stop="([ -f /tmp/netbox.pid ] && kill \\\$(cat /tmp/netbox.pid) && rm /tmp/netbox.pid && echo 'NetBox stopped' || echo 'NetBox not running'); ([ -f /tmp/rqworker.pid ] && kill \\\$(cat /tmp/rqworker.pid) && rm /tmp/rqworker.pid && echo 'RQ worker stopped' || echo 'RQ worker not running')"
-alias netbox-logs="tail -f /tmp/netbox.log"
-alias netbox-status="[ -f /tmp/netbox.pid ] && kill -0 \\\$(cat /tmp/netbox.pid) 2>/dev/null && echo 'NetBox is running (PID: '\\\$(cat /tmp/netbox.pid)')' || echo 'NetBox is not running'; [ -f /tmp/rqworker.pid ] && kill -0 \\\$(cat /tmp/rqworker.pid) 2>/dev/null && echo 'RQ worker is running (PID: '\\\$(cat /tmp/rqworker.pid)')' || echo 'RQ worker is not running'"
-alias rq-logs="tail -f /tmp/rqworker.log"
-alias rq-status="[ -f /tmp/rqworker.pid ] && kill -0 \\\$(cat /tmp/rqworker.pid) 2>/dev/null && echo 'RQ worker is running (PID: '\\\$(cat /tmp/rqworker.pid)')' || echo 'RQ worker is not running'"
-alias netbox-shell="cd /opt/netbox/netbox && source /opt/netbox/venv/bin/activate && python manage.py shell"
-alias netbox-test="cd \$PLUGIN_DIR && source /opt/netbox/venv/bin/activate && python -m pytest"
-alias netbox-manage="cd /opt/netbox/netbox && source /opt/netbox/venv/bin/activate && python manage.py"
-alias plugin-install="cd \$PLUGIN_DIR && (command -v uv >/dev/null 2>&1 && uv pip install -e . || pip install -e .)"
-alias ruff-check="cd \$PLUGIN_DIR && ruff check ."
-alias ruff-format="cd \$PLUGIN_DIR && ruff format ."
-alias ruff-fix="cd \$PLUGIN_DIR && ruff check --fix ."
-alias diagnose="\$PLUGIN_DIR/.devcontainer/scripts/diagnose.sh"
-alias plugins-install='if [ -f "$PLUGIN_DIR/.devcontainer/extra-requirements.txt" ]; then source /opt/netbox/venv/bin/activate && pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt"; else echo "No .devcontainer/extra-requirements.txt found"; fi'
-# Help
-alias dev-help='echo "🎯 NetBox LibreNMS Plugin Development Commands:"; echo ""; echo "📊 NetBox Server Management:"; echo "  netbox-run-bg       : Start NetBox in background"; echo "  netbox-run          : Start NetBox in foreground (for debugging)"; echo "  netbox-stop         : Stop NetBox and RQ worker"; echo "  netbox-restart      : Restart NetBox and RQ worker"; echo "  netbox-reload       : Reinstall plugin and restart NetBox"; echo "  netbox-status       : Check if NetBox and RQ worker are running"; echo "  netbox-logs         : View NetBox server logs"; echo ""; echo "⚙️  Background Jobs (RQ Worker):"; echo "  rq-status           : Check if RQ worker is running"; echo "  rq-logs             : View RQ worker logs"; echo ""; echo "🛠️  Development Tools:"; echo "  netbox-shell        : Open NetBox Django shell"; echo "  netbox-test         : Run plugin tests"; echo "  netbox-manage       : Run Django management commands"; echo "  plugin-install      : Reinstall plugin in development mode"; echo ""; echo "🧹 Code Quality:"; echo "  ruff-check          : Check code with Ruff"; echo "  ruff-format         : Format code with Ruff"; echo "  ruff-fix            : Auto-fix code issues with Ruff"; echo ""; echo "🔎 Diagnostics:"; echo "  diagnose            : Run startup diagnostics"; echo "  dev-help           : Show this help message"; echo ""; echo "📖 NetBox available at: http://localhost:8000 (admin/admin)"; echo ""'
+# Load aliases and welcome message from the canonical source (load-aliases.sh).
+# Appended to .bashrc so every interactive shell gets them automatically.
+# Guard with a sentinel so rerunning setup.sh doesn't create duplicate entries.
+BASHRC_SENTINEL="# NetBox LibreNMS Plugin — source aliases from the single canonical file"
+if ! grep -qF "$BASHRC_SENTINEL" ~/.bashrc 2>/dev/null; then
+  cat >> ~/.bashrc << EOF
+$BASHRC_SENTINEL
+source "$PLUGIN_WS_DIR/.devcontainer/scripts/load-aliases.sh"
 
 # Show welcome message for new terminals
-bash $PLUGIN_DIR/.devcontainer/scripts/welcome.sh
+bash "$PLUGIN_WS_DIR/.devcontainer/scripts/welcome.sh"
 EOF
+fi
 
 # Fix Git remote URLs for dev container compatibility
 echo "🔧 Checking Git remote configuration..."
@@ -221,4 +288,5 @@ else
   echo "⚠️  Warning: Plugin may not be properly installed"
 fi
 
+echo ""
 echo "🚀 NetBox LibreNMS Plugin Dev Environment Ready!"

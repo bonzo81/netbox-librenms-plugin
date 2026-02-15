@@ -49,9 +49,9 @@ class LibreNMSInterfaceTable(tables.Table):
         self._meta.row_attrs = {
             "data-interface": lambda record: record.get(self.interface_name_field),
             "data-name": lambda record: record.get(self.interface_name_field),
-            "data-enabled": lambda record: record.get("ifAdminStatus", "").lower()
-            if record.get("ifAdminStatus")
-            else "",
+            "data-enabled": lambda record: (
+                record.get("ifAdminStatus", "").lower() if record.get("ifAdminStatus") else ""
+            ),
         }
 
         super().__init__(*args, **kwargs)

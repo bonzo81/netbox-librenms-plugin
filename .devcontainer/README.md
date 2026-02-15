@@ -65,6 +65,20 @@ If you need to test with a LibreNMS instance on a private network (local lab, co
 - **GitHub CLI**: Automatically configured for easy PR submission
 - **Logs**: Use `netbox-logs` to debug issues in real-time
 
+
+### 📡 LibreNMS Server Configuration
+
+You need a LibreNMS instance to use this plugin. Configure your LibreNMS server(s) in `plugin-config.py`:
+
+1. Copy the example config:
+
+   ```bash
+   cp .devcontainer/config/plugin-config.py.example .devcontainer/config/plugin-config.py
+   ```
+
+2. Edit it with your LibreNMS server URL(s) and API token(s)
+3. Restart NetBox: `netbox-restart`
+
 ## Out-of-the-box defaults
 
 Below are the dev container defaults. The field name to change these defaults is listed below each line.
@@ -83,6 +97,8 @@ Below are the dev container defaults. The field name to change these defaults is
    - .env: `SUPERUSER_NAME`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, `SKIP_SUPERUSER`
 - Plugin loader: enabled; reads `.devcontainer/config/plugin-config.py` if present
 - If `plugin-config.py` is missing: plugin is enabled with empty config (features won’t work until configured)
+
+
 
 ## 🔧 Configuration
 
@@ -139,6 +155,84 @@ You might experience issues with database schemas and migrations when changing N
 - Database: `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
 - Redis: `REDIS_HOST`, `REDIS_PASSWORD`
 - Superuser: `SUPERUSER_NAME`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, `SKIP_SUPERUSER`
+- Proxy: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE`
+
+### 🌐 Proxy Configuration (MITM Proxies)
+
+If you're behind a corporate proxy or MITM proxy (like Zscaler, BlueCoat, etc.), you need to configure proxy at two levels: the Docker client (for building) and the container runtime (for package installation inside the container).
+
+**Step 1: Configure Docker client proxy** (`~/.docker/config.json`)
+
+This is **required** so that `apt-get`, `curl`, etc. work during the container image build (e.g., when installing devcontainer features like `git` and `github-cli`).
+
+Create or edit `~/.docker/config.json`:
+
+```json
+{
+  "proxies": {
+    "default": {
+      "httpProxy": "http://proxy.example.com:8080",
+      "httpsProxy": "http://proxy.example.com:8080",
+      "noProxy": "localhost,127.0.0.1,postgres,redis"
+    }
+  }
+}
+```
+
+Docker automatically injects these as environment variables into every `RUN` instruction during `docker build`. No VS Code restart is needed — this takes effect immediately.
+
+> **Docker Desktop users:** You can configure the same settings via Docker Desktop Settings → Resources → Proxies, which writes this file for you.
+
+**Step 2: Create `.devcontainer/.env`** (for container runtime)
+
+```bash
+cp .devcontainer/.env.example .devcontainer/.env
+```
+
+Add your proxy settings to `.devcontainer/.env`:
+
+```bash
+# Proxy Configuration
+HTTP_PROXY=http://proxy.example.com:8080
+HTTPS_PROXY=http://proxy.example.com:8080
+NO_PROXY=localhost,127.0.0.1,postgres,redis
+
+# CA Certificate Bundle (if your proxy uses a custom CA)
+# Place your CA cert in the workspace, e.g., /workspaces/netbox-librenms-plugin/ca-bundle.crt
+# REQUESTS_CA_BUNDLE=/workspaces/netbox-librenms-plugin/ca-bundle.crt
+# SSL_CERT_FILE=/workspaces/netbox-librenms-plugin/ca-bundle.crt
+# CURL_CA_BUNDLE=/workspaces/netbox-librenms-plugin/ca-bundle.crt
+```
+
+**Step 3: Add your CA certificate** (optional, only if your proxy intercepts TLS):
+   - Export your proxy's CA certificate (usually available from your IT department or browser)
+   - Save it as `ca-bundle.crt` in the root of your workspace
+   - Uncomment and update the `*_CA_BUNDLE` / `SSL_CERT_FILE` lines in `.env`
+
+**Step 4: Rebuild the container**:
+   - VS Code: Ctrl+Shift+P → "Dev Containers: Rebuild Container"
+
+**What gets configured:**
+- `~/.docker/config.json` → proxy for Docker build steps (devcontainer features, apt in Dockerfile)
+- `.devcontainer/.env` → proxy for running containers (apt, pip, curl at runtime)
+- `setup.sh` auto-configures apt proxy and git SSL settings inside the container
+
+**Important Notes:**
+- The `.env` file is ignored by git, so your proxy credentials stay private
+- `~/.docker/config.json` is a per-user file outside the repo
+- Add internal service names to `NO_PROXY` to avoid routing internal Docker traffic through the proxy
+- **Proxy authentication:** Embedding credentials directly in the proxy URL (e.g., `http://username:password@proxy.example.com:8080`) is insecure — credentials can be visible in process listings, environment dumps, `docker inspect` output, and logs. Prefer safer alternatives such as Docker's `config.json` with `credsStore` or a secret manager for storing proxy credentials securely.
+
+**Common Issues:**
+
+*"Could not connect to archive.ubuntu.com" during build*
+- → `~/.docker/config.json` is missing or has wrong proxy URL
+
+*"SSL certificate errors" during build*
+- → Your proxy uses a MITM certificate. Export it and add it to the system trust store, or set `SSL_CERT_FILE` in `.env`
+
+*Container builds but apt/pip fails inside*
+- → .env file is missing or has wrong proxy settings. Check .env matches Docker Desktop settings
 
 
 After any `.env` change, rebuild the dev container to apply environment updates.
