@@ -22,6 +22,16 @@ services:
       SUPERUSER_EMAIL: ${SUPERUSER_EMAIL:-admin@example.com}
       SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:-admin}
       SKIP_SUPERUSER: ${SKIP_SUPERUSER:-false}
+      # Proxy settings (optional)
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      no_proxy: ${NO_PROXY:-}
+      REQUESTS_CA_BUNDLE: ${REQUESTS_CA_BUNDLE:-}
+      SSL_CERT_FILE: ${SSL_CERT_FILE:-}
+      CURL_CA_BUNDLE: ${CURL_CA_BUNDLE:-}
     depends_on:
       postgres:
         condition: service_healthy

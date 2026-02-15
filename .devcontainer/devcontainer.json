@@ -19,7 +19,7 @@
   },
   "hostRequirements": {
     "memory": "4gb",
-    "storage": "32gb"
+    "storage": "48gb"
   },
   "containerEnv": {
     "NETBOX_VERSION": "${localEnv:NETBOX_VERSION:latest}",
@@ -34,12 +34,18 @@
     "SUPERUSER_NAME": "${localEnv:SUPERUSER_NAME:admin}",
     "SUPERUSER_EMAIL": "${localEnv:SUPERUSER_EMAIL:admin@example.com}",
     "SUPERUSER_PASSWORD": "${localEnv:SUPERUSER_PASSWORD:admin}",
-    "SKIP_SUPERUSER": "${localEnv:SKIP_SUPERUSER:false}"
+    "SKIP_SUPERUSER": "${localEnv:SKIP_SUPERUSER:false}",
+    "HTTP_PROXY": "${localEnv:HTTP_PROXY}",
+    "HTTPS_PROXY": "${localEnv:HTTPS_PROXY}",
+    "http_proxy": "${localEnv:HTTP_PROXY}",
+    "https_proxy": "${localEnv:HTTPS_PROXY}",
+    "NO_PROXY": "${localEnv:NO_PROXY}",
+    "no_proxy": "${localEnv:NO_PROXY}",
+    "REQUESTS_CA_BUNDLE": "${localEnv:REQUESTS_CA_BUNDLE}",
+    "SSL_CERT_FILE": "${localEnv:SSL_CERT_FILE}",
+    "CURL_CA_BUNDLE": "${localEnv:CURL_CA_BUNDLE}"
   },
-  "features": {
-    "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/devcontainers/features/github-cli:1": {}
-  },
+  "features": {},
   "customizations": {
     "vscode": {
       "extensions": [

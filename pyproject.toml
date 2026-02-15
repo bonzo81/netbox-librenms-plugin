@@ -32,7 +32,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["netbox_librenms_plugin*"]
-exclude = ["site*"]
+exclude = ["site*", "netbox_librenms_plugin.tests*"]
 
 [tool.setuptools.package-data]
 netbox_librenms_plugin = ["templates/**"]

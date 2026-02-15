@@ -46,6 +46,7 @@ fi
 echo ""
 echo "🚀 Quick start:"
 echo "   • Type 'netbox-run' to start the development server"
+echo "   • Type 'netbox-restart' to restart NetBox (after config changes)"
 echo "   • Type 'dev-help' to see all available commands"
 echo "   • Edit code in the workspace - auto-reload is enabled"
 echo ""
