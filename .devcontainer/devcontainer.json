@@ -19,7 +19,7 @@
   },
   "hostRequirements": {
     "memory": "4gb",
-    "storage": "48gb"
+    "storage": "32gb"
   },
   "containerEnv": {
     "NETBOX_VERSION": "${localEnv:NETBOX_VERSION:latest}",
