@@ -808,11 +808,44 @@ def validate_device_for_import(
                 result["can_import"] = False
 
                 # Check if name matches resolved name (accounts for use_sysname/strip_domain)
+                # Also accounts for virtual chassis naming pattern when device is a VC member
+                name_matched = False
                 if hostname and existing_device.name == hostname:
+                    name_matched = True
+                elif (
+                    hostname
+                    and hasattr(existing_device, "virtual_chassis")
+                    and existing_device.virtual_chassis is not None
+                    and existing_device.vc_position is not None
+                ):
+                    # Device is a VC member — generate the expected VC name using
+                    # the same function that the import creation process uses
+                    expected_vc_name = _generate_vc_member_name(
+                        hostname,
+                        existing_device.vc_position,
+                        serial=getattr(existing_device, "serial", None),
+                    )
+                    if existing_device.name == expected_vc_name:
+                        name_matched = True
+
+                if name_matched:
                     result["name_matches"] = True
-                elif hostname and existing_device.name != hostname:
+                elif hostname:
                     result["name_sync_available"] = True
-                    result["suggested_name"] = hostname
+                    # suggested_name uses resolved name (not raw sysName),
+                    # respecting use_sysname/strip_domain preferences
+                    if (
+                        hasattr(existing_device, "virtual_chassis")
+                        and existing_device.virtual_chassis is not None
+                        and existing_device.vc_position is not None
+                    ):
+                        result["suggested_name"] = _generate_vc_member_name(
+                            hostname,
+                            existing_device.vc_position,
+                            serial=getattr(existing_device, "serial", None),
+                        )
+                    else:
+                        result["suggested_name"] = hostname
 
                 # Check for serial drift on the linked device
                 incoming_serial = libre_device.get("serial") or ""
@@ -1071,7 +1104,16 @@ def validate_device_for_import(
                     )
                     if vc_detection:
                         result["virtual_chassis"] = vc_detection
-                        if vc_detection["is_stack"]:
+                        # Correct VC member suggested_names using the resolved name
+                        # (which respects use_sysname/strip_domain preferences).
+                        # This reuses the same function that BulkImportConfirmView uses.
+                        if vc_detection.get("is_stack") and hostname:
+                            update_vc_member_suggested_names(vc_detection, hostname)
+                            logger.debug(
+                                f"Virtual chassis CONFIRMED for device {hostname}: "
+                                f"{vc_detection['member_count']} members"
+                            )
+                        elif vc_detection["is_stack"]:
                             logger.debug(
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
@@ -2261,6 +2303,8 @@ def process_device_filters(
     job=None,
     request=None,
     return_cache_status: bool = False,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
 ) -> List[dict] | tuple[List[dict], bool]:
     """
     Process LibreNMS device filters and return validated devices.
@@ -2279,6 +2323,8 @@ def process_device_filters(
         job: Optional JobRunner instance for logging job events
         request: Optional Django request for client disconnect detection (synchronous only)
         return_cache_status: When True, returns (devices, from_cache) tuple
+        use_sysname: If True, prefer sysName over hostname for device name resolution
+        strip_domain: If True, strip domain suffix from device names
 
     Returns:
         List[dict]: Validated devices with _validation key, or tuple of (devices, from_cache)
@@ -2431,6 +2477,8 @@ def process_device_filters(
                 api=api_for_validation,
                 include_vc_detection=vc_detection_enabled,
                 force_vc_refresh=clear_cache,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
             )
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:

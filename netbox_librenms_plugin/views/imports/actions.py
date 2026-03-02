@@ -659,11 +659,15 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     is_vm = device_id in [item["device_id"] for item in vm_result.get("success", [])]
 
                     # Re-validate with fresh status (will now show as imported)
+                    # Pass naming preferences so name comparison uses the same
+                    # resolved name the device was imported with.
                     validation = validate_device_for_import(
                         libre_device,
                         import_as_vm=is_vm,
                         api=None,  # No VC detection needed for already-imported devices
                         include_vc_detection=False,
+                        use_sysname=sync_options.get("use_sysname", True),
+                        strip_domain=sync_options.get("strip_domain", False),
                     )
                     validation["import_as_vm"] = is_vm
 

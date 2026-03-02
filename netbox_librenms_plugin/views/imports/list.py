@@ -134,6 +134,25 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         self._cache_timeout = 300
         self._cache_metadata_missing = False
 
+        # Resolve naming preferences early so all paths (sync, background job,
+        # queryset loading) use the same use_sysname/strip_domain values.
+        # Cascade: user preference → plugin settings → defaults.
+        try:
+            settings_obj, _ = LibreNMSSettings.objects.get_or_create()
+        except Exception:
+            settings_obj = None
+
+        _use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        _strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        if _use_sysname is None:
+            _use_sysname = getattr(settings_obj, "use_sysname_default", True) if settings_obj else True
+        if _strip_domain is None:
+            _strip_domain = getattr(settings_obj, "strip_domain_default", False) if settings_obj else False
+
+        self._use_sysname = _use_sysname
+        self._strip_domain = _strip_domain
+        self._settings = settings_obj
+
         # Determine if new filters are being submitted
         libre_filter_fields = (
             "librenms_location",
@@ -252,8 +271,6 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 logger.error(f"Error getting device count: {e}")
                 device_count = 0
 
-            # Load settings for background job decision
-            settings = None
             # Decide whether to use background job
             # Skip background job if data is already cached
             if not devices_cached and self.should_use_background_job():
@@ -270,6 +287,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                         show_disabled=bool(self._filter_form_data.get("show_disabled")),
                         exclude_existing=bool(self._filter_form_data.get("exclude_existing")),
                         server_key=self.librenms_api.server_key,
+                        use_sysname=self._use_sysname,
+                        strip_domain=self._strip_domain,
                     )
 
                     logger.info(
@@ -301,21 +320,6 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         filter_warning = self._filter_warning
 
-        # Load settings for import defaults
-        try:
-            settings, _ = LibreNMSSettings.objects.get_or_create()
-        except Exception:
-            settings = None
-
-        # User preference overrides for toggles (persisted per-user)
-        use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
-        strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
-        # Fall back to server-level settings
-        if use_sysname is None:
-            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
-        if strip_domain is None:
-            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
-
         # Get active cached searches for this server
         cached_searches = get_active_cached_searches(self.librenms_api.server_key)
 
@@ -327,9 +331,9 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             "filter_warning": filter_warning,
             "filters_submitted": filters_submitted,
             "show_filter_warning": bool(filter_warning),
-            "settings": settings,
-            "use_sysname": use_sysname,
-            "strip_domain": strip_domain,
+            "settings": self._settings,
+            "use_sysname": self._use_sysname,
+            "strip_domain": self._strip_domain,
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),
@@ -417,6 +421,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             exclude_existing=exclude_existing,
             request=self._request,
             return_cache_status=True,
+            use_sysname=self._use_sysname,
+            strip_domain=self._strip_domain,
         )
 
         self._from_cache = from_cache

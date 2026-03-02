@@ -1286,6 +1286,315 @@ class TestDeviceNamingPreferences:
         assert result["resolved_name"] == "switch-01"
 
 
+class TestNameMatchesWithNamingPreferences:
+    """Test that name_matches/name_sync_available respect naming preferences and VC patterns.
+
+    The name comparison should use the resolved name (result of _determine_device_name())
+    which accounts for use_sysname and strip_domain, not the raw LibreNMS sysName.
+    For VC members, it should also account for the VC naming pattern.
+    """
+
+    COMMON_PATCHES = [
+        "netbox_librenms_plugin.import_utils.Site",
+        "netbox_librenms_plugin.import_utils.Rack",
+        "netbox_librenms_plugin.import_utils.Cluster",
+        "netbox_librenms_plugin.import_utils.DeviceRole",
+        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.find_matching_site",
+        "netbox_librenms_plugin.import_utils.Device",
+        "virtualization.models.VirtualMachine",
+    ]
+
+    def _start_patches(self):
+        """Start all common patches and return mocks in standard order."""
+        self._patchers = [patch(p) for p in self.COMMON_PATCHES]
+        mocks = [p.start() for p in self._patchers]
+        (
+            self.mock_site_model,
+            self.mock_rack,
+            self.mock_cluster,
+            self.mock_role,
+            self.mock_match_type,
+            self.mock_find_platform,
+            self.mock_find_site,
+            self.mock_device,
+            self.mock_vm,
+        ) = mocks
+
+    def _stop_patches(self):
+        """Stop all patches."""
+        for p in self._patchers:
+            p.stop()
+
+    def _configure_standard_mocks(self):
+        """Configure standard mock returns for site/platform/type/role."""
+        self.mock_find_site.return_value = {
+            "found": True,
+            "site": MagicMock(),
+            "match_type": "exact",
+            "confidence": 1.0,
+        }
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+
+    def _setup_librenms_id_match(self, existing_device, as_vm=False):
+        """Configure mocks so that a device is found by librenms_id."""
+        if as_vm:
+            self.mock_vm.objects.filter.return_value.first.return_value = existing_device
+            self.mock_device.objects.filter.return_value.first.return_value = None
+        else:
+            self.mock_vm.objects.filter.return_value.first.return_value = None
+
+            def device_filter(**kwargs):
+                result = MagicMock()
+                if "custom_field_data__librenms_id" in kwargs:
+                    result.first.return_value = existing_device
+                else:
+                    result.first.return_value = None
+                return result
+
+            self.mock_device.objects.filter.side_effect = device_filter
+
+    def setup_method(self):
+        """Set up common patches."""
+        self._start_patches()
+
+    def teardown_method(self):
+        """Tear down patches."""
+        self._stop_patches()
+
+    def test_name_matches_with_strip_domain(self):
+        """strip_domain=True: FQDN in LibreNMS matches short name in NetBox."""
+        existing = MagicMock()
+        existing.name = "router"
+        existing.serial = ""
+        existing.virtual_chassis = None
+        existing.vc_position = None
+
+        self._setup_librenms_id_match(existing)
+        self._configure_standard_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "router.example.com",
+            "sysName": "router.example.com",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+            strip_domain=True,
+        )
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["name_matches"] is True
+        assert result["name_sync_available"] is False
+
+    def test_name_matches_uses_hostname_when_sysname_disabled(self):
+        """use_sysname=False: matches against hostname instead of sysName."""
+        existing = MagicMock()
+        existing.name = "10.0.0.1"
+        existing.serial = ""
+        existing.virtual_chassis = None
+        existing.vc_position = None
+
+        self._setup_librenms_id_match(existing)
+        self._configure_standard_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "10.0.0.1",
+            "sysName": "core-switch",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+            use_sysname=False,
+        )
+
+        assert result["name_matches"] is True
+        assert result["name_sync_available"] is False
+
+    def test_name_mismatch_offers_sync_with_resolved_name(self):
+        """When names don't match, suggested_name is the resolved name, not raw sysName."""
+        existing = MagicMock()
+        existing.name = "old-device"
+        existing.serial = ""
+        existing.virtual_chassis = None
+        existing.vc_position = None
+
+        self._setup_librenms_id_match(existing)
+        self._configure_standard_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "new-switch.example.com",
+            "sysName": "new-switch.example.com",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+            strip_domain=True,
+        )
+
+        assert result["name_sync_available"] is True
+        # suggested_name should be the resolved (stripped) name, not raw sysName
+        assert result["suggested_name"] == "new-switch"
+
+    @patch("netbox_librenms_plugin.import_utils._generate_vc_member_name")
+    def test_name_matches_vc_member(self, mock_vc_name):
+        """VC member: name matches when existing device name matches generated VC name."""
+        mock_vc_name.return_value = "switch-M2"
+
+        existing = MagicMock()
+        existing.name = "switch-M2"
+        existing.serial = "SN123"
+        existing.virtual_chassis = MagicMock()  # Not None → device is a VC member
+        existing.vc_position = 2
+
+        self._setup_librenms_id_match(existing)
+        self._configure_standard_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "switch",
+            "sysName": "switch",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+        )
+
+        assert result["name_matches"] is True
+        assert result["name_sync_available"] is False
+        # _generate_vc_member_name should be called with resolved name, position, serial
+        mock_vc_name.assert_called_with("switch", 2, serial="SN123")
+
+    @patch("netbox_librenms_plugin.import_utils._generate_vc_member_name")
+    def test_name_matches_vc_member_with_strip_domain(self, mock_vc_name):
+        """VC member + strip_domain: FQDN resolved to short name matches VC pattern."""
+        mock_vc_name.return_value = "siteA-9300-1 (2)"
+
+        existing = MagicMock()
+        existing.name = "siteA-9300-1 (2)"
+        existing.serial = "SN456"
+        existing.virtual_chassis = MagicMock()
+        existing.vc_position = 2
+
+        self._setup_librenms_id_match(existing)
+        self._configure_standard_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 555,
+            "hostname": "siteA-9300-1.example.net.com",
+            "sysName": "siteA-9300-1.example.net.com",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+            strip_domain=True,
+        )
+
+        assert result["name_matches"] is True
+        assert result["name_sync_available"] is False
+        # Resolved name should be "siteA-9300-1" (stripped), then VC name generated
+        mock_vc_name.assert_called_with("siteA-9300-1", 2, serial="SN456")
+
+    @patch("netbox_librenms_plugin.import_utils._generate_vc_member_name")
+    def test_vc_member_name_mismatch_suggests_vc_name(self, mock_vc_name):
+        """VC member name mismatch: suggested_name should be the expected VC name."""
+        mock_vc_name.return_value = "new-switch-M2"
+
+        existing = MagicMock()
+        existing.name = "old-switch-M2"
+        existing.serial = "SN789"
+        existing.virtual_chassis = MagicMock()
+        existing.vc_position = 2
+
+        self._setup_librenms_id_match(existing)
+        self._configure_standard_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "new-switch",
+            "sysName": "new-switch",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+        )
+
+        assert result["name_matches"] is False
+        assert result["name_sync_available"] is True
+        assert result["suggested_name"] == "new-switch-M2"
+
+    def test_vm_name_matches_with_strip_domain(self):
+        """VM name comparison also uses resolved name, not raw sysName."""
+        existing_vm = MagicMock()
+        existing_vm.name = "vm-server"
+
+        self._setup_librenms_id_match(existing_vm, as_vm=True)
+        self._configure_standard_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "vm-server.example.com",
+            "sysName": "vm-server.example.com",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+            strip_domain=True,
+        )
+
+        assert result["import_as_vm"] is True
+        assert result["name_matches"] is True
+
+    def test_name_matches_exact_without_vc(self):
+        """Standalone device: exact name match works without VC check."""
+        existing = MagicMock()
+        existing.name = "core-router"
+        existing.serial = ""
+        existing.virtual_chassis = None
+        existing.vc_position = None
+
+        self._setup_librenms_id_match(existing)
+        self._configure_standard_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "core-router",
+            "sysName": "core-router",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+        )
+
+        assert result["name_matches"] is True
+        assert result["name_sync_available"] is False
+
+
 class TestSerialNumberMatching:
     """Test serial number matching in device validation."""
 
