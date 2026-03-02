@@ -1093,6 +1093,12 @@
                 modalContent.innerHTML = event.detail.xhr.responseText;
             }
 
+            // Initialize Bootstrap tooltips inside the freshly-swapped modal content
+            if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
+                const tooltips = modalContent.querySelectorAll('[data-bs-toggle="tooltip"]');
+                [...tooltips].forEach(el => new bootstrap.Tooltip(el));
+            }
+
             showModal(modalElement, fallbackBackdropRef);
         }
 

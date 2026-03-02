@@ -36,13 +36,16 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_naming_preferences(request) -> tuple[bool, bool]:
-    """Resolve use_sysname/strip_domain: POST data → user pref → plugin settings."""
+    """Resolve use_sysname/strip_domain: POST/GET data → user pref → plugin settings."""
     from netbox_librenms_plugin.models import LibreNMSSettings
 
     settings = None
 
+    # Check POST first (form submissions), then GET (HTMX hx-include on hx-get)
     if "use-sysname-toggle" in request.POST:
         use_sysname = request.POST.get("use-sysname-toggle") == "on"
+    elif "use-sysname-toggle" in request.GET:
+        use_sysname = request.GET.get("use-sysname-toggle") == "on"
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
         if pref is not None:
@@ -53,6 +56,8 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
 
     if "strip-domain-toggle" in request.POST:
         strip_domain = request.POST.get("strip-domain-toggle") == "on"
+    elif "strip-domain-toggle" in request.GET:
+        strip_domain = request.GET.get("strip-domain-toggle") == "on"
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
         if pref is not None:
@@ -741,9 +746,13 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                 status=404,
             )
 
+        use_sysname, strip_domain = _resolve_naming_preferences(request)
+
         context = {
             "libre_device": libre_device,
             "validation": validation,
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
         }
 
         # Add sync comparison data for existing devices

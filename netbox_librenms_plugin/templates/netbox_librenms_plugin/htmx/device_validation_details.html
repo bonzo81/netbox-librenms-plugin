@@ -81,7 +81,19 @@
     {# Right: Device Information table #}
     <div class="col-md-8">
       <div class="card h-100">
-        <h6 class="card-header">Device Information</h6>
+        <h6 class="card-header d-flex justify-content-between align-items-center">
+          Device Information
+          <span class="d-flex gap-1">
+            {% if use_sysname %}
+              <span class="badge bg-success-lt"><i class="mdi mdi-check-circle-outline"></i> sysName</span>
+            {% else %}
+              <span class="badge bg-success-lt"><i class="mdi mdi-check-circle-outline"></i> hostname</span>
+            {% endif %}
+            {% if strip_domain %}
+              <span class="badge bg-success-lt"><i class="mdi mdi-check-circle-outline"></i> Domain stripped</span>
+            {% endif %}
+          </span>
+        </h6>
         <div class="card-body p-0">
           <table class="table table-sm table-hover mb-0">
             <thead>
@@ -117,7 +129,9 @@
                     <span class="text-muted">New device</span>
                   {% endif %}
                 </td>
-                <td>{{ libre_device.sysName|default:libre_device.hostname }}</td>
+                <td>
+                  {{ libre_device.sysName|default:libre_device.hostname }}
+                </td>
               </tr>
 
               {% if not validation.import_as_vm %}

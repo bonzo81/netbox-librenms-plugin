@@ -762,6 +762,13 @@ def validate_device_for_import(
             device_id=librenms_id,
         )
         result["resolved_name"] = hostname
+        result["naming_criteria"] = {
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
+            "raw_sysname": libre_device.get("sysName") or "",
+            "raw_hostname": libre_device.get("hostname") or "",
+            "source": "sysName" if use_sysname else "hostname",
+        }
         logger.debug(
             f"Checking for existing device/VM: "
             f"librenms_id={librenms_id} (type={type(librenms_id).__name__}), "
