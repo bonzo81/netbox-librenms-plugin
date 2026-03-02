@@ -140,6 +140,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         try:
             settings_obj, _ = LibreNMSSettings.objects.get_or_create()
         except Exception:
+            logger.exception(
+                "Failed to get or create LibreNMSSettings during LibreNMS import for user %s",
+                getattr(request, "user", None),
+            )
             settings_obj = None
 
         _use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
