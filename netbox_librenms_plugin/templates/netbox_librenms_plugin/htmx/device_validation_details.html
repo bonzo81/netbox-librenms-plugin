@@ -131,7 +131,8 @@
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% elif validation.site.site %}
-                    <span class="badge bg-success text-white">{{ validation.site.site.name }}</span>
+                    {{ validation.site.site.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching site</span>
                   {% endif %}
@@ -177,7 +178,8 @@
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% elif validation.device_type.device_type %}
-                    <span class="badge bg-success text-white">{{ validation.device_type.device_type }}</span>
+                    {{ validation.device_type.device_type }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
                   {% endif %}
@@ -240,7 +242,8 @@
                     {{ validation.existing_device.role }}
                     <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% elif validation.device_role.role %}
-                    <span class="badge bg-success text-white">{{ validation.device_role.role.name }}</span>
+                    {{ validation.device_role.role.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     <span class="text-danger"><i class="mdi mdi-close-circle"></i> No role assigned</span>
                   {% endif %}
@@ -277,7 +280,8 @@
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% elif validation.platform.platform %}
-                    <span class="badge bg-success text-white">{{ validation.platform.platform.name }}</span>
+                    {{ validation.platform.platform.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% elif sync_info and sync_info.platform_info.platform_exists %}
                     <span class="text-muted">Not set</span>
                     {% if validation.existing_device and not validation.import_as_vm and not validation.existing_device.cluster %}
@@ -305,7 +309,8 @@
                 <td style="padding-left: 0.75rem;">Cluster</td>
                 <td>
                   {% if validation.cluster.cluster %}
-                    <span class="badge bg-success text-white">{{ validation.cluster.cluster.name }}</span>
+                    {{ validation.cluster.cluster.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     <span class="text-danger"><i class="mdi mdi-close-circle"></i> No cluster assigned</span>
                   {% endif %}
@@ -318,13 +323,12 @@
                 <td style="padding-left: 0.75rem;">Rack</td>
                 <td>
                   {% if validation.rack.rack %}
-                    <span class="badge bg-success text-white">
-                      {% if validation.rack.rack.location %}
-                        {{ validation.rack.rack.location.name }} — {{ validation.rack.rack.name }}
-                      {% else %}
-                        {{ validation.rack.rack.name }}
-                      {% endif %}
-                    </span>
+                    {% if validation.rack.rack.location %}
+                      {{ validation.rack.rack.location.name }} — {{ validation.rack.rack.name }}
+                    {% else %}
+                      {{ validation.rack.rack.name }}
+                    {% endif %}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     <span class="text-muted">Optional</span>
                   {% endif %}
