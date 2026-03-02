@@ -2142,7 +2142,7 @@ class TestDeviceConflictActionView:
             "sysName": "switch-01.example.com",
             "serial": "ABC123",
         }
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("link", 42, use_sysname=True)
@@ -2182,7 +2182,7 @@ class TestDeviceConflictActionView:
             "sysName": "new-name.example.com",
             "serial": "NEW-SERIAL",
         }
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("update", 42, use_sysname=True)
@@ -2218,7 +2218,7 @@ class TestDeviceConflictActionView:
         existing_device.serial = "OLD-SERIAL"
 
         libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "NEW-SERIAL"}
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("update_serial", 42)
@@ -2255,7 +2255,7 @@ class TestDeviceConflictActionView:
         existing_device.serial = "EXISTING"
 
         libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "-"}
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("update_serial", 42)
@@ -2322,7 +2322,7 @@ class TestDeviceConflictActionView:
             "sysName": "switch-01.example.com",
             "serial": "ABC123",
         }
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("sync_name", 42, use_sysname=True)
@@ -2353,7 +2353,7 @@ class TestDeviceConflictActionView:
         existing_device.custom_field_data = {}
 
         libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "ABC123"}
-        validation = {"can_import": False, "device_type_mismatch": True}
+        validation = {"can_import": False, "device_type_mismatch": True, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("link", 42, use_sysname=True)
@@ -2388,7 +2388,7 @@ class TestDeviceConflictActionView:
             "sysName": "switch-01.example.com",
             "serial": "ABC123",
         }
-        validation = {"can_import": False, "device_type_mismatch": True}
+        validation = {"can_import": False, "device_type_mismatch": True, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("link", 42, use_sysname=True)
@@ -2433,6 +2433,7 @@ class TestDeviceConflictActionView:
             "can_import": False,
             "device_type_mismatch": True,
             "device_type": {"device_type": librenms_device_type},
+            "existing_device": existing_device,
         }
         selections = {}
 
@@ -2480,6 +2481,7 @@ class TestDeviceConflictActionView:
             "can_import": False,
             "device_type_mismatch": True,
             "device_type": {"device_type": new_device_type},
+            "existing_device": existing_device,
         }
         selections = {}
 
