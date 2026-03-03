@@ -149,7 +149,7 @@ class TestDeviceNameDetermination:
 class TestDeviceRetrieval:
     """Test device retrieval and filtering functions."""
 
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_get_librenms_devices_for_import_success(self, mock_api_class, mock_cache):
         """Retrieve devices from LibreNMS API."""
@@ -171,7 +171,7 @@ class TestDeviceRetrieval:
         assert len(devices) == 2
         assert devices[0]["hostname"] == "switch-01"
 
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_librenms_devices_for_import_uses_cache(self, mock_cache):
         """Cached results returned on repeat call."""
         cached_devices = [
@@ -189,7 +189,7 @@ class TestDeviceRetrieval:
         assert devices[0]["hostname"] == "cached-device"
         mock_api.list_devices.assert_not_called()
 
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_librenms_devices_for_import_cache_miss(self, mock_cache):
         """API called when cache empty."""
         mock_cache.get.return_value = None
@@ -209,7 +209,7 @@ class TestDeviceRetrieval:
         mock_api.list_devices.assert_called_once()
         assert len(devices) == 1
 
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_device_count_for_filters_success(self, mock_cache):
         """Returns correct count from API."""
         mock_cache.get.return_value = [
@@ -225,7 +225,7 @@ class TestDeviceRetrieval:
 
         assert count == 3
 
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_device_count_excludes_disabled(self, mock_cache):
         """Count respects show_disabled filter parameter."""
         mock_cache.get.return_value = [
@@ -279,7 +279,7 @@ class TestDeviceRetrieval:
         assert data["members"] == []
         assert data["detection_error"] is None
 
-    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
+    @patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache")
     def test_get_virtual_chassis_data_returns_empty_without_api(self, mock_cache):
         """Get VC data returns empty structure without API."""
         from netbox_librenms_plugin.import_utils import get_virtual_chassis_data
@@ -1108,14 +1108,14 @@ class TestDeviceNamingPreferences:
     """Test that validation honours use_sysname and strip_domain user preferences."""
 
     COMMON_PATCHES = [
-        "netbox_librenms_plugin.import_utils.Site",
-        "netbox_librenms_plugin.import_utils.Rack",
-        "netbox_librenms_plugin.import_utils.Cluster",
-        "netbox_librenms_plugin.import_utils.DeviceRole",
-        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
-        "netbox_librenms_plugin.import_utils.find_matching_platform",
-        "netbox_librenms_plugin.import_utils.find_matching_site",
-        "netbox_librenms_plugin.import_utils.Device",
+        "netbox_librenms_plugin.import_utils.device_operations.Site",
+        "netbox_librenms_plugin.import_utils.device_operations.Rack",
+        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+        "netbox_librenms_plugin.import_utils.device_operations.Device",
         "virtualization.models.VirtualMachine",
     ]
 
@@ -1295,14 +1295,14 @@ class TestNameMatchesWithNamingPreferences:
     """
 
     COMMON_PATCHES = [
-        "netbox_librenms_plugin.import_utils.Site",
-        "netbox_librenms_plugin.import_utils.Rack",
-        "netbox_librenms_plugin.import_utils.Cluster",
-        "netbox_librenms_plugin.import_utils.DeviceRole",
-        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
-        "netbox_librenms_plugin.import_utils.find_matching_platform",
-        "netbox_librenms_plugin.import_utils.find_matching_site",
-        "netbox_librenms_plugin.import_utils.Device",
+        "netbox_librenms_plugin.import_utils.device_operations.Site",
+        "netbox_librenms_plugin.import_utils.device_operations.Rack",
+        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+        "netbox_librenms_plugin.import_utils.device_operations.Device",
         "virtualization.models.VirtualMachine",
     ]
 
@@ -1599,14 +1599,14 @@ class TestSerialNumberMatching:
     """Test serial number matching in device validation."""
 
     SERIAL_PATCHES = [
-        "netbox_librenms_plugin.import_utils.Site",
-        "netbox_librenms_plugin.import_utils.Rack",
-        "netbox_librenms_plugin.import_utils.Cluster",
-        "netbox_librenms_plugin.import_utils.DeviceRole",
-        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
-        "netbox_librenms_plugin.import_utils.find_matching_platform",
-        "netbox_librenms_plugin.import_utils.find_matching_site",
-        "netbox_librenms_plugin.import_utils.Device",
+        "netbox_librenms_plugin.import_utils.device_operations.Site",
+        "netbox_librenms_plugin.import_utils.device_operations.Rack",
+        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+        "netbox_librenms_plugin.import_utils.device_operations.Device",
         "virtualization.models.VirtualMachine",
     ]
 
@@ -1980,7 +1980,7 @@ class TestSerialNumberMatching:
         self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
-        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+        with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
 
             from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -2036,7 +2036,7 @@ class TestSerialNumberMatching:
         self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
-        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+        with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
 
             from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -2082,7 +2082,7 @@ class TestSerialNumberMatching:
         self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
-        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+        with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
 
             from netbox_librenms_plugin.import_utils import validate_device_for_import

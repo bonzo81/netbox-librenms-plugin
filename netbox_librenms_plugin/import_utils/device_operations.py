@@ -6,6 +6,7 @@ from dcim.models import Device, DeviceRole, DeviceType, Rack, Site
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
+from virtualization.models import Cluster
 
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
@@ -434,8 +435,6 @@ def validate_device_for_import(
         # Validate based on import type (Device or VM)
         if import_as_vm:
             # 2. For VMs: Validate Cluster (required) - Must be manually selected
-            from virtualization.models import Cluster
-
             result["cluster"]["found"] = False
             result["issues"].append("Cluster must be manually selected before importing as VM")
             # Provide list of available clusters for user selection (cached)

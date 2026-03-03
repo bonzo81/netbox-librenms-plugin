@@ -633,8 +633,8 @@ class TestNetBoxObjectPermissionMixin:
 class TestBulkImportPermissions:
     """Tests for permission checks in bulk import functions."""
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
     def test_bulk_import_devices_checks_permissions(self, mock_api_class, mock_require):
         """bulk_import_devices_shared calls require_permissions."""
         from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
@@ -658,8 +658,8 @@ class TestBulkImportPermissions:
         assert "dcim.add_device" in call_args[0][1]
         assert "dcim.add_interface" in call_args[0][1]
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
     def test_bulk_import_devices_extracts_user_from_job(self, mock_api_class, mock_require):
         """bulk_import_devices_shared extracts user from job if not provided."""
         from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
@@ -682,7 +682,7 @@ class TestBulkImportPermissions:
         call_args = mock_require.call_args
         assert job_user == call_args[0][0]
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions")
     def test_bulk_import_vms_checks_permissions(self, mock_require):
         """bulk_import_vms calls require_permissions."""
         from netbox_librenms_plugin.import_utils import bulk_import_vms
@@ -703,7 +703,7 @@ class TestBulkImportPermissions:
         assert user == call_args[0][0]
         assert "virtualization.add_virtualmachine" in call_args[0][1]
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions")
     def test_bulk_import_vms_extracts_user_from_job(self, mock_require):
         """bulk_import_vms extracts user from job if not provided."""
         from netbox_librenms_plugin.import_utils import bulk_import_vms
@@ -729,7 +729,7 @@ class TestBulkImportPermissions:
 class TestBulkImportPermissionDenied:
     """Tests for permission denied behavior in bulk import."""
 
-    @patch("netbox_librenms_plugin.import_utils.check_user_permissions")
+    @patch("netbox_librenms_plugin.import_utils.permissions.check_user_permissions")
     def test_bulk_import_devices_raises_on_missing_permissions(self, mock_check):
         """bulk_import_devices_shared raises PermissionDenied when permissions missing."""
         import pytest
@@ -748,7 +748,7 @@ class TestBulkImportPermissionDenied:
                 server_key="default",
             )
 
-    @patch("netbox_librenms_plugin.import_utils.check_user_permissions")
+    @patch("netbox_librenms_plugin.import_utils.permissions.check_user_permissions")
     def test_bulk_import_vms_raises_on_missing_permissions(self, mock_check):
         """bulk_import_vms raises PermissionDenied when permissions missing."""
         import pytest
@@ -873,8 +873,8 @@ class TestSafeRedirectUrl:
 class TestBulkImportVCPermission:
     """Tests that bulk import checks virtualchassis permission."""
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
     def test_bulk_import_devices_checks_vc_permission(self, mock_api_class, mock_require):
         """bulk_import_devices_shared includes dcim.add_virtualchassis in required perms."""
         from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
