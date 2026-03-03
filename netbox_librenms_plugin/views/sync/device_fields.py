@@ -9,6 +9,53 @@ from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
+class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Update NetBox device name from LibreNMS sysName."""
+
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
+    def post(self, request, pk):
+        """Sync the device name from LibreNMS sysName."""
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        self.librenms_id = self.librenms_api.get_librenms_id(device)
+
+        if not self.librenms_id:
+            messages.error(request, "Device not found in LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+
+        if not success or not device_info:
+            messages.error(request, "Failed to retrieve device info from LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        sys_name = device_info.get("sysName")
+
+        if not sys_name:
+            messages.warning(request, "No sysName available in LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        old_name = device.name
+        device.name = sys_name
+        try:
+            device.full_clean()
+            device.save()
+        except (ValidationError, IntegrityError) as e:
+            device.name = old_name
+            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+            messages.error(request, f"Failed to update device name to '{sys_name}': {error_msg}")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        messages.success(request, f"Device name updated from '{old_name}' to '{sys_name}'")
+
+        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+
 class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update NetBox device serial number from LibreNMS."""
 

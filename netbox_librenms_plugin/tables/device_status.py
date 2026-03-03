@@ -444,7 +444,7 @@ class DeviceImportTable(tables.Table):
         buttons = []
 
         if existing:
-            # Link to existing device/VM in NetBox
+            # Link to existing device/VM in NetBox + details button for conflict resolution
             if isinstance(existing, VirtualMachine):
                 url_name = "virtualization:virtualmachine"
                 title = "View VM in NetBox"
@@ -456,6 +456,44 @@ class DeviceImportTable(tables.Table):
             buttons.append(
                 f'<a href="{device_url}" class="btn btn-sm btn-secondary" '
                 f'title="{title}"><i class="mdi mdi-open-in-new"></i></a>'
+            )
+
+            # Add details/conflict button for conflict resolution actions
+            details_url = self._build_validation_details_url(device_id, validation)
+            match_type = validation.get("existing_match_type", "")
+            serial_action = validation.get("serial_action")
+            has_mismatch = validation.get("device_type_mismatch", False)
+            has_actions = match_type == "hostname" or (match_type == "serial" and serial_action is not None)
+            has_name_sync = validation.get("name_sync_available", False)
+            has_sync_needed = match_type == "librenms_id" and serial_action in ("update_serial", "conflict")
+
+            if has_mismatch:
+                btn_class = "btn-outline-danger"
+                btn_icon = "mdi-alert-circle"
+                btn_label = " Conflict"
+            elif has_actions:
+                btn_class = "btn-outline-warning"
+                btn_icon = "mdi-alert"
+                btn_label = " Conflict"
+            elif has_name_sync or has_sync_needed:
+                btn_class = "btn-outline-warning"
+                btn_icon = "mdi-information-outline"
+                btn_label = " Details"
+            else:
+                btn_class = "btn-outline-success"
+                btn_icon = "mdi-check-circle"
+                btn_label = ""
+
+            btn_title = "Resolve conflict" if (has_actions or has_mismatch) else "View details"
+            buttons.append(
+                f'<button type="button" '
+                f'class="btn btn-sm {btn_class}" '
+                f'hx-get="{details_url}" '
+                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
+                f'hx-target="#htmx-modal-content" '
+                f'hx-swap="innerHTML" '
+                f'title="{btn_title}">'
+                f'<i class="mdi {btn_icon}"></i>{btn_label}</button>'
             )
         elif is_ready:
             # Ready to import - show Import and Details buttons
@@ -473,7 +511,7 @@ class DeviceImportTable(tables.Table):
                 f'<button type="button" '
                 f'class="btn btn-sm btn-outline-primary" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}]" '
+                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="View details">'
@@ -487,7 +525,7 @@ class DeviceImportTable(tables.Table):
                 f'<button type="button" '
                 f'class="btn btn-sm btn-warning" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}]" '
+                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="Review and import">'
@@ -509,7 +547,7 @@ class DeviceImportTable(tables.Table):
                 f'<button type="button" '
                 f'class="btn btn-sm btn-outline-danger" '
                 f'hx-get="{details_url}" '
-                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}]" '
+                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
                 f'hx-target="#htmx-modal-content" '
                 f'hx-swap="innerHTML" '
                 f'title="View validation details">'

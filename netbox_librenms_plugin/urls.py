@@ -10,6 +10,7 @@ from .views import (
     DeleteNetBoxInterfacesView,
     DeviceCableTableView,
     DeviceClusterUpdateView,
+    DeviceConflictActionView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
@@ -43,6 +44,7 @@ from .views import (
     SyncVLANsView,
     TestLibreNMSConnectionView,
     UpdateDeviceLocationView,
+    UpdateDeviceNameView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,
     UpdateDeviceTypeView,
@@ -188,7 +190,12 @@ urlpatterns = [
         UpdateDeviceLocationView.as_view(),
         name="update_device_location",
     ),
-    # Update device field URLs (serial, device type, platform)
+    # Update device field URLs (name, serial, device type, platform)
+    path(
+        "devices/<int:pk>/update-name/",
+        UpdateDeviceNameView.as_view(),
+        name="update_device_name",
+    ),
     path(
         "devices/<int:pk>/update-serial/",
         UpdateDeviceSerialView.as_view(),
@@ -258,6 +265,11 @@ urlpatterns = [
         "device-import/rack-update/<str:device_id>/",
         DeviceRackUpdateView.as_view(),
         name="device_rack_update",
+    ),
+    path(
+        "device-import/conflict-action/<str:device_id>/",
+        DeviceConflictActionView.as_view(),
+        name="device_conflict_action",
     ),
     path(
         "save-user-pref/",

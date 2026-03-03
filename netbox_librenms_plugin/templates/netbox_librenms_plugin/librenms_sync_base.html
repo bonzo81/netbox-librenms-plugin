@@ -242,6 +242,34 @@
                         {% with model_name=object|meta:"model_name" %}
                         {% if model_name == "device" %}
 
+                        <!-- Name Row -->
+                        <tr>
+                            <td style="padding-left: 1rem;">Name</td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div>{{ object.name }}</div>
+                                    <div class="ms-3">
+                                        {% if sysName and sysName != object.name %}
+                                        <form method="post"
+                                              action="{% url 'plugins:netbox_librenms_plugin:update_device_name' pk=object.pk %}"
+                                              style="display: inline;">
+                                            {% csrf_token %}
+                                            <button type="submit" class="btn btn-sm btn-outline-primary"
+                                                    title="Sync name to {{ sysName }}">
+                                                <i class="mdi mdi-sync"></i> Sync to NetBox
+                                            </button>
+                                        </form>
+                                        {% elif sysName %}
+                                        <span class="text-success" title="Name matches LibreNMS">
+                                            <i class="mdi mdi-check-circle"></i>
+                                        </span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>{{ sysName|default:"—" }}</td>
+                        </tr>
+
                         <!-- Device Type Row -->
                         <tr>
                             <td style="padding-left: 1rem;">Device Type</td>

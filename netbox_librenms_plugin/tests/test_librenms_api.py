@@ -643,7 +643,7 @@ class TestLibreNMSAPIDeviceOperations:
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
     def test_add_device_duplicate_error(self, mock_post, mock_librenms_config):
         """Verify duplicate device handling."""
-        mock_post.return_value.status_code = 500
+        mock_post.return_value.status_code = 200
         mock_post.return_value.json.return_value = {
             "status": "error",
             "message": "Device already exists",
