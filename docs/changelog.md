@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.4.3 (2026-03-03)
+
+### New Features
+* **VLAN Sync**: Full VLAN synchronization with per-row verification, per-VLAN group selection, color-coded summary UI, edit modal, and form spinners
+* **Two-Tier Permission System**: Plugin-level and object-level access control with `LibreNMSPermissionMixin` and `NetBoxObjectPermissionMixin`
+* **Serial Number Matching & Conflict Resolution**: Import detects serial number matches and guides users through device conflicts
+* **Per-User Preferences**: Persistent user preferences for import toggles and interface name field
+* **Device Identity Mismatch Modal**: Informational mismatch display on sync pages when device name differs between NetBox and LibreNMS
+* **Empty State Cards**: Friendly empty state cards on sync tabs when no data is available
+* **Naming Preferences in Validation**: Honour `use_sysname` and `strip_domain` settings in the import validation path with badge indicators
+* **SNMPv1 Support**: Add SNMPv1 option to the LibreNMS add device form
+
+### Improvements
+* Security hardening — XSS escaping, input validation, open-redirect prevention, and VC member validation
+* Block import when validation issues are present; fix modal titles and hostname conflict display
+* Code deduplication and minor bug fixes across views and utilities
+* Add docstrings to models, tables, views, forms, and API modules
+* Pin all GitHub Actions to commit SHAs and add Dependabot configuration
+* Add pull request template for contributions
+
+### Fixes
+* Fix KeyError for missing non-default server keys in `LibreNMSAPI`
+* Fix device redirect URL and inaccurate docstrings
+* Correct device role refresh to preserve schema keys
+* Fix validation readiness, VM form guards, and sync_info accuracy
+* Use flash message + redirect for import permission denied
+* Add virtual chassis permission check and validate `object_type`
+
+### Development
+* Comprehensive test suite with CI workflow (GitHub Actions, pytest, ruff lint/format)
+* Pre-commit hooks and updated format/lint dependencies
+* DevContainer refactor with script consolidation, proxy/MITM support, and diagnostic tooling
+* Modular copilot instructions split into per-concern `.instructions.md` files
+
+### Documentation
+* VLAN sync feature and view architecture documentation
+* Permission system documentation
+* Improved README, workflow guides, and troubleshooting notes
+
 ## 0.4.2 (2026-01-16)
 
 ### Fixes
