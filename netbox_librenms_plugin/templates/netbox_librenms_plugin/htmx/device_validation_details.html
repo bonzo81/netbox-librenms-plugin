@@ -357,10 +357,8 @@
                 <td>
                   {% if validation.existing_device and validation.existing_device.primary_ip %}
                     {{ validation.existing_device.primary_ip }}
-                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% elif libre_device.ip %}
                     {{ libre_device.ip }}
-                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     <span class="text-muted">No primary IP</span>
                   {% endif %}
