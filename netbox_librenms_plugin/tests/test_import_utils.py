@@ -1045,8 +1045,8 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_clusters = [MagicMock(id=1, name="VMware Cluster")]
-        # Cluster is imported locally in the VM path, so we need to mock it there
-        mock_cluster_local.objects.all.return_value = mock_clusters
+        # Cluster is imported at module level in device_operations
+        mock_cluster_module.objects.all.return_value = mock_clusters
         mock_cache.get.return_value = None  # Force cache miss to trigger Cluster.objects.all()
         mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
