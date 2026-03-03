@@ -3,6 +3,7 @@
 echo "🔍 DevContainer Startup Diagnostics"
 echo "=================================="
 
+PLUGIN_WS_DIR="${PLUGIN_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 echo "📍 Current working directory: $(pwd)"
 echo "👤 Current user: $(whoami)"
 echo "🆔 User ID: $(id)"
@@ -26,18 +27,20 @@ echo "  - Redis: $(timeout 3 bash -c 'cat < /dev/null > /dev/tcp/redis/6379' 2>/
 echo ""
 echo "🗂️ File System:"
 echo "  - NetBox venv: $(test -f /opt/netbox/venv/bin/activate && echo 'Exists' || echo 'Missing')"
-echo "  - Plugin directory: $(test -d /workspaces/netbox-librenms-plugin && echo 'Exists' || echo 'Missing')"
-echo "  - Setup script: $(test -f /workspaces/netbox-librenms-plugin/.devcontainer/scripts/setup.sh && echo 'Exists' || echo 'Missing')"
-echo "  - Start script: $(test -f /workspaces/netbox-librenms-plugin/.devcontainer/scripts/start-netbox.sh && echo 'Exists' || echo 'Missing')"
-echo "  - Start script executable: $(test -x /workspaces/netbox-librenms-plugin/.devcontainer/scripts/start-netbox.sh && echo 'Yes' || echo 'No')"
-echo "  - Plugin config: $(test -f /workspaces/netbox-librenms-plugin/.devcontainer/plugin-config.py && echo 'Found' || echo 'Missing (using defaults)')"
+echo "  - Plugin directory: $(test -d "$PLUGIN_WS_DIR" && echo 'Exists' || echo 'Missing')"
+echo "  - Setup script: $(test -f "$PLUGIN_WS_DIR/.devcontainer/scripts/setup.sh" && echo 'Exists' || echo 'Missing')"
+echo "  - Start script: $(test -f "$PLUGIN_WS_DIR/.devcontainer/scripts/start-netbox.sh" && echo 'Exists' || echo 'Missing')"
+echo "  - Start script executable: $(test -x "$PLUGIN_WS_DIR/.devcontainer/scripts/start-netbox.sh" && echo 'Yes' || echo 'No')"
+echo "  - Plugin config: $(test -f "$PLUGIN_WS_DIR/.devcontainer/config/plugin-config.py" && echo 'Found' || echo 'Missing (using defaults)')"
 echo "  - NetBox config path: /opt/netbox/netbox/netbox/configuration.py"
 
 echo ""
 echo "🚀 Process Status:"
 if [ -f /tmp/netbox.pid ]; then
   PID=$(cat /tmp/netbox.pid)
-  if kill -0 $PID 2>/dev/null; then
+  if [ -z "$PID" ]; then
+    echo "  - NetBox server: PID file exists but is empty"
+  elif kill -0 "$PID" 2>/dev/null; then
     echo "  - NetBox server: Running (PID: $PID)"
   else
     echo "  - NetBox server: PID file exists but process not running"

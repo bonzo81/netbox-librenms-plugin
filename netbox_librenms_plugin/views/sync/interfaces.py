@@ -163,17 +163,6 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             interface_name_field,
         )
 
-        if "enabled" not in exclude_columns:
-            interface.enabled = (
-                True
-                if librenms_interface.get("ifAdminStatus") is None
-                else (
-                    librenms_interface["ifAdminStatus"].lower() == "up"
-                    if isinstance(librenms_interface["ifAdminStatus"], str)
-                    else bool(librenms_interface["ifAdminStatus"])
-                )
-            )
-
         # Sync VLANs if not excluded
         vlan_synced = False
         if "vlans" not in exclude_columns:
@@ -248,8 +237,17 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         if "librenms_id" in interface.cf:
             interface.custom_field_data["librenms_id"] = librenms_interface.get("port_id")
 
-        ifPhysAddress = librenms_interface.get("ifPhysAddress")
-        self.handle_mac_address(interface, ifPhysAddress)
+        if "enabled" not in exclude_columns:
+            admin_status = librenms_interface.get("ifAdminStatus")
+            interface.enabled = (
+                True
+                if admin_status is None
+                else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
+            )
+
+        if "mac_address" not in exclude_columns:
+            ifPhysAddress = librenms_interface.get("ifPhysAddress")
+            self.handle_mac_address(interface, ifPhysAddress)
 
         interface.save()
 

@@ -3,7 +3,7 @@ repos:
     rev: v0.14.13  # Use the latest version from https://github.com/astral-sh/ruff-pre-commit/releases
     hooks:
       # Run the linter
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       # Run the formatter
       - id: ruff-format

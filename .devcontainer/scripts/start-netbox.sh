@@ -21,28 +21,33 @@ else
   echo "🐛 Debug: ACCESS_URL is set to: $ACCESS_URL"
 fi
 
-# Kill any orphaned RQ workers (not tracked by PID file)
-echo "🧹 Cleaning up orphaned processes..."
-ORPHAN_RQ_PIDS=$(pgrep -f "python.*rqworker" 2>/dev/null)
-if [ -n "$ORPHAN_RQ_PIDS" ]; then
-  echo "   Found orphaned RQ workers, killing..."
-  pkill -9 -f "python.*rqworker" 2>/dev/null
-  sleep 1
+# Load shared process management helpers
+if ! source "$(dirname "$0")/process-helpers.sh"; then
+  echo "ERROR: Failed to load process-helpers.sh" >&2
+  exit 1
 fi
 
-# Kill any orphaned NetBox runserver processes
-ORPHAN_NETBOX_PIDS=$(pgrep -f "python.*runserver.*8000" 2>/dev/null)
-if [ -n "$ORPHAN_NETBOX_PIDS" ]; then
+# Kill any orphaned processes (not tracked by PID file)
+echo "🧹 Cleaning up orphaned processes..."
+if pgrep -f "python.*rqworker" >/dev/null 2>&1; then
+  echo "   Found orphaned RQ workers, killing..."
+  graceful_kill_pattern "python.*rqworker"
+fi
+
+if pgrep -f "python.*runserver.*8000" >/dev/null 2>&1; then
   echo "   Found orphaned NetBox servers, killing..."
-  pkill -9 -f "python.*runserver.*8000" 2>/dev/null
-  sleep 1
+  graceful_kill_pattern "python.*runserver.*8000"
 fi
 
 # Stop any tracked processes from PID files
 if [ -f /tmp/netbox.pid ]; then
   OLD_PID=$(cat /tmp/netbox.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    kill "$OLD_PID" 2>/dev/null || kill -9 "$OLD_PID" 2>/dev/null
+    if is_expected_pid "$OLD_PID" "python.*runserver.*8000"; then
+      graceful_kill_pid "$OLD_PID"
+    else
+      echo "⚠️  Skipping stale /tmp/netbox.pid (PID $OLD_PID is not NetBox runserver)"
+    fi
   fi
   rm -f /tmp/netbox.pid
 fi
@@ -50,7 +55,11 @@ fi
 if [ -f /tmp/rqworker.pid ]; then
   OLD_PID=$(cat /tmp/rqworker.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    kill "$OLD_PID" 2>/dev/null || kill -9 "$OLD_PID" 2>/dev/null
+    if is_expected_pid "$OLD_PID" "python.*rqworker"; then
+      graceful_kill_pid "$OLD_PID"
+    else
+      echo "⚠️  Skipping stale /tmp/rqworker.pid (PID $OLD_PID is not rqworker)"
+    fi
   fi
   rm -f /tmp/rqworker.pid
 fi

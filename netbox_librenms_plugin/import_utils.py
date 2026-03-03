@@ -638,6 +638,8 @@ def validate_device_for_import(
     *,
     include_vc_detection: bool = True,
     force_vc_refresh: bool = False,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -656,6 +658,8 @@ def validate_device_for_import(
         api: Optional LibreNMSAPI instance for virtual chassis detection
         include_vc_detection: Skip VC detection when False to speed up bulk operations
         force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS
+        use_sysname: If True, prefer sysName over hostname (matches import behaviour)
+        strip_domain: If True, strip domain suffix from device name
 
     Returns:
         dict: Validation result with structure:
@@ -704,8 +708,16 @@ def validate_device_for_import(
         "is_ready": False,
         "can_import": False,
         "import_as_vm": import_as_vm,
+        "resolved_name": None,  # Final device name after applying user preferences
         "existing_device": None,
         "existing_match_type": None,  # Track how existing device was matched
+        "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs"
+        "serial_confirmed": False,  # True when librenms_id match and serial matches
+        "serial_duplicate": False,  # True when incoming serial is already on a different device
+        "name_matches": False,  # True when existing device name matches LibreNMS sysName
+        "name_sync_available": False,  # True when existing device name differs from sysName
+        "suggested_name": None,  # sysName to suggest when name_sync_available is True
+        "device_type_mismatch": False,  # True when existing device's type differs from LibreNMS
         "issues": [],
         "warnings": [],
         "virtual_chassis": empty_virtual_chassis_data(),
@@ -743,7 +755,20 @@ def validate_device_for_import(
         # 1. Check if device/VM already exists in NetBox
         # Always check both Devices AND VMs to properly detect existing objects
         librenms_id = libre_device.get("device_id")
-        hostname = libre_device.get("hostname", "")
+        hostname = _determine_device_name(
+            libre_device,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
+            device_id=librenms_id,
+        )
+        result["resolved_name"] = hostname
+        result["naming_criteria"] = {
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
+            "raw_sysname": libre_device.get("sysName") or "",
+            "raw_hostname": libre_device.get("hostname") or "",
+            "source": "sysName" if use_sysname else "hostname",
+        }
         logger.debug(
             f"Checking for existing device/VM: "
             f"librenms_id={librenms_id} (type={type(librenms_id).__name__}), "
@@ -765,78 +790,197 @@ def validate_device_for_import(
             result["existing_device"] = existing_vm
             result["existing_match_type"] = "librenms_id"
             result["import_as_vm"] = True  # Force VM mode since VM exists
-            result["warnings"].append(f"VM already imported to NetBox as '{existing_vm.name}'")
             result["can_import"] = False
-            return result
+
+            # Check if name matches sysName
+            # Note: name_sync_available/suggested_name are intentionally not set for VMs
+            # because UpdateDeviceNameView only supports Device objects; VM name-sync
+            # would require a separate implementation.
+            if hostname and existing_vm.name == hostname:
+                result["name_matches"] = True
 
         # Check for existing Device (by librenms_id custom field)
         # Always query with int to match custom field type
-        try:
-            existing_device = Device.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
-        except (ValueError, TypeError):
-            # librenms_id is not convertible to int; no match will be found
-            existing_device = None
+        if not result["existing_device"]:
+            try:
+                existing_device = Device.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
+            except (ValueError, TypeError):
+                # librenms_id is not convertible to int; no match will be found
+                existing_device = None
 
-        if existing_device:
-            logger.info(f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})")
-            result["existing_device"] = existing_device
-            result["existing_match_type"] = "librenms_id"
-            result["warnings"].append(f"Device already imported to NetBox as '{existing_device.name}'")
-            result["can_import"] = False
-            return result
+            if existing_device:
+                logger.info(f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})")
+                result["existing_device"] = existing_device
+                result["existing_match_type"] = "librenms_id"
+                result["can_import"] = False
 
-        # Check by hostname/name - Check both VMs and Devices for conflicts
-        existing_vm = VirtualMachine.objects.filter(name__iexact=hostname).first()
-        existing_device = Device.objects.filter(name__iexact=hostname).first()
-
-        # If BOTH exist with same hostname, it's ambiguous - don't match either
-        if existing_vm and existing_device:
-            logger.warning(
-                f"Hostname conflict: Both VM '{existing_vm.name}' and Device "
-                f"'{existing_device.name}' exist with hostname '{hostname}'"
-            )
-            result["warnings"].append(
-                f"Both a VM and Device exist with hostname '{hostname}' in NetBox. "
-                f"Cannot determine which to match. Please set the librenms_id custom field on the correct object."
-            )
-            # Don't set existing_device, don't block import - let user proceed as new
-            # This allows them to import and then resolve the conflict manually
-        elif existing_vm:
-            logger.info(f"Found existing VM by hostname: {existing_vm.name}")
-            result["existing_device"] = existing_vm
-            result["existing_match_type"] = "hostname"
-            result["import_as_vm"] = True  # Force VM mode since VM exists
-            result["warnings"].append(
-                f"VM with same hostname exists in NetBox as '{existing_vm.name}' (not linked to LibreNMS)"
-            )
-            result["can_import"] = False
-            return result
-        elif existing_device:
-            logger.info(f"Found existing device by hostname: {existing_device.name}")
-            result["existing_device"] = existing_device
-            result["existing_match_type"] = "hostname"
-            result["warnings"].append(
-                f"Device with same hostname exists in NetBox as '{existing_device.name}' (not linked to LibreNMS)"
-            )
-            result["can_import"] = False
-            return result
-
-        # Check by primary IP (weaker match, IP could be reassigned) - only for devices
-        primary_ip = libre_device.get("ip")
-        if primary_ip and not import_as_vm:
-            from ipam.models import IPAddress
-
-            existing_ip = IPAddress.objects.filter(address__startswith=primary_ip).first()
-            if existing_ip and existing_ip.assigned_object:
-                device = existing_ip.assigned_object.device if hasattr(existing_ip.assigned_object, "device") else None
-                if device:
-                    result["existing_device"] = device
-                    result["existing_match_type"] = "primary_ip"
-                    result["warnings"].append(
-                        f"IP address {primary_ip} already assigned to device '{device.name}' (not linked to LibreNMS)"
+                # Check if name matches resolved name (accounts for use_sysname/strip_domain)
+                # Also accounts for virtual chassis naming pattern when device is a VC member
+                name_matched = False
+                if hostname and existing_device.name == hostname:
+                    name_matched = True
+                elif (
+                    hostname
+                    and hasattr(existing_device, "virtual_chassis")
+                    and existing_device.virtual_chassis is not None
+                    and existing_device.vc_position is not None
+                ):
+                    # Device is a VC member — generate the expected VC name using
+                    # the same function that the import creation process uses
+                    expected_vc_name = _generate_vc_member_name(
+                        hostname,
+                        existing_device.vc_position,
+                        serial=getattr(existing_device, "serial", None),
                     )
-                    result["can_import"] = False
-                    return result
+                    if existing_device.name == expected_vc_name:
+                        name_matched = True
+
+                if name_matched:
+                    result["name_matches"] = True
+                elif hostname:
+                    result["name_sync_available"] = True
+                    # suggested_name uses resolved name (not raw sysName),
+                    # respecting use_sysname/strip_domain preferences
+                    if (
+                        hasattr(existing_device, "virtual_chassis")
+                        and existing_device.virtual_chassis is not None
+                        and existing_device.vc_position is not None
+                    ):
+                        result["suggested_name"] = _generate_vc_member_name(
+                            hostname,
+                            existing_device.vc_position,
+                            serial=getattr(existing_device, "serial", None),
+                        )
+                    else:
+                        result["suggested_name"] = hostname
+
+                # Check for serial drift on the linked device
+                incoming_serial = libre_device.get("serial") or ""
+                if incoming_serial and incoming_serial != "-":
+                    if existing_device.serial and existing_device.serial == incoming_serial:
+                        result["serial_confirmed"] = True
+                    elif existing_device.serial and existing_device.serial != incoming_serial:
+                        serial_conflict = (
+                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                        )
+                        if serial_conflict:
+                            result["serial_action"] = "conflict"
+                            result["serial_duplicate"] = True
+                            result["warnings"].append(
+                                f"Serial conflict: incoming serial '{incoming_serial}' is already assigned to "
+                                f"device '{serial_conflict.name}' (ID: {serial_conflict.pk}) in NetBox. "
+                                f"Investigate which device should own this serial before updating."
+                            )
+                        else:
+                            result["serial_action"] = "update_serial"
+                            result["warnings"].append(
+                                f"Serial number differs (NetBox: '{existing_device.serial}', "
+                                f"LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
+                            )
+
+        # Only check hostname/serial/IP if not already matched by librenms_id
+        if not result["existing_device"]:
+            # Check by hostname/name - Check both VMs and Devices for conflicts
+            existing_vm = VirtualMachine.objects.filter(name__iexact=hostname).first()
+            existing_device = Device.objects.filter(name__iexact=hostname).first()
+
+            # If BOTH exist with same hostname, it's ambiguous - don't match either
+            if existing_vm and existing_device:
+                logger.warning(
+                    f"Hostname conflict: Both VM '{existing_vm.name}' and Device "
+                    f"'{existing_device.name}' exist with hostname '{hostname}'"
+                )
+                result["warnings"].append(
+                    f"Both a VM and Device exist with hostname '{hostname}' in NetBox. "
+                    f"Cannot determine which to match. Please set the librenms_id custom field on the correct object."
+                )
+                # Don't set existing_device, don't block import - let user proceed as new
+                # This allows them to import and then resolve the conflict manually
+            elif existing_vm:
+                logger.info(f"Found existing VM by hostname: {existing_vm.name}")
+                result["existing_device"] = existing_vm
+                result["existing_match_type"] = "hostname"
+                result["import_as_vm"] = True  # Force VM mode since VM exists
+                result["warnings"].append(
+                    f"VM with same hostname exists in NetBox as '{existing_vm.name}' (not linked to LibreNMS)"
+                )
+                result["can_import"] = False
+            elif existing_device:
+                logger.info(f"Found existing device by hostname: {existing_device.name}")
+                result["existing_device"] = existing_device
+                result["existing_match_type"] = "hostname"
+
+                # Check for serial conflict on hostname-matched device
+                incoming_serial = libre_device.get("serial") or ""
+                if incoming_serial and incoming_serial != "-" and existing_device.serial != incoming_serial:
+                    serial_conflict = (
+                        Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                    )
+                    if serial_conflict:
+                        result["serial_action"] = "conflict"
+                        result["serial_duplicate"] = True
+                        result["warnings"].append(
+                            f"Serial conflict: incoming serial '{incoming_serial}' is already assigned to "
+                            f"device '{serial_conflict.name}' (ID: {serial_conflict.pk}) in NetBox. "
+                            f"Investigate which device should own this serial before importing."
+                        )
+                    else:
+                        result["serial_action"] = "update_serial"
+                        result["warnings"].append(
+                            f"Hostname matches but serial differs (NetBox: '{existing_device.serial}', "
+                            f"LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
+                        )
+                else:
+                    result["warnings"].append(
+                        f"Device with same hostname exists in NetBox as '{existing_device.name}' (not linked to LibreNMS)"
+                    )
+
+                result["can_import"] = False
+
+            # Check by serial number (strong physical match - hardware identity)
+            if not result["existing_device"]:
+                serial = libre_device.get("serial") or ""
+                if serial and serial != "-" and not import_as_vm:
+                    existing_by_serial = Device.objects.filter(serial=serial).first()
+                    if existing_by_serial:
+                        logger.info(f"Found existing device by serial: {existing_by_serial.name} (serial={serial})")
+                        result["existing_device"] = existing_by_serial
+                        result["existing_match_type"] = "serial"
+                        result["can_import"] = False
+
+                        if existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower():
+                            result["warnings"].append(
+                                f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
+                                f"(not linked to LibreNMS)"
+                            )
+                            result["serial_action"] = "link"
+                        else:
+                            result["warnings"].append(
+                                f"Device with same serial ({serial}) exists as '{existing_by_serial.name}' "
+                                f"but hostname differs (LibreNMS: '{hostname}'). Device may have been reinstalled."
+                            )
+                            result["serial_action"] = "hostname_differs"
+
+            # Check by primary IP (weaker match, IP could be reassigned) - only for devices
+            if not result["existing_device"]:
+                primary_ip = libre_device.get("ip")
+                if primary_ip and not import_as_vm:
+                    from ipam.models import IPAddress
+
+                    existing_ip = IPAddress.objects.filter(address__net_host=primary_ip).first()
+                    if existing_ip and existing_ip.assigned_object:
+                        device = (
+                            existing_ip.assigned_object.device
+                            if hasattr(existing_ip.assigned_object, "device")
+                            else None
+                        )
+                        if device:
+                            result["existing_device"] = device
+                            result["existing_match_type"] = "primary_ip"
+                            result["warnings"].append(
+                                f"IP address {primary_ip} already assigned to device '{device.name}' (not linked to LibreNMS)"
+                            )
+                            result["can_import"] = False
 
         # Validate based on import type (Device or VM)
         if import_as_vm:
@@ -953,13 +1097,6 @@ def validate_device_for_import(
         if not hostname:
             result["issues"].append("Device has no hostname")
 
-        # Serial number check
-        serial = libre_device.get("serial", "")
-        if serial and serial != "-":
-            existing_serial = Device.objects.filter(serial=serial).first()
-            if existing_serial:
-                result["warnings"].append(f"Serial number {serial} already exists on device: {existing_serial.name}")
-
         # 7. Virtual chassis detection (only for devices, not VMs)
         if include_vc_detection and not import_as_vm and api is not None:
             device_id = libre_device.get("device_id")
@@ -974,7 +1111,16 @@ def validate_device_for_import(
                     )
                     if vc_detection:
                         result["virtual_chassis"] = vc_detection
-                        if vc_detection["is_stack"]:
+                        # Correct VC member suggested_names using the resolved name
+                        # (which respects use_sysname/strip_domain preferences).
+                        # This reuses the same function that BulkImportConfirmView uses.
+                        if vc_detection.get("is_stack") and hostname:
+                            update_vc_member_suggested_names(vc_detection, hostname)
+                            logger.debug(
+                                f"Virtual chassis CONFIRMED for device {hostname}: "
+                                f"{vc_detection['member_count']} members"
+                            )
+                        elif vc_detection["is_stack"]:
                             logger.debug(
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
@@ -986,19 +1132,39 @@ def validate_device_for_import(
                 logger.debug(f"No device_id found for {hostname}")
 
         # 8. Determine if device/VM is ready to import
-        result["can_import"] = len(result["issues"]) == 0
+        if result["existing_device"]:
+            # Already matched - can_import was already set to False
+            result["is_ready"] = False
+            # Populate role from existing device so the modal shows it
+            existing = result["existing_device"]
+            if hasattr(existing, "role") and existing.role:
+                result["device_role"]["found"] = True
+                result["device_role"]["role"] = existing.role
 
-        if import_as_vm:
-            # For VMs: only cluster is required
-            result["is_ready"] = result["can_import"] and result["cluster"]["found"]
+            # Check for device type mismatch between existing device and LibreNMS
+            if hasattr(existing, "device_type") and existing.device_type:
+                librenms_dt = result["device_type"].get("device_type")
+                if librenms_dt and existing.device_type.pk != librenms_dt.pk:
+                    result["device_type_mismatch"] = True
+                    result["warnings"].append(
+                        f"Device type mismatch: NetBox has '{existing.device_type}' "
+                        f"but LibreNMS reports '{librenms_dt}'. "
+                        f"This may indicate the wrong device was matched."
+                    )
         else:
-            # For Devices: site, device_type, and device_role are required
-            result["is_ready"] = (
-                result["can_import"]
-                and result["site"]["found"]
-                and result["device_type"]["found"]
-                and result["device_role"]["found"]
-            )
+            result["can_import"] = len(result["issues"]) == 0
+
+            if import_as_vm:
+                # For VMs: only cluster is required
+                result["is_ready"] = result["can_import"] and result["cluster"]["found"]
+            else:
+                # For Devices: site, device_type, and device_role are required
+                result["is_ready"] = (
+                    result["can_import"]
+                    and result["site"]["found"]
+                    and result["device_type"]["found"]
+                    and result["device_role"]["found"]
+                )
 
         logger.debug(
             f"Validation for {libre_device.get('hostname')} ({'VM' if import_as_vm else 'Device'}): "
@@ -1074,7 +1240,13 @@ def import_single_device(
 
         # Validate device if validation not provided
         if validation is None:
-            validation = validate_device_for_import(libre_device)
+            use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
+            strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+            validation = validate_device_for_import(
+                libre_device,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
+            )
 
         # Check if device already exists
         if validation.get("existing_device"):
@@ -1331,7 +1503,14 @@ def bulk_import_devices_shared(
                     logger.error(error_msg)
                 continue
 
-            validation = validate_device_for_import(libre_device, api=api)
+            use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
+            strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+            validation = validate_device_for_import(
+                libre_device,
+                api=api,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
+            )
 
             # Build manual mappings from validation + any provided overrides
             device_mappings = {}
@@ -1687,7 +1866,15 @@ def bulk_import_vms(
                 continue
 
             # Validate as VM
-            validation = validate_device_for_import(libre_device, import_as_vm=True, api=api)
+            use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
+            strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+            validation = validate_device_for_import(
+                libre_device,
+                import_as_vm=True,
+                api=api,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
+            )
 
             # Check if VM already exists
             if validation.get("existing_device"):
@@ -2072,6 +2259,47 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
         raise
 
 
+def _refresh_existing_device(validation: dict) -> None:
+    """Refresh existing_device from DB to pick up changes made in NetBox since caching."""
+    existing = validation.get("existing_device")
+    if not existing or not hasattr(existing, "pk"):
+        return
+    try:
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        if validation.get("import_as_vm"):
+            refreshed = VirtualMachine.objects.filter(pk=existing.pk).first()
+        else:
+            refreshed = Device.objects.filter(pk=existing.pk).first()
+
+        if refreshed:
+            validation["existing_device"] = refreshed
+            if hasattr(refreshed, "role") and refreshed.role:
+                validation["device_role"]["found"] = True
+                validation["device_role"]["role"] = refreshed.role
+        else:
+            # Device was deleted since caching — recompute readiness
+            validation["existing_device"] = None
+            validation["existing_match_type"] = None
+            if validation.get("import_as_vm"):
+                required_found = (
+                    validation.get("site", {}).get("found")
+                    and validation.get("cluster", {}).get("found")
+                    and validation.get("device_role", {}).get("found")
+                )
+            else:
+                required_found = (
+                    validation.get("site", {}).get("found")
+                    and validation.get("device_type", {}).get("found")
+                    and validation.get("device_role", {}).get("found")
+                )
+            validation["can_import"] = validation["is_ready"] = bool(required_found and not validation.get("issues"))
+    except Exception as e:
+        existing_id = getattr(existing, "pk", "unknown") if existing else "none"
+        logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
+
+
 def process_device_filters(
     api: LibreNMSAPI,
     filters: dict,
@@ -2082,6 +2310,8 @@ def process_device_filters(
     job=None,
     request=None,
     return_cache_status: bool = False,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
 ) -> List[dict] | tuple[List[dict], bool]:
     """
     Process LibreNMS device filters and return validated devices.
@@ -2100,6 +2330,8 @@ def process_device_filters(
         job: Optional JobRunner instance for logging job events
         request: Optional Django request for client disconnect detection (synchronous only)
         return_cache_status: When True, returns (devices, from_cache) tuple
+        use_sysname: If True, prefer sysName over hostname for device name resolution
+        strip_domain: If True, strip domain suffix from device names
 
     Returns:
         List[dict]: Validated devices with _validation key, or tuple of (devices, from_cache)
@@ -2232,6 +2464,10 @@ def process_device_filters(
                 # Use cached validation
                 device["_validation"] = cached_device["_validation"]
 
+                # Refresh existing_device from DB to avoid stale data
+                # (user may have changed role, name, etc. in NetBox)
+                _refresh_existing_device(device["_validation"])
+
                 # Apply exclude_existing filter if enabled
                 if exclude_existing:
                     validation = device["_validation"]
@@ -2248,6 +2484,8 @@ def process_device_filters(
                 api=api_for_validation,
                 include_vc_detection=vc_detection_enabled,
                 force_vc_refresh=clear_cache,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
             )
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:

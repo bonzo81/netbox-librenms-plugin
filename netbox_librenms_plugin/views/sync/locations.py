@@ -46,10 +46,6 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTabl
         if self.request.GET and self.filterset:
             return self.filterset(self.request.GET, queryset=sync_data).qs
 
-        if "q" in self.request.GET:
-            query = self.request.GET.get("q", "").lower()
-            sync_data = [item for item in sync_data if query in item.netbox_site.name.lower()]
-
         return sync_data
 
     def get_librenms_locations(self):
@@ -118,6 +114,13 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTabl
 
     def create_librenms_location(self, request, site):
         """Create a new location in LibreNMS from the given site."""
+        if site.latitude is None or site.longitude is None:
+            messages.warning(
+                request,
+                f"Latitude and/or longitude is missing. Cannot create location '{site.name}' in LibreNMS.",
+            )
+            return redirect("plugins:netbox_librenms_plugin:site_location_sync")
+
         location_data = self.build_location_data(site)
         success, message = self.librenms_api.add_location(location_data)
         if success:

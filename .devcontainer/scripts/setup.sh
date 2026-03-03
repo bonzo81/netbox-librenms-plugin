@@ -28,6 +28,13 @@ detect_plugin_workspace() {
   fi
 }
 
+# Clean up empty CA bundle vars (Compose injects "" when host var is unset)
+for _ca_var in REQUESTS_CA_BUNDLE SSL_CERT_FILE CURL_CA_BUNDLE; do
+  _val="${!_ca_var}"
+  [ -z "$_val" ] && unset "$_ca_var"
+done
+unset _ca_var _val
+
 # Configure proxy for apt and pip if proxy environment variables are set
 if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
   echo "🌐 Configuring proxy settings..."
@@ -186,7 +193,7 @@ if [ -f "$CONF_FILE" ]; then
       echo "import importlib.util, os";
       echo "PLUGINS = ['netbox_librenms_plugin']";
       echo "PLUGINS_CONFIG = {'netbox_librenms_plugin': {}}";
-      echo "_pc_path = '/workspaces/netbox-librenms-plugin/.devcontainer/config/plugin-config.py'";
+      echo "_pc_path = '$PLUGIN_WS_DIR/.devcontainer/config/plugin-config.py'";
       echo "if os.path.isfile(_pc_path):";
       echo "    _spec = importlib.util.spec_from_file_location('workspace_plugin_config', _pc_path)";
       echo "    _mod = importlib.util.module_from_spec(_spec)";
@@ -200,7 +207,7 @@ if [ -f "$CONF_FILE" ]; then
       echo "    print('ℹ️ plugin-config.py not found; using defaults')";
 
       echo "# Import optional extra NetBox configuration (uppercase settings)";
-      echo "_xc_path = '/workspaces/netbox-librenms-plugin/.devcontainer/config/extra-configuration.py'";
+      echo "_xc_path = '$PLUGIN_WS_DIR/.devcontainer/config/extra-configuration.py'";
       echo "if os.path.isfile(_xc_path):";
       echo "    _xc_spec = importlib.util.spec_from_file_location('workspace_extra_configuration', _xc_path)";
       echo "    _xc_mod = importlib.util.module_from_spec(_xc_spec)";
@@ -213,7 +220,7 @@ if [ -f "$CONF_FILE" ]; then
       echo "        print(f'⚠️  Failed to apply extra-configuration.py: {e}')";
 
       echo "# Import Codespaces configuration when applicable (uppercase settings)";
-      echo "_cs_path = '/workspaces/netbox-librenms-plugin/.devcontainer/config/codespaces-configuration.py'";
+      echo "_cs_path = '$PLUGIN_WS_DIR/.devcontainer/config/codespaces-configuration.py'";
       echo "if os.environ.get('CODESPACES') == 'true' and os.path.isfile(_cs_path):";
       echo "    _cs_spec = importlib.util.spec_from_file_location('workspace_codespaces_configuration', _cs_path)";
       echo "    _cs_mod = importlib.util.module_from_spec(_cs_spec)";
@@ -251,15 +258,17 @@ echo "🗃️  Applying database migrations..."
 python manage.py migrate 2>&1 | grep -E "(Operations to perform|Running migrations|Apply all migrations|No migrations to apply|\s+Applying|\s+OK)" || true
 
 echo "🔐 Creating superuser (if not exists)..."
+echo "   Credentials are read from environment variables (see .devcontainer/.env)"
 python manage.py shell -c "
+import os
 from django.contrib.auth import get_user_model
 User = get_user_model()
-username = '${SUPERUSER_NAME:-admin}'
-email = '${SUPERUSER_EMAIL:-admin@example.com}'
-password = '${SUPERUSER_PASSWORD:-admin}'
+username = (os.environ.get('SUPERUSER_NAME') or '').strip() or 'admin'
+email = (os.environ.get('SUPERUSER_EMAIL') or '').strip() or 'admin@example.com'
+password = (os.environ.get('SUPERUSER_PASSWORD') or '').strip() or 'admin'
 if not User.objects.filter(username=username).exists():
     User.objects.create_superuser(username, email, password)
-    print(f'Created superuser: {username}/{password}')
+    print(f'Created superuser: {username}')
 else:
     print(f'Superuser {username} already exists')
 " 2>/dev/null || true
