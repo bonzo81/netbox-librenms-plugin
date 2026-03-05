@@ -24,7 +24,6 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
-    interface_name_field = get_interface_name_field()
 
     def get_object(self, pk):
         """Retrieve the object (Device or VirtualMachine)."""
@@ -47,34 +46,32 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         return data
 
     def get_links_data(self, obj):
-        """Fetch links data from LibreNMS for the device and add local port names."""
+        """Fetch links data from LibreNMS, including local_port names for the current request."""
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
         success, data = self.librenms_api.get_device_links(self.librenms_id)
         if not success or "error" in data:
             return None
 
         ports_data = self.get_ports_data(obj)
-        local_ports_map = {}
-        for port in ports_data.get("ports", []):
-            port_id = str(port["port_id"])
-            port_name = port[self.interface_name_field]
-            local_ports_map[port_id] = port_name
+        interface_name_field = get_interface_name_field(getattr(self, "request", None))
+        local_ports_map = {
+            str(port["port_id"]): port.get(interface_name_field)
+            for port in ports_data.get("ports", [])
+            if port.get("port_id") and port.get(interface_name_field)
+        }
 
         links = data.get("links", [])
-        links_data = []
-        for link in links:
-            local_port_name = local_ports_map.get(str(link.get("local_port_id")))
-            links_data.append(
-                {
-                    "local_port": local_port_name,
-                    "local_port_id": link.get("local_port_id"),
-                    "remote_port": link.get("remote_port"),
-                    "remote_device": link.get("remote_hostname"),
-                    "remote_port_id": link.get("remote_port_id"),
-                    "remote_device_id": link.get("remote_device_id"),
-                }
-            )
-        return links_data
+        return [
+            {
+                "local_port": local_ports_map.get(str(link.get("local_port_id"))),
+                "local_port_id": link.get("local_port_id"),
+                "remote_port": link.get("remote_port"),
+                "remote_device": link.get("remote_hostname"),
+                "remote_port_id": link.get("remote_port_id"),
+                "remote_device_id": link.get("remote_device_id"),
+            }
+            for link in links
+        ]
 
     def get_device_by_id_or_name(self, remote_device_id, hostname):
         """Try to find device in NetBox first by librenms_id custom field, then by name"""
@@ -254,7 +251,6 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def _prepare_context(self, request, obj, fetch_fresh=False):
         """Helper method to prepare the context data for cable sync views."""
-        table = None
         cache_expiry = None
 
         if fetch_fresh:
@@ -270,11 +266,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             else:
                 return None
 
-        # Enrich data in both cases to ensure current NetBox state
+        # Enrich with current NetBox state on both paths
         links_data = self.enrich_links_data(links_data, obj)
 
         if fetch_fresh:
-            # Cache the fresh data after enrichment
+            # Cache after enrichment so SyncCablesView and SingleCableVerifyView
+            # can read fully-populated link dicts (local_port, netbox_*_id, etc.)
             cache.set(
                 self.get_cache_key(obj, "links"),
                 {"links": links_data},
@@ -285,12 +282,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
         if cache_ttl is not None:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
-        # Generate the table
-        table = self.get_table(links_data, obj)
 
+        table = self.get_table(links_data, obj)
         table.configure(request)
 
-        # Prepare and return the context
         return {
             "table": table,
             "object": obj,
