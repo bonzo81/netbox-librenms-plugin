@@ -269,17 +269,22 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # Enrich with current NetBox state on both paths
         links_data = self.enrich_links_data(links_data, obj)
 
+        # Cache after enrichment so verify/sync views read current NetBox state
+        cache_key = self.get_cache_key(obj, "links")
         if fetch_fresh:
-            # Cache after enrichment so SyncCablesView and SingleCableVerifyView
-            # can read fully-populated link dicts (local_port, netbox_*_id, etc.)
             cache.set(
-                self.get_cache_key(obj, "links"),
+                cache_key,
                 {"links": links_data},
                 timeout=self.librenms_api.cache_timeout,
             )
+        else:
+            # Write enriched data back, preserving original TTL
+            remaining_ttl = cache.ttl(cache_key)
+            if remaining_ttl and remaining_ttl > 0:
+                cache.set(cache_key, {"links": links_data}, timeout=remaining_ttl)
 
         # Calculate cache expiry
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
+        cache_ttl = cache.ttl(cache_key)
         if cache_ttl is not None:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
