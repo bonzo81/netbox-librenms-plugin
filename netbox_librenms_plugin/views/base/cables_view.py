@@ -266,7 +266,21 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             else:
                 return None
 
-        # Enrich with current NetBox state on both paths
+        if not fetch_fresh:
+            # Strip derived fields so re-enrichment starts from raw link data;
+            # without this, stale IDs/URLs persist when NetBox objects are
+            # deleted and cause DoesNotExist in check_cable_status().
+            _raw_keys = {
+                "local_port",
+                "local_port_id",
+                "remote_port",
+                "remote_device",
+                "remote_port_id",
+                "remote_device_id",
+            }
+            links_data = [{k: v for k, v in link.items() if k in _raw_keys} for link in links_data]
+
+        # Enrich data in both cases to ensure current NetBox state
         links_data = self.enrich_links_data(links_data, obj)
 
         # Cache after enrichment so verify/sync views read current NetBox state
