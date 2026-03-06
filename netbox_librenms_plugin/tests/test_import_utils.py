@@ -149,8 +149,8 @@ class TestDeviceNameDetermination:
 class TestDeviceRetrieval:
     """Test device retrieval and filtering functions."""
 
-    @patch("netbox_librenms_plugin.import_utils.cache")
-    @patch("netbox_librenms_plugin.import_utils.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_get_librenms_devices_for_import_success(self, mock_api_class, mock_cache):
         """Retrieve devices from LibreNMS API."""
         mock_cache.get.return_value = None  # Cache miss
@@ -171,7 +171,7 @@ class TestDeviceRetrieval:
         assert len(devices) == 2
         assert devices[0]["hostname"] == "switch-01"
 
-    @patch("netbox_librenms_plugin.import_utils.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_librenms_devices_for_import_uses_cache(self, mock_cache):
         """Cached results returned on repeat call."""
         cached_devices = [
@@ -189,7 +189,7 @@ class TestDeviceRetrieval:
         assert devices[0]["hostname"] == "cached-device"
         mock_api.list_devices.assert_not_called()
 
-    @patch("netbox_librenms_plugin.import_utils.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_librenms_devices_for_import_cache_miss(self, mock_cache):
         """API called when cache empty."""
         mock_cache.get.return_value = None
@@ -209,7 +209,7 @@ class TestDeviceRetrieval:
         mock_api.list_devices.assert_called_once()
         assert len(devices) == 1
 
-    @patch("netbox_librenms_plugin.import_utils.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_device_count_for_filters_success(self, mock_cache):
         """Returns correct count from API."""
         mock_cache.get.return_value = [
@@ -225,7 +225,7 @@ class TestDeviceRetrieval:
 
         assert count == 3
 
-    @patch("netbox_librenms_plugin.import_utils.cache")
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_device_count_excludes_disabled(self, mock_cache):
         """Count respects show_disabled filter parameter."""
         mock_cache.get.return_value = [
@@ -279,7 +279,7 @@ class TestDeviceRetrieval:
         assert data["members"] == []
         assert data["detection_error"] is None
 
-    @patch("netbox_librenms_plugin.import_utils.cache")
+    @patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache")
     def test_get_virtual_chassis_data_returns_empty_without_api(self, mock_cache):
         """Get VC data returns empty structure without API."""
         from netbox_librenms_plugin.import_utils import get_virtual_chassis_data
@@ -299,14 +299,14 @@ class TestDeviceValidation:
     """Test device validation for import."""
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_site_match_found(
         self,
         mock_site_model,
@@ -358,14 +358,14 @@ class TestDeviceValidation:
         assert result["site"]["site"] == mock_site
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_site_not_found(
         self,
         mock_site_model,
@@ -416,15 +416,15 @@ class TestDeviceValidation:
         assert any("site" in issue.lower() for issue in result["issues"])
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
-    @patch("netbox_librenms_plugin.import_utils.DeviceType")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType")
     def test_validate_device_platform_match_found(
         self,
         mock_device_type,
@@ -478,14 +478,14 @@ class TestDeviceValidation:
         assert result["platform"]["platform"] == mock_platform
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_platform_not_found(
         self,
         mock_site_model,
@@ -535,14 +535,14 @@ class TestDeviceValidation:
         assert result["platform"]["found"] is False
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_type_match_found(
         self,
         mock_site_model,
@@ -594,15 +594,15 @@ class TestDeviceValidation:
         assert result["device_type"]["device_type"] == mock_dt
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
-    @patch("netbox_librenms_plugin.import_utils.DeviceType")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType")
     def test_validate_device_type_not_found(
         self,
         mock_device_type,
@@ -655,14 +655,14 @@ class TestDeviceValidation:
         assert any("device type" in issue.lower() for issue in result["issues"])
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_role_required(
         self,
         mock_site_model,
@@ -716,14 +716,14 @@ class TestDeviceValidation:
         assert any("role" in issue.lower() for issue in result["issues"])
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_handles_empty_location(
         self,
         mock_site_model,
@@ -775,14 +775,14 @@ class TestDeviceValidation:
         assert result["site"]["found"] is False
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_handles_empty_os(
         self,
         mock_site_model,
@@ -833,15 +833,15 @@ class TestDeviceValidation:
         assert result["platform"]["found"] is False
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
-    @patch("netbox_librenms_plugin.import_utils.DeviceType")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType")
     def test_validate_device_handles_empty_hardware(
         self,
         mock_device_type,
@@ -894,14 +894,14 @@ class TestDeviceValidation:
         assert result["device_type"]["matched"] is False
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_duplicate_detection(
         self,
         mock_site_model,
@@ -933,14 +933,14 @@ class TestDeviceValidation:
         assert result["can_import"] is False
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_returns_complete_state(
         self,
         mock_site_model,
@@ -999,17 +999,17 @@ class TestDeviceValidation:
         assert "cluster" in result
         assert "platform" in result
 
-    @patch("netbox_librenms_plugin.import_utils.cache")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
     @patch("virtualization.models.Cluster")
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_import_as_vm(
         self,
         mock_site_model,
@@ -1045,8 +1045,8 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_clusters = [MagicMock(id=1, name="VMware Cluster")]
-        # Cluster is imported locally in the VM path, so we need to mock it there
-        mock_cluster_local.objects.all.return_value = mock_clusters
+        # Cluster is imported at module level in device_operations
+        mock_cluster_module.objects.all.return_value = mock_clusters
         mock_cache.get.return_value = None  # Force cache miss to trigger Cluster.objects.all()
         mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
@@ -1064,14 +1064,14 @@ class TestDeviceValidation:
         assert result["cluster"]["available_clusters"] == mock_clusters
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_validate_device_existing_vm_blocks_import(
         self,
         mock_site_model,
@@ -1108,14 +1108,14 @@ class TestDeviceNamingPreferences:
     """Test that validation honours use_sysname and strip_domain user preferences."""
 
     COMMON_PATCHES = [
-        "netbox_librenms_plugin.import_utils.Site",
-        "netbox_librenms_plugin.import_utils.Rack",
-        "netbox_librenms_plugin.import_utils.Cluster",
-        "netbox_librenms_plugin.import_utils.DeviceRole",
-        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
-        "netbox_librenms_plugin.import_utils.find_matching_platform",
-        "netbox_librenms_plugin.import_utils.find_matching_site",
-        "netbox_librenms_plugin.import_utils.Device",
+        "netbox_librenms_plugin.import_utils.device_operations.Site",
+        "netbox_librenms_plugin.import_utils.device_operations.Rack",
+        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+        "netbox_librenms_plugin.import_utils.device_operations.Device",
         "virtualization.models.VirtualMachine",
     ]
 
@@ -1153,14 +1153,14 @@ class TestDeviceNamingPreferences:
         mock_site_model.objects.all.return_value = []
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_resolved_name_uses_sysname_by_default(self, *mocks):
         """Default use_sysname=True uses sysName for resolved_name."""
         self._setup_no_existing(mocks)
@@ -1175,14 +1175,14 @@ class TestDeviceNamingPreferences:
         assert result["resolved_name"] == "core-switch"
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_resolved_name_uses_hostname_when_sysname_disabled(self, *mocks):
         """use_sysname=False uses hostname for resolved_name."""
         self._setup_no_existing(mocks)
@@ -1201,14 +1201,14 @@ class TestDeviceNamingPreferences:
         assert result["resolved_name"] == "10.0.0.1"
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_resolved_name_strips_domain(self, *mocks):
         """strip_domain=True strips the domain suffix."""
         self._setup_no_existing(mocks)
@@ -1227,14 +1227,14 @@ class TestDeviceNamingPreferences:
         assert result["resolved_name"] == "switch-01"
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_duplicate_detection_uses_resolved_name(self, *mocks):
         """Duplicate detection should match against the resolved name, not raw hostname."""
         self._setup_no_existing(mocks)
@@ -1262,14 +1262,14 @@ class TestDeviceNamingPreferences:
         assert result["existing_match_type"] == "hostname"
 
     @patch("virtualization.models.VirtualMachine")
-    @patch("netbox_librenms_plugin.import_utils.Device")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
-    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
-    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
-    @patch("netbox_librenms_plugin.import_utils.Cluster")
-    @patch("netbox_librenms_plugin.import_utils.Rack")
-    @patch("netbox_librenms_plugin.import_utils.Site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_backward_compatible_defaults(self, *mocks):
         """Calling without naming params produces resolved_name in result."""
         self._setup_no_existing(mocks)
@@ -1295,14 +1295,14 @@ class TestNameMatchesWithNamingPreferences:
     """
 
     COMMON_PATCHES = [
-        "netbox_librenms_plugin.import_utils.Site",
-        "netbox_librenms_plugin.import_utils.Rack",
-        "netbox_librenms_plugin.import_utils.Cluster",
-        "netbox_librenms_plugin.import_utils.DeviceRole",
-        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
-        "netbox_librenms_plugin.import_utils.find_matching_platform",
-        "netbox_librenms_plugin.import_utils.find_matching_site",
-        "netbox_librenms_plugin.import_utils.Device",
+        "netbox_librenms_plugin.import_utils.device_operations.Site",
+        "netbox_librenms_plugin.import_utils.device_operations.Rack",
+        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+        "netbox_librenms_plugin.import_utils.device_operations.Device",
         "virtualization.models.VirtualMachine",
     ]
 
@@ -1451,7 +1451,7 @@ class TestNameMatchesWithNamingPreferences:
         # suggested_name should be the resolved (stripped) name, not raw sysName
         assert result["suggested_name"] == "new-switch"
 
-    @patch("netbox_librenms_plugin.import_utils._generate_vc_member_name")
+    @patch("netbox_librenms_plugin.import_utils.device_operations._generate_vc_member_name")
     def test_name_matches_vc_member(self, mock_vc_name):
         """VC member: name matches when existing device name matches generated VC name."""
         mock_vc_name.return_value = "switch-M2"
@@ -1482,7 +1482,7 @@ class TestNameMatchesWithNamingPreferences:
         # _generate_vc_member_name should be called with resolved name, position, serial
         mock_vc_name.assert_called_with("switch", 2, serial="SN123")
 
-    @patch("netbox_librenms_plugin.import_utils._generate_vc_member_name")
+    @patch("netbox_librenms_plugin.import_utils.device_operations._generate_vc_member_name")
     def test_name_matches_vc_member_with_strip_domain(self, mock_vc_name):
         """VC member + strip_domain: FQDN resolved to short name matches VC pattern."""
         mock_vc_name.return_value = "siteA-9300-1 (2)"
@@ -1514,7 +1514,7 @@ class TestNameMatchesWithNamingPreferences:
         # Resolved name should be "siteA-9300-1" (stripped), then VC name generated
         mock_vc_name.assert_called_with("siteA-9300-1", 2, serial="SN456")
 
-    @patch("netbox_librenms_plugin.import_utils._generate_vc_member_name")
+    @patch("netbox_librenms_plugin.import_utils.device_operations._generate_vc_member_name")
     def test_vc_member_name_mismatch_suggests_vc_name(self, mock_vc_name):
         """VC member name mismatch: suggested_name should be the expected VC name."""
         mock_vc_name.return_value = "new-switch-M2"
@@ -1599,14 +1599,14 @@ class TestSerialNumberMatching:
     """Test serial number matching in device validation."""
 
     SERIAL_PATCHES = [
-        "netbox_librenms_plugin.import_utils.Site",
-        "netbox_librenms_plugin.import_utils.Rack",
-        "netbox_librenms_plugin.import_utils.Cluster",
-        "netbox_librenms_plugin.import_utils.DeviceRole",
-        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
-        "netbox_librenms_plugin.import_utils.find_matching_platform",
-        "netbox_librenms_plugin.import_utils.find_matching_site",
-        "netbox_librenms_plugin.import_utils.Device",
+        "netbox_librenms_plugin.import_utils.device_operations.Site",
+        "netbox_librenms_plugin.import_utils.device_operations.Rack",
+        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+        "netbox_librenms_plugin.import_utils.device_operations.Device",
         "virtualization.models.VirtualMachine",
     ]
 
@@ -1980,7 +1980,7 @@ class TestSerialNumberMatching:
         self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
-        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+        with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
 
             from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -2036,7 +2036,7 @@ class TestSerialNumberMatching:
         self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
-        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+        with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
 
             from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -2082,7 +2082,7 @@ class TestSerialNumberMatching:
         self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
-        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+        with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
             mock_cache.get.return_value = None
 
             from netbox_librenms_plugin.import_utils import validate_device_for_import
