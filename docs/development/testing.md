@@ -29,6 +29,8 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_background_jobs.py](../../netbox_librenms_plugin/tests/test_background_jobs.py) | Background job execution and view decision logic |
 | [test_vlan_sync.py](../../netbox_librenms_plugin/tests/test_vlan_sync.py) | VLAN sync—API fetching, comparison logic, CSS class utilities, and sync actions |
 | [test_interface_vlan_sync.py](../../netbox_librenms_plugin/tests/test_interface_vlan_sync.py) | Interface VLAN assignments—group resolution, mode detection, and per-interface VLAN assignment |
+| [test_integration_sync.py](../../netbox_librenms_plugin/tests/test_integration_sync.py) | Integration tests—API client against local mock HTTP server |
+| [test_view_wiring.py](../../netbox_librenms_plugin/tests/test_view_wiring.py) | Smoke tests—view class MRO, mixin wiring, permission contracts, and template syntax |
 
 Supporting files:
 
@@ -36,6 +38,7 @@ Supporting files:
 |------|---------|
 | [conftest.py](../../netbox_librenms_plugin/tests/conftest.py) | Shared pytest fixtures |
 | [test_librenms_api_helpers.py](../../netbox_librenms_plugin/tests/test_librenms_api_helpers.py) | Auto-use fixture for API configuration mocking |
+| [mock_librenms_server.py](../../netbox_librenms_plugin/tests/mock_librenms_server.py) | Minimal HTTP mock server for integration tests |
 
 ## Running Tests
 
@@ -63,6 +66,12 @@ pytest netbox_librenms_plugin/tests/test_import_utils.py netbox_librenms_plugin/
 
 # Background job tests
 pytest netbox_librenms_plugin/tests/test_background_jobs.py -v
+
+# Integration tests (API client against mock HTTP server)
+pytest netbox_librenms_plugin/tests/test_integration_sync.py -v
+
+# View wiring and template syntax smoke tests
+pytest netbox_librenms_plugin/tests/test_view_wiring.py -v
 ```
 
 ### Debugging Failed Tests
@@ -85,10 +94,10 @@ pytest netbox_librenms_plugin/tests/ -v --lf
 
 The test suite prioritizes speed and isolation so you can run tests frequently during development:
 
-- **Mock-based**: Tests use `MagicMock` instead of real database objects. No Django database setup required.
+- **Mock-based**: Unit tests use `MagicMock` instead of real database objects. No Django database setup required.
 - **Fast execution**: The full suite runs in under 0.5 seconds.
 - **Isolated**: Each test is independent with no shared state between tests.
-- **No external dependencies**: Tests don't make network calls or require LibreNMS access.
+- **No external network access**: Tests never call external services. Integration tests use a local loopback HTTP server (`mock_librenms_server.py`) to exercise the real API client against realistic HTTP responses without requiring a running LibreNMS instance.
 
 This approach means tests work identically in your local development environment, in the devcontainer, and in CI pipelines.
 
@@ -186,7 +195,7 @@ mock_delete.assert_not_called()
 The tests run in any environment without external dependencies:
 
 - No database connection required
-- No network access needed
+- No external network access needed (integration tests use local loopback only)
 - Fast execution suitable for pre-commit hooks
 - Clear failure messages for debugging
 - Works in containerized environments
