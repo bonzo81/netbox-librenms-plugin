@@ -21,16 +21,20 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
     }
 
     def get_selected_interfaces(self, request, initial_device):
-        """Return selected interface entries from POST data."""
+        """Return selected interface entries from POST data.
+
+        Each ``select`` value is a ``local_port_id`` (stable LibreNMS identifier)
+        so that matching against cached link data is user-preference agnostic.
+        """
         selected_interfaces = []
         selected_data = [x for x in request.POST.getlist("select") if x]
 
         if not selected_data:
             return None
 
-        for interface in selected_data:
-            device_id = request.POST.get(f"device_selection_{interface}") or initial_device.id
-            selected_interfaces.append({"device_id": device_id, "interface": interface})
+        for port_id in selected_data:
+            device_id = request.POST.get(f"device_selection_{port_id}") or initial_device.id
+            selected_interfaces.append({"device_id": device_id, "local_port_id": port_id})
 
         return selected_interfaces
 
@@ -77,11 +81,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
 
     def process_single_interface(self, interface, cached_links):
         """Process cable creation for a single interface from cached link data."""
+        port_id = str(interface.get("local_port_id", ""))
         try:
-            link_data = next(link for link in cached_links if link["local_port"] == interface["interface"])
+            link_data = next(link for link in cached_links if str(link.get("local_port_id", "")) == port_id)
             return self.handle_cable_creation(link_data, interface)
         except StopIteration:
-            return {"status": "invalid"}
+            return {"status": "invalid", "interface": port_id}
 
     def verify_cable_creation_requirements(self, link_data):
         """Return True if all required NetBox IDs are present in link data."""
@@ -95,22 +100,23 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
 
     def handle_cable_creation(self, link_data, interface):
         """Create a cable from link data and return the operation result."""
+        display_name = link_data.get("local_port") or interface.get("local_port_id", "")
         if not self.verify_cable_creation_requirements(link_data):
-            return {"status": "invalid", "interface": interface["interface"]}
+            return {"status": "invalid", "interface": display_name}
 
         try:
             local_interface = Interface.objects.get(pk=link_data["netbox_local_interface_id"])
             remote_interface = Interface.objects.get(pk=link_data["netbox_remote_interface_id"])
 
             if self.check_existing_cable(local_interface, remote_interface):
-                return {"status": "duplicate", "interface": interface["interface"]}
+                return {"status": "duplicate", "interface": display_name}
 
             if self.create_cable(local_interface, remote_interface, self.request):
-                return {"status": "valid", "interface": interface["interface"]}
-            return {"status": "invalid", "interface": interface["interface"]}  # pragma: no cover
+                return {"status": "valid", "interface": display_name}
+            return {"status": "invalid", "interface": display_name}  # pragma: no cover
 
         except Interface.DoesNotExist:
-            return {"status": "missing_remote", "interface": interface["interface"]}
+            return {"status": "missing_remote", "interface": display_name}
 
     def process_interface_sync(self, selected_interfaces, cached_links):
         """Process cable sync for all selected interfaces and return results."""

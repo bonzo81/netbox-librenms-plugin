@@ -825,7 +825,7 @@ function handleCableChange(select, value) {
         },
         body: JSON.stringify({
             device_id: value,
-            local_port: select.dataset.interface
+            local_port_id: select.dataset.interface
         })
     })
         .then(response => response.json())
