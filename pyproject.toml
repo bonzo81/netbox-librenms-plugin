@@ -49,11 +49,6 @@ addopts = "-v --tb=short"
 [tool.ruff]
 line-length = 120
 
-[tool.ruff.lint.mccabe]
-#Flag errors (`C901`) whenever the complexity level exceeds 15.
-#Rule not enforced - only to bump default 10 to 15 to allow for manual check
-max-complexity = 15
-
 [tool.ruff.lint]
 # Follow NetBox conventions - ignore certain rules
 ignore = [
@@ -61,6 +56,11 @@ ignore = [
     "F403",  # Undefined local with import star
     "F405",  # Undefined local with import star usage
 ]
+
+[tool.ruff.lint.mccabe]
+# Flag errors (`C901`) whenever the complexity level exceeds 15.
+# Rule not enforced - only to bump default 10 to 15 to allow for manual check
+max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 # Allow re-exports in __init__.py files
