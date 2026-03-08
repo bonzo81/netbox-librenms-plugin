@@ -46,7 +46,8 @@ def _save_device(device) -> HttpResponse | None:
     try:
         device.full_clean()
     except ValidationError as exc:
-        return HttpResponse(f"Validation error: {escape(str(exc))}", status=400)
+        error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+        return HttpResponse(f"Validation error: {escape(str(error_msg))}", status=400)
     try:
         device.save()
     except IntegrityError as exc:
@@ -60,11 +61,24 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
 
     settings = None
 
-    # Check POST first (form submissions), then GET (HTMX hx-include on hx-get)
-    if "use-sysname-toggle" in request.POST:
-        use_sysname = request.POST.get("use-sysname-toggle") == "on"
-    elif "use-sysname-toggle" in request.GET:
-        use_sysname = request.GET.get("use-sysname-toggle") == "on"
+    # Check POST first (form submissions), then GET (HTMX hx-include on hx-get).
+    # Support hyphenated ("use-sysname-toggle"), underscored ("use_sysname-toggle"),
+    # and plain canonical ("use_sysname") key variants for compatibility across
+    # different form/hidden-input implementations.
+    _USE_SYSNAME_KEYS = ("use-sysname-toggle", "use_sysname-toggle", "use_sysname")
+    _STRIP_DOMAIN_KEYS = ("strip-domain-toggle", "strip_domain-toggle", "strip_domain")
+    _TRUTHY = frozenset({"on", "true", "1"})
+
+    def _is_truthy(val):
+        return val.lower() in _TRUTHY if val is not None else False
+
+    _use_sysname_post = next((request.POST.get(k) for k in _USE_SYSNAME_KEYS if k in request.POST), None)
+    _use_sysname_get = next((request.GET.get(k) for k in _USE_SYSNAME_KEYS if k in request.GET), None)
+
+    if _use_sysname_post is not None:
+        use_sysname = _is_truthy(_use_sysname_post)
+    elif _use_sysname_get is not None:
+        use_sysname = _is_truthy(_use_sysname_get)
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
         if pref is not None:
@@ -73,10 +87,13 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
             settings = LibreNMSSettings.objects.first()
             use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
 
-    if "strip-domain-toggle" in request.POST:
-        strip_domain = request.POST.get("strip-domain-toggle") == "on"
-    elif "strip-domain-toggle" in request.GET:
-        strip_domain = request.GET.get("strip-domain-toggle") == "on"
+    _strip_domain_post = next((request.POST.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.POST), None)
+    _strip_domain_get = next((request.GET.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.GET), None)
+
+    if _strip_domain_post is not None:
+        strip_domain = _is_truthy(_strip_domain_post)
+    elif _strip_domain_get is not None:
+        strip_domain = _is_truthy(_strip_domain_get)
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
         if pref is not None:
@@ -87,6 +104,20 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
             strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
 
     return use_sysname, strip_domain
+
+
+def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> str:
+    """Return the resolved hostname to use when updating a device during a conflict action.
+
+    Prefer the cached ``resolved_name`` from validation (already computed with the
+    user's naming prefs at validation time). Fall back to computing it fresh from
+    the current request's naming preferences.
+    """
+    resolved = validation.get("resolved_name")
+    if resolved:
+        return resolved
+    use_sysname, strip_domain = _resolve_naming_preferences(request)
+    return _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
 
 
 class DeviceImportHelperMixin:
@@ -330,7 +361,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             vc_requested = request.GET.get("enable_vc_detection") == "true"
             validation["_vc_detection_enabled"] = vc_requested
 
-            device_name = validation["resolved_name"]
+            device_name = validation.get("resolved_name")
 
             if validation.get("virtual_chassis", {}).get("is_stack") and device_name:
                 validation["virtual_chassis"] = update_vc_member_suggested_names(
@@ -460,12 +491,13 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             messages.error(request, "Invalid device identifier supplied")
             return HttpResponse("Invalid device identifier", status=400)
 
+        use_sysname, strip_domain = _resolve_naming_preferences(request)
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
             "sync_cables": request.POST.get("sync_cables") == "on",
             "sync_ips": request.POST.get("sync_ips") == "on",
-            "use_sysname": request.POST.get("use_sysname", "true") == "true",
-            "strip_domain": request.POST.get("strip_domain", "false") == "true",
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
         }
 
         manual_mappings_per_device: dict[int, dict[str, int]] = {}
@@ -792,8 +824,9 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         librenms_os = libre_device.get("os") or "-"
         librenms_hardware = libre_device.get("hardware") or "-"
 
-        # Serial comparison
-        serial_synced = existing_device.serial == librenms_serial or librenms_serial == "-"
+        # Serial comparison (VMs may not have serial in all NetBox versions)
+        netbox_serial = getattr(existing_device, "serial", None) or ""
+        serial_synced = netbox_serial == librenms_serial or librenms_serial == "-"
 
         # Platform comparison
         platform_info = {
@@ -812,20 +845,21 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
 
         netbox_platform = platform_info["netbox_platform"]
         matching_platform = platform_info["matching_platform"]
-        platform_synced = librenms_os == "-" or (
+        platform_synced = librenms_os == "-" or bool(
             netbox_platform and matching_platform and netbox_platform.pk == matching_platform.pk
         )
 
-        # Device type comparison
+        # Device type comparison (VMs don't have device_type)
         device_type_synced = True
         librenms_device_type = None
-        if librenms_hardware and librenms_hardware != "-":
+        netbox_device_type = getattr(existing_device, "device_type", None)
+        if librenms_hardware and librenms_hardware != "-" and netbox_device_type is not None:
             from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
             hw_match = match_librenms_hardware_to_device_type(librenms_hardware)
             if hw_match.get("matched"):
                 librenms_device_type = hw_match["device_type"]
-                if not existing_device.device_type or existing_device.device_type.pk != librenms_device_type.pk:
+                if not netbox_device_type or netbox_device_type.pk != librenms_device_type.pk:
                     device_type_synced = False
             else:
                 device_type_synced = False
