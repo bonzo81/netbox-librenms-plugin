@@ -4,6 +4,11 @@ These tests never touch the database or network; they only inspect class
 hierarchies and attribute presence.
 """
 
+import os
+from pathlib import Path
+
+import pytest
+
 
 class TestLibreNMSAPIMixinWiring:
     """Views that need LibreNMSAPIMixin must have it in their MRO."""
@@ -234,3 +239,35 @@ class TestViewPropertyLazyInit:
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
         assert any("librenms_api" in vars(cls) for cls in BaseLibreNMSSyncView.__mro__)
+
+
+# ── Template syntax smoke tests ──────────────────────────────────────────────
+
+_TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "netbox_librenms_plugin"
+_TEMPLATE_FILES = sorted(_TEMPLATE_DIR.rglob("*.html"))
+
+
+class TestTemplateSyntax:
+    """Compile every plugin template to catch syntax errors early."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _django_engine(self):
+        """Ensure Django is set up once and expose the template engine."""
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "netbox.settings")
+        import django
+
+        django.setup()
+        from django.template import engines
+
+        self.__class__._engine = engines["django"]
+
+    @pytest.mark.parametrize(
+        "template_path",
+        _TEMPLATE_FILES,
+        ids=[str(p.relative_to(_TEMPLATE_DIR)) for p in _TEMPLATE_FILES],
+    )
+    def test_template_compiles(self, template_path):
+        """Each template must parse without TemplateSyntaxError."""
+        source = template_path.read_text()
+        # Compile the template — raises TemplateSyntaxError on bad tags
+        self._engine.from_string(source)
