@@ -166,7 +166,19 @@ def bulk_import_devices_shared(
                 # Handle virtual chassis creation for stacks
                 vc_data = validation.get("virtual_chassis", {})
                 if vc_data.get("is_stack", False):
-                    vc_domain = f"librenms-{device_id}"
+                    # Derive a stack-level dedup key from member serials so that all
+                    # LibreNMS devices belonging to the same physical stack (e.g. each
+                    # switch in a stacked chassis that appears as a separate device in
+                    # LibreNMS) share the same key and VC creation is triggered only once.
+                    # Fall back to device_id when no member serials are available.
+                    member_serials = sorted(
+                        serial
+                        for m in vc_data.get("members", [])
+                        if (serial := str(m.get("serial") or "").strip()) and serial != "-"
+                    )
+                    vc_domain = (
+                        f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-{device_id}"
+                    )
 
                     # Only create VC if we haven't processed this stack yet
                     # Add to set BEFORE attempting creation to prevent race condition

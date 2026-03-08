@@ -651,7 +651,7 @@ class TestDeviceValidation:
 
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
-        assert result["device_type"]["matched"] is False
+        assert result["device_type"]["found"] is False
         assert any("device type" in issue.lower() for issue in result["issues"])
 
     @patch("virtualization.models.VirtualMachine")
@@ -891,7 +891,7 @@ class TestDeviceValidation:
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
         assert result is not None
-        assert result["device_type"]["matched"] is False
+        assert result["device_type"]["found"] is False
 
     @patch("virtualization.models.VirtualMachine")
     @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
@@ -1835,6 +1835,7 @@ class TestSerialNumberMatching:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = "ABC123"
+        existing.virtual_chassis = None
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
