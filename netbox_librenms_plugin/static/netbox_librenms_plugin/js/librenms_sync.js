@@ -763,6 +763,7 @@ function handleVRFChange(select, value) {
         return;
     }
     const deviceId = deviceInfo.id;
+    const row = select.closest('tr');
 
     fetch('/plugins/librenms_plugin/verify-ipaddress/', {
         method: 'POST',
