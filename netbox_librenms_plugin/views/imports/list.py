@@ -241,27 +241,28 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             if hardware := request.GET.get("librenms_hardware"):
                 libre_filters["hardware"] = hardware
 
-            # Check if data is already cached before deciding on background job
-            # This prevents creating a job when cached results are available
             from netbox_librenms_plugin.import_utils import (
+                get_cache_metadata_key,
                 get_device_count_for_filters,
-                get_librenms_devices_for_import,
             )
 
-            # Quick check: are the raw devices already cached?
-            devices_cached = False
+            # Check if validated results already exist for this naming-mode
+            # namespace.  The metadata key encodes server, filters, vc_enabled,
+            # use_sysname and strip_domain, so a naming-preference change
+            # correctly shows the cache as cold and triggers the background path.
+            validated_cached = False
             if not self._cache_cleared:
                 try:
-                    _, devices_from_cache = get_librenms_devices_for_import(
-                        api=self.librenms_api,
+                    metadata_key = get_cache_metadata_key(
+                        server_key=self.librenms_api.server_key,
                         filters=libre_filters,
-                        force_refresh=False,
-                        return_cache_status=True,
+                        vc_enabled=self._vc_detection_enabled,
+                        use_sysname=self._use_sysname,
+                        strip_domain=self._strip_domain,
                     )
-                    devices_cached = devices_from_cache
-                except Exception:
-                    # Cache check failed; proceed with background job decision based on device_count
-                    pass
+                    validated_cached = cache.get(metadata_key) is not None
+                except Exception as e:
+                    logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
 
             # Get device count for background job decision
             try:
@@ -276,8 +277,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 device_count = 0
 
             # Decide whether to use background job
-            # Skip background job if data is already cached
-            if not devices_cached and self.should_use_background_job():
+            # Skip background job if validated data is already cached
+            if not validated_cached and self.should_use_background_job():
                 # Check if RQ workers are available
                 if get_workers_for_queue("default") > 0:
                     from netbox_librenms_plugin.jobs import FilterDevicesJob

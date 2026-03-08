@@ -318,3 +318,80 @@ class TestMismatchDetection:
         result = view.get_librenms_device_info(obj)
 
         assert result["mismatched_device"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tests for VC lookup delegation in get()
+# ---------------------------------------------------------------------------
+
+
+class TestVCLookupDelegation:
+    """Verify that BaseLibreNMSSyncView.get() always delegates VC device
+    resolution to get_librenms_sync_device(), even when the viewed member
+    has its own librenms_id."""
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_vc_member_with_own_id_delegates_to_sync_device(self, mock_sync_device, mock_get_object, mock_render):
+        """A VC member with its own librenms_id should still delegate to
+        get_librenms_sync_device, which may return a different member."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        # Viewed device: member A with its own librenms_id
+        member_a = MagicMock()
+        member_a.pk = 1
+        member_a.cf = {"librenms_id": 42}
+        member_a.virtual_chassis = MagicMock()
+
+        # Sync device: member B (returned by get_librenms_sync_device)
+        member_b = MagicMock()
+        member_b.pk = 2
+
+        mock_get_object.return_value = member_a
+        mock_sync_device.return_value = member_b
+
+        view = object.__new__(BaseLibreNMSSyncView)
+        view.model = MagicMock()
+        api = MagicMock()
+        api.get_librenms_id.return_value = 42
+        view._librenms_api = api
+        view.tab = MagicMock()
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = MagicMock()
+        view.get(request, pk=1)
+
+        # get_librenms_sync_device must be called unconditionally for VC members
+        mock_sync_device.assert_called_once_with(member_a)
+        # get_librenms_id should be called on the sync device (member_b)
+        api.get_librenms_id.assert_called_once_with(member_b)
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_non_vc_device_skips_sync_device_lookup(self, mock_sync_device, mock_get_object, mock_render):
+        """A device without a virtual chassis should not call
+        get_librenms_sync_device at all."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        device = MagicMock()
+        device.pk = 1
+        device.virtual_chassis = None
+
+        mock_get_object.return_value = device
+
+        view = object.__new__(BaseLibreNMSSyncView)
+        view.model = MagicMock()
+        api = MagicMock()
+        api.get_librenms_id.return_value = 42
+        view._librenms_api = api
+        view.tab = MagicMock()
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = MagicMock()
+        view.get(request, pk=1)
+
+        mock_sync_device.assert_not_called()
