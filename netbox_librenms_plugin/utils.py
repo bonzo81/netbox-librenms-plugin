@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Optional
 
@@ -7,6 +8,8 @@ from django.http import HttpRequest
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
+
+logger = logging.getLogger(__name__)
 
 
 def convert_speed_to_kbps(speed_bps: int) -> int:
@@ -101,7 +104,8 @@ def get_librenms_sync_device(device: Device) -> Optional[Device]:
 
     # Priority 1: Check if ANY member has librenms_id configured
     for member in all_members:
-        if member.cf.get("librenms_id"):
+        raw_cf = member.cf.get("librenms_id")
+        if raw_cf is not None and not isinstance(raw_cf, bool):
             return member
 
     # Priority 2: Use master device if it has primary IP
