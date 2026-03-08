@@ -1,5 +1,5 @@
 import django_tables2 as tables
-from django.utils.html import format_html
+from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
@@ -127,7 +127,7 @@ class VCCableTable(LibreNMSCableTable):
         port_id = record["local_port_id"]
 
         options = [
-            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{member.name}</option>'
+            f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{escape(member.name)}</option>'
             for member in members
         ]
 

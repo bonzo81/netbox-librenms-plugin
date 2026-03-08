@@ -196,6 +196,8 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             return None
 
         # Step 5: Extract member info
+        # Load naming pattern once to avoid a DB query per member.
+        vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
         members = []
         for idx, chassis in enumerate(chassis_items):
             raw_position = chassis.get("entPhysicalParentRelPos", idx)
@@ -214,7 +216,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
 
             # Generate suggested name if we have master name
             if master_name:
-                member_data["suggested_name"] = _generate_vc_member_name(master_name, position + 1)
+                member_data["suggested_name"] = _generate_vc_member_name(
+                    master_name, position + 1, pattern=vc_name_pattern
+                )
             else:
                 member_data["suggested_name"] = f"Member-{position + 1}"
 
@@ -232,7 +236,23 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         return None
 
 
-def _generate_vc_member_name(master_name: str, position: int, serial: str = None) -> str:
+def _load_vc_member_name_pattern() -> str:
+    """Load the VC member name pattern from settings, with fallback to default."""
+    from ..models import LibreNMSSettings
+
+    default = "-M{position}"
+    try:
+        settings = LibreNMSSettings.objects.order_by("pk").first()
+        if not settings:
+            return default
+        pattern = settings.vc_member_name_pattern
+        return pattern if isinstance(pattern, str) and pattern.strip() else default
+    except Exception as e:
+        logger.warning(f"Could not load VC member name pattern from settings: {e}. Using default.")
+        return default
+
+
+def _generate_vc_member_name(master_name: str, position: int, serial: str = None, pattern: str = None) -> str:
     """
     Generate name for VC member device using configured pattern from settings.
 
@@ -240,6 +260,8 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
         master_name: Name of the master/primary device
         position: VC position number
         serial: Optional serial number of the member device
+        pattern: Optional pre-loaded pattern; if None, loaded from settings via
+            _load_vc_member_name_pattern()
 
     Returns:
         Generated member device name
@@ -250,16 +272,8 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
         pattern="-SW{position}" -> "switch01-SW2"
         pattern=" [{serial}]" -> "switch01 [ABC123]"
     """
-    # Import here to avoid circular dependency
-    from ..models import LibreNMSSettings
-
-    # Get pattern from settings with fallback to default
-    try:
-        settings = LibreNMSSettings.objects.first()
-        pattern = settings.vc_member_name_pattern if settings else "-M{position}"
-    except Exception as e:
-        logger.warning(f"Could not load VC member name pattern from settings: {e}. Using default.")
-        pattern = "-M{position}"
+    if pattern is None:
+        pattern = _load_vc_member_name_pattern()
 
     # Prepare format variables
     format_vars = {
@@ -272,7 +286,7 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
     try:
         formatted_suffix = pattern.format(**format_vars)
         return f"{master_name}{formatted_suffix}"
-    except KeyError as e:
+    except (KeyError, ValueError, IndexError) as e:
         logger.error(f"Invalid placeholder in VC naming pattern '{pattern}': {e}. Using default.")
         return f"{master_name}-M{position}"
 
@@ -294,6 +308,8 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
     if not vc_data or not vc_data.get("is_stack"):
         return vc_data
 
+    # Load naming pattern once to avoid a DB query per member
+    vc_pattern = _load_vc_member_name_pattern()
     for idx, member in enumerate(vc_data.get("members", [])):
         raw_position = member.get("position", idx)
         try:
@@ -302,7 +318,9 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
             base_position = idx
         position = base_position + 1  # Convert to 1-based position
         member["position"] = base_position
-        member["suggested_name"] = _generate_vc_member_name(master_name, position, serial=member.get("serial"))
+        member["suggested_name"] = _generate_vc_member_name(
+            master_name, position, serial=member.get("serial"), pattern=vc_pattern
+        )
 
     return vc_data
 
@@ -341,8 +359,12 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
 
     try:
         with transaction.atomic():
+            # Load naming pattern once to avoid a DB query per member
+            vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
-            master_device_new_name = _generate_vc_member_name(original_master_name, 1, serial=master_device.serial)
+            master_device_new_name = _generate_vc_member_name(
+                original_master_name, 1, serial=master_device.serial, pattern=vc_pattern
+            )
 
             # Check if renamed master conflicts with existing device
             if Device.objects.filter(name=master_device_new_name).exclude(pk=master_device.pk).exists():
@@ -389,7 +411,7 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                     logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
                     continue
 
-                member_name = _generate_vc_member_name(master_base_name, position, serial=serial)
+                member_name = _generate_vc_member_name(master_base_name, position, serial=serial, pattern=vc_pattern)
 
                 # Check for duplicate name
                 if Device.objects.filter(name=member_name).exists():

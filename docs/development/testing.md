@@ -29,6 +29,12 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_background_jobs.py](../../netbox_librenms_plugin/tests/test_background_jobs.py) | Background job execution and view decision logic |
 | [test_vlan_sync.py](../../netbox_librenms_plugin/tests/test_vlan_sync.py) | VLAN sync—API fetching, comparison logic, CSS class utilities, and sync actions |
 | [test_interface_vlan_sync.py](../../netbox_librenms_plugin/tests/test_interface_vlan_sync.py) | Interface VLAN assignments—group resolution, mode detection, and per-interface VLAN assignment |
+| [test_librenms_id.py](../../netbox_librenms_plugin/tests/test_librenms_id.py) | Multi-server librenms_id helpers—get/set/find/migrate and boolean rejection |
+| [test_mixins.py](../../netbox_librenms_plugin/tests/test_mixins.py) | View mixins—CacheMixin key generation, LibreNMSAPIMixin lazy init, permission checks |
+| [test_sync_devices.py](../../netbox_librenms_plugin/tests/test_sync_devices.py) | Device sync views—field updates, platform creation, server mapping, legacy ID conversion |
+| [test_sync_interfaces.py](../../netbox_librenms_plugin/tests/test_sync_interfaces.py) | Interface sync—port matching, attribute updates, MAC handling, librenms_id assignment |
+| [test_sync_view_mismatch.py](../../netbox_librenms_plugin/tests/test_sync_view_mismatch.py) | Sync page context—device type mismatch detection and badge rendering |
+| [test_permissions.py](../../netbox_librenms_plugin/tests/test_permissions.py) | Permission enforcement—mixin contracts, object-level permissions, and write guards |
 | [test_integration_sync.py](../../netbox_librenms_plugin/tests/test_integration_sync.py) | Integration tests—API client against local mock HTTP server |
 | [test_view_wiring.py](../../netbox_librenms_plugin/tests/test_view_wiring.py) | Smoke tests—view class MRO, mixin wiring, permission contracts, and template syntax |
 
@@ -66,6 +72,12 @@ pytest netbox_librenms_plugin/tests/test_import_utils.py netbox_librenms_plugin/
 
 # Background job tests
 pytest netbox_librenms_plugin/tests/test_background_jobs.py -v
+
+# Multi-server librenms_id tests
+pytest netbox_librenms_plugin/tests/test_librenms_id.py -v
+
+# Sync view tests (devices, interfaces)
+pytest netbox_librenms_plugin/tests/test_sync_devices.py netbox_librenms_plugin/tests/test_sync_interfaces.py -v
 
 # Integration tests (API client against mock HTTP server)
 pytest netbox_librenms_plugin/tests/test_integration_sync.py -v
