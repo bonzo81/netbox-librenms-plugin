@@ -628,7 +628,11 @@ function initializeVlanModalSave() {
                 })
             }).then(response => {
                 if (!response.ok) {
-                    return response.text().then(t => { throw new Error(`HTTP ${response.status}: ${t}`); });
+                    return response.text().then(t => {
+                        let msg = `HTTP ${response.status}`;
+                        try { const data = JSON.parse(t); if (data.message) msg = data.message; } catch (_) {}
+                        throw new Error(msg);
+                    });
                 }
                 // Close modal only on success
                 const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
