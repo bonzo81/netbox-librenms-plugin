@@ -97,15 +97,22 @@ class MockLibreNMSServer:
         _, port = self._server.server_address
         self.url = f"http://127.0.0.1:{port}"
 
-    def register(self, path: str, body: dict, status: int = 200, method: str | None = None):
+    def register(self, path: str, body, status: int = 200, method: str | None = None):
         """Register a mock response for a URL path.
 
         If *method* is given the route is stored as ``"METHOD /path"`` and only
         matches requests using that HTTP verb.  Omit *method* (or pass ``None``)
         to match any verb on that path.
+
+        *body* may be a ``dict`` (serialised to JSON) or a callable.  When a
+        callable is provided it is stored directly and invoked by the handler on
+        each matching request; the *status* argument is ignored in that case.
         """
         key = f"{method} {path}" if method else path
-        self._server.routes[key] = (status, body)
+        if callable(body):
+            self._server.routes[key] = body
+        else:
+            self._server.routes[key] = (status, body)
 
     def start(self):
         self._thread.start()

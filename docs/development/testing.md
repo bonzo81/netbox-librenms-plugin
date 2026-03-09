@@ -79,6 +79,9 @@ pytest netbox_librenms_plugin/tests/test_librenms_id.py -v
 # Sync view tests (devices, interfaces)
 pytest netbox_librenms_plugin/tests/test_sync_devices.py netbox_librenms_plugin/tests/test_sync_interfaces.py -v
 
+# Sync view mismatch detection and permission enforcement
+pytest netbox_librenms_plugin/tests/test_sync_view_mismatch.py netbox_librenms_plugin/tests/test_permissions.py -v
+
 # Integration tests (API client against mock HTTP server)
 pytest netbox_librenms_plugin/tests/test_integration_sync.py -v
 

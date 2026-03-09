@@ -784,6 +784,7 @@ function handleVRFChange(select, value) {
             return response.json();
         })
         .then(data => {
+            if (data.status === 'success' && row && data.formatted_row) {
                 const statusCell = row.querySelector('td[data-col="status"]');
                 if (statusCell) {
                     statusCell.innerHTML = data.formatted_row.status;
