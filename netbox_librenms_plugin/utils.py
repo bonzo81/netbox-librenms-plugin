@@ -102,10 +102,12 @@ def get_librenms_sync_device(device: Device) -> Optional[Device]:
     vc = device.virtual_chassis
     all_members = vc.members.all()
 
-    # Priority 1: Check if ANY member has librenms_id configured
+    # Priority 1: Check if ANY member has librenms_id configured.
+    # LibreNMS device IDs are auto-incremented from 1 (MySQL default), so 0 is never valid.
+    # Using a truthy check safely excludes 0, None, "", and other falsy non-IDs.
     for member in all_members:
         raw_cf = member.cf.get("librenms_id")
-        if raw_cf is not None and not isinstance(raw_cf, bool):
+        if raw_cf and not isinstance(raw_cf, bool):
             return member
 
     # Priority 2: Use master device if it has primary IP
