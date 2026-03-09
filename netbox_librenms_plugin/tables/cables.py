@@ -16,7 +16,7 @@ class LibreNMSCableTable(tables.Table):
     """
 
     selection = ToggleColumn(
-        accessor="local_port",
+        accessor="local_port_id",
         orderable=False,
         visible=True,
         attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
@@ -35,7 +35,7 @@ class LibreNMSCableTable(tables.Table):
         {% if record.can_create_cable %}
             <button type="submit"
                     class="btn btn-sm btn-primary"
-                    onclick="document.getElementById('selected_port').value='{{ record.local_port }}'">
+                    onclick="document.getElementById('selected_port').value='{{ record.local_port_id }}'">
                 Sync Cable
             </button>
         {% endif %}
@@ -97,7 +97,7 @@ class LibreNMSCableTable(tables.Table):
             "actions",
         ]
         row_attrs = {
-            "data-interface": lambda record: record["local_port"],
+            "data-interface": lambda record: record["local_port_id"],
             "data-device": lambda record: record["device_id"],
             "data-name": lambda record: record["local_port"],
         }
@@ -111,7 +111,7 @@ class VCCableTable(LibreNMSCableTable):
 
     device_selection = tables.Column(
         verbose_name="Virtual Chassis Member",
-        accessor="local_port",
+        accessor="local_port_id",
         attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
     )
 
@@ -124,6 +124,7 @@ class VCCableTable(LibreNMSCableTable):
         members = self.device.virtual_chassis.members.all()
         chassis_member = get_virtual_chassis_member(self.device, record["local_port"])
         selected_member_id = chassis_member.id if chassis_member else self.device.id
+        port_id = record["local_port_id"]
 
         options = [
             f'<option value="{member.id}"{" selected" if member.id == selected_member_id else ""}>{member.name}</option>'
@@ -132,7 +133,7 @@ class VCCableTable(LibreNMSCableTable):
 
         return format_html(
             '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>',
-            record["local_port"],
+            port_id,
             mark_safe("".join(options)),
         )
 
@@ -149,10 +150,10 @@ class VCCableTable(LibreNMSCableTable):
             "actions",
         ]
         row_attrs = {
-            "data-interface": lambda record: record["local_port"],
+            "data-interface": lambda record: record["local_port_id"],
             "data-device": lambda record: record["device_id"],
             "data-name": lambda record: record["local_port"],
-            "id": lambda record: record["local_port"],
+            "id": lambda record: record["local_port_id"],
         }
         attrs = {
             "class": "table table-hover object-list",

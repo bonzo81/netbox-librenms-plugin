@@ -12,13 +12,16 @@ from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
+    LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
 )
 
 
-class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, VlanAssignmentMixin, CacheMixin, View):
+class SyncInterfacesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, VlanAssignmentMixin, CacheMixin, View
+):
     """Sync selected interfaces from LibreNMS into NetBox."""
 
     def get_required_permissions_for_object_type(self, object_type):
@@ -164,14 +167,8 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         )
 
         # Sync VLANs if not excluded
-        vlan_synced = False
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
-            vlan_synced = True
-
-        # Skip redundant save when _sync_interface_vlans already saved (via _update_interface_vlan_assignment)
-        if not vlan_synced:
-            interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""
@@ -196,7 +193,8 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 mac_obj = MACAddress.objects.create(mac_address=ifPhysAddress)
 
             interface.mac_addresses.add(mac_obj)
-            interface.primary_mac_address = mac_obj
+            if hasattr(interface, "primary_mac_address"):
+                interface.primary_mac_address = mac_obj
 
     def update_interface_attributes(
         self,

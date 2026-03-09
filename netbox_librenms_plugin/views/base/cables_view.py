@@ -5,9 +5,11 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import MultipleObjectsReturned
 from django.http import JsonResponse
+from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
@@ -24,7 +26,6 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
-    interface_name_field = get_interface_name_field()
 
     def get_object(self, pk):
         """Retrieve the object (Device or VirtualMachine)."""
@@ -47,34 +48,32 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         return data
 
     def get_links_data(self, obj):
-        """Fetch links data from LibreNMS for the device and add local port names."""
+        """Fetch links data from LibreNMS, including local_port names for the current request."""
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
         success, data = self.librenms_api.get_device_links(self.librenms_id)
         if not success or "error" in data:
             return None
 
         ports_data = self.get_ports_data(obj)
-        local_ports_map = {}
-        for port in ports_data.get("ports", []):
-            port_id = str(port["port_id"])
-            port_name = port[self.interface_name_field]
-            local_ports_map[port_id] = port_name
+        interface_name_field = get_interface_name_field(getattr(self, "request", None))
+        local_ports_map = {
+            str(port["port_id"]): port.get(interface_name_field)
+            for port in ports_data.get("ports", [])
+            if port.get("port_id") and port.get(interface_name_field)
+        }
 
         links = data.get("links", [])
-        links_data = []
-        for link in links:
-            local_port_name = local_ports_map.get(str(link.get("local_port_id")))
-            links_data.append(
-                {
-                    "local_port": local_port_name,
-                    "local_port_id": link.get("local_port_id"),
-                    "remote_port": link.get("remote_port"),
-                    "remote_device": link.get("remote_hostname"),
-                    "remote_port_id": link.get("remote_port_id"),
-                    "remote_device_id": link.get("remote_device_id"),
-                }
-            )
-        return links_data
+        return [
+            {
+                "local_port": local_ports_map.get(str(link.get("local_port_id"))),
+                "local_port_id": link.get("local_port_id"),
+                "remote_port": link.get("remote_port"),
+                "remote_device": link.get("remote_hostname"),
+                "remote_port_id": link.get("remote_port_id"),
+                "remote_device_id": link.get("remote_device_id"),
+            }
+            for link in links
+        ]
 
     def get_device_by_id_or_name(self, remote_device_id, hostname):
         """Try to find device in NetBox first by librenms_id custom field, then by name"""
@@ -254,7 +253,6 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def _prepare_context(self, request, obj, fetch_fresh=False):
         """Helper method to prepare the context data for cable sync views."""
-        table = None
         cache_expiry = None
 
         if fetch_fresh:
@@ -270,27 +268,45 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             else:
                 return None
 
+        if not fetch_fresh:
+            # Strip derived fields so re-enrichment starts from raw link data;
+            # without this, stale IDs/URLs persist when NetBox objects are
+            # deleted and cause DoesNotExist in check_cable_status().
+            _raw_keys = {
+                "local_port",
+                "local_port_id",
+                "remote_port",
+                "remote_device",
+                "remote_port_id",
+                "remote_device_id",
+            }
+            links_data = [{k: v for k, v in link.items() if k in _raw_keys} for link in links_data]
+
         # Enrich data in both cases to ensure current NetBox state
         links_data = self.enrich_links_data(links_data, obj)
 
+        # Cache after enrichment so verify/sync views read current NetBox state
+        cache_key = self.get_cache_key(obj, "links")
         if fetch_fresh:
-            # Cache the fresh data after enrichment
             cache.set(
-                self.get_cache_key(obj, "links"),
+                cache_key,
                 {"links": links_data},
                 timeout=self.librenms_api.cache_timeout,
             )
+        else:
+            # Write enriched data back, preserving original TTL
+            remaining_ttl = cache.ttl(cache_key)
+            if remaining_ttl and remaining_ttl > 0:
+                cache.set(cache_key, {"links": links_data}, timeout=remaining_ttl)
 
         # Calculate cache expiry
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
+        cache_ttl = cache.ttl(cache_key)
         if cache_ttl is not None:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
-        # Generate the table
-        table = self.get_table(links_data, obj)
 
+        table = self.get_table(links_data, obj)
         table.configure(request)
 
-        # Prepare and return the context
         return {
             "table": table,
             "object": obj,
@@ -334,10 +350,10 @@ class SingleCableVerifyView(BaseCableTableView):
     def post(self, request):
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
-        local_port = data.get("local_port")
+        local_port_id = data.get("local_port_id")
 
         formatted_row = {
-            "local_port": local_port,
+            "local_port": "",
             "remote_port": "",
             "remote_device": "",
             "cable_status": "Missing Ports",
@@ -362,76 +378,107 @@ class SingleCableVerifyView(BaseCableTableView):
 
             if cached_links:
                 link_data = next(
-                    (link for link in cached_links.get("links", []) if link["local_port"] == local_port),
+                    (
+                        link
+                        for link in cached_links.get("links", [])
+                        if str(link.get("local_port_id", "")) == str(local_port_id)
+                    ),
                     None,
                 )
                 if link_data:
+                    # Strip derived fields from cached data to avoid stale
+                    # IDs/URLs when NetBox objects are deleted after caching.
+                    _raw_keys = {
+                        "local_port",
+                        "local_port_id",
+                        "remote_port",
+                        "remote_device",
+                        "remote_port_id",
+                        "remote_device_id",
+                    }
+                    link_data = {k: v for k, v in link_data.items() if k in _raw_keys}
+
+                    # Re-enrich remote side from current NetBox state
+                    remote_hostname = link_data.get("remote_device", "")
+                    if remote_hostname:
+                        link_data = self.process_remote_device(
+                            link_data, remote_hostname, link_data.get("remote_device_id")
+                        )
+
+                    local_port = link_data.get("local_port", "")
+                    formatted_row["local_port"] = local_port
+
                     # First try to find interface by librenms_id
                     interface = None
-                    if local_port_id := link_data.get("local_port_id"):
+                    if local_port_id:
                         interface = selected_device.interfaces.filter(
                             custom_field_data__librenms_id=local_port_id
                         ).first()
 
                     # If not found by librenms_id, try matching by name
-                    if not interface:
+                    if not interface and local_port:
                         interface = selected_device.interfaces.filter(name=local_port).first()
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk
 
-                        # Check remote device existence first
-                        remote_device_name = link_data.get("remote_device", "")
-                        if remote_device_name and not link_data.get("remote_device_url"):
-                            formatted_row["cable_status"] = "Device Not Found in NetBox"
-                        else:
+                        # Check cable status if remote side was resolved
+                        if link_data.get("netbox_remote_device_id"):
                             link_data = self.check_cable_status(link_data)
-                            formatted_row["cable_status"] = link_data["cable_status"]
 
-                        formatted_row["local_port"] = (
-                            f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{local_port}</a>'
-                        )
+                        # Escape LibreNMS-sourced labels to prevent XSS
+                        safe_local_port = escape(local_port)
                         remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
-                        formatted_row["remote_port"] = (
-                            f'<a href="{link_data["remote_port_url"]}">{remote_port_name}</a>'
-                            if link_data.get("remote_port_url")
-                            else remote_port_name
-                        )
+                        safe_remote_port = escape(remote_port_name)
                         remote_device_name = link_data.get("remote_device", "")
+                        safe_remote_device = escape(remote_device_name)
+                        safe_cable_status = escape(link_data.get("cable_status", "Missing Ports"))
+
+                        formatted_row["cable_status"] = safe_cable_status
+                        formatted_row["local_port"] = (
+                            f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{safe_local_port}</a>'
+                        )
+                        formatted_row["remote_port"] = (
+                            f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
+                            if link_data.get("remote_port_url")
+                            else safe_remote_port
+                        )
                         formatted_row["remote_device"] = (
-                            f'<a href="{link_data["remote_device_url"]}">{remote_device_name}</a>'
+                            f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
                             if link_data.get("remote_device_url")
-                            else remote_device_name
+                            else safe_remote_device
                         )
                         if link_data.get("cable_url"):
                             formatted_row["cable_status"] = (
-                                f'<a href="{link_data["cable_url"]}">{link_data["cable_status"]}</a>'
+                                f'<a href="{link_data["cable_url"]}">{safe_cable_status}</a>'
                             )
-                        else:
-                            formatted_row["cable_status"] = link_data["cable_status"]
 
                         if link_data.get("can_create_cable"):
+                            csrf_token = get_token(request)
                             formatted_row["actions"] = f"""
                                 <form method="post" action="{reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[selected_device.id])}">
-                                    <input type="hidden" name="select" value="{local_port}">
+                                    <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
+                                    <input type="hidden" name="select" value="{escape(str(local_port_id))}">
                                     <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
                                 </form>
                             """
                     else:
-                        formatted_row["local_port"] = local_port
+                        formatted_row["local_port"] = escape(local_port)
                         # Keep remote port name visible, add URL if available
                         remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
+                        safe_remote_port = escape(remote_port_name)
                         formatted_row["remote_port"] = (
-                            f'<a href="{link_data["remote_port_url"]}">{remote_port_name}</a>'
+                            f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
                             if link_data.get("remote_port_url")
-                            else remote_port_name
+                            else safe_remote_port
                         )
                         # Keep remote device name visible, add URL if available
                         remote_device_name = link_data.get("remote_device", "")
+                        safe_remote_device = escape(remote_device_name)
                         formatted_row["remote_device"] = (
-                            f'<a href="{link_data["remote_device_url"]}">{remote_device_name}</a>'
+                            f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
                             if link_data.get("remote_device_url")
-                            else remote_device_name
+                            else safe_remote_device
                         )
 
                         # First check if remote device exists in NetBox
