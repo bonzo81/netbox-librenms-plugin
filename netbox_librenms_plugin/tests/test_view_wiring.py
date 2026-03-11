@@ -271,3 +271,32 @@ class TestTemplateSyntax:
         source = template_path.read_text()
         # Compile the template — raises TemplateSyntaxError on bad tags
         self._engine.from_string(source)
+
+class TestRenderDeviceSelectionEscape:
+    """VCCableTable.render_device_selection must HTML-escape member.name."""
+
+    def test_member_name_is_escaped(self):
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+
+        device = MagicMock()
+        device.id = 1
+        vc = MagicMock()
+        member = MagicMock()
+        member.id = 1
+        member.name = '<script>alert("xss")</script>'
+        vc.members.all.return_value = [member]
+        device.virtual_chassis = vc
+
+        table = VCCableTable([], device=device)
+        record = {"local_port": "eth0", "local_port_id": "42"}
+
+        with patch(
+            "netbox_librenms_plugin.tables.cables.get_virtual_chassis_member",
+            return_value=member,
+        ):
+            html = str(table.render_device_selection(None, record))
+
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html

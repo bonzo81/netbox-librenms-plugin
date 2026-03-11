@@ -2693,3 +2693,38 @@ class TestBuildSyncInfo:
 
         assert result["device_type_synced"] is False
         assert result["all_synced"] is False
+
+class TestImportSingleDeviceLazyValidation:
+    """import_single_device must pass api=api to validate_device_for_import when validation is None."""
+
+    def test_api_passed_to_validate(self):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        mock_api = MagicMock()
+        mock_api.server_key = "prod"
+
+        mock_validation = {
+            "existing_device": MagicMock(name="existing"),
+            "can_import": False,
+        }
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI",
+                return_value=mock_api,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.validate_device_for_import",
+                return_value=mock_validation,
+            ) as mock_validate,
+        ):
+            import_single_device(
+                42,
+                server_key="prod",
+                sync_options={"use_sysname": True, "strip_domain": False},
+                validation=None,
+                libre_device={"device_id": 42, "hostname": "test"},
+            )
+
+            mock_validate.assert_called_once()
+            assert mock_validate.call_args[1].get("api") is mock_api
