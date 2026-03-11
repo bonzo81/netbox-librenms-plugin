@@ -473,6 +473,8 @@ def process_device_filters(
             filters=filters,
             device_id=device_id,
             vc_enabled=vc_detection_enabled,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         # Check if we already have cached validation for this device
@@ -543,7 +545,11 @@ def process_device_filters(
         from datetime import datetime, timezone
 
         cache_metadata_key = get_cache_metadata_key(
-            server_key=api.server_key, filters=filters, vc_enabled=vc_detection_enabled
+            server_key=api.server_key,
+            filters=filters,
+            vc_enabled=vc_detection_enabled,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         # Check if metadata already exists to preserve original timestamp

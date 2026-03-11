@@ -102,6 +102,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
         """Create a cable from link data and return the operation result."""
         display_name = link_data.get("local_port") or interface.get("local_port_id", "")
         if not self.verify_cable_creation_requirements(link_data):
+            if not link_data.get("netbox_remote_device_id") or not link_data.get("netbox_remote_interface_id"):
+                return {"status": "missing_remote", "interface": display_name}
             return {"status": "invalid", "interface": display_name}
 
         try:

@@ -92,6 +92,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         filters = job_data.get("filters", {})
         server_key = job_data.get("server_key", "default")
         vc_enabled = job_data.get("vc_detection_enabled", False)
+        use_sysname = job_data.get("use_sysname", True)
+        strip_domain = job_data.get("strip_domain", False)
 
         # Extract cache metadata for frontend warnings
         self._cache_timestamp = job_data.get("cached_at")
@@ -109,6 +111,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 filters=filters,
                 device_id=device_id,
                 vc_enabled=vc_enabled,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
             )
             device = cache.get(cache_key)
             if device:
@@ -441,6 +445,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 server_key=self.librenms_api.server_key,
                 filters=libre_filters,
                 vc_enabled=vc_detection_enabled,
+                use_sysname=self._use_sysname,
+                strip_domain=self._strip_domain,
             )
             cache_metadata = cache.get(cache_metadata_key)
             if cache_metadata:

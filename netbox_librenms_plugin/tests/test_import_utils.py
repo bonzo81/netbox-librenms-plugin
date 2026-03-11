@@ -2694,6 +2694,7 @@ class TestBuildSyncInfo:
         assert result["device_type_synced"] is False
         assert result["all_synced"] is False
 
+
 class TestImportSingleDeviceLazyValidation:
     """import_single_device must pass api=api to validate_device_for_import when validation is None."""
 

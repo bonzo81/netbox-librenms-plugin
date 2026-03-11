@@ -217,7 +217,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             # Generate suggested name if we have master name
             if master_name:
                 member_data["suggested_name"] = _generate_vc_member_name(
-                    master_name, position + 1, pattern=vc_name_pattern
+                    master_name, position + 1, serial=member_data.get("serial"), pattern=vc_name_pattern
                 )
             else:
                 member_data["suggested_name"] = f"Member-{position + 1}"

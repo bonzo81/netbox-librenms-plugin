@@ -708,12 +708,16 @@ class TestLoadJobResults:
             filters={"location": "dc1"},
             device_id=1,
             vc_enabled=True,
+            use_sysname=True,
+            strip_domain=False,
         )
         mock_get_key.assert_any_call(
             server_key="primary",
             filters={"location": "dc1"},
             device_id=2,
             vc_enabled=True,
+            use_sysname=True,
+            strip_domain=False,
         )
 
         assert len(results) == 2
@@ -748,6 +752,8 @@ class TestLoadJobResults:
             filters={"location": "dc2", "type": "router"},
             device_id=1,
             vc_enabled=False,
+            use_sysname=True,
+            strip_domain=False,
         )
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")

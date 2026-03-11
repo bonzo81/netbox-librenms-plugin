@@ -54,6 +54,8 @@ def _try_chassis_device_type_match(api, device_id):
                 value = item.get(field) or ""
                 if value and value not in skip_values:
                     chassis_match = match_librenms_hardware_to_device_type(value)
+                    if chassis_match is None:
+                        continue
                     if chassis_match["matched"]:
                         chassis_match["match_type"] = "chassis"
                         chassis_match["chassis_model"] = value

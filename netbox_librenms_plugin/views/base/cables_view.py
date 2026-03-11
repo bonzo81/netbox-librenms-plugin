@@ -408,16 +408,21 @@ class SingleCableVerifyView(BaseCableTableView):
                     local_port = link_data.get("local_port", "")
                     formatted_row["local_port"] = local_port
 
-                    # First try to find interface by librenms_id
+                    # First try to find interface by librenms_id (handle VC members)
                     interface = None
+                    lookup_device = selected_device
+                    if local_port and hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
+                        chassis_member = get_virtual_chassis_member(selected_device, local_port)
+                        if chassis_member:
+                            lookup_device = chassis_member
                     if local_port_id:
-                        interface = selected_device.interfaces.filter(
+                        interface = lookup_device.interfaces.filter(
                             custom_field_data__librenms_id=local_port_id
                         ).first()
 
                     # If not found by librenms_id, try matching by name
                     if not interface and local_port:
-                        interface = selected_device.interfaces.filter(name=local_port).first()
+                        interface = lookup_device.interfaces.filter(name=local_port).first()
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk

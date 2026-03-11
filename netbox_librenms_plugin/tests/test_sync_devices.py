@@ -214,6 +214,7 @@ class TestUpdateDeviceSerialViewWiring:
         assert "POST" in perms
         assert any(action == "change" and model == Device for action, model in perms["POST"])
 
+
 class TestCreatePlatformFullClean:
     """CreateAndAssignPlatformView must call full_clean() so ValidationError is catchable."""
 
@@ -241,7 +242,7 @@ class TestCreatePlatformFullClean:
         ):
             MockPlatform.objects.filter.return_value.exists.return_value = False
             platform_instance = MagicMock()
-            platform_instance.full_clean.side_effect = ValidationError("Slug already exists")
+            platform_instance.full_clean.side_effect = ValidationError({"slug": ["Slug already exists"]})
             MockPlatform.return_value = platform_instance
 
             view.post(request, pk=1)

@@ -361,7 +361,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             vc_requested = request.GET.get("enable_vc_detection") == "true"
             validation["_vc_detection_enabled"] = vc_requested
 
-            device_name = validation.get("resolved_name")
+            device_name = validation.get("resolved_name") or f"device-{device_id}"
 
             if validation.get("virtual_chassis", {}).get("is_stack") and device_name:
                 validation["virtual_chassis"] = update_vc_member_suggested_names(
@@ -857,7 +857,9 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
             hw_match = match_librenms_hardware_to_device_type(librenms_hardware)
-            if hw_match.get("matched"):
+            if hw_match is None:
+                device_type_synced = False
+            elif hw_match.get("matched"):
                 librenms_device_type = hw_match["device_type"]
                 if not netbox_device_type or netbox_device_type.pk != librenms_device_type.pk:
                     device_type_synced = False

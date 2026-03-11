@@ -272,6 +272,7 @@ class TestTemplateSyntax:
         # Compile the template — raises TemplateSyntaxError on bad tags
         self._engine.from_string(source)
 
+
 class TestRenderDeviceSelectionEscape:
     """VCCableTable.render_device_selection must HTML-escape member.name."""
 
