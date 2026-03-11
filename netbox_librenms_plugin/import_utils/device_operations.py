@@ -504,21 +504,29 @@ def validate_device_for_import(
             hardware = libre_device.get("hardware", "")
             dt_match = match_librenms_hardware_to_device_type(hardware)
 
-            # Chassis inventory fallback: when hardware doesn't match,
-            # try the chassis entPhysicalModelName as an additional lookup source
-            if not dt_match["matched"] and api:
-                device_id = libre_device.get("device_id")
-                if device_id:
-                    chassis_match = _try_chassis_device_type_match(api, device_id)
-                    if chassis_match and chassis_match["matched"]:
-                        dt_match = chassis_match
+            if dt_match is None:
+                result["device_type"]["found"] = False
+                result["device_type"]["device_type"] = None
+                result["device_type"]["match_type"] = "ambiguous"
+                result["issues"].append(
+                    f"Multiple device types match hardware '{hardware}' — resolve the ambiguity in NetBox."
+                )
+            else:
+                # Chassis inventory fallback: when hardware doesn't match,
+                # try the chassis entPhysicalModelName as an additional lookup source
+                if not dt_match["matched"] and api:
+                    device_id = libre_device.get("device_id")
+                    if device_id:
+                        chassis_match = _try_chassis_device_type_match(api, device_id)
+                        if chassis_match and chassis_match["matched"]:
+                            dt_match = chassis_match
 
-            # Update result keys individually to preserve the existing schema (especially "found")
-            result["device_type"]["found"] = dt_match["matched"]
-            result["device_type"]["device_type"] = dt_match.get("device_type")
-            result["device_type"]["match_type"] = dt_match.get("match_type")
+                # Update result keys individually to preserve the existing schema (especially "found")
+                result["device_type"]["found"] = dt_match["matched"]
+                result["device_type"]["device_type"] = dt_match.get("device_type")
+                result["device_type"]["match_type"] = dt_match.get("match_type")
 
-            if not dt_match["matched"]:
+            if not result["device_type"]["found"]:
                 result["device_type"]["found"] = False
                 result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
                 # Get some device types for user to choose from
