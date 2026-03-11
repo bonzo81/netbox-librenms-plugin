@@ -107,7 +107,8 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
 
 
 def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> str:
-    """Return the resolved hostname to use when updating a device during a conflict action.
+    """
+    Return the resolved hostname to use when updating a device during a conflict action.
 
     Prefer the cached ``resolved_name`` from validation (already computed with the
     user's naming prefs at validation time). Fall back to computing it fresh from
@@ -252,7 +253,8 @@ def _apply_user_selections_to_validation(
     selections: dict,
     is_vm: bool,
 ) -> None:
-    """Apply user-selected cluster, role, and rack to validation dict.
+    """
+    Apply user-selected cluster, role, and rack to validation dict.
 
     This helper consolidates the logic shared across DeviceValidationDetailsView,
     DeviceRoleUpdateView, DeviceClusterUpdateView, and DeviceRackUpdateView.

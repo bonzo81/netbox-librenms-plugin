@@ -1,4 +1,5 @@
-"""Tests for device mismatch detection in get_librenms_device_info.
+"""
+Tests for device mismatch detection in get_librenms_device_info.
 
 Covers the identity cross-matching logic that determines whether a
 mismatched_device warning banner is shown on the LibreNMS Sync page.
@@ -163,7 +164,8 @@ class TestMismatchDetection:
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
     def test_fqdn_domain_differs_matches_via_domain_strip(self, mock_hw):
-        """Different FQDN domains -- matches because domain-stripped
+        """
+        Different FQDN domains -- matches because domain-stripped
         LibreNMS short name 'sw01' matches NetBox FQDN split 'sw01'.
 
         NetBox name 'sw01.example.net' is compared as-is (no stripping),
@@ -326,7 +328,8 @@ class TestMismatchDetection:
 
 
 class TestVCLookupDelegation:
-    """Verify that BaseLibreNMSSyncView.get() always delegates VC device
+    """
+    Verify that BaseLibreNMSSyncView.get() always delegates VC device
     resolution to get_librenms_sync_device(), even when the viewed member
     has its own librenms_id."""
 
@@ -334,7 +337,8 @@ class TestVCLookupDelegation:
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_vc_member_with_own_id_delegates_to_sync_device(self, mock_sync_device, mock_get_object, mock_render):
-        """A VC member with its own librenms_id should still delegate to
+        """
+        A VC member with its own librenms_id should still delegate to
         get_librenms_sync_device, which may return a different member."""
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
@@ -372,7 +376,8 @@ class TestVCLookupDelegation:
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_non_vc_device_skips_sync_device_lookup(self, mock_sync_device, mock_get_object, mock_render):
-        """A device without a virtual chassis should not call
+        """
+        A device without a virtual chassis should not call
         get_librenms_sync_device at all."""
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 

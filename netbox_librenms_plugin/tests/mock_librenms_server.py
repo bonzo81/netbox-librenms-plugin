@@ -1,4 +1,5 @@
-"""Minimal HTTP mock for LibreNMS API responses.
+"""
+Minimal HTTP mock for LibreNMS API responses.
 
 Usage in tests (add to conftest.py or inline):
 
@@ -78,7 +79,8 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
 
 
 class MockLibreNMSServer:
-    """Context-manager wrapper around a simple HTTP mock server.
+    """
+    Context-manager wrapper around a simple HTTP mock server.
 
     Attributes:
         url (str): Base URL for the mock server (e.g. "http://127.0.0.1:PORT").
@@ -98,7 +100,8 @@ class MockLibreNMSServer:
         self.url = f"http://127.0.0.1:{port}"
 
     def register(self, path: str, body, status: int = 200, method: str | None = None):
-        """Register a mock response for a URL path.
+        """
+        Register a mock response for a URL path.
 
         If *method* is given the route is stored as ``"METHOD /path"`` and only
         matches requests using that HTTP verb.  Omit *method* (or pass ``None``)

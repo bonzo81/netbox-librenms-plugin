@@ -21,7 +21,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
     }
 
     def get_selected_interfaces(self, request, initial_device):
-        """Return selected interface entries from POST data.
+        """
+        Return selected interface entries from POST data.
 
         Each ``select`` value is a ``local_port_id`` (stable LibreNMS identifier)
         so that matching against cached link data is user-preference agnostic.

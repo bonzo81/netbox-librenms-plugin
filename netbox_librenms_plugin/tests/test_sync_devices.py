@@ -121,7 +121,8 @@ class TestUpdateDeviceLocationView:
     """UpdateDeviceLocationView.post calls update_device_field with site name."""
 
     def test_calls_update_device_field_with_site(self):
-        """post() resolves the NetBox site name and passes the exact API payload
+        """
+        post() resolves the NetBox site name and passes the exact API payload
         expected by LibreNMS's PATCH /api/v0/devices/{id}/field endpoint:
         ``{"field": ["location", "override_sysLocation"], "data": [name, "1"]}``.
         """

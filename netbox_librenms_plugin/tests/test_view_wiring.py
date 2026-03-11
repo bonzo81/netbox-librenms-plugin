@@ -1,4 +1,5 @@
-"""Step 1 smoke tests — verify view class wiring (mixins, MRO, key attributes).
+"""
+Step 1 smoke tests — verify view class wiring (mixins, MRO, key attributes).
 
 These tests never touch the database or network; they only inspect class
 hierarchies and attribute presence.
@@ -126,11 +127,13 @@ class TestPermissionMixinWiring:
 
 
 class TestRequiredObjectPermissionsWiring:
-    """POST-only sync views that modify NetBox objects must declare required_object_permissions
+    """
+    POST-only sync views that modify NetBox objects must declare required_object_permissions
     and include the NetBoxObjectPermissionMixin (and LibreNMSPermissionMixin) in their MRO."""
 
     def _assert_has_mixins(self, view_class):
-        """Assert that *view_class* includes both permission mixins in its MRO.
+        """
+        Assert that *view_class* includes both permission mixins in its MRO.
 
         Checking the MRO (not just runtime behaviour) guarantees that the permission
         enforcement is wired at the class level — a missing mixin would silently skip
@@ -209,7 +212,8 @@ class TestRequiredObjectPermissionsWiring:
 
 
 class TestViewPropertyLazyInit:
-    """Verify that _librenms_api starts as None (lazy, not eager-init) and that
+    """
+    Verify that _librenms_api starts as None (lazy, not eager-init) and that
     the librenms_api property descriptor exists on the class."""
 
     def test_librenms_api_mixin_property_is_defined_on_class(self):
@@ -230,7 +234,8 @@ class TestViewPropertyLazyInit:
         assert dummy._librenms_api is None
 
     def test_sync_interfaces_has_librenms_api_property_via_class(self):
-        """BaseLibreNMSSyncView must expose librenms_api through its MRO.
+        """
+        BaseLibreNMSSyncView must expose librenms_api through its MRO.
 
         SyncInterfacesView gains LibreNMSAPIMixin in the view-fixes PR; on the
         current upstream/develop baseline we verify the property via

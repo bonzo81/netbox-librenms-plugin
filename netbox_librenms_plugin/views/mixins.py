@@ -10,7 +10,8 @@ from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
 
 def _get_safe_redirect_url(request):
-    """Return a validated redirect URL from the HTTP Referer header.
+    """
+    Return a validated redirect URL from the HTTP Referer header.
 
     Validates the Referer against allowed hosts and schemes to prevent
     open-redirect attacks. Falls back to the current request path or "/".

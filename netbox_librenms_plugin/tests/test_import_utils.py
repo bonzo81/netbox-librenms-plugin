@@ -1,4 +1,5 @@
-"""Tests for netbox_librenms_plugin.import_utils module.
+"""
+Tests for netbox_librenms_plugin.import_utils module.
 
 Phase 2 tests covering cache key generation, device name determination,
 device retrieval, and device validation functions.
@@ -1287,7 +1288,8 @@ class TestDeviceNamingPreferences:
 
 
 class TestNameMatchesWithNamingPreferences:
-    """Test that name_matches/name_sync_available respect naming preferences and VC patterns.
+    """
+    Test that name_matches/name_sync_available respect naming preferences and VC patterns.
 
     The name comparison should use the resolved name (result of _determine_device_name())
     which accounts for use_sysname and strip_domain, not the raw LibreNMS sysName.

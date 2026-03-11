@@ -1,4 +1,5 @@
-"""Tests for netbox_librenms_plugin.utils module.
+"""
+Tests for netbox_librenms_plugin.utils module.
 
 Phase 2 tests covering device type matching, site matching,
 platform matching, and conversion helper functions.

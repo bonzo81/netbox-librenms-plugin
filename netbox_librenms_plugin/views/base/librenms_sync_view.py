@@ -267,7 +267,8 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
     @staticmethod
     def _strip_vc_pattern(name):
-        """Strip the VC member naming suffix from a device name.
+        """
+        Strip the VC member naming suffix from a device name.
 
         Uses the vc_member_name_pattern from LibreNMSSettings to build a
         regex that removes the suffix.  For example, with the default
