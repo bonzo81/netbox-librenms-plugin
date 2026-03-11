@@ -471,7 +471,8 @@ def validate_device_for_import(
         if import_as_vm:
             # 2. For VMs: Validate Cluster (required) - Must be manually selected
             result["cluster"]["found"] = False
-            result["issues"].append("Cluster must be manually selected before importing as VM")
+            if not result.get("existing_device"):
+                result["issues"].append("Cluster must be manually selected before importing as VM")
             # Provide list of available clusters for user selection (cached)
             cache_key = "librenms_import_all_clusters"
             all_clusters = cache.get(cache_key)
@@ -526,7 +527,7 @@ def validate_device_for_import(
                 result["device_type"]["device_type"] = dt_match.get("device_type")
                 result["device_type"]["match_type"] = dt_match.get("match_type")
 
-            if not result["device_type"]["found"]:
+            if not result["device_type"]["found"] and result["device_type"].get("match_type") != "ambiguous":
                 result["device_type"]["found"] = False
                 result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
                 # Get some device types for user to choose from
@@ -543,7 +544,8 @@ def validate_device_for_import(
             # 4. DeviceRole (required) - Must be manually selected by user
             logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
             result["device_role"]["found"] = False
-            result["issues"].append("Device role must be manually selected before import")
+            if not result.get("existing_device"):
+                result["issues"].append("Device role must be manually selected before import")
             logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
             # Provide list of available roles for user selection (cached)
             cache_key = "librenms_import_all_roles"
