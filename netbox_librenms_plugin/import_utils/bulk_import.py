@@ -239,9 +239,7 @@ def bulk_import_devices_shared(
                             for m in vc_data.get("members", [])
                         )
                         if member_parts:
-                            fingerprint = hashlib.md5((f"{device_id}," + ",".join(member_parts)).encode()).hexdigest()[
-                                :12
-                            ]
+                            fingerprint = hashlib.md5(",".join(member_parts).encode()).hexdigest()[:12]
                             vc_domain = f"librenms-stack-{fingerprint}"
                         else:
                             vc_domain = f"librenms-{device_id}"
@@ -468,9 +466,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             actual_is_vm = found_as_cross_model != import_as_vm  # XOR: cross flips the flag
             validation["import_as_vm"] = actual_is_vm  # Update so future refreshes query correct model
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
-                validation["device_role"] = {"found": True, "role": new_device.role}
+                apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:
-                validation.setdefault("device_role", {}).update({"found": False, "role": None})
+                validation["device_role"] = {"found": False, "role": None}
+            recalculate_validation_status(validation, is_vm=actual_is_vm)
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
 
