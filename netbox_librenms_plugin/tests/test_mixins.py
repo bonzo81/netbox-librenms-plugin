@@ -110,6 +110,22 @@ class TestCacheMixinKeyGeneration:
         key = mixin.get_cache_key(obj, "ports")
         assert key == "librenms_ports_device_5"
 
+    def test_get_cache_key_includes_server_key(self):
+        """
+        Cache keys must be namespaced per server so two servers' data never collide.
+
+        Without server_key isolation a second server's stale ports list could be
+        returned to the wrong sync session.
+        """
+        mixin = self._make_mixin()
+        obj = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 5
+
+        key = mixin.get_cache_key(obj, "ports", server_key="srv1")
+        assert "srv1" in key
+        assert key == "librenms_ports_device_5_srv1"
+
     def test_get_cache_key_includes_model_name(self):
         mixin = self._make_mixin()
         obj = MagicMock()
@@ -120,6 +136,16 @@ class TestCacheMixinKeyGeneration:
         assert "virtualmachine" in key
         assert "10" in key
 
+    def test_get_cache_key_different_data_types(self):
+        mixin = self._make_mixin()
+        obj = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 1
+
+        key_ports = mixin.get_cache_key(obj, "ports", server_key="prod")
+        key_ips = mixin.get_cache_key(obj, "ips", server_key="prod")
+        assert key_ports != key_ips
+
     def test_get_last_fetched_key_format(self):
         mixin = self._make_mixin()
         obj = MagicMock()
@@ -128,6 +154,21 @@ class TestCacheMixinKeyGeneration:
 
         key = mixin.get_last_fetched_key(obj, "ports")
         assert key == "librenms_ports_last_fetched_device_3"  # exact string
+
+    def test_get_last_fetched_key_includes_server_key(self):
+        """
+        The last-fetched timestamp key must also be server-scoped.
+
+        If two servers share the same key the cache countdown would reflect the
+        wrong server's fetch time.
+        """
+        mixin = self._make_mixin()
+        obj = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 3
+
+        key = mixin.get_last_fetched_key(obj, "ports", server_key="srv1")
+        assert key == "librenms_ports_last_fetched_device_3_srv1"  # exact string
 
     def test_cache_key_different_pks_differ(self):
         mixin = self._make_mixin()
@@ -152,3 +193,15 @@ class TestCacheMixinKeyGeneration:
         assert vlan_key == "librenms_vlan_group_overrides_device_7"
         data_key = mixin.get_cache_key(obj, "vlans")
         assert vlan_key != data_key
+
+    def test_get_vlan_overrides_key_server_scoped(self):
+        """VLAN overrides key includes server_key to avoid cross-server leakage."""
+        mixin = self._make_mixin()
+        obj = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 7
+
+        key_no_server = mixin.get_vlan_overrides_key(obj)
+        key_with_server = mixin.get_vlan_overrides_key(obj, server_key="prod")
+        assert key_with_server == "librenms_vlan_group_overrides_device_7_prod"
+        assert key_no_server != key_with_server

@@ -36,7 +36,7 @@ Delete items that don’t apply and describe briefly.
 3.
 
 ## Risk Assessment
-- Does this change affect existing users?  
+- Does this change affect existing users?
 - Could this cause unintended imports / updates?
 
 Explain briefly.

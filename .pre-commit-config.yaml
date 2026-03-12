@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.4  # Use the latest version from https://github.com/astral-sh/ruff-pre-commit/releases
+    rev: v0.15.5  # Use the latest version from https://github.com/astral-sh/ruff-pre-commit/releases
     hooks:
       # Run the linter
       - id: ruff-check
@@ -15,5 +15,9 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
         exclude: ^mkdocs\.yml$
+      - id: check-yaml
+        name: check-yaml (mkdocs.yml --unsafe)
+        args: [--unsafe]
+        files: ^mkdocs\.yml$
       - id: check-added-large-files
       - id: check-merge-conflict

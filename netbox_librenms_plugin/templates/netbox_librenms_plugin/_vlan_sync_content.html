@@ -21,6 +21,7 @@
       action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}">
 {% endwith %}
     {% csrf_token %}
+    {% if vlan_sync.server_key %}<input type="hidden" name="server_key" value="{{ vlan_sync.server_key }}">{% endif %}
     <input type="hidden" name="action" value="create_vlans">
 
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">

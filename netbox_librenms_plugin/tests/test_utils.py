@@ -16,9 +16,12 @@ from unittest.mock import MagicMock, patch
 class TestDeviceTypeMatching:
     """Test device type matching logic."""
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_exact_match_by_part_number(self, mock_device_type):
+    def test_match_device_type_exact_match_by_part_number(self, mock_device_type, mock_dtm):
         """Exact part_number string should match."""
+        mock_dtm.DoesNotExist = Exception
+        mock_dtm.objects.get.side_effect = Exception
         mock_dt = MagicMock(id=1, model="C9300-48P")
         mock_device_type.objects.get.return_value = mock_dt
 
@@ -30,9 +33,12 @@ class TestDeviceTypeMatching:
         assert result["device_type"] == mock_dt
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_exact_match_by_model(self, mock_device_type):
+    def test_match_device_type_exact_match_by_model(self, mock_device_type, mock_dtm):
         """Exact model string should match when part_number fails."""
+        mock_dtm.DoesNotExist = Exception
+        mock_dtm.objects.get.side_effect = Exception
         mock_dt = MagicMock(id=1, model="WS-C3750X-48P")
         # Part number lookup fails, model lookup succeeds
         mock_device_type.DoesNotExist = Exception
@@ -49,9 +55,12 @@ class TestDeviceTypeMatching:
         assert result["device_type"] == mock_dt
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_not_found(self, mock_device_type):
-        """Returns None when no match found."""
+    def test_match_device_type_not_found(self, mock_device_type, mock_dtm):
+        """Returns not-found dict when no match found."""
+        mock_dtm.DoesNotExist = Exception
+        mock_dtm.objects.get.side_effect = Exception
         mock_device_type.DoesNotExist = Exception
         mock_device_type.objects.get.side_effect = mock_device_type.DoesNotExist
 
@@ -347,72 +356,200 @@ class TestVirtualChassisHelpers:
 
         assert result == mock_member_with_id
 
-    def test_get_librenms_sync_device_member_with_id_preferred(self):
-        """A VC member with librenms_id set is preferred over members without."""
+    def test_get_librenms_sync_device_dict_preferred_over_legacy_bare_int(self):
+        """
+        In a partially migrated VC, a member with per-server dict format
+        is preferred over a member with legacy bare-int format."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
+        # Member A: legacy bare-int librenms_id (not yet migrated)
         member_a = MagicMock()
-        member_a.cf = {}
+        member_a.cf = {"librenms_id": 42}
 
+        # Member B: migrated per-server dict format
         member_b = MagicMock()
-        member_b.cf = {"librenms_id": 42}
+        member_b.cf = {"librenms_id": {"default": 42}}
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = MagicMock()
+        # member_a listed first — the function should still prefer member_b
         mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
 
-        result = get_librenms_sync_device(mock_device)
+        result = get_librenms_sync_device(mock_device, server_key="default")
 
         assert result == member_b
 
-    def test_get_librenms_sync_device_fallback_to_master_with_ip(self):
-        """When no member has librenms_id, fall back to master with primary IP."""
+    def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
+        """When no member has a per-server dict, fall back to legacy bare-int."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
         member_a = MagicMock()
-        member_a.cf = {}
-        member_a.primary_ip = MagicMock()
-
+        member_a.cf = {"librenms_id": 42}
         member_b = MagicMock()
         member_b.cf = {}
-        member_b.primary_ip = None
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.master = member_a
-        mock_device.virtual_chassis.master.primary_ip = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+        mock_device.virtual_chassis.members.all.return_value = [member_b, member_a]
 
-        result = get_librenms_sync_device(mock_device)
+        result = get_librenms_sync_device(mock_device, server_key="default")
 
         assert result == member_a
 
-    def test_get_librenms_sync_device_fallback_to_any_member_with_ip(self):
-        """When no member has librenms_id and master has no IP, fall back to any member with IP."""
+    def test_get_librenms_sync_device_dict_for_different_server_falls_through(self):
+        """Per-server dict with a different key does not match; legacy bare-int resolves instead."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
+        # Member A: legacy bare-int (universal fallback)
         member_a = MagicMock()
-        member_a.cf = {}
-        member_a.primary_ip = None
+        member_a.cf = {"librenms_id": 42}
 
+        # Member B: dict but only for "production", not "default"
         member_b = MagicMock()
-        member_b.cf = {}
-        member_b.primary_ip = MagicMock()
+        member_b.cf = {"librenms_id": {"production": 99}}
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.master = member_a
-        mock_device.virtual_chassis.master.primary_ip = None
         mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
 
-        result = get_librenms_sync_device(mock_device)
+        result = get_librenms_sync_device(mock_device, server_key="default")
 
-        assert result == member_b
+        assert result == member_a
+
+    def test_zero_id_is_still_valid(self):
+        """A zero-valued LibreNMS ID must not be treated as missing (is not None guard)."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        device = MagicMock()
+        vc = MagicMock()
+        device.virtual_chassis = vc
+
+        member = MagicMock()
+        member.cf = {"librenms_id": 0}  # zero is a valid LibreNMS ID
+        member.custom_field_data = {"librenms_id": 0}
+
+        # Simulate get_librenms_device_id returning 0 (not None) for member
+        with patch("netbox_librenms_plugin.utils.get_librenms_device_id") as mock_get_id:
+            mock_get_id.side_effect = lambda obj, server_key, **kwargs: 0 if obj is member else None
+            vc.members.all.return_value = [member]
+            result = get_librenms_sync_device(device, server_key="default")
+
+        # 0 is a valid ID — should not be treated as "no ID"
+        assert result is member
 
 
 # =============================================================================
-# TestPaginationHelpers - 2 tests
+# TestSafeDisabled - tests for _safe_disabled in bulk_import.py and filters.py
 # =============================================================================
+
+
+class TestSafeDisabledBulkImport:
+    """Tests for _safe_disabled in import_utils/bulk_import.py."""
+
+    def _call(self, val):
+        from netbox_librenms_plugin.import_utils.bulk_import import _safe_disabled
+
+        return _safe_disabled({"disabled": val})
+
+    def test_bool_true(self):
+        assert self._call(True) == 1
+
+    def test_bool_false(self):
+        assert self._call(False) == 0
+
+    def test_string_true_lowercase(self):
+        assert self._call("true") == 1
+
+    def test_string_yes(self):
+        assert self._call("yes") == 1
+
+    def test_string_on(self):
+        assert self._call("on") == 1
+
+    def test_string_false_lowercase(self):
+        assert self._call("false") == 0
+
+    def test_string_no(self):
+        assert self._call("no") == 0
+
+    def test_string_off(self):
+        assert self._call("off") == 0
+
+    def test_numeric_one(self):
+        assert self._call(1) == 1
+
+    def test_numeric_zero(self):
+        assert self._call(0) == 0
+
+    def test_none_defaults_to_zero(self):
+        assert self._call(None) == 0
+
+    def test_missing_key_defaults_to_zero(self):
+        from netbox_librenms_plugin.import_utils.bulk_import import _safe_disabled
+
+        assert _safe_disabled({}) == 0
+
+    def test_string_true_uppercase(self):
+        assert self._call("TRUE") == 1
+
+    def test_non_zero_int_is_disabled(self):
+        assert self._call(2) == 1
+
+    def test_negative_int_is_disabled(self):
+        assert self._call(-1) == 1
+
+
+class TestSafeDisabledFilters:
+    """Tests for _safe_disabled in import_utils/filters.py (same contract)."""
+
+    def _call(self, val):
+        from netbox_librenms_plugin.import_utils.filters import _safe_disabled
+
+        return _safe_disabled({"disabled": val})
+
+    def test_bool_true(self):
+        assert self._call(True) == 1
+
+    def test_bool_false(self):
+        assert self._call(False) == 0
+
+    def test_string_true(self):
+        assert self._call("true") == 1
+
+    def test_string_yes(self):
+        assert self._call("yes") == 1
+
+    def test_string_on(self):
+        assert self._call("on") == 1
+
+    def test_string_false(self):
+        assert self._call("false") == 0
+
+    def test_string_off(self):
+        assert self._call("off") == 0
+
+    def test_string_uppercase_true(self):
+        assert self._call("TRUE") == 1
+
+    def test_string_no(self):
+        assert self._call("no") == 0
+
+    def test_numeric_one(self):
+        assert self._call(1) == 1
+
+    def test_none_defaults_to_zero(self):
+        assert self._call(None) == 0
+
+    def test_non_zero_int_is_disabled(self):
+        assert self._call(2) == 1
+
+    def test_negative_int_is_disabled(self):
+        assert self._call(-1) == 1
+
+    def test_missing_key_defaults_to_zero(self):
+        from netbox_librenms_plugin.import_utils.filters import _safe_disabled
+
+        assert _safe_disabled({}) == 0
 
 
 class TestPaginationHelpers:

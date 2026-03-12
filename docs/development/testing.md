@@ -35,8 +35,18 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_sync_interfaces.py](../../netbox_librenms_plugin/tests/test_sync_interfaces.py) | Interface sync—port matching, attribute updates, MAC handling, librenms_id assignment |
 | [test_virtual_chassis.py](../../netbox_librenms_plugin/tests/test_virtual_chassis.py) | Virtual chassis detection—VC member naming patterns and name generation |
 | [test_sync_view_mismatch.py](../../netbox_librenms_plugin/tests/test_sync_view_mismatch.py) | Sync page context—device type mismatch detection and badge rendering |
+| [test_coverage_device_fields.py](../../netbox_librenms_plugin/tests/test_coverage_device_fields.py) | Device field sync view—field update logic and device field mapping |
+| [test_coverage_list.py](../../netbox_librenms_plugin/tests/test_coverage_list.py) | Import list view—background job decision, job result loading, and GET handler |
+| [test_coverage_api.py](../../netbox_librenms_plugin/tests/test_coverage_api.py) | LibreNMS API client—malformed payload guards, error paths, and edge cases |
+| [test_coverage_sync_view.py](../../netbox_librenms_plugin/tests/test_coverage_sync_view.py) | Sync view base class—context preparation and tab rendering |
+| [test_coverage_filters.py](../../netbox_librenms_plugin/tests/test_coverage_filters.py) | Import filter logic—filter form processing and device count helpers |
+| [test_sync_modules.py](../../netbox_librenms_plugin/tests/test_sync_modules.py) | Module sync—inventory matching, module type resolution, and normalization rules |
+| [test_modules_view.py](../../netbox_librenms_plugin/tests/test_modules_view.py) | Module sync view—context preparation, table rendering, and module bay mapping |
+| [test_tables_modules.py](../../netbox_librenms_plugin/tests/test_tables_modules.py) | Module tables—column rendering, row formatting, and action buttons |
 | [test_permissions.py](../../netbox_librenms_plugin/tests/test_permissions.py) | Permission enforcement—mixin contracts, object-level permissions, and write guards |
+| [test_vm_operations.py](../../netbox_librenms_plugin/tests/test_vm_operations.py) | VM operations—virtual machine sync, interface handling, and VM-specific views |
 | [test_integration_sync.py](../../netbox_librenms_plugin/tests/test_integration_sync.py) | Integration tests—API client against local mock HTTP server |
+| [test_integration_virtual_chassis.py](../../netbox_librenms_plugin/tests/test_integration_virtual_chassis.py) | Integration tests—VC detection, negative cache, multi-server cache isolation |
 | [test_view_wiring.py](../../netbox_librenms_plugin/tests/test_view_wiring.py) | Smoke tests—view class MRO, mixin wiring, permission contracts, and template syntax |
 
 Supporting files:
@@ -77,14 +87,14 @@ pytest netbox_librenms_plugin/tests/test_background_jobs.py -v
 # Multi-server librenms_id tests
 pytest netbox_librenms_plugin/tests/test_librenms_id.py -v
 
-# Sync view tests (devices, interfaces)
-pytest netbox_librenms_plugin/tests/test_sync_devices.py netbox_librenms_plugin/tests/test_sync_interfaces.py -v
-
-# Sync view mismatch detection and permission enforcement
-pytest netbox_librenms_plugin/tests/test_sync_view_mismatch.py netbox_librenms_plugin/tests/test_permissions.py -v
+# Sync view tests (devices, interfaces, modules)
+pytest netbox_librenms_plugin/tests/test_sync_devices.py netbox_librenms_plugin/tests/test_sync_interfaces.py netbox_librenms_plugin/tests/test_sync_modules.py -v
 
 # Integration tests (API client against mock HTTP server)
 pytest netbox_librenms_plugin/tests/test_integration_sync.py -v
+
+# Sync view mismatch detection and permission enforcement
+pytest netbox_librenms_plugin/tests/test_sync_view_mismatch.py netbox_librenms_plugin/tests/test_permissions.py -v
 
 # View wiring and template syntax smoke tests
 pytest netbox_librenms_plugin/tests/test_view_wiring.py -v
@@ -111,9 +121,10 @@ pytest netbox_librenms_plugin/tests/ -v --lf
 The test suite prioritizes speed and isolation so you can run tests frequently during development:
 
 - **Mock-based**: Unit tests use `MagicMock` instead of real database objects. No Django database setup required.
-- **Fast execution**: The full suite runs in under 0.5 seconds.
+- **Fast execution**: The full suite runs in approximately 15-20 seconds (varies by environment).
 - **Isolated**: Each test is independent with no shared state between tests.
 - **No external network access**: Tests never call external services. Integration tests use a local loopback HTTP server (`mock_librenms_server.py`) to exercise the real API client against realistic HTTP responses without requiring a running LibreNMS instance.
+- **Coverage exclusions**: Test files themselves are excluded from coverage reports (see `[tool.coverage.run]` omit list in `pyproject.toml`).
 
 This approach means tests work identically in your local development environment, in the devcontainer, and in CI pipelines.
 

@@ -459,3 +459,25 @@ class TestGetVlanSyncCssClass:
         from netbox_librenms_plugin.utils import get_vlan_sync_css_class
 
         assert get_vlan_sync_css_class(exists_in_netbox=True) == "text-success"
+
+
+class TestVlanEntryDictGuardInSync:
+    """Verify isinstance(vlan_entry, dict) guard works in parse_port_vlan_data."""
+
+    def test_mixed_vlans_data_only_dicts_parsed(self, mock_librenms_config):
+        """vlans array with non-dict entries: only dict entries produce VIDs."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        port_data = {
+            "port_id": 1,
+            "ifName": "GigabitEthernet0/0",
+            "ifDescr": "GigabitEthernet0/0",
+            "ifTrunk": "dot1Q",
+            "ifVlan": None,
+            "vlans": [{"vlan": 10, "untagged": 1}, "bad_entry", {"vlan": 20}],
+        }
+        result = api.parse_port_vlan_data(port_data)
+        assert result["untagged_vlan"] == 10
+        assert result["tagged_vlans"] == [20]
