@@ -1,4 +1,5 @@
-"""Tests for device mismatch detection in get_librenms_device_info.
+"""
+Tests for device mismatch detection in get_librenms_device_info.
 
 Covers the identity cross-matching logic that determines whether a
 mismatched_device warning banner is shown on the LibreNMS Sync page,
@@ -181,7 +182,8 @@ class TestMismatchDetection:
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
     def test_fqdn_domain_differs_matches_via_domain_strip(self, mock_hw):
-        """Different FQDN domains -- matches because domain-stripped
+        """
+        Different FQDN domains -- matches because domain-stripped
         LibreNMS short name 'sw01' matches NetBox FQDN split 'sw01'.
 
         NetBox name 'sw01.example.net' is compared as-is (no stripping),
