@@ -311,7 +311,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if error := self.require_write_permission():
             return error
 
-        post_server_key = request.POST.get("server_key", "").strip()
+        post_server_key = (request.POST.get("server_key") or "").strip()
         if post_server_key:
             from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -493,7 +493,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if error := self.require_write_permission():
             return error
 
-        post_server_key = request.POST.get("server_key", "").strip()
+        post_server_key = (request.POST.get("server_key") or "").strip()
         if post_server_key:
             from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -1006,7 +1006,7 @@ class DeviceConflictActionView(
 
         # If the form submitted a specific server_key, honour it so the handler uses
         # the same server context as the import page when the user clicked the button.
-        post_server_key = request.POST.get("server_key", "").strip()
+        post_server_key = (request.POST.get("server_key") or "").strip()
         if post_server_key:
             self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
