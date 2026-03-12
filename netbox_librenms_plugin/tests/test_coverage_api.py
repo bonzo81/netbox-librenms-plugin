@@ -1017,10 +1017,13 @@ class TestGetInventoryFilteredNonOk:
             {"entPhysicalContainedIn": "1", "entPhysicalName": "slot1"},
         ]
         mock_resp.json.return_value = {"status": "ok", "inventory": inventory}
-        with patch("requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp) as mock_get:
             ok, data = api.get_inventory_filtered(1, ent_physical_contained_in="1")
         assert ok is True
         assert len(data) == 1
+        mock_get.assert_called_once()
+        _, call_kwargs = mock_get.call_args
+        assert call_kwargs.get("params", {}).get("entPhysicalContainedIn") == "1"
 
     def test_empty_inventory_returns_empty(self):
         """Line 799: when response lacks status:ok (even with an empty inventory list), returns False."""
@@ -1143,10 +1146,30 @@ class TestMalformedPayloads:
             ok, msg = api.get_device_inventory(1)
         assert ok is False
 
+    def test_get_device_inventory_non_dict_inventory_item(self):
+        """get_device_inventory: list containing non-dict items returns (False, ...)."""
+        api = _make_api()
+        body = {"status": "ok", "inventory": [None, {"entPhysicalName": "slot1"}]}
+        with patch("requests.get", return_value=self._ok_resp(body)):
+            ok, msg = api.get_device_inventory(1)
+        assert ok is False
+        assert msg is not None
+
     def test_get_inventory_filtered_none_inventory(self):
         """get_inventory_filtered: inventory=None in filtered path returns (False, ...) without calling get_device_inventory."""
         api = _make_api()
         with patch("requests.get", return_value=self._ok_resp({"status": "ok", "inventory": None})):
+            with patch.object(api, "get_device_inventory") as mock_get_inv:
+                ok, msg = api.get_inventory_filtered(1, ent_physical_class="chassis")
+        assert ok is False
+        assert msg is not None
+        mock_get_inv.assert_not_called()
+
+    def test_get_inventory_filtered_non_dict_inventory_item(self):
+        """get_inventory_filtered: list containing non-dict items returns (False, ...) without fallback."""
+        api = _make_api()
+        body = {"status": "ok", "inventory": ["bad"]}
+        with patch("requests.get", return_value=self._ok_resp(body)):
             with patch.object(api, "get_device_inventory") as mock_get_inv:
                 ok, msg = api.get_inventory_filtered(1, ent_physical_class="chassis")
         assert ok is False

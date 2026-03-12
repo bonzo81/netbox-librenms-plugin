@@ -227,12 +227,6 @@ def get_import_search_cache_key(server_key: str, api_filters: dict, client_filte
     Returns:
         str: Cache key for the import search result.
     """
-    import hashlib
-    import json
-
-    def _hash(d):
-        return hashlib.sha256(
-            json.dumps(sorted(d.items()) if isinstance(d, dict) else d, sort_keys=True).encode()
-        ).hexdigest()[:16]
-
-    return f"librenms_devices_import_{server_key}_{_hash(api_filters)}_{_hash(client_filters)}"
+    return (
+        f"librenms_devices_import_{server_key}_{_build_filter_hash(api_filters)}_{_build_filter_hash(client_filters)}"
+    )
