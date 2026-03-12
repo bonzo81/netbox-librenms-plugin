@@ -69,7 +69,11 @@ You can manually assign a value to the `librenms_id` custom field for a device u
 2. **Set the LibreNMS ID:**
 
     - Scroll to the **Custom Fields** section.
-    - Enter the LibreNMS device ID in the `librenms_id` field.
+    - Enter the `librenms_id` value as a JSON object with your server key(s):
+      ```json
+      {"production": 42}
+      ```
+      For multiple servers: `{"production": 42, "staging": 17}`
 
 3. **Save Changes:**
 

@@ -416,26 +416,35 @@ class TestVirtualChassisHelpers:
 
         assert result == member_a
 
-    def test_zero_id_is_still_valid(self):
-        """A zero-valued LibreNMS ID must not be treated as missing (is not None guard)."""
+    def test_zero_id_is_not_a_valid_librenms_id(self):
+        """LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
+        A member whose resolved ID is 0 must be skipped so a real ID is preferred."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
         device = MagicMock()
         vc = MagicMock()
         device.virtual_chassis = vc
+        vc.master = None
 
-        member = MagicMock()
-        member.cf = {"librenms_id": 0}  # zero is a valid LibreNMS ID
-        member.custom_field_data = {"librenms_id": 0}
+        member_zero = MagicMock()
+        member_zero.primary_ip = None
+        member_real = MagicMock()
+        member_real.primary_ip = None
 
-        # Simulate get_librenms_device_id returning 0 (not None) for member
+        def _id_side_effect(obj, server_key, **kwargs):
+            if obj is member_zero:
+                return 0
+            if obj is member_real:
+                return 5
+            return None
+
+        # member_zero comes first but has id=0; member_real has id=5 — real ID wins
         with patch("netbox_librenms_plugin.utils.get_librenms_device_id") as mock_get_id:
-            mock_get_id.side_effect = lambda obj, server_key, **kwargs: 0 if obj is member else None
-            vc.members.all.return_value = [member]
+            mock_get_id.side_effect = _id_side_effect
+            vc.members.all.return_value = [member_zero, member_real]
             result = get_librenms_sync_device(device, server_key="default")
 
-        # 0 is a valid ID — should not be treated as "no ID"
-        assert result is member
+        assert result is member_real
 
 
 # =============================================================================

@@ -121,7 +121,7 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
         # (includes bare-int legacy IDs that are a universal fallback).
         for member in all_members:
             result = get_librenms_device_id(member, server_key, auto_save=False)
-            if result is not None:
+            if result:
                 return member
     else:
         # server_key is None: match any member that has any librenms_id set (any server).

@@ -9,7 +9,13 @@ from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field, set_librenms_device_id
+from netbox_librenms_plugin.utils import (
+    convert_speed_to_kbps,
+    get_interface_name_field,
+    get_librenms_device_id,
+    get_librenms_sync_device,
+    set_librenms_device_id,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -104,7 +110,14 @@ class SyncInterfacesView(
         """Return cached LibreNMS port data for the given object."""
         if server_key is None:
             server_key = self.librenms_api.server_key
-        cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
+        # On VC member pages the GET tab writes ports under the resolved sync device's
+        # cache key. Resolve the same device here so the POST path reads the same entry.
+        cache_obj = obj
+        if isinstance(obj, Device) and get_librenms_device_id(obj, server_key, auto_save=False) is None:
+            sync_device = get_librenms_sync_device(obj, server_key=server_key)
+            if sync_device is not None:
+                cache_obj = sync_device
+        cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
         if not cached_data:
             messages.warning(
                 request,

@@ -238,6 +238,7 @@ class MockLibreNMSServer:
             return 200, {"status": "ok", "inventory": all_items}
 
         self.routes[f"/api/v0/inventory/{device_id}"] = _handler
+        self.routes[f"/api/v0/inventory/{device_id}/all"] = _handler
 
 
 @contextmanager

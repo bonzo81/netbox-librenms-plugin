@@ -441,8 +441,22 @@ function updateHiddenVlanGroupInput(safeName, vid, groupId) {
  * @param {string} vlanType - "U" for untagged, "T" for tagged
  * @param {string} groupId - Selected group ID
  */
+let pendingVlanVerifications = 0;
+
+function _vlanVerifyStart(saveBtn) {
+    pendingVlanVerifications++;
+    if (saveBtn) saveBtn.disabled = true;
+}
+
+function _vlanVerifyEnd(saveBtn) {
+    pendingVlanVerifications = Math.max(0, pendingVlanVerifications - 1);
+    if (saveBtn && pendingVlanVerifications === 0) saveBtn.disabled = false;
+}
+
 function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
-    if (!deviceId) return;
+
+    const saveBtn = document.getElementById('saveVlanGroups');
+    _vlanVerifyStart(saveBtn);
 
     fetch('/plugins/librenms_plugin/verify-vlan-group/', {
         method: 'POST',
@@ -458,7 +472,12 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             vlan_type: vlanType
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(t => { throw new Error(t || `HTTP ${response.status}`); });
+            }
+            return response.json();
+        })
         .then(data => {
             if (data.status === 'success') {
                 const newCss = data.css_class || 'text-danger';
@@ -505,8 +524,9 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
                 }
             }
         })
-        .catch(error => {
-            console.error('VLAN verification error:', error);
+        .finally(() => {
+            const saveBtn = document.getElementById('saveVlanGroups');
+            _vlanVerifyEnd(saveBtn);
         });
 }
 
@@ -1549,7 +1569,6 @@ function initializeModuleReplaceButtons() {
             // Fetch preview content and inject into modal body
             fetch(`${previewUrl}?${params.toString()}`, {
                 signal,
-                headers: { 'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value },
             })
                 .then(response => {
                     if (!response.ok) return response.text().then(t => { throw new Error(t); });

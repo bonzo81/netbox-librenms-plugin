@@ -942,9 +942,9 @@ class LibreNMSAPI:
 
             result = response.json()
             if isinstance(result, dict) and result.get("status") == "ok":
-                all_vlans = result.get("vlans") if isinstance(result, dict) else None
+                all_vlans = result.get("vlans")
                 if not isinstance(all_vlans, list):
-                    msg = result.get("message") if isinstance(result, dict) else None
+                    msg = result.get("message")
                     return False, msg or "Unexpected response format: missing 'vlans' list"
                 # Filter VLANs by device_id since resources endpoint returns all VLANs
                 device_vlans = [
