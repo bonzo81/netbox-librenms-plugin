@@ -229,9 +229,10 @@ class MockLibreNMSServer:
             if contained_in == "0":
                 return 200, {"status": "ok", "inventory": root}
             if contained_in is not None:
-                # Only return chassis children when explicitly requesting chassis class
+                # Require entPhysicalClass=chassis for child queries so tests catch
+                # any regression where the production code stops sending the class filter.
                 phy_class = query.get("entPhysicalClass", [None])[0]
-                if phy_class is not None and phy_class != "chassis":
+                if phy_class != "chassis":
                     return 200, {"status": "ok", "inventory": []}
                 try:
                     idx = int(contained_in)

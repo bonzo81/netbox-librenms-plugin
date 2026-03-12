@@ -38,10 +38,24 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_coverage_device_fields.py](../../netbox_librenms_plugin/tests/test_coverage_device_fields.py) | Device field sync view—field update logic and device field mapping |
 | [test_coverage_list.py](../../netbox_librenms_plugin/tests/test_coverage_list.py) | Import list view—background job decision, job result loading, and GET handler |
 | [test_coverage_api.py](../../netbox_librenms_plugin/tests/test_coverage_api.py) | LibreNMS API client—malformed payload guards, error paths, and edge cases |
+| [test_coverage_api2.py](../../netbox_librenms_plugin/tests/test_coverage_api2.py) | API views—device status, background job management, VM status endpoints |
 | [test_coverage_base_views.py](../../netbox_librenms_plugin/tests/test_coverage_base_views.py) | Base view coverage tests—sync table views, context data, and data pipeline |
-| [test_coverage_base_views2.py](../../netbox_librenms_plugin/tests/test_coverage_base_views2.py) | Additional base view coverage tests |
+| [test_coverage_base_views2.py](../../netbox_librenms_plugin/tests/test_coverage_base_views2.py) | Additional base view coverage—IP address sync, cable matching, edge cases |
+| [test_coverage_cache.py](../../netbox_librenms_plugin/tests/test_coverage_cache.py) | Import cache helpers—cache key generation, active search tracking, metadata |
+| [test_coverage_device_operations.py](../../netbox_librenms_plugin/tests/test_coverage_device_operations.py) | Device validation—type matching, serial handling, VC detection, role lookup |
+| [test_coverage_forms.py](../../netbox_librenms_plugin/tests/test_coverage_forms.py) | Import forms—filter form choices, background-job option guards, field validation |
+| [test_coverage_mixins.py](../../netbox_librenms_plugin/tests/test_coverage_mixins.py) | View mixins—VLAN group scope resolution, VlanAssignmentMixin, scope priority |
+| [test_coverage_sync_interfaces.py](../../netbox_librenms_plugin/tests/test_coverage_sync_interfaces.py) | Interface sync view—port caching, attribute updates, MAC handling, VC member routing |
 | [test_coverage_sync_view.py](../../netbox_librenms_plugin/tests/test_coverage_sync_view.py) | Sync view base class—context preparation and tab rendering |
+| [test_coverage_sync_views.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views.py) | Sync action views—cables, IP addresses, VLAN sync action handlers |
+| [test_coverage_sync_views2.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views2.py) | Additional sync action view coverage—device fields, device name/type sync |
+| [test_coverage_sync_views3.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views3.py) | Further sync action view coverage—location sync, VLAN assignment edge cases |
+| [test_coverage_actions.py](../../netbox_librenms_plugin/tests/test_coverage_actions.py) | Import action views—bulk import, device role/cluster/rack update, validation details |
 | [test_coverage_filters.py](../../netbox_librenms_plugin/tests/test_coverage_filters.py) | Import filter logic—filter form processing and device count helpers |
+| [test_coverage_tables.py](../../netbox_librenms_plugin/tests/test_coverage_tables.py) | Sync tables—column rendering, row data, interface and cable table helpers |
+| [test_coverage_utils.py](../../netbox_librenms_plugin/tests/test_coverage_utils.py) | Utility function coverage—name matching, speed conversion, site/platform lookup |
+| [test_coverage_virtual_chassis.py](../../netbox_librenms_plugin/tests/test_coverage_virtual_chassis.py) | Virtual chassis coverage—VC creation, position conflict handling, member naming |
+| [test_coverage_vlans_table.py](../../netbox_librenms_plugin/tests/test_coverage_vlans_table.py) | VLAN sync table—column rendering, group assignment, VLAN comparison rows |
 | [test_sync_modules.py](../../netbox_librenms_plugin/tests/test_sync_modules.py) | Module sync—inventory matching, module type resolution, and normalization rules |
 | [test_modules_view.py](../../netbox_librenms_plugin/tests/test_modules_view.py) | Module sync view—context preparation, table rendering, and module bay mapping |
 | [test_tables_modules.py](../../netbox_librenms_plugin/tests/test_tables_modules.py) | Module tables—column rendering, row formatting, and action buttons |
