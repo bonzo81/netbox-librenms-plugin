@@ -538,6 +538,7 @@ class TestDeviceStatusFilterSetSearch:
         assert "site__name__icontains" in q_str
         assert "device_type__model__icontains" in q_str
         assert "role__name__icontains" in q_str
+        assert "rack__name__icontains" in q_str
 
     def test_search_whitespace_only_returns_qs(self):
         from netbox_librenms_plugin.filtersets import DeviceStatusFilterSet

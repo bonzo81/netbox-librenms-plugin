@@ -555,15 +555,12 @@ class TestProcessRemoteDevice:
         mock_device.pk = 5
 
         link = {"remote_port": "Gi0/1", "remote_port_id": None}
-        enriched = {
-            "remote_port": "Gi0/1",
-            "remote_device_url": "/dcim/devices/5/",
-            "netbox_remote_device_id": 5,
-        }
 
         with (
             patch.object(view, "get_device_by_id_or_name", return_value=(mock_device, True, None)),
-            patch.object(view, "enrich_remote_port", return_value=enriched),
+            patch.object(
+                view, "enrich_remote_port", side_effect=lambda link, *_args, **_kwargs: dict(link)
+            ) as mock_enrich,
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.reverse",
                 return_value="/dcim/devices/5/",
@@ -573,6 +570,7 @@ class TestProcessRemoteDevice:
 
         assert result["remote_device_url"] == "/dcim/devices/5/"
         assert result["netbox_remote_device_id"] == 5
+        mock_enrich.assert_called_once()
 
     def test_found_false_with_error_message(self):
         """found=False with error_message → cable_status set to the error."""

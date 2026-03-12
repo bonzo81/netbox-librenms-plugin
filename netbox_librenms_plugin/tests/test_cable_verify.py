@@ -113,7 +113,9 @@ class TestStaleFieldStripping:
 
     def test_raw_keys_match_prepare_context(self):
         """The _raw_keys set in post() must match the one in _prepare_context()."""
+        import ast
         import inspect
+        import re
 
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView, SingleCableVerifyView
 
@@ -121,18 +123,14 @@ class TestStaleFieldStripping:
         prepare_src = inspect.getsource(BaseCableTableView._prepare_context)
         post_src = inspect.getsource(SingleCableVerifyView.post)
 
-        # Both should contain the same set of raw keys
-        expected_keys = {
-            "local_port",
-            "local_port_id",
-            "remote_port",
-            "remote_device",
-            "remote_port_id",
-            "remote_device_id",
-        }
-        for key in expected_keys:
-            assert f'"{key}"' in prepare_src, f"{key} missing from _prepare_context _raw_keys"
-            assert f'"{key}"' in post_src, f"{key} missing from post() _raw_keys"
+        def extract_raw_keys(src, label):
+            match = re.search(r"_raw_keys\s*=\s*(\{[^}]*\})", src, re.S)
+            assert match, f"_raw_keys missing from {label}"
+            return set(ast.literal_eval(match.group(1)))
+
+        prepare_keys = extract_raw_keys(prepare_src, "_prepare_context")
+        post_keys = extract_raw_keys(post_src, "post()")
+        assert prepare_keys == post_keys, f"_raw_keys mismatch: {prepare_keys} != {post_keys}"
 
 
 class TestXSSEscaping:

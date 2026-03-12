@@ -430,23 +430,23 @@ class TestGetView:
                         mock_pref.return_value = None
 
                         mock_form_cls = MagicMock()
-                    mock_form = MagicMock()
-                    mock_form.is_valid.return_value = False
-                    mock_form_cls.return_value = mock_form
-                    view.filterset_form = mock_form_cls
+                        mock_form = MagicMock()
+                        mock_form.is_valid.return_value = False
+                        mock_form_cls.return_value = mock_form
+                        view.filterset_form = mock_form_cls
 
-                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                        mock_render.return_value = MagicMock()
+                        with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                            mock_render.return_value = MagicMock()
 
-                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                            ) as mock_searches:
-                                mock_searches.return_value = []
+                            with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                                with patch(
+                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                ) as mock_searches:
+                                    mock_searches.return_value = []
 
-                                with patch.object(view, "get_server_info", return_value={}):
-                                    view.get(request)
-                                    mock_load.assert_called_once_with(42)
+                                    with patch.object(view, "get_server_info", return_value={}):
+                                        view.get(request)
+                                        mock_load.assert_called_once_with(42)
 
     def test_get_invalid_job_id_logs_warning(self):
         """Invalid (non-integer) job_id is caught and logged."""
@@ -611,7 +611,8 @@ class TestGetView:
                                             mock_count.return_value = 5
                                             with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
                                                 mock_cache.get.return_value = None
-                                                view.get(request)
+                                                with patch.object(view, "_get_import_queryset", return_value=[]):
+                                                    view.get(request)
                                                 mock_render.assert_called_once()
 
     def test_get_background_job_enqueued_for_superuser(self):
@@ -731,7 +732,10 @@ class TestGetView:
                                                     with patch(
                                                         "netbox_librenms_plugin.views.imports.list.messages"
                                                     ) as mock_messages:
-                                                        view.get(request)
+                                                        with patch.object(
+                                                            view, "_get_import_queryset", return_value=[]
+                                                        ):
+                                                            view.get(request)
                                                         # Should render page (synchronous fallback)
                                                         mock_render.assert_called_once()
                                                         mock_messages.warning.assert_called_once()
@@ -997,7 +1001,8 @@ class TestGetViewFilterFields:
                                             mock_count.return_value = 5
                                             with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
                                                 mock_cache.get.return_value = None
-                                                view.get(request)
+                                                with patch.object(view, "_get_import_queryset", return_value=[]):
+                                                    view.get(request)
                                                 # All filters were submitted — filter count passed to device count
                                                 mock_count.assert_called_once()
                                                 args, kwargs = mock_count.call_args
@@ -1062,7 +1067,8 @@ class TestGetViewFilterFields:
                                             with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
                                                 mock_cache.get.return_value = None
                                                 # Should not raise despite the settings exception
-                                                view.get(request)
+                                                with patch.object(view, "_get_import_queryset", return_value=[]):
+                                                    view.get(request)
                                                 mock_render.assert_called_once()
 
     def test_get_device_count_exception_defaults_zero(self):
@@ -1116,7 +1122,8 @@ class TestGetViewFilterFields:
                                                 with patch(
                                                     "netbox_librenms_plugin.views.imports.list.logger"
                                                 ) as mock_logger:
-                                                    view.get(request)
+                                                    with patch.object(view, "_get_import_queryset", return_value=[]):
+                                                        view.get(request)
                                                     mock_render.assert_called_once()
                                                     mock_logger.error.assert_called()
 
@@ -1170,7 +1177,8 @@ class TestGetViewFilterFields:
                                             with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
                                                 mock_cache.get.return_value = None
                                                 # Should not raise
-                                                view.get(request)
+                                                with patch.object(view, "_get_import_queryset", return_value=[]):
+                                                    view.get(request)
                                                 mock_render.assert_called_once()
 
 

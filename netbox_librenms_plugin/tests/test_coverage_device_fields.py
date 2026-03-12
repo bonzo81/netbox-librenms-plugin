@@ -1782,6 +1782,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         ):
             view.post(_make_request({"object_type": "device"}), pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_migrate_returns_false(self):
         """migrate_legacy_librenms_id returns False → warning."""
@@ -1849,6 +1850,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         ):
             view.post(_make_request({"object_type": "device"}), pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_unexpected_error_on_save(self):
         view = self._view()
@@ -1883,6 +1885,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         ):
             view.post(_make_request({"object_type": "device"}), pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_success_integer_cf_value(self):
         """Happy path with integer cf_value → success message."""

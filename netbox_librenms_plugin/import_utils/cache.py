@@ -103,9 +103,12 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
             now = datetime.now(timezone.utc)
             try:
                 cached_at_raw = metadata.get("cached_at")
-                cached_at = (
-                    datetime.fromisoformat(cached_at_raw) if cached_at_raw else datetime.fromtimestamp(0, timezone.utc)
-                )
+                if isinstance(cached_at_raw, datetime):
+                    cached_at = cached_at_raw
+                elif cached_at_raw:
+                    cached_at = datetime.fromisoformat(cached_at_raw)
+                else:
+                    cached_at = datetime.fromtimestamp(0, timezone.utc)
                 # Normalize naive datetimes (e.g., stored without tzinfo) to UTC
                 if cached_at.tzinfo is None:
                     cached_at = cached_at.replace(tzinfo=timezone.utc)
