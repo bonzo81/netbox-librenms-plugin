@@ -1409,6 +1409,8 @@ class TestRemoveServerMappingViewPost:
             mock_settings.PLUGINS_CONFIG = mock_cfg
             view.post(req, pk=1)
         mock_msg.success.assert_called_once()
+        mock_locked.full_clean.assert_called_once()
+        mock_locked.save.assert_called_once()
         # After deleting the last key, cf should be set to None
         assert mock_locked.custom_field_data["librenms_id"] is None
 
@@ -1440,6 +1442,8 @@ class TestRemoveServerMappingViewPost:
             mock_settings.PLUGINS_CONFIG = mock_cfg
             view.post(req, pk=1)
         mock_msg.success.assert_called_once()
+        mock_locked.full_clean.assert_called_once()
+        mock_locked.save.assert_called_once()
         assert mock_locked.custom_field_data["librenms_id"] == {"other": 6}
 
 
@@ -1573,7 +1577,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
             view.post(_make_request({"object_type": "device"}), pk=1)
-        mock_msg.warning.assert_called_once()
+        mock_msg.error.assert_called_once()
 
     def test_non_digit_string_cf_value(self):
         view = self._view()
@@ -1903,6 +1907,8 @@ class TestConvertLegacyLibreNMSIdViewPost:
         ):
             view.post(_make_request({"object_type": "device"}), pk=1)
         mock_msg.success.assert_called_once()
+        mock_locked.full_clean.assert_called_once()
+        mock_locked.save.assert_called_once()
         assert "42" in mock_msg.success.call_args[0][1]
 
     def test_success_string_cf_value(self):

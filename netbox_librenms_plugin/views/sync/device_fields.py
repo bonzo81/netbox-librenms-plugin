@@ -589,7 +589,10 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         # Verify the device actually has a legacy bare-int librenms_id
         cf_value = obj.custom_field_data.get("librenms_id")
-        if not isinstance(cf_value, (int, str)) or isinstance(cf_value, bool):
+        if isinstance(cf_value, bool):
+            messages.error(request, "librenms_id has an invalid boolean value; cannot convert.")
+            return self._sync_url(object_type, pk)
+        if not isinstance(cf_value, (int, str)):
             messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
             return self._sync_url(object_type, pk)
         if isinstance(cf_value, str):

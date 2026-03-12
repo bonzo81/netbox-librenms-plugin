@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 
-class TestTryChassiDeviceTypeMatch:
+class TestTryChassisDeviceTypeMatch:
     """Tests for _try_chassis_device_type_match (lines 45-65)."""
 
     def test_api_failure_returns_none(self):
@@ -945,7 +945,7 @@ class TestValidateDeviceForImportEdgeCases:
 
         # Should have found a match via model name fallback
         assert result is not None
-        assert mock_match.call_count >= 2
+        assert mock_match.call_count == 2
         assert result["matched"] is True
         assert result.get("device_type") is mock_dt
 
@@ -1642,11 +1642,12 @@ class TestValidateDeviceChassisMatch:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
-                return_value=None,
+                return_value={"found": False, "platform": None, "match_type": None},
             ),
         ]
 
-        [p.start() for p in patches]
+        for p in patches:
+            p.start()
 
         try:
             result = validate_device_for_import(libre_device, api=api)

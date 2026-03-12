@@ -238,7 +238,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             # position is already 1-based, so pass it directly (no +1).
             if master_name:
                 member_data["suggested_name"] = _generate_vc_member_name(
-                    master_name, position, serial=member_data.get("serial"), pattern=vc_name_pattern
+                    master_name, position, serial=_norm_serial(member_data.get("serial")), pattern=vc_name_pattern
                 )
             else:
                 member_data["suggested_name"] = f"Member-{position}"
@@ -344,7 +344,7 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
             position = idx + 1
         member["position"] = position
         member["suggested_name"] = _generate_vc_member_name(
-            master_name, position, serial=member.get("serial"), pattern=vc_pattern
+            master_name, position, serial=_norm_serial(member.get("serial")), pattern=vc_pattern
         )
 
     return vc_data

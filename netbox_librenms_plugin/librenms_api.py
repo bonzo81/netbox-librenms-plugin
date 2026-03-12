@@ -1000,10 +1000,14 @@ class LibreNMSAPI:
                 result = response.json()
                 if not isinstance(result, dict):
                     return False, "Unexpected response format"
-                port_data = result.get("port", [])
-                if port_data and len(port_data) > 0:
-                    return True, port_data[0]
-                return False, "Port not found"
+                port_data = result.get("port")
+                if not isinstance(port_data, list):
+                    return False, result.get("message", "Unexpected response format: missing 'port' list")
+                if not port_data:
+                    return False, "Port not found"
+                if not isinstance(port_data[0], dict):
+                    return False, "Unexpected response format: invalid 'port' entry"
+                return True, port_data[0]
 
             return False, f"HTTP {response.status_code}"
         except requests.exceptions.HTTPError as e:

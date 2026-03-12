@@ -1876,6 +1876,7 @@ class TestBaseIPAddressTableViewGetTable:
 
         assert isinstance(mock_table.htmx_url, str)
         assert "ipaddresses" in mock_table.htmx_url
+        assert "server_key=default" in mock_table.htmx_url
 
 
 # ===========================================================================

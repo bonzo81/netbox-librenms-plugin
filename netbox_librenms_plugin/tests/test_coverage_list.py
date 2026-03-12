@@ -78,18 +78,6 @@ class TestShouldUseBackgroundJob:
 
         assert view.should_use_background_job() is True
 
-    def test_superuser_empty_form_data_defaults_true(self):
-        """Empty _filter_form_data defaults use_background_job to True."""
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
-        view = object.__new__(LibreNMSImportView)
-        view._filter_form_data = {}
-        view.request = MagicMock()
-        view.request.user.is_superuser = True
-
-        result = view.should_use_background_job()
-        assert result is True
-
 
 class TestLoadJobResults:
     """Tests for _load_job_results()."""

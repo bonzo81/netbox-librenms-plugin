@@ -1572,6 +1572,9 @@ function initializeModuleReplaceButtons() {
             // Fetch preview content and inject into modal body
             fetch(`${previewUrl}?${params.toString()}`, {
                 signal,
+                headers: {
+                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+                },
             })
                 .then(response => {
                     if (!response.ok) return response.text().then(t => { throw new Error(t); });
