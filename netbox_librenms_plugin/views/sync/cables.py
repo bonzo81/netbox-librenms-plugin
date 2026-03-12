@@ -3,6 +3,7 @@ from urllib.parse import quote_plus
 
 from dcim.models import Cable, Device, Interface
 from django.contrib import messages
+from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
@@ -44,8 +45,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return None
 
         for port_id in selected_data:
-            device_id = request.POST.get(f"device_selection_{port_id}") or initial_device.id
-            selected_interfaces.append({"device_id": device_id, "local_port_id": port_id})
+            override = request.POST.get(f"device_selection_{port_id}")
+            device_id = override or initial_device.id
+            selected_interfaces.append(
+                {"device_id": device_id, "local_port_id": port_id, "vc_override": bool(override)}
+            )
 
         return selected_interfaces
 
@@ -77,7 +81,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     def check_existing_cable(self, local_interface, remote_interface):
         """Return True if a cable already exists for either interface."""
-        from django.contrib.contenttypes.models import ContentType
         from dcim.models import Interface as DCIMInterface
 
         interface_ct = ContentType.objects.get_for_model(DCIMInterface)
@@ -114,8 +117,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             link_data = next(link for link in cached_links if str(link.get("local_port_id", "")) == port_id)
             # Apply posted device override (VC member selection) without mutating the cached list.
             link_data = {**link_data, "device_id": interface.get("device_id", link_data.get("device_id"))}
-            # Re-resolve local interface against current NetBox state after VC member override.
-            if hasattr(self, "_initial_device"):
+            # Re-resolve local interface only when a VC member override was explicitly applied.
+            if interface.get("vc_override") and hasattr(self, "_initial_device"):
                 link_data.pop("netbox_local_interface_id", None)
                 link_data.pop("local_port_url", None)
                 self.enrich_local_port(link_data, self._initial_device, getattr(self, "_post_server_key", None))
