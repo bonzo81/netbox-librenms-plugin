@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Optional
 
@@ -7,6 +8,8 @@ from django.http import HttpRequest
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
+
+logger = logging.getLogger(__name__)
 
 
 def convert_speed_to_kbps(speed_bps: int) -> int:
@@ -99,9 +102,12 @@ def get_librenms_sync_device(device: Device) -> Optional[Device]:
     vc = device.virtual_chassis
     all_members = vc.members.all()
 
-    # Priority 1: Check if ANY member has librenms_id configured
+    # Priority 1: Check if ANY member has librenms_id configured.
+    # LibreNMS device IDs are auto-incremented from 1 (MySQL default), so 0 is never valid.
+    # Using a truthy check safely excludes 0, None, "", and other falsy non-IDs.
     for member in all_members:
-        if member.cf.get("librenms_id"):
+        raw_cf = member.cf.get("librenms_id")
+        if raw_cf and not isinstance(raw_cf, bool):
             return member
 
     # Priority 2: Use master device if it has primary IP

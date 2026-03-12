@@ -1,4 +1,5 @@
-"""Integration tests using the mock LibreNMS HTTP server.
+"""
+Integration tests using the mock LibreNMS HTTP server.
 
 These tests verify that LibreNMSAPI correctly parses responses from a real
 (but local, mocked) HTTP server, and that the full request/response cycle works.
@@ -66,7 +67,8 @@ class TestLibreNMSAPIPortsFetch:
     """LibreNMSAPI.get_ports() correctly parses mock server responses."""
 
     def test_get_ports_returns_dict_with_ports_key(self, mock_server):
-        """get_ports() returns a parsed dict and sends the required query parameters.
+        """
+        get_ports() returns a parsed dict and sends the required query parameters.
 
         A callable route is used so we can capture the outgoing query string and
         assert that both the ``columns`` field list and ``with=vlans`` are present —
@@ -260,7 +262,8 @@ class TestLibreNMSAPIInventory:
 
 
 class TestLibreNMSAPIDiscovery:
-    """LibreNMSAPI device-ID discovery: lookup by IP and hostname fallback.
+    """
+    LibreNMSAPI device-ID discovery: lookup by IP and hostname fallback.
 
     Covers get_device_id_by_ip(), get_device_id_by_hostname(), and the
     get_librenms_id() fallback chain (IP → DNS name → hostname).

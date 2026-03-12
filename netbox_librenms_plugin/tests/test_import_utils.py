@@ -1,4 +1,5 @@
-"""Tests for netbox_librenms_plugin.import_utils module.
+"""
+Tests for netbox_librenms_plugin.import_utils module.
 
 Phase 2 tests covering cache key generation, device name determination,
 device retrieval, and device validation functions.
@@ -651,7 +652,7 @@ class TestDeviceValidation:
 
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
-        assert result["device_type"]["matched"] is False
+        assert result["device_type"]["found"] is False
         assert any("device type" in issue.lower() for issue in result["issues"])
 
     @patch("virtualization.models.VirtualMachine")
@@ -891,7 +892,7 @@ class TestDeviceValidation:
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
         assert result is not None
-        assert result["device_type"]["matched"] is False
+        assert result["device_type"]["found"] is False
 
     @patch("virtualization.models.VirtualMachine")
     @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
@@ -1287,7 +1288,8 @@ class TestDeviceNamingPreferences:
 
 
 class TestNameMatchesWithNamingPreferences:
-    """Test that name_matches/name_sync_available respect naming preferences and VC patterns.
+    """
+    Test that name_matches/name_sync_available respect naming preferences and VC patterns.
 
     The name comparison should use the resolved name (result of _determine_device_name())
     which accounts for use_sysname and strip_domain, not the raw LibreNMS sysName.
@@ -1835,6 +1837,7 @@ class TestSerialNumberMatching:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = "ABC123"
+        existing.virtual_chassis = None
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
@@ -2692,3 +2695,39 @@ class TestBuildSyncInfo:
 
         assert result["device_type_synced"] is False
         assert result["all_synced"] is False
+
+
+class TestImportSingleDeviceLazyValidation:
+    """import_single_device must pass api=api to validate_device_for_import when validation is None."""
+
+    def test_api_passed_to_validate(self):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        mock_api = MagicMock()
+        mock_api.server_key = "prod"
+
+        mock_validation = {
+            "existing_device": MagicMock(name="existing"),
+            "can_import": False,
+        }
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI",
+                return_value=mock_api,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.validate_device_for_import",
+                return_value=mock_validation,
+            ) as mock_validate,
+        ):
+            import_single_device(
+                42,
+                server_key="prod",
+                sync_options={"use_sysname": True, "strip_domain": False},
+                validation=None,
+                libre_device={"device_id": 42, "hostname": "test"},
+            )
+
+            mock_validate.assert_called_once()
+            assert mock_validate.call_args[1].get("api") is mock_api

@@ -51,14 +51,21 @@ def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: b
     # Generate import timestamp comment
     import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
 
+    # Validate device_id before creating the VM so a missing/invalid value
+    # never leaves a VM without a librenms_id (partial persistence).
+    raw_device_id = libre_device["device_id"]
+    if isinstance(raw_device_id, bool):
+        raise ValueError(f"device_id is a boolean ({raw_device_id!r}); expected an integer")
+    librenms_device_id = int(raw_device_id)
+
     # Create the VM with librenms_id custom field
     vm = VirtualMachine.objects.create(
         name=vm_name,
         cluster=cluster,
         role=role,  # Optional VM role
         platform=platform,
-        comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-        custom_field_data={"librenms_id": int(libre_device["device_id"])},
+        comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
+        custom_field_data={"librenms_id": librenms_device_id},
     )
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")

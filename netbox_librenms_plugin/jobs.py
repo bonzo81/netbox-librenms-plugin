@@ -113,6 +113,8 @@ class FilterDevicesJob(JobRunner):
             "filters": filters,
             "server_key": server_key,
             "vc_detection_enabled": vc_detection_enabled,
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
             "cache_timeout": api.cache_timeout,
             "cached_at": cached_at,
             "completed": True,

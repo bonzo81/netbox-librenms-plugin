@@ -47,9 +47,9 @@
               <tr>
                 <th style="padding-left: 0.75rem;">Status</th>
                 <td>
-                  {% if libre_device.status == 1 %}
+                  {% if libre_device.status == 1 or libre_device.status == "1" %}
                     <span class="badge bg-success text-white"><i class="mdi mdi-check"></i> Up</span>
-                  {% elif libre_device.status == 0 %}
+                  {% elif libre_device.status == 0 or libre_device.status == "0" %}
                     <span class="badge bg-danger text-white"><i class="mdi mdi-close"></i> Down</span>
                   {% else %}
                     <span class="badge bg-secondary text-white"><i class="mdi mdi-help"></i> Unknown</span>
@@ -109,10 +109,10 @@
                 <td style="padding-left: 0.75rem;">Name</td>
                 <td>
                   {% if validation.existing_device %}
-                    <a href="{{ existing_device_url }}" target="_blank">
+                    <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">
                       {{ validation.existing_device.name }}
                     </a>
-                    {% if validation.name_sync_available %}
+                    {% if validation.name_sync_available and existing_device_model_name != "virtualmachine" %}
                       <form style="display:inline" class="ms-2"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                             hx-swap="none"
@@ -120,7 +120,7 @@
                         {% csrf_token %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="action" value="sync_name">
-                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync name to {{ validation.suggested_name }}">
+                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync name to {{ validation.suggested_name }}" aria-label="Sync name to {{ validation.suggested_name }}">
                           <i class="mdi mdi-sync"></i>
                         </button>
                       </form>
@@ -129,9 +129,7 @@
                     <span class="text-muted">New device</span>
                   {% endif %}
                 </td>
-                <td>
-                  {{ libre_device.sysName|default:libre_device.hostname }}
-                </td>
+                <td>{{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }}</td>
               </tr>
 
               {% if not validation.import_as_vm %}
@@ -171,7 +169,7 @@
                       <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                       <input type="hidden" name="action" value="update_type">
                       <input type="hidden" name="force" value="on">
-                      <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1" title="Update to LibreNMS type">
+                      <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1" title="Update to LibreNMS type" aria-label="Update to LibreNMS type">
                         <i class="mdi mdi-sync"></i>
                       </button>
                     </form>
@@ -184,7 +182,7 @@
                         {% csrf_token %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="action" value="sync_device_type">
-                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync device type">
+                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync device type" aria-label="Sync device type">
                           <i class="mdi mdi-sync"></i>
                         </button>
                       </form>
@@ -192,8 +190,10 @@
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% elif validation.device_type.device_type %}
-                    {{ validation.device_type.device_type }}
-                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    <span {% if validation.device_type.match_type == 'chassis' %}title="Matched via chassis inventory ({{ validation.device_type.chassis_model }})"{% elif validation.device_type.match_type == 'mapping' %}title="Matched via device type mapping"{% endif %}>
+                      {{ validation.device_type.device_type }}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    </span>
                   {% else %}
                     <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
                   {% endif %}
@@ -225,7 +225,7 @@
                         {% csrf_token %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="action" value="sync_serial">
-                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync serial from LibreNMS">
+                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync serial from LibreNMS" aria-label="Sync serial from LibreNMS">
                           <i class="mdi mdi-sync"></i>
                         </button>
                       </form>
@@ -280,7 +280,7 @@
                           {% csrf_token %}
                           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                           <input type="hidden" name="action" value="sync_platform">
-                          <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform">
+                          <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform" aria-label="Sync platform">
                             <i class="mdi mdi-sync"></i>
                           </button>
                         </form>
@@ -305,7 +305,7 @@
                       {% csrf_token %}
                       <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                       <input type="hidden" name="action" value="sync_platform">
-                      <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform">
+                      <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform" aria-label="Sync platform">
                         <i class="mdi mdi-sync"></i>
                       </button>
                     </form>
@@ -409,7 +409,7 @@
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank">{{ validation.existing_device.name }}</a>,
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
           not linked to LibreNMS.
         </span>
       </div>
@@ -469,7 +469,7 @@
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank">{{ validation.existing_device.name }}</a>,
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
           not linked to LibreNMS.
         </span>
       </div>
@@ -507,7 +507,7 @@
         <span class="badge bg-warning-lt me-1"><i class="mdi mdi-ip-network"></i> IP match</span>
         <span class="text-muted ms-1">
           — Device with IP {{ libre_device.ip }} exists as
-          <a href="{{ existing_device_url }}" target="_blank">{{ validation.existing_device.name }}</a>.
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
           Consider adding LibreNMS ID manually.
         </span>
       </div>
@@ -516,7 +516,7 @@
       <div class="alert alert-info py-2 mb-3">
         <i class="mdi mdi-link"></i>
         <strong>Exists</strong> — Device already exists as
-        <a href="{{ existing_device_url }}" target="_blank">{{ validation.existing_device.name }}</a>.
+        <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
       </div>
     {% endif %}
 
@@ -559,17 +559,17 @@
   {% if validation.existing_device %}
     {% if validation.import_as_vm or validation.existing_device.cluster %}
       <a href="{{ existing_device_url }}"
-         class="btn btn-primary btn-sm" target="_blank">
+         class="btn btn-primary btn-sm" target="_blank" rel="noopener noreferrer">
         <i class="mdi mdi-open-in-new"></i> View VM in NetBox
       </a>
     {% else %}
       <a href="{{ existing_device_url }}"
-         class="btn btn-primary btn-sm" target="_blank">
+         class="btn btn-primary btn-sm" target="_blank" rel="noopener noreferrer">
         <i class="mdi mdi-open-in-new"></i> View in NetBox
       </a>
       {% if validation.existing_match_type == 'librenms_id' %}
         <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}"
-           class="btn btn-outline-primary btn-sm" target="_blank">
+           class="btn btn-outline-primary btn-sm" target="_blank" rel="noopener noreferrer">
           <i class="mdi mdi-sync"></i> Full Sync Page
         </a>
       {% endif %}

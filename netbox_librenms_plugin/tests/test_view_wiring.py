@@ -1,8 +1,14 @@
-"""Step 1 smoke tests — verify view class wiring (mixins, MRO, key attributes).
+"""
+Step 1 smoke tests — verify view class wiring (mixins, MRO, key attributes).
 
 These tests never touch the database or network; they only inspect class
 hierarchies and attribute presence.
 """
+
+import os
+from pathlib import Path
+
+import pytest
 
 
 class TestLibreNMSAPIMixinWiring:
@@ -121,11 +127,13 @@ class TestPermissionMixinWiring:
 
 
 class TestRequiredObjectPermissionsWiring:
-    """POST-only sync views that modify NetBox objects must declare required_object_permissions
+    """
+    POST-only sync views that modify NetBox objects must declare required_object_permissions
     and include the NetBoxObjectPermissionMixin (and LibreNMSPermissionMixin) in their MRO."""
 
     def _assert_has_mixins(self, view_class):
-        """Assert that *view_class* includes both permission mixins in its MRO.
+        """
+        Assert that *view_class* includes both permission mixins in its MRO.
 
         Checking the MRO (not just runtime behaviour) guarantees that the permission
         enforcement is wired at the class level — a missing mixin would silently skip
@@ -204,7 +212,8 @@ class TestRequiredObjectPermissionsWiring:
 
 
 class TestViewPropertyLazyInit:
-    """Verify that _librenms_api starts as None (lazy, not eager-init) and that
+    """
+    Verify that _librenms_api starts as None (lazy, not eager-init) and that
     the librenms_api property descriptor exists on the class."""
 
     def test_librenms_api_mixin_property_is_defined_on_class(self):
@@ -225,7 +234,8 @@ class TestViewPropertyLazyInit:
         assert dummy._librenms_api is None
 
     def test_sync_interfaces_has_librenms_api_property_via_class(self):
-        """BaseLibreNMSSyncView must expose librenms_api through its MRO.
+        """
+        BaseLibreNMSSyncView must expose librenms_api through its MRO.
 
         SyncInterfacesView gains LibreNMSAPIMixin in the view-fixes PR; on the
         current upstream/develop baseline we verify the property via
@@ -234,3 +244,65 @@ class TestViewPropertyLazyInit:
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
         assert any("librenms_api" in vars(cls) for cls in BaseLibreNMSSyncView.__mro__)
+
+
+# ── Template syntax smoke tests ──────────────────────────────────────────────
+
+_TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "netbox_librenms_plugin"
+_TEMPLATE_FILES = sorted(_TEMPLATE_DIR.rglob("*.html"))
+
+
+class TestTemplateSyntax:
+    """Compile every plugin template to catch syntax errors early."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _django_engine(self):
+        """Ensure Django is set up once and expose the template engine."""
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "netbox.settings")
+        import django
+
+        django.setup()
+        from django.template import engines
+
+        self.__class__._engine = engines["django"]
+
+    @pytest.mark.parametrize(
+        "template_path",
+        _TEMPLATE_FILES,
+        ids=[str(p.relative_to(_TEMPLATE_DIR)) for p in _TEMPLATE_FILES],
+    )
+    def test_template_compiles(self, template_path):
+        """Each template must parse without TemplateSyntaxError."""
+        source = template_path.read_text()
+        # Compile the template — raises TemplateSyntaxError on bad tags
+        self._engine.from_string(source)
+
+
+class TestRenderDeviceSelectionEscape:
+    """VCCableTable.render_device_selection must HTML-escape member.name."""
+
+    def test_member_name_is_escaped(self):
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+
+        device = MagicMock()
+        device.id = 1
+        vc = MagicMock()
+        member = MagicMock()
+        member.id = 1
+        member.name = '<script>alert("xss")</script>'
+        vc.members.all.return_value = [member]
+        device.virtual_chassis = vc
+
+        table = VCCableTable([], device=device)
+        record = {"local_port": "eth0", "local_port_id": "42"}
+
+        with patch(
+            "netbox_librenms_plugin.tables.cables.get_virtual_chassis_member",
+            return_value=member,
+        ):
+            html = str(table.render_device_selection(None, record))
+
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
