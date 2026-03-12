@@ -200,7 +200,7 @@ def get_import_device_cache_key(device_id: int | str, server_key: str = "default
 
     Args:
         device_id: LibreNMS device ID
-        server_key: LibreNMS server identifier for multi-server setups (required)
+        server_key: LibreNMS server identifier for multi-server setups. Defaults to "default" for backward compatibility.
 
     Returns:
         str: Cache key for the device data

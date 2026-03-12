@@ -74,6 +74,8 @@ class TestLibreNMSAPIInitFallback:
 
                 api = LibreNMSAPI()
                 assert api.server_key == "default"
+                assert api.librenms_url == "https://x.example.com"
+                assert api.api_token == "tok"
 
 
 class TestTestConnectionErrors:
@@ -1142,12 +1144,14 @@ class TestMalformedPayloads:
         assert ok is False
 
     def test_get_inventory_filtered_none_inventory(self):
-        """get_inventory_filtered: inventory=None in filtered path returns (False, ...)."""
+        """get_inventory_filtered: inventory=None in filtered path returns (False, ...) without calling get_device_inventory."""
         api = _make_api()
         with patch("requests.get", return_value=self._ok_resp({"status": "ok", "inventory": None})):
-            ok, msg = api.get_inventory_filtered(1, ent_physical_class="chassis")
+            with patch.object(api, "get_device_inventory") as mock_get_inv:
+                ok, msg = api.get_inventory_filtered(1, ent_physical_class="chassis")
         assert ok is False
         assert msg is not None
+        mock_get_inv.assert_not_called()
 
     def test_list_devices_none_devices(self):
         """list_devices: devices=None returns (False, ...)."""

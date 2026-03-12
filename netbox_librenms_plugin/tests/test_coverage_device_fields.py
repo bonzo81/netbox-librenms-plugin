@@ -258,6 +258,8 @@ class TestUpdateDeviceSerialView:
             view.post(_make_request(), pk=1)
         mock_msg.success.assert_called_once()
         assert "OLDSERIAL" in mock_msg.success.call_args[0][1]
+        assert mock_device.serial == "SN001"
+        mock_device.full_clean.assert_called_once()
         mock_device.save.assert_called_once()
 
     def test_save_success_no_old_serial(self):
@@ -275,6 +277,9 @@ class TestUpdateDeviceSerialView:
             view.post(_make_request(), pk=1)
         mock_msg.success.assert_called_once()
         assert "set to" in mock_msg.success.call_args[0][1]
+        assert mock_device.serial == "SN001"
+        mock_device.full_clean.assert_called_once()
+        mock_device.save.assert_called_once()
 
     def test_save_validation_error_with_message_dict(self):
         from django.core.exceptions import ValidationError
@@ -403,6 +408,7 @@ class TestUpdateDeviceTypeView:
             view.post(_make_request(), pk=1)
         mock_device.full_clean.assert_called_once()
         mock_device.save.assert_called_once()
+        assert mock_device.device_type is mock_dt
         mock_msg.success.assert_called_once()
 
     def test_save_validation_error_with_message_dict(self):
@@ -543,6 +549,8 @@ class TestUpdateDevicePlatformView:
             view.post(_make_request(), pk=1)
         mock_msg.success.assert_called_once()
         assert "updated from" in mock_msg.success.call_args[0][1]
+        assert mock_device.platform is mock_platform
+        mock_device.full_clean.assert_called_once()
         mock_device.save.assert_called_once()
 
     def test_save_success_no_old_platform(self):
@@ -567,6 +575,9 @@ class TestUpdateDevicePlatformView:
             view.post(_make_request(), pk=1)
         mock_msg.success.assert_called_once()
         assert "set to" in mock_msg.success.call_args[0][1]
+        assert mock_device.platform is mock_platform
+        mock_device.full_clean.assert_called_once()
+        mock_device.save.assert_called_once()
 
     def test_save_validation_error(self):
         from django.core.exceptions import ValidationError
@@ -727,6 +738,7 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_device_does_not_exist_inside_transaction(self):
         view = self._view()
@@ -755,6 +767,7 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_device_validation_error(self):
         from django.core.exceptions import ValidationError
@@ -788,6 +801,7 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_integrity_error(self):
         from django.db import IntegrityError
@@ -819,6 +833,7 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
 
 # ---------------------------------------------------------------------------
@@ -1352,6 +1367,7 @@ class TestRemoveServerMappingViewPost:
             mock_settings.PLUGINS_CONFIG = mock_cfg
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_unexpected_error_on_save(self):
         view = self._view()
@@ -1384,6 +1400,7 @@ class TestRemoveServerMappingViewPost:
             mock_settings.PLUGINS_CONFIG = mock_cfg
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_success_removes_mapping(self):
         """Happy path: mapping removed, last entry → cf set to None."""
@@ -1549,6 +1566,8 @@ class TestConvertLegacyLibreNMSIdViewPost:
             view.post(_make_request({"object_type": "virtualmachine"}), pk=1)
         mock_msg.success.assert_called_once()
         mock_migrate.assert_called_once()
+        mock_locked.full_clean.assert_called_once()
+        mock_locked.save.assert_called_once()
 
     def test_permission_denied(self):
         view = self._view()
@@ -1951,6 +1970,8 @@ class TestConvertLegacyLibreNMSIdViewPost:
         ):
             view.post(_make_request({"object_type": "device"}), pk=1)
         mock_msg.success.assert_called_once()
+        mock_locked.full_clean.assert_called_once()
+        mock_locked.save.assert_called_once()
 
     def test_conflict_same_object_is_not_conflict(self):
         """find_by_librenms_id returns the same object → no conflict, proceeds."""
@@ -1986,3 +2007,5 @@ class TestConvertLegacyLibreNMSIdViewPost:
         ):
             view.post(_make_request({"object_type": "device"}), pk=1)
         mock_msg.success.assert_called_once()
+        mock_locked.full_clean.assert_called_once()
+        mock_locked.save.assert_called_once()

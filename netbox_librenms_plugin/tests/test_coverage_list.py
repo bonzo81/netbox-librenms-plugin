@@ -1126,6 +1126,8 @@ class TestGetViewFilterFields:
                                                         view.get(request)
                                                     mock_render.assert_called_once()
                                                     mock_logger.error.assert_called()
+                                                    context = mock_render.call_args[0][2]
+                                                    assert context["device_count"] == 0
 
     def test_get_cache_check_exception_continues(self):
         """Cache check exception is logged and processing continues (lines 293-294)."""

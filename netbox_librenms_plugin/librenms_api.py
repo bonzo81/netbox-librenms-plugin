@@ -309,7 +309,7 @@ class LibreNMSAPI:
             response.raise_for_status()
             device_data = response.json()["devices"][0]
             return device_data["device_id"]
-        except (requests.exceptions.RequestException, IndexError, KeyError, TypeError):
+        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
     def get_device_id_by_hostname(self, hostname):
@@ -332,7 +332,7 @@ class LibreNMSAPI:
             response.raise_for_status()
             device_data = response.json()["devices"][0]
             return device_data["device_id"]
-        except (requests.exceptions.RequestException, IndexError, KeyError, TypeError):
+        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
     def get_device_info(self, device_id):
@@ -359,7 +359,7 @@ class LibreNMSAPI:
                     return False, None
                 return True, device_data
             return False, None
-        except (requests.exceptions.RequestException, IndexError, KeyError, TypeError):
+        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return False, None
 
     def get_ports(self, device_id, with_vlans=True):
@@ -754,7 +754,7 @@ class LibreNMSAPI:
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
             return False, "Unexpected response format: non-object JSON"
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
     def get_inventory_filtered(self, device_id, ent_physical_class=None, ent_physical_contained_in=None):

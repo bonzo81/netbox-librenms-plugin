@@ -1170,7 +1170,7 @@ class TestLibreNMSAPIErrorHandling:
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_invalid_json_response(self, mock_get, mock_librenms_config):
-        """Verify handling of invalid JSON responses."""
+        """Verify handling of invalid JSON responses — ValueError is now caught gracefully."""
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.side_effect = ValueError("Invalid JSON")
 
@@ -1178,9 +1178,10 @@ class TestLibreNMSAPIErrorHandling:
 
         api = LibreNMSAPI(server_key="default")
 
-        # ValueError should be raised, not caught
-        with pytest.raises(ValueError):
-            api.get_device_info(device_id=123)
+        # ValueError is now caught, returning (False, None) instead of propagating
+        success, result = api.get_device_info(device_id=123)
+        assert success is False
+        assert result is None
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_http_500_error_handling(self, mock_get, mock_librenms_config):
