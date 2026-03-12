@@ -278,15 +278,16 @@ class TestSingleCableVerifyServerKey:
             }
         ).encode()
 
+        mock_device = MagicMock()
+
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj,
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=None,
+                return_value=mock_device,
             ) as mock_sync_device,
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
         ):
-            mock_device = MagicMock()
             mock_get_obj.return_value = mock_device
             mock_cache.get.return_value = None  # No cached data
 
@@ -320,7 +321,7 @@ class TestSingleCableVerifyServerKey:
             patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get_obj,
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=None,
+                side_effect=lambda dev, **kw: dev,
             ) as mock_sync_device,
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
         ):

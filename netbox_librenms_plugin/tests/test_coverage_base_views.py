@@ -159,14 +159,21 @@ class TestBaseCableTableViewGetDeviceByIdOrName:
         view._librenms_api.server_key = "default"
 
         mock_device = MagicMock()
+        sentinel_q = object()
 
-        with patch("netbox_librenms_plugin.views.base.cables_view.Device") as MockDevice:
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.Device") as MockDevice,
+            patch("netbox_librenms_plugin.views.base.cables_view._librenms_id_q", return_value=sentinel_q) as mock_q,
+        ):
             MockDevice.objects.get.return_value = mock_device
+
             device, found, error = view.get_device_by_id_or_name(42, "switch.example.com")
 
         assert found is True
         assert device is mock_device
         assert error is None
+        mock_q.assert_called_once_with("default", 42)
+        MockDevice.objects.get.assert_called_once_with(sentinel_q)
 
     def test_falls_back_to_name_when_no_id(self):
         """When remote_device_id is None, falls back to name lookup."""
@@ -985,7 +992,7 @@ class TestBaseInterfaceTableViewGetContextData:
 
         obj = _mock_obj()
         obj.virtual_chassis = vc
-        obj.id = 10
+        obj.id = 9999  # distinct from all member IDs so VC path is unambiguous
         request = _mock_request()
 
         cached_data = {
@@ -1011,7 +1018,7 @@ class TestBaseInterfaceTableViewGetContextData:
             patch(
                 "netbox_librenms_plugin.views.base.interfaces_view.get_virtual_chassis_member",
                 return_value=member1,
-            ),
+            ) as mock_get_vc_member,
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
@@ -1024,6 +1031,8 @@ class TestBaseInterfaceTableViewGetContextData:
 
         # VC members should be included
         assert ctx["virtual_chassis_members"] is not None
+        # get_virtual_chassis_member should have been called with obj and the port name
+        mock_get_vc_member.assert_called_once_with(obj, "Gi0/0")
 
 
 class TestBaseInterfaceTableViewAddVlanGroupSelection:

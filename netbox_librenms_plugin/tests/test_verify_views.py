@@ -75,7 +75,8 @@ class TestSingleCableVerifyView:
         request = _make_request({"device_id": 1, "local_port_id": "42"})
         view.post(request)
 
-        mock_sync.assert_called_once_with(device, server_key=ANY)
+
+        mock_sync.assert_called_once_with(device, server_key=view._librenms_api.server_key)
         mock_cache.get.assert_called_once()
         cache_key = mock_cache.get.call_args[0][0]
         assert "device" in cache_key
@@ -167,7 +168,8 @@ class TestSingleInterfaceVerifyView:
         )
         view.post(request)
 
-        mock_sync.assert_called_once_with(device, server_key=ANY)
+
+        mock_sync.assert_called_once_with(device, server_key=view._librenms_api.server_key)
         mock_cache.get.assert_called_once()
         cache_key = mock_cache.get.call_args[0][0]
         assert "3" in cache_key
