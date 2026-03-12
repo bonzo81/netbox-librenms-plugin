@@ -415,7 +415,7 @@ def create_virtual_chassis_with_members(
             vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
             master_device_new_name = _generate_vc_member_name(
-                original_master_name, _master_pos, serial=master_device.serial, pattern=vc_pattern
+                original_master_name, _master_pos, serial=_norm_serial(master_device.serial), pattern=vc_pattern
             )
 
             # Check if renamed master conflicts with existing device

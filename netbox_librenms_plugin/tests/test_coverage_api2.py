@@ -235,6 +235,10 @@ class TestSyncJobStatusRQJobStopped:
         # timezone.now() should NOT have been called since completed is already set
         mock_tz.now.assert_not_called()
         assert response.status_code == 200
+        from core.choices import JobStatusChoices
+
+        assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
+        mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
 
 
 class TestSyncJobStatusRQJobNotInQueue:

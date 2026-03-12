@@ -118,6 +118,8 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
                 # Add remaining time and cache key
                 metadata["remaining_seconds"] = int(remaining_seconds)
                 metadata["cache_key"] = cache_key
+                # Store numeric sort key so the final sort is unambiguous
+                metadata["cached_at_ts"] = cached_at.timestamp()
 
                 # Enrich filters with human-readable display values
                 if "filters" in metadata:
@@ -141,7 +143,7 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
         cache.set(cache_index_key, valid_cache_keys, timeout=3600)
 
     # Sort by most recent first
-    active_searches.sort(key=lambda x: x.get("cached_at", ""), reverse=True)
+    active_searches.sort(key=lambda x: x.get("cached_at_ts", 0.0), reverse=True)
 
     return active_searches
 

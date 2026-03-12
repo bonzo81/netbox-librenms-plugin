@@ -438,7 +438,7 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api = MagicMock()
-        mock_api.server_key = "default"
+        mock_api.server_key = "non-default"
         mock_api_class.return_value = mock_api
 
         # Mock device imports
@@ -468,16 +468,20 @@ class TestImportDevicesJob:
         job.run(
             device_ids=[1],
             vm_imports={10: {"cluster_id": 1}},
-            server_key="default",
+            server_key="non-default",
         )
 
         # Both should be called
         mock_bulk_devices.assert_called_once()
         mock_bulk_vms.assert_called_once()
 
-        # Verify server_key is forwarded to bulk_import_devices_shared
+        # Verify server_key (via api.server_key) is forwarded to bulk_import_devices_shared
         bulk_devices_kwargs = mock_bulk_devices.call_args[1]
-        assert bulk_devices_kwargs.get("server_key") == "default"
+        assert bulk_devices_kwargs.get("server_key") == "non-default"
+
+        # Verify bulk_import_vms received the api with the correct server_key
+        bulk_vms_positional = mock_bulk_vms.call_args[0]
+        assert bulk_vms_positional[1].server_key == "non-default"
 
         # Verify combined results
         assert job.job.data["imported_device_pks"] == [100]

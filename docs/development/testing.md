@@ -92,7 +92,7 @@ pytest netbox_librenms_plugin/tests/test_librenms_api.py::TestLibreNMSAPIConnect
 
 ```bash
 # API client tests
-pytest netbox_librenms_plugin/tests/test_librenms_api.py -v
+pytest netbox_librenms_plugin/tests/test_librenms_api.py netbox_librenms_plugin/tests/test_coverage_api.py netbox_librenms_plugin/tests/test_coverage_api2.py -v
 
 # Import and validation tests
 pytest netbox_librenms_plugin/tests/test_import_utils.py netbox_librenms_plugin/tests/test_import_validation_helpers.py netbox_librenms_plugin/tests/test_utils.py -v

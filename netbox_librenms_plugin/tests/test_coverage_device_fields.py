@@ -258,6 +258,7 @@ class TestUpdateDeviceSerialView:
             view.post(_make_request(), pk=1)
         mock_msg.success.assert_called_once()
         assert "OLDSERIAL" in mock_msg.success.call_args[0][1]
+        mock_device.save.assert_called_once()
 
     def test_save_success_no_old_serial(self):
         view = self._view()
@@ -542,6 +543,7 @@ class TestUpdateDevicePlatformView:
             view.post(_make_request(), pk=1)
         mock_msg.success.assert_called_once()
         assert "updated from" in mock_msg.success.call_args[0][1]
+        mock_device.save.assert_called_once()
 
     def test_save_success_no_old_platform(self):
         view = self._view()
@@ -1537,13 +1539,16 @@ class TestConvertLegacyLibreNMSIdViewPost:
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
             patch("netbox_librenms_plugin.views.sync.device_fields.VirtualMachine", mock_vm_cls),
             patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True
+            ) as mock_migrate,
             patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
             view.post(_make_request({"object_type": "virtualmachine"}), pk=1)
         mock_msg.success.assert_called_once()
+        mock_migrate.assert_called_once()
 
     def test_permission_denied(self):
         view = self._view()

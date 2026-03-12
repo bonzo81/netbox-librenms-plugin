@@ -25,6 +25,7 @@ def _mock_obj(model_name="device", pk=1, name="test-device"):
     obj._meta = MagicMock()
     obj._meta.model_name = model_name
     obj.pk = pk
+    obj.id = pk
     obj.name = name
     return obj
 

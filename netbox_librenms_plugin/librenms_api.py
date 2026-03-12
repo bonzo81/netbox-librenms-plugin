@@ -346,6 +346,8 @@ class LibreNMSAPI:
             )
             if response.status_code == 200:
                 device_data = response.json()["devices"][0]
+                if not isinstance(device_data, dict):
+                    return False, None
                 return True, device_data
             return False, None
         except (requests.exceptions.RequestException, IndexError, KeyError, TypeError):

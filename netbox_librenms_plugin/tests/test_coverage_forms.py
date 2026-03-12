@@ -54,3 +54,8 @@ class TestLibreNMSFilterFormBackgroundJobDefault:
 
             form = LibreNMSImportFilterForm()
         assert form.data.get("use_background_job") is None
+
+    def test_pagination_param_does_not_inject_background_job(self):
+        """Auxiliary params like 'page' must not trigger background-job default injection."""
+        form = self._make_form({"page": "2"})
+        assert form.data.get("use_background_job") is None

@@ -575,6 +575,7 @@ class TestGetDeviceIdByIPErrors:
         """API returns {"devices": null} — TypeError must be caught, not propagate."""
         api = _make_api()
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.raise_for_status.return_value = None
         mock_resp.json.return_value = {"devices": None}
         with patch("requests.get", return_value=mock_resp):
@@ -585,6 +586,7 @@ class TestGetDeviceIdByIPErrors:
         """API returns {"devices": []} — no match, returns None."""
         api = _make_api()
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.raise_for_status.return_value = None
         mock_resp.json.return_value = {"devices": []}
         with patch("requests.get", return_value=mock_resp):
@@ -644,6 +646,8 @@ class TestStorelibrenmsId:
         with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
             api._store_librenms_id(obj, 42)
         mock_cache.set.assert_called_once()
+        cache_key_used = mock_cache.set.call_args[0][0]
+        assert api.server_key in cache_key_used
 
 
 class TestParsePortVlanData:
@@ -1001,16 +1005,16 @@ class TestGetInventoryFilteredNonOk:
         assert isinstance(data, str)  # error message, not empty list
 
     def test_ent_physical_contained_in_filter(self):
-        """Line 791: ent_physical_contained_in filter applied."""
+        """Line 791: ent_physical_contained_in filter exercised — API returns already-filtered list."""
         api = _make_api()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.raise_for_status.return_value = None
+        # The real LibreNMS API filters server-side; mock returns only the matching item.
         inventory = [
             {"entPhysicalContainedIn": "1", "entPhysicalName": "slot1"},
-            {"entPhysicalContainedIn": "2", "entPhysicalName": "slot2"},
         ]
-        mock_resp.json.return_value = {"inventory": inventory}
+        mock_resp.json.return_value = {"status": "ok", "inventory": inventory}
         with patch("requests.get", return_value=mock_resp):
             ok, data = api.get_inventory_filtered(1, ent_physical_contained_in="1")
         assert ok is True
