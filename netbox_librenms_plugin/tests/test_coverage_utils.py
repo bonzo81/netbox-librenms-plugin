@@ -373,13 +373,11 @@ class TestMatchLibrenmsHardwareDeviceTypeMappingPaths:
 
 
 class TestMatchLibrenmsHardwareDeviceTypeMultipleReturned:
-    """Tests for DeviceType MultipleObjectsReturned (lines 277-279, 291-293)."""
+    """Tests for DeviceType MultipleObjectsReturned — ambiguity surfaces as None."""
 
-    def test_part_number_multiple_returns_uses_first(self):
-        """DeviceType.MultipleObjectsReturned for part_number → use first()."""
+    def test_part_number_multiple_returns_none(self):
+        """DeviceType.MultipleObjectsReturned for part_number → return None (not silently pick first)."""
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
-
-        mock_dt = MagicMock()
 
         DoesNotExist = type("DoesNotExist", (Exception,), {})
         MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
@@ -395,25 +393,19 @@ class TestMatchLibrenmsHardwareDeviceTypeMultipleReturned:
                 MockDT.DoesNotExist = DoesNotExist
                 MockDT.MultipleObjectsReturned = MultipleObjectsReturned
                 MockDT.objects.get.side_effect = MultipleObjectsReturned("multiple")
-                MockDT.objects.filter.return_value.first.return_value = mock_dt
 
                 result = match_librenms_hardware_to_device_type("C9300")
 
-        assert result["matched"] is True
-        assert result["device_type"] is mock_dt
+        assert result is None
 
-    def test_model_multiple_returns_uses_first(self):
-        """DeviceType.MultipleObjectsReturned for model → use first()."""
+    def test_model_multiple_returns_none(self):
+        """DeviceType.MultipleObjectsReturned for model → return None (not silently pick first)."""
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
-
-        mock_dt = MagicMock()
 
         DoesNotExist = type("DoesNotExist", (Exception,), {})
         MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
-        call_count = [0]
 
         def get_side_effect(**kwargs):
-            call_count[0] += 1
             if "part_number__iexact" in kwargs:
                 raise DoesNotExist("no part number")
             raise MultipleObjectsReturned("multiple models")
@@ -429,12 +421,10 @@ class TestMatchLibrenmsHardwareDeviceTypeMultipleReturned:
                 MockDT.DoesNotExist = DoesNotExist
                 MockDT.MultipleObjectsReturned = MultipleObjectsReturned
                 MockDT.objects.get.side_effect = get_side_effect
-                MockDT.objects.filter.return_value.first.return_value = mock_dt
 
                 result = match_librenms_hardware_to_device_type("SomeModel")
 
-        assert result["matched"] is True
-        assert result["device_type"] is mock_dt
+        assert result is None
 
 
 class TestFindMatchingSiteMultipleReturned:
