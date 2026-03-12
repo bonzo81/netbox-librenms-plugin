@@ -11,6 +11,7 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.utils import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -56,7 +57,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
     def get_cached_links_data(self, request, obj):
         """Return cached LibreNMS link data for the given object."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        cached_data = cache.get(self.get_cache_key(obj, "links", server_key))
+        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
+        cached_data = cache.get(self.get_cache_key(cache_obj, "links", server_key))
         if not cached_data:
             return None
         return cached_data.get("links", [])

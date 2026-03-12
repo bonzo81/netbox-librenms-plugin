@@ -166,13 +166,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(obj, local_port)
 
-                # First try to find interface by librenms_id
-                if local_port_id:
-                    interface = chassis_member.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
+                if chassis_member:
+                    # First try to find interface by librenms_id
+                    if local_port_id:
+                        interface = chassis_member.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
 
-                # Only if librenms_id match fails, try matching by name
-                if not interface:
-                    interface = chassis_member.interfaces.filter(name=local_port).first()
+                    # Only if librenms_id match fails, try matching by name
+                    if not interface:
+                        interface = chassis_member.interfaces.filter(name=local_port).first()
             else:
                 # First try to find interface by librenms_id
                 if local_port_id:
@@ -199,15 +200,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 # Get the appropriate chassis member based on the port name
                 chassis_member = get_virtual_chassis_member(device, remote_port)
 
-                # First try to find interface by librenms_id
-                if librenms_remote_port_id:
-                    netbox_remote_interface = chassis_member.interfaces.filter(
-                        _librenms_id_q(server_key, librenms_remote_port_id)
-                    ).first()
+                if chassis_member:
+                    # First try to find interface by librenms_id
+                    if librenms_remote_port_id:
+                        netbox_remote_interface = chassis_member.interfaces.filter(
+                            _librenms_id_q(server_key, librenms_remote_port_id)
+                        ).first()
 
-                # If not found by librenms_id, fall back to name matching on the correct chassis member
-                if not netbox_remote_interface:
-                    netbox_remote_interface = chassis_member.interfaces.filter(name=remote_port).first()
+                    # If not found by librenms_id, fall back to name matching on the correct chassis member
+                    if not netbox_remote_interface:
+                        netbox_remote_interface = chassis_member.interfaces.filter(name=remote_port).first()
             else:
                 # Non-virtual chassis case
                 # First try to find interface by librenms_id
