@@ -552,7 +552,6 @@ def validate_device_for_import(
                 result["device_type"]["match_type"] = dt_match.get("match_type")
 
             if not result["device_type"]["found"] and result["device_type"].get("match_type") != "ambiguous":
-                result["device_type"]["found"] = False
                 result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
                 # Get some device types for user to choose from
                 all_device_types = DeviceType.objects.all()[:10]
