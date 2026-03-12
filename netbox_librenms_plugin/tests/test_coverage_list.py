@@ -429,25 +429,24 @@ class TestGetView:
                     with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                         mock_pref.return_value = None
 
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.list.LibreNMSImportFilterForm"
-                        ) as mock_form_cls:
-                            mock_form = MagicMock()
-                            mock_form.is_valid.return_value = False
-                            mock_form_cls.return_value = mock_form
+                        mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = False
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
 
-                            with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                                mock_render.return_value = MagicMock()
+                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                        mock_render.return_value = MagicMock()
 
-                                with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                                    with patch(
-                                        "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                                    ) as mock_searches:
-                                        mock_searches.return_value = []
+                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                            ) as mock_searches:
+                                mock_searches.return_value = []
 
-                                        with patch.object(view, "get_server_info", return_value={}):
-                                            view.get(request)
-                                            mock_load.assert_called_once_with(42)
+                                with patch.object(view, "get_server_info", return_value={}):
+                                    view.get(request)
+                                    mock_load.assert_called_once_with(42)
 
     def test_get_invalid_job_id_logs_warning(self):
         """Invalid (non-integer) job_id is caught and logged."""
@@ -466,24 +465,25 @@ class TestGetView:
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                     mock_pref.return_value = None
 
-                    with patch("netbox_librenms_plugin.views.imports.list.LibreNMSImportFilterForm") as mock_form_cls:
-                        mock_form = MagicMock()
-                        mock_form.is_valid.return_value = False
-                        mock_form_cls.return_value = mock_form
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = False
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
 
-                        with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                            mock_render.return_value = MagicMock()
+                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                        mock_render.return_value = MagicMock()
 
-                            with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                                ) as mock_searches:
-                                    mock_searches.return_value = []
+                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                            ) as mock_searches:
+                                mock_searches.return_value = []
 
-                                    with patch.object(view, "get_server_info", return_value={}):
-                                        with patch("netbox_librenms_plugin.views.imports.list.logger") as mock_logger:
-                                            view.get(request)
-                                            mock_logger.warning.assert_called()
+                                with patch.object(view, "get_server_info", return_value={}):
+                                    with patch("netbox_librenms_plugin.views.imports.list.logger") as mock_logger:
+                                        view.get(request)
+                                        mock_logger.warning.assert_called()
 
     def test_get_no_job_id_renders_template(self):
         """Normal GET without job_id renders the import template."""
@@ -502,26 +502,27 @@ class TestGetView:
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                     mock_pref.return_value = None
 
-                    with patch("netbox_librenms_plugin.views.imports.list.LibreNMSImportFilterForm") as mock_form_cls:
-                        mock_form = MagicMock()
-                        mock_form.is_valid.return_value = False
-                        mock_form_cls.return_value = mock_form
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = False
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
 
-                        with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                            mock_render.return_value = MagicMock()
+                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                        mock_render.return_value = MagicMock()
 
-                            with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                                ) as mock_searches:
-                                    mock_searches.return_value = []
+                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                            ) as mock_searches:
+                                mock_searches.return_value = []
 
-                                    with patch.object(view, "get_server_info", return_value={}):
-                                        view.get(request)
-                                        mock_render.assert_called_once()
-                                        # Verify called with correct template
-                                        call_args = mock_render.call_args
-                                        assert "librenms_import.html" in call_args[0][1]
+                                with patch.object(view, "get_server_info", return_value={}):
+                                    view.get(request)
+                                    mock_render.assert_called_once()
+                                    # Verify called with correct template
+                                    call_args = mock_render.call_args
+                                    assert "librenms_import.html" in call_args[0][1]
 
     def test_get_settings_exception_falls_back_to_none(self):
         """LibreNMSSettings exception during GET is caught and settings set to None."""
@@ -540,26 +541,27 @@ class TestGetView:
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                     mock_pref.return_value = None
 
-                    with patch("netbox_librenms_plugin.views.imports.list.LibreNMSImportFilterForm") as mock_form_cls:
-                        mock_form = MagicMock()
-                        mock_form.is_valid.return_value = False
-                        mock_form_cls.return_value = mock_form
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = False
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
 
-                        with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                            mock_render.return_value = MagicMock()
+                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                        mock_render.return_value = MagicMock()
 
-                            with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                                ) as mock_searches:
-                                    mock_searches.return_value = []
+                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                            ) as mock_searches:
+                                mock_searches.return_value = []
 
-                                    with patch.object(view, "get_server_info", return_value={}):
-                                        # Should not raise
-                                        view.get(request)
-                                        mock_render.assert_called_once()
-                                        ctx = mock_render.call_args[0][2]
-                                        assert ctx["settings"] is None
+                                with patch.object(view, "get_server_info", return_value={}):
+                                    # Should not raise
+                                    view.get(request)
+                                    mock_render.assert_called_once()
+                                    ctx = mock_render.call_args[0][2]
+                                    assert ctx["settings"] is None
 
     def test_get_filters_submitted_with_valid_form(self):
         """When filters are submitted and form is valid, processes filters."""
@@ -751,25 +753,26 @@ class TestGetView:
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                     mock_pref.return_value = None
 
-                    with patch("netbox_librenms_plugin.views.imports.list.LibreNMSImportFilterForm") as mock_form_cls:
-                        mock_form = MagicMock()
-                        mock_form.is_valid.return_value = False
-                        mock_form_cls.return_value = mock_form
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = False
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
 
-                        with patch.object(view, "_load_job_results", return_value=[]):
-                            with patch("netbox_librenms_plugin.views.imports.list.messages") as mock_messages:
-                                with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                                    mock_render.return_value = MagicMock()
+                    with patch.object(view, "_load_job_results", return_value=[]):
+                        with patch("netbox_librenms_plugin.views.imports.list.messages") as mock_messages:
+                            with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                                mock_render.return_value = MagicMock()
 
-                                    with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                                        with patch(
-                                            "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                                        ) as mock_searches:
-                                            mock_searches.return_value = []
+                                with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                                    with patch(
+                                        "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                    ) as mock_searches:
+                                        mock_searches.return_value = []
 
-                                            with patch.object(view, "get_server_info", return_value={}):
-                                                view.get(request)
-                                                mock_messages.warning.assert_called_once()
+                                        with patch.object(view, "get_server_info", return_value={}):
+                                            view.get(request)
+                                            mock_messages.warning.assert_called_once()
 
     def test_get_legacy_skip_vc_detection_flag(self):
         """Legacy skip_vc_detection=true sets vc_detection_enabled=False."""
@@ -788,23 +791,24 @@ class TestGetView:
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                     mock_pref.return_value = None
 
-                    with patch("netbox_librenms_plugin.views.imports.list.LibreNMSImportFilterForm") as mock_form_cls:
-                        mock_form = MagicMock()
-                        mock_form.is_valid.return_value = False
-                        mock_form_cls.return_value = mock_form
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = False
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
 
-                        with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                            mock_render.return_value = MagicMock()
+                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                        mock_render.return_value = MagicMock()
 
-                            with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                                ) as mock_searches:
-                                    mock_searches.return_value = []
+                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                            ) as mock_searches:
+                                mock_searches.return_value = []
 
-                                    with patch.object(view, "get_server_info", return_value={}):
-                                        view.get(request)
-                                        assert view._vc_detection_enabled is False
+                                with patch.object(view, "get_server_info", return_value={}):
+                                    view.get(request)
+                                    assert view._vc_detection_enabled is False
 
     def test_get_enable_vc_detection_flag(self):
         """enable_vc_detection=1 sets vc_detection_enabled=True."""
@@ -823,23 +827,24 @@ class TestGetView:
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                     mock_pref.return_value = None
 
-                    with patch("netbox_librenms_plugin.views.imports.list.LibreNMSImportFilterForm") as mock_form_cls:
-                        mock_form = MagicMock()
-                        mock_form.is_valid.return_value = False
-                        mock_form_cls.return_value = mock_form
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = False
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
 
-                        with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                            mock_render.return_value = MagicMock()
+                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                        mock_render.return_value = MagicMock()
 
-                            with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                                ) as mock_searches:
-                                    mock_searches.return_value = []
+                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                            ) as mock_searches:
+                                mock_searches.return_value = []
 
-                                    with patch.object(view, "get_server_info", return_value={}):
-                                        view.get(request)
-                                        assert view._vc_detection_enabled is True
+                                with patch.object(view, "get_server_info", return_value={}):
+                                    view.get(request)
+                                    assert view._vc_detection_enabled is True
 
     def test_get_context_includes_can_use_background_jobs(self):
         """Rendered context includes can_use_background_jobs keyed on is_superuser."""
@@ -858,24 +863,25 @@ class TestGetView:
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                     mock_pref.return_value = None
 
-                    with patch("netbox_librenms_plugin.views.imports.list.LibreNMSImportFilterForm") as mock_form_cls:
-                        mock_form = MagicMock()
-                        mock_form.is_valid.return_value = False
-                        mock_form_cls.return_value = mock_form
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = False
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
 
-                        with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
-                            mock_render.return_value = MagicMock()
+                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                        mock_render.return_value = MagicMock()
 
-                            with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
-                                ) as mock_searches:
-                                    mock_searches.return_value = []
+                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                            ) as mock_searches:
+                                mock_searches.return_value = []
 
-                                    with patch.object(view, "get_server_info", return_value={}):
-                                        view.get(request)
-                                        ctx = mock_render.call_args[0][2]
-                                        assert ctx["can_use_background_jobs"] is True
+                                with patch.object(view, "get_server_info", return_value={}):
+                                    view.get(request)
+                                    ctx = mock_render.call_args[0][2]
+                                    assert ctx["can_use_background_jobs"] is True
 
     def test_get_form_non_field_errors_set_warning(self):
         """Non-field form validation errors are stored as _filter_warning."""
@@ -1007,8 +1013,8 @@ class TestGetViewFilterFields:
                                                 assert filters.get("sysname") == "sw1"
                                                 assert filters.get("hardware") == "Cisco C9300"
 
-    def test_get_settings_exception_in_inline_load(self):
-        """LibreNMSSettings exception inside filter block is caught (lines 263-264)."""
+    def test_get_settings_exception_is_caught(self):
+        """LibreNMSSettings exception at the top of get() is caught and settings set to None."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view, request = self._make_view(query_params={"apply_filters": "1", "librenms_location": "DC1"})
@@ -1018,17 +1024,7 @@ class TestGetViewFilterFields:
 
         with patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)):
             with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
-                # First call (module-level read at top of get()) succeeds
-                # Second call (inline, inside the filter block) raises
-                first_call = [True]
-
-                def first_then_raise(*a, **kw):
-                    if first_call:
-                        first_call.pop()
-                        return None
-                    raise Exception("DB error")
-
-                mock_settings.objects.first.side_effect = first_then_raise
+                mock_settings.objects.first.side_effect = Exception("DB error")
                 mock_settings.objects.get_or_create.return_value = (None, False)
 
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
@@ -1240,8 +1236,8 @@ class TestGetImportQuerysetFilterFields:
                         assert filters["sysname"] == "sw1"
                         assert filters["hardware"] == "Cisco"
 
-    def test_settings_exception_in_get_import_queryset(self):
-        """LibreNMSSettings exception in _get_import_queryset is caught (lines 475-477)."""
+    def test_get_import_queryset_returns_empty_on_no_results(self):
+        """_get_import_queryset returns [] when process_device_filters returns empty."""
         view = self._make_view(
             filter_data={
                 "librenms_location": "DC1",
@@ -1256,14 +1252,10 @@ class TestGetImportQuerysetFilterFields:
             with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                 mock_pref.return_value = None
 
-                with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
-                    mock_settings.objects.first.side_effect = Exception("DB error")
-
-                    with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
-                        mock_cache.get.return_value = None
-                        # Should not raise
-                        result = view._get_import_queryset()
-                        assert result == []
+                with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
+                    mock_cache.get.return_value = None
+                    result = view._get_import_queryset()
+                    assert result == []
 
     def test_cache_metadata_found_sets_timestamps(self):
         """When cache metadata is found, timestamps are set (lines 523-527)."""

@@ -356,15 +356,22 @@ class TestBaseCableTableViewEnrichLocalPort:
 
         obj = _mock_obj()
         obj.virtual_chassis = vc
+        # Non-VC fallback returns nothing to confirm member path is used
+        obj.interfaces = MagicMock()
+        obj.interfaces.filter.return_value.first.return_value = None
 
         link = {"local_port": "Gi1/0/1", "local_port_id": 100}
 
         with (
-            patch("netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member", return_value=member),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member",
+                return_value=member,
+            ) as mock_get_vc_member,
             patch("netbox_librenms_plugin.views.base.cables_view.reverse", return_value="/dcim/interfaces/3/"),
         ):
             view.enrich_local_port(link, obj)
 
+        mock_get_vc_member.assert_called_once_with(obj, "Gi1/0/1")
         assert link["local_port_url"] == "/dcim/interfaces/3/"
 
 

@@ -384,7 +384,6 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 elif not validation.get("import_as_vm"):
                     validation["device_role"] = {"found": False, "role": None}
                     remove_validation_issue(validation, "role")
-                    validation.setdefault("issues", []).append("Device role must be manually selected before import")
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                 return
             else:

@@ -1584,6 +1584,7 @@ function initializeModuleReplaceButtons() {
                     const modalBody = document.getElementById('htmx-modal-body');
                     if (modalBody) {
                         modalBody.innerHTML = html;
+                        htmx.process(modalBody);
                     }
                 })
                 .catch(err => {

@@ -253,7 +253,7 @@ class TestValidateDeviceStateMachine:
         try:
             result = validate_device_for_import(libre_device, api=api, **kwargs)
         finally:
-            for p in base_patches:
+            for p in reversed(base_patches):
                 p.stop()
         return result
 
@@ -1578,13 +1578,16 @@ class TestValidateDeviceExistingVMGuard:
             patch("virtualization.models.VirtualMachine", new=mock_vm_model),
             patch("ipam.models.IPAddress"),
             patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type"),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type"
+            ) as mock_match,
             patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site") as mock_site,
         ):
             result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
 
-        # find_matching_site should NOT be called for VMs (device-specific validation skipped)
+        # find_matching_site and match_librenms_hardware_to_device_type should NOT be called for VMs
         mock_site.assert_not_called()
+        mock_match.assert_not_called()
         # Device-specific fields are marked found=True for all VMs
         assert result["site"]["found"] is True
         assert result["device_type"]["found"] is True

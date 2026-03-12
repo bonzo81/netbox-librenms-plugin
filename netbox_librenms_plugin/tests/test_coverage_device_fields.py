@@ -963,6 +963,7 @@ class TestAssignVCSerialView:
         member.name = "sw-member"
         member.virtual_chassis = vc
         member.serial = "OLD"
+        member.save = MagicMock()
 
         DoesNotExist = type("DoesNotExist", (Exception,), {})
         mock_device_cls = MagicMock()
@@ -979,6 +980,7 @@ class TestAssignVCSerialView:
             view.post(req, pk=1)
         mock_msg.success.assert_called_once()
         assert member.serial == "SN100"
+        member.save.assert_called_once()
 
     def test_assignments_and_errors_both_reported(self):
         """One success + one error → both messages emitted."""

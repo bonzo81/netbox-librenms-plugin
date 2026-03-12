@@ -608,14 +608,20 @@ class TestSyncInterfacesViewHandleMacAddress:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
-        interface = MagicMock()
-        interface.mac_addresses.filter.return_value.first.return_value = None
+
+        # Use a stub with explicit attributes to enforce the guard on primary_mac_address
+        class InterfaceStub:
+            primary_mac_address = None
+
+            def __init__(self):
+                self.mac_addresses = MagicMock()
+                self.mac_addresses.filter.return_value.first.return_value = None
+
+        interface = InterfaceStub()
         mock_mac = MagicMock()
 
         with patch("netbox_librenms_plugin.views.sync.interfaces.MACAddress") as mock_mac_cls:
             mock_mac_cls.objects.create.return_value = mock_mac
-            # Ensure interface has primary_mac_address attribute
-            interface.primary_mac_address = None
             view.handle_mac_address(interface, "aa:bb:cc:dd:ee:ff")
 
         assert interface.primary_mac_address == mock_mac
@@ -904,19 +910,18 @@ class TestDeleteNetBoxInterfacesViewPost:
         assert isinstance(result, JsonResponse)
         assert result.status_code == 400
 
-    def test_invalid_object_type_returns_400(self):
+    def test_invalid_object_type_raises_http404(self):
+        """Invalid object_type raises Http404 from get_required_permissions_for_object_type."""
+        import pytest
+        from django.http import Http404
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
-        from django.http import JsonResponse
 
         view = object.__new__(DeleteNetBoxInterfacesView)
-        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
         view.require_all_permissions_json = MagicMock(return_value=None)
 
         req = _make_request(post_data={"interface_ids": ["1"]})
-        result = view.post(req, "badtype", 1)
-
-        assert isinstance(result, JsonResponse)
-        assert result.status_code == 400
+        with pytest.raises(Http404):
+            view.post(req, "badtype", 1)
 
     def test_device_interface_deleted_successfully(self):
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView

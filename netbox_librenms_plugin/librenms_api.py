@@ -702,10 +702,10 @@ class LibreNMSAPI:
             response.raise_for_status()
             inventory_data = response.json()
             inventory = inventory_data.get("inventory") if isinstance(inventory_data, dict) else None
-            if not isinstance(inventory, list):
+            if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
                 msg = inventory_data.get("message", "") if isinstance(inventory_data, dict) else ""
                 logger.warning(f"Unexpected inventory response for device {device_id}: {inventory_data}")
-                return False, msg or "Unexpected response format: missing 'inventory' list"
+                return False, msg or "Unexpected response format: invalid 'inventory' payload"
             return True, inventory
         except requests.exceptions.RequestException as e:
             return False, str(e)
@@ -790,9 +790,9 @@ class LibreNMSAPI:
             data = response.json()
             if isinstance(data, dict) and data.get("status") == "ok":
                 inventory = data.get("inventory")
-                if not isinstance(inventory, list):
+                if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
                     msg = data.get("message")
-                    return False, msg or "Unexpected response format: missing 'inventory' list"
+                    return False, msg or "Unexpected response format: invalid 'inventory' payload"
                 logger.debug(f"API returned {len(inventory)} items")
 
                 # If we got results or didn't specify filters, return

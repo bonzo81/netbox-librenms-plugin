@@ -1569,8 +1569,8 @@ class TestSingleIPAddressVerifyViewPost:
         assert rendered_record["interface_name"] == "eth0"
         assert rendered_record["interface_url"] == "/interface/1/"
 
-    def test_exception_returns_500(self):
-        """Unhandled exception inside post() → JsonResponse 500."""
+    def test_invalid_json_returns_400(self):
+        """Malformed JSON body → JsonResponse 400."""
         import json as json_mod
 
         view = self._make_view()
@@ -1578,7 +1578,7 @@ class TestSingleIPAddressVerifyViewPost:
         req.body = b"not-json"  # will cause json.loads to fail
 
         response = view.post(req)
-        assert response.status_code == 500
+        assert response.status_code == 400
         data = json_mod.loads(response.content)
         assert data["status"] == "error"
 
