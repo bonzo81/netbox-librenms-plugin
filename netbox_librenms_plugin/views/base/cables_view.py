@@ -14,6 +14,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_sync_device,
     get_virtual_chassis_member,
 )
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
@@ -363,16 +364,14 @@ class SingleCableVerifyView(BaseCableTableView):
         if selected_device_id:
             selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-            # Get the primary device (master or first with IP) if part of virtual chassis
+            # Resolve the VC device that holds cached LibreNMS data
             if selected_device.virtual_chassis:
-                primary_device = selected_device.virtual_chassis.master
-                if not primary_device or not primary_device.primary_ip:
-                    primary_device = next(
-                        (member for member in selected_device.virtual_chassis.members.all() if member.primary_ip),
-                        None,
-                    )
+                primary_device = get_librenms_sync_device(selected_device)
             else:
                 primary_device = selected_device
+
+            if not primary_device:
+                return JsonResponse({"status": "success", "formatted_row": formatted_row})
 
             cached_links = cache.get(self.get_cache_key(primary_device, "links"))
 
