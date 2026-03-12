@@ -1058,6 +1058,8 @@ class DeviceConflictActionView(
             librenms_id = int(librenms_id)
         except (TypeError, ValueError):
             return HttpResponse("Invalid or missing LibreNMS device_id in payload", status=400)
+        if librenms_id <= 0:
+            return HttpResponse("Invalid or missing LibreNMS device_id in payload", status=400)
 
         # Wrap the LibreNMS-ID collision check and subsequent write in a single
         # transaction so the read-then-write is atomic for link/update/update_serial.

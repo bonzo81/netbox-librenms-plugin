@@ -1,3 +1,5 @@
+from urllib.parse import quote_plus
+
 from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
@@ -68,7 +70,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         url = f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
         if server_key:
-            url += f"&server_key={server_key}"
+            url += f"&server_key={quote_plus(server_key)}"
         return url
 
     def post(self, request, object_type, pk):

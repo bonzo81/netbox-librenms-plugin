@@ -1,3 +1,5 @@
+from urllib.parse import quote_plus
+
 from dcim.models import Device, Interface, MACAddress
 from django.contrib import messages
 from django.core.cache import cache
@@ -70,7 +72,7 @@ class SyncInterfacesView(
         redirect_url = (
             reverse(url_name, kwargs={"pk": object_id})
             + f"?tab=interfaces&interface_name_field={interface_name_field}"
-            + (f"&server_key={server_key}" if server_key else "")
+            + (f"&server_key={quote_plus(server_key)}" if server_key else "")
         )
 
         if selected_interfaces is None:

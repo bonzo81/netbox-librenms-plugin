@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import quote_plus
 
 from dcim.models import Cable, Device, Interface
 from django.contrib import messages
@@ -168,7 +169,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         self._post_server_key = server_key
         redirect_url = (
             f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
-            + (f"&server_key={server_key}" if server_key else "")
+            + (f"&server_key={quote_plus(server_key)}" if server_key else "")
         )
 
         selected_interfaces = self.get_selected_interfaces(request, initial_device)

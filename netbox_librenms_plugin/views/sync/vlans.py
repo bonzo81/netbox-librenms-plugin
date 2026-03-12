@@ -1,3 +1,5 @@
+from urllib.parse import quote_plus
+
 from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
@@ -69,7 +71,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         url = reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans"
         if server_key:
-            url += f"&server_key={server_key}"
+            url += f"&server_key={quote_plus(server_key)}"
         return redirect(url)
 
     def _handle_create_vlans(self, request, obj, object_type, object_id):
