@@ -1277,7 +1277,7 @@ class DeviceConflictActionView(
 
             hardware = libre_device.get("hardware") or ""
             hw_match = match_librenms_hardware_to_device_type(hardware)
-            if hw_match.get("matched"):
+            if hw_match and hw_match.get("matched"):
                 existing_device.device_type = hw_match["device_type"]
                 if err := _save_device(existing_device):
                     return err

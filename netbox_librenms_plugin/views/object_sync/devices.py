@@ -117,9 +117,16 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-        # Normalise to the VC sync device so cache keys match what the sync view stored
-        primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
-        if primary_device is None:
+        # For VC devices, resolve to the primary sync device so cache keys match;
+        # return 404 if the VC has no resolvable sync device.
+        if hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
+            primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
+            if primary_device is None:
+                return JsonResponse(
+                    {"status": "error", "message": "Cannot resolve sync device for this virtual chassis"},
+                    status=404,
+                )
+        else:
             primary_device = selected_device
 
         cached_data = cache.get(self.get_cache_key(primary_device, "ports", server_key))

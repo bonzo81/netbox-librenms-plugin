@@ -430,9 +430,14 @@ class SingleCableVerifyView(BaseCableTableView):
         if selected_device_id:
             selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-            # Use the same sync-device resolution as the GET path so the cache
-            # key matches what _prepare_context wrote.
-            primary_device = get_librenms_sync_device(selected_device, server_key=server_key) or selected_device
+            # For VC devices, resolve to the primary sync device so the cache key
+            # matches what _prepare_context wrote; return empty row if unresolvable.
+            if hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
+                primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
+                if primary_device is None:
+                    return JsonResponse({"status": "success", "formatted_row": formatted_row})
+            else:
+                primary_device = selected_device
 
             cached_links = cache.get(self.get_cache_key(primary_device, "links", server_key))
 
