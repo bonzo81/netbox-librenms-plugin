@@ -311,6 +311,12 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if error := self.require_write_permission():
             return error
 
+        post_server_key = request.POST.get("server_key", "").strip()
+        if post_server_key:
+            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
         device_ids = request.POST.getlist("select")
         if not device_ids:
             return HttpResponse(
@@ -447,6 +453,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "errors": errors,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
+            "server_key": self.librenms_api.server_key,
         }
 
         return render(
@@ -485,6 +492,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # Check write permission before any import operation
         if error := self.require_write_permission():
             return error
+
+        post_server_key = request.POST.get("server_key", "").strip()
+        if post_server_key:
+            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         device_ids = request.POST.getlist("select")
         if not device_ids:

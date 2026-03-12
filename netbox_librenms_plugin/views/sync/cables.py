@@ -114,6 +114,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             link_data = next(link for link in cached_links if str(link.get("local_port_id", "")) == port_id)
             # Apply posted device override (VC member selection) without mutating the cached list.
             link_data = {**link_data, "device_id": interface.get("device_id", link_data.get("device_id"))}
+            # Re-resolve local interface against current NetBox state after VC member override.
+            if hasattr(self, "_initial_device"):
+                link_data.pop("netbox_local_interface_id", None)
+                link_data.pop("local_port_url", None)
+                self.enrich_local_port(link_data, self._initial_device, getattr(self, "_post_server_key", None))
             return self.handle_cable_creation(link_data, interface)
         except StopIteration:
             return {"status": "invalid", "interface": port_id}
@@ -178,6 +183,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         initial_device = get_object_or_404(Device, pk=pk)
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
         self._post_server_key = server_key
+        self._initial_device = initial_device
         redirect_url = (
             f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
             + (f"&server_key={quote_plus(server_key)}" if server_key else "")

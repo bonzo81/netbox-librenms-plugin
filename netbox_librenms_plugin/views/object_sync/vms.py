@@ -35,6 +35,10 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
         """Return None; VMs do not support cable sync."""
         return None  # VMs do not expose cable sync data
 
+    def get_vlan_context(self, request, obj):
+        """Return None; VMs do not support VLAN sync."""
+        return None
+
     def get_ip_context(self, request, obj):
         """Return IP address sync context for the virtual machine."""
         ipaddress_sync_view = VMIPAddressTableView()
