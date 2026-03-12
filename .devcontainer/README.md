@@ -44,20 +44,20 @@ If you need to test with a LibreNMS instance on a private network (local lab, co
 
 1. Fork and Clone: fork the plugin repo in Github and clone locally
 2. Open in VS Code and choose "Reopen in Container" (or Ctrl+Shift+P → Dev Containers: Reopen in Container)
-2. Wait for setup (~5min on first run or when new NetBox image is used). The container will install the plugin and prep NetBox
-3. Set up GitHub access: `gh auth login` (for pushing/pulling code changes)
-4. Create your plugin config — see [Plugin configuration](#plugin-configuration):
+3. Wait for setup (~5min on first run or when new NetBox image is used). The container will install the plugin and prep NetBox
+4. Set up GitHub access: `gh auth login` (for pushing/pulling code changes)
+5. Create your plugin config — see [LibreNMS Server configuration](#librenms-server-configuration):
    - `cp .devcontainer/config/plugin-config.py.example .devcontainer/config/plugin-config.py`
    - Edit it with your server details (tokens/URLs)
-5. Start NetBox with `netbox-run` (or `netbox-run-bg` in background) (see [Commands](#-commands-aliases))
-6. Access NetBox at http://localhost:8000
+6. Start NetBox with `netbox-run` (or `netbox-run-bg` in background) (see [Commands](#-commands-aliases))
+7. Access NetBox at http://localhost:8000
    - Username: `admin`
    - Password: `admin`
 
 ### 🔄 Code changes and Committing
 8. Edit code in the repo root.  Check out [contributing docs](../docs/contributing.md)
 9. Use `netbox-logs` to follow log output on screen
-6. Commit changes and contribute as normal by submitting a PR on GitHub.
+10. Commit changes and contribute as normal by submitting a PR on GitHub.
 
 ### Quick Tips
 - **Auto-reload**: Works for most code changes when `DEBUG=True`
@@ -241,7 +241,7 @@ After any `.env` change, rebuild the dev container to apply environment updates.
 
 ### Additional packages (including other netbox plugins)
 - Create `.devcontainer/extra-requirements.txt` for extra Python packages. Example: `.devcontainer/extra-requirements.txt.example`.
-   - After changes: run `plugins-install` to install packages, then `netbox-restart` (see [Commands](#-commands-aliases))
+   - After changes: run `plugin-install` to install packages, then `netbox-restart` (see [Commands](#-commands-aliases))
 
 ## 🔧 Git Setup
 
@@ -259,7 +259,7 @@ The dev container includes Git and GitHub CLI pre-installed. You'll need to conf
 git remote -v
 
 # If it shows git@github.com:..., convert to HTTPS
-git remote set-url origin https://github.com/bonzo81/netbox-librenms-plugin.git
+git remote set-url origin https://github.com/<owner>/netbox-librenms-plugin.git
 ```
 
 ### Recommended: GitHub CLI (Easiest)
@@ -347,13 +347,14 @@ fatal: Could not read from remote repository.
 1. **Check remote URL** - should use HTTPS, not SSH:
    ```bash
    git remote -v
-   # Should show: https://github.com/bonzo81/netbox-librenms-plugin.git
-   # NOT: git@github.com:bonzo81/netbox-librenms-plugin.git
+   # Should show: https://github.com/<owner>/netbox-librenms-plugin.git
+   # NOT: git@github.com:<owner>/netbox-librenms-plugin.git
    ```
 
 2. **Fix SSH remote URL**:
+
    ```bash
-   git remote set-url origin https://github.com/bonzo81/netbox-librenms-plugin.git
+   git remote set-url origin https://github.com/<owner>/netbox-librenms-plugin.git
    ```
 
 3. **Authenticate with GitHub CLI**:
