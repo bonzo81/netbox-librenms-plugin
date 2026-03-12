@@ -48,9 +48,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         for port_id in selected_data:
             override = request.POST.get(f"device_selection_{port_id}")
             device_id = override or initial_device.id
-            selected_interfaces.append(
-                {"device_id": device_id, "local_port_id": port_id, "vc_override": bool(override)}
-            )
+            selected_interfaces.append({"device_id": device_id, "local_port_id": port_id})
 
         return selected_interfaces
 
@@ -117,13 +115,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         port_id = str(interface.get("local_port_id", ""))
         try:
             link_data = next(link for link in cached_links if str(link.get("local_port_id", "")) == port_id)
-            # Apply posted device override (VC member selection) without mutating the cached list.
+            # Apply posted device_id (VC member selection) without mutating the cached list.
             link_data = {**link_data, "device_id": interface.get("device_id", link_data.get("device_id"))}
-            # Re-resolve local interface only when a VC member override was explicitly applied.
-            if interface.get("vc_override") and hasattr(self, "_initial_device"):
-                link_data.pop("netbox_local_interface_id", None)
-                link_data.pop("local_port_url", None)
-                self.enrich_local_port(link_data, self._initial_device, getattr(self, "_post_server_key", None))
             return self.handle_cable_creation(link_data, interface)
         except StopIteration:
             return {"status": "invalid", "interface": port_id}
@@ -147,6 +140,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         try:
             local_interface = Interface.objects.get(pk=link_data["netbox_local_interface_id"])
+
+            # Honour user's VC member selection: if the selected device_id differs from
+            # the cached interface's device, look up the same port name on that device.
+            selected_device_id = interface.get("device_id")
+            if selected_device_id and str(local_interface.device_id) != str(selected_device_id):
+                port_name = link_data.get("local_port") or local_interface.name
+                try:
+                    local_interface = Interface.objects.get(device_id=selected_device_id, name=port_name)
+                except Interface.DoesNotExist:
+                    logger.debug(
+                        "Port %s not found on device %s; falling back to cached interface",
+                        port_name,
+                        selected_device_id,
+                    )
+
             remote_interface = Interface.objects.get(pk=link_data["netbox_remote_interface_id"])
 
             if self.check_existing_cable(local_interface, remote_interface):
