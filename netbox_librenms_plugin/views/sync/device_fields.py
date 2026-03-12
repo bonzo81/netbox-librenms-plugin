@@ -10,8 +10,12 @@ from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.import_utils import _determine_device_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.utils import (
     find_by_librenms_id,
+    get_user_pref,
     match_librenms_hardware_to_device_type,
     migrate_legacy_librenms_id,
 )
@@ -45,24 +49,54 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Failed to retrieve device info from LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        sys_name = device_info.get("sysName")
+        # Resolve naming preferences (user pref → plugin settings)
+        use_sysname_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        strip_domain_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        settings = None
+        if use_sysname_pref is None:
+            settings = LibreNMSSettings.objects.first()
+            use_sysname_pref = getattr(settings, "use_sysname_default", True) if settings else True
+        if strip_domain_pref is None:
+            if settings is None:
+                settings = LibreNMSSettings.objects.first()
+            strip_domain_pref = getattr(settings, "strip_domain_default", False) if settings else False
 
-        if not sys_name:
-            messages.warning(request, "No sysName available in LibreNMS")
+        resolved_name = _determine_device_name(
+            device_info,
+            use_sysname=use_sysname_pref,
+            strip_domain=strip_domain_pref,
+            device_id=self.librenms_id,
+        )
+
+        # For VC members, generate the expected VC member name
+        if (
+            resolved_name
+            and hasattr(device, "virtual_chassis")
+            and device.virtual_chassis is not None
+            and device.vc_position is not None
+        ):
+            resolved_name = _generate_vc_member_name(
+                resolved_name,
+                device.vc_position,
+                serial=getattr(device, "serial", None),
+            )
+
+        if not resolved_name:
+            messages.warning(request, "No name could be determined from LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         old_name = device.name
-        device.name = sys_name
+        device.name = resolved_name
         try:
             device.full_clean()
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.name = old_name
             error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update device name to '{sys_name}': {error_msg}")
+            messages.error(request, f"Failed to update device name to '{resolved_name}': {error_msg}")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        messages.success(request, f"Device name updated from '{old_name}' to '{sys_name}'")
+        messages.success(request, f"Device name updated from '{old_name}' to '{resolved_name}'")
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 

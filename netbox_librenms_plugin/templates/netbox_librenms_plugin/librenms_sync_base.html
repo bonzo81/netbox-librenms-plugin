@@ -329,23 +329,27 @@
 
                         <!-- Name Row -->
                         <tr>
-                            <td style="padding-left: 1rem;">Name</td>
+                            <td style="padding-left: 1rem;">Name
+                                <i class="mdi mdi-information-outline text-muted ms-1"
+                                   title="Name check uses your sysName and strip domain preferences. For virtual chassis members, the VC naming pattern is also applied."
+                                   style="cursor: help;"></i>
+                            </td>
                             <td>
                                 <div class="d-flex align-items-center">
                                     <div>{{ object.name }}</div>
                                     <div class="ms-3">
-                                        {% if sysName and sysName != "-" and sysName != object.name %}
+                                        {% if resolved_name and resolved_name != object.name %}
                                         <form method="post"
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_name' pk=object.pk %}"
                                               style="display: inline;">
                                             {% csrf_token %}
                                             <button type="submit" class="btn btn-sm btn-outline-primary"
-                                                    title="Sync name to {{ sysName }}">
+                                                    title="Sync name to {{ resolved_name }}">
                                                 <i class="mdi mdi-sync"></i> Sync to NetBox
                                             </button>
                                         </form>
-                                        {% elif sysName and sysName != "-" %}
-                                        <span class="text-success" title="Name matches LibreNMS">
+                                        {% elif resolved_name %}
+                                        <span class="text-success" title="Synced with LibreNMS">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
                                         {% endif %}
@@ -403,9 +407,6 @@
                         <tr>
                             <td style="padding-left: 1rem;">
                                 Serial Number
-                                {% if object.virtual_chassis and vc_inventory_serials %}
-                                    <span class="badge bg-secondary text-white ms-2">{{ vc_inventory_serials|length }}</span>
-                                {% endif %}
                             </td>
                             <td>
                                 <div class="d-flex align-items-center">
@@ -421,7 +422,7 @@
                                             <button type="button" class="btn btn-sm btn-outline-info"
                                                     data-bs-toggle="modal" data-bs-target="#vc-serials-modal"
                                                     title="View VC member serials from inventory">
-                                                <i class="mdi mdi-server-network"></i> VC Serials
+                                                <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
                                         {% else %}
                                             {% if librenms_device_serial != "-" %}
