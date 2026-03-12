@@ -387,6 +387,7 @@ class TestLibreNMSAPIErrorResponses:
         mock_server.register("/api/v0/devices/42", {"devices": []})
         success, data = api.get_device_info(42)
         assert success is False
+        assert data is None
 
     def test_404_get_device_info(self, mock_server):
         """404 on device endpoint must return (False, None)."""

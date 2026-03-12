@@ -789,9 +789,9 @@ class LibreNMSAPI:
 
             data = response.json()
             if isinstance(data, dict) and data.get("status") == "ok":
-                inventory = data.get("inventory") if isinstance(data, dict) else None
+                inventory = data.get("inventory")
                 if not isinstance(inventory, list):
-                    msg = data.get("message") if isinstance(data, dict) else None
+                    msg = data.get("message")
                     return False, msg or "Unexpected response format: missing 'inventory' list"
                 logger.debug(f"API returned {len(inventory)} items")
 

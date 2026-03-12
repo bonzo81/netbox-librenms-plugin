@@ -46,7 +46,7 @@ If you need to test with a LibreNMS instance on a private network (local lab, co
 2. Open in VS Code and choose "Reopen in Container" (or Ctrl+Shift+P → Dev Containers: Reopen in Container)
 3. Wait for setup (~5min on first run or when new NetBox image is used). The container will install the plugin and prep NetBox
 4. Set up GitHub access: `gh auth login` (for pushing/pulling code changes)
-5. Create your plugin config — see [LibreNMS Server configuration](#librenms-server-configuration):
+5. Create your plugin config — see [LibreNMS Server configuration](#📡-librenms-server-configuration):
    - `cp .devcontainer/config/plugin-config.py.example .devcontainer/config/plugin-config.py`
    - Edit it with your server details (tokens/URLs)
 6. Start NetBox with `netbox-run` (or `netbox-run-bg` in background) (see [Commands](#-commands-aliases))
