@@ -46,12 +46,6 @@ python_classes = "Test*"
 python_functions = "test_*"
 addopts = "-v --tb=short"
 
-[tool.coverage.run]
-omit = [
-    "*/tests/*",
-    "*/test_*.py",
-]
-
 [tool.ruff]
 line-length = 120
 
