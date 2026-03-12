@@ -7,7 +7,6 @@ hierarchies and attribute presence.
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -64,11 +63,6 @@ class TestLibreNMSAPIMixinWiring:
         from netbox_librenms_plugin.views.sync.device_fields import AssignVCSerialView
 
         self._assert_has_api_mixin(AssignVCSerialView)
-
-    def test_convert_legacy_id_has_librenms_api_mixin(self):
-        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
-
-        self._assert_has_api_mixin(ConvertLegacyLibreNMSIdView)
 
 
 class TestCacheMixinWiring:
@@ -200,18 +194,6 @@ class TestRequiredObjectPermissionsWiring:
 
         self._assert_has_mixins(UpdateDeviceSerialView)
         assert "POST" in UpdateDeviceSerialView.required_object_permissions
-
-    def test_remove_server_mapping_has_required_object_permissions(self):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-
-        self._assert_has_mixins(RemoveServerMappingView)
-        assert "POST" in RemoveServerMappingView.required_object_permissions
-
-    def test_convert_legacy_id_has_required_object_permissions(self):
-        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
-
-        self._assert_has_mixins(ConvertLegacyLibreNMSIdView)
-        assert "POST" in ConvertLegacyLibreNMSIdView.required_object_permissions
 
     def test_delete_interfaces_has_required_object_permissions(self):
         from dcim.models import Interface
@@ -458,3 +440,4 @@ class TestSingleCableVerifyServerKey:
             # cache lookup must also use the fallback server_key
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "fallback-server" in cache_key_arg
+

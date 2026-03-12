@@ -17,9 +17,10 @@ logger = logging.getLogger(__name__)
 def create_vm_from_librenms(
     libre_device: dict,
     validation: dict,
-    server_key: str,
+    server_key: str = "default",
     use_sysname: bool = True,
     strip_domain: bool = False,
+    role=None,
 ):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
@@ -44,7 +45,7 @@ def create_vm_from_librenms(
     # Extract matched objects from validation
     cluster = validation["cluster"]["cluster"]
     platform = validation["platform"].get("platform")
-    role = validation.get("device_role", {}).get("role")
+    role = role if role is not None else validation.get("device_role", {}).get("role")
 
     # Determine VM name - use pre-computed name if available (handles strip_domain),
     # falling back to the validated resolved_name before recomputing from raw fields.

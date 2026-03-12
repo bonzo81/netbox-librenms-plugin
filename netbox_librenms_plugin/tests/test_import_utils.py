@@ -1677,7 +1677,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -1704,7 +1704,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -1731,7 +1731,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -1758,7 +1758,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "name__iexact" in kwargs:
                 result.first.return_value = existing
@@ -1838,7 +1838,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "name__iexact" in kwargs:
                 result.first.return_value = hostname_device
@@ -2006,7 +2006,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -2059,7 +2059,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -2110,7 +2110,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing

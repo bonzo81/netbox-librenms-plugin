@@ -393,8 +393,11 @@ def create_virtual_chassis_with_members(
         ]
     """
 
-    # original_master_name is still referenced in warning messages inside the atomic block.
+    # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
+    # not in-memory model fields.
     original_master_name = master_device.name
+    original_vc = master_device.virtual_chassis
+    original_vc_position = master_device.vc_position
 
     # Find master's actual VC position from members_info by serial match; default to 1
     _master_pos = 1
@@ -524,7 +527,10 @@ def create_virtual_chassis_with_members(
                 [
                     m
                     for m in members_info
-                    if not (_norm_serial(m.get("serial")) and _norm_serial(m.get("serial")) == master_device.serial)
+                    if not (
+                        _norm_serial(m.get("serial"))
+                        and _norm_serial(m.get("serial")) == _norm_serial(master_device.serial)
+                    )
                     and not (
                         not _norm_serial(m.get("serial"))
                         and m.get("position") is not None
@@ -547,10 +553,11 @@ def create_virtual_chassis_with_members(
             return vc
 
     except Exception as e:
-        # The transaction.atomic() block above will roll back all DB changes automatically.
-        # Manual state restoration is redundant and the save() would fail in a broken transaction.
+        master_device.name = original_master_name
+        master_device.virtual_chassis = original_vc
+        master_device.vc_position = original_vc_position
         logger.error(
-            f"Virtual Chassis creation failed for device {master_device.name}: {e}",
+            f"Virtual Chassis creation failed for device {original_master_name}: {e}",
             exc_info=True,
         )
         raise

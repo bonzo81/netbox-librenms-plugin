@@ -81,11 +81,6 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if not success or "error" in data:
             return None
 
-        # TODO: local_port names are baked into the cache using the requesting
-        # user's interface_name_field preference.  Subsequent users with a
-        # different preference will see (and match against) the wrong label.
-        # Fix requires either rebuilding names per-request from local_port_id
-        # or partitioning the cache key by interface_name_field.
         interface_name_field = get_interface_name_field(getattr(self, "request", None))
         ports_data = self.get_ports_data(obj)
         local_ports_map = {}

@@ -201,9 +201,13 @@ class MockLibreNMSServer:
 
     def inventory_response(self, device_id: int, items: list, status: int = 200):
         """Register a plain inventory response for /api/v0/inventory/{device_id}/all."""
+        payload_status = "ok" if 200 <= status < 300 else "error"
+        payload = (
+            {"status": payload_status, "inventory": items} if payload_status == "ok" else {"status": payload_status}
+        )
         self.register(
             f"/api/v0/inventory/{device_id}/all",
-            {"status": "ok", "inventory": items},
+            payload,
             status=status,
         )
 
@@ -225,6 +229,10 @@ class MockLibreNMSServer:
             if contained_in == "0":
                 return 200, {"status": "ok", "inventory": root}
             if contained_in is not None:
+                # Only return chassis children when explicitly requesting chassis class
+                phy_class = query.get("entPhysicalClass", [None])[0]
+                if phy_class is not None and phy_class != "chassis":
+                    return 200, {"status": "ok", "inventory": []}
                 try:
                     idx = int(contained_in)
                 except (TypeError, ValueError):

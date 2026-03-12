@@ -437,9 +437,9 @@ class TestImportDevicesJob:
         """Import both devices and VMs."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_instance = MagicMock()
-        mock_api_instance.server_key = "default"
-        mock_api_class.return_value = mock_api_instance
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        mock_api_class.return_value = mock_api
 
         # Mock device imports
         mock_device = MagicMock()

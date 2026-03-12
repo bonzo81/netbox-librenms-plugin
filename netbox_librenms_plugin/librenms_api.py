@@ -1051,7 +1051,7 @@ class LibreNMSAPI:
         untagged_vlan = None
         tagged_vlans = []
 
-        if vlans_data:
+        if isinstance(vlans_data, list) and vlans_data:
             # Parse from detailed vlans array
             for vlan_entry in vlans_data:
                 if not isinstance(vlan_entry, dict):

@@ -403,7 +403,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"
             logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
-        return
+            return
 
     # existing_device was None at cache time — check if device was imported since
     if not libre_device:
