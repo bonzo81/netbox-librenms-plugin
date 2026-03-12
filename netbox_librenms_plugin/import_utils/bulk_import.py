@@ -99,13 +99,13 @@ def bulk_import_devices_shared(
     if user is None and job is not None:
         user = getattr(job.job, "user", None)
 
-    # Check permissions at start of bulk operation — both device and VM perms are
+    # Check permissions at start of bulk operation — device and VM add perms are
     # required because any device may be flagged as import_as_vm during validation.
+    # change_device is needed for VC master/member updates; VMs are only created, not changed.
     required_perms = [
         "dcim.add_device",
         "dcim.change_device",
         "virtualization.add_virtualmachine",
-        "virtualization.change_virtualmachine",
     ]
     require_permissions(user, required_perms, "import devices")
 

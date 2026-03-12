@@ -459,7 +459,7 @@ def create_virtual_chassis_with_members(
                 member_pos = _safe_pos(member.get("position"))
 
                 # Skip if this is the master's serial (only when both serials are non-empty)
-                if serial and serial == (master_device.serial or "").strip():
+                if serial and serial == _norm_serial(master_device.serial):
                     continue
                 # Skip blank-serial entries that represent the master slot by position
                 if (
