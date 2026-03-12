@@ -309,11 +309,11 @@ def validate_device_for_import(
                 result["librenms_id_needs_migration"] = True
 
             # Check if name matches resolved name (accounts for use_sysname/strip_domain)
-            # Note: name_sync_available/suggested_name are intentionally not set for VMs
-            # because UpdateDeviceNameView only supports Device objects; VM name-sync
-            # would require a separate implementation.
             if hostname and existing_vm.name == hostname:
                 result["name_matches"] = True
+            elif hostname and existing_vm.name != hostname:
+                result["name_sync_available"] = True
+                result["suggested_name"] = hostname
 
         # Check for existing Device (by librenms_id custom field)
         if not result["existing_device"]:

@@ -546,16 +546,8 @@ class LibreNMSImportFilterForm(forms.Form):
             ]
             has_filters = any(data.get(field) for field in filter_fields)
 
-            # Option-only fields that don't constitute a real search submission
-            option_only_fields = [
-                "show_disabled",
-                "enable_vc_detection",
-                "clear_cache",
-                "exclude_existing",
-                "apply_filters",
-            ]
             non_option_fields = [
-                f for f in data if f not in option_only_fields + ["csrfmiddlewaretoken", "use_background_job"]
+                f for f in filter_fields if data.get(f) not in (None, "", []) and str(data.get(f, "")).strip()
             ]
             has_option_only = bool(data) and not bool(non_option_fields) and not has_filters
 

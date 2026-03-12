@@ -136,6 +136,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
                     [],
                     device=selected_device,
                     interface_name_field=interface_name_field,
+                    server_key=server_key,
                 )
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})

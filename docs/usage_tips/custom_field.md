@@ -43,10 +43,11 @@ Follow these steps to create the `librenms_id` custom field in NetBox:
         ```json
         {"production": 42, "staging": 17}
         ```
-      - Legacy single-server example (integer):
+      - Legacy single-server example (integer) — read-only/deprecated; do not use for new entries:
         ```
         42
         ```
+        > Note: to create new entries manually use the JSON format shown above.
     - **Required:** Leave unchecked (optional).
     - **Default Value:** Leave blank.
 

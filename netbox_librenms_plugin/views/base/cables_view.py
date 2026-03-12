@@ -309,6 +309,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         """Helper method to prepare the context data for cable sync views."""
         cache_expiry = None
         server_key = self.librenms_api.server_key
+        # For VC devices, cache under the sync device's key so SingleCableVerifyView reads the same entry.
+        cache_device = get_librenms_sync_device(obj, server_key=server_key) or obj
 
         if fetch_fresh:
             # Always fetch new data when requested
@@ -317,7 +319,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 return None
         else:
             # Try to use cached data
-            cached_links_data = cache.get(self.get_cache_key(obj, "links", server_key))
+            cached_links_data = cache.get(self.get_cache_key(cache_device, "links", server_key))
             if cached_links_data:
                 links_data = cached_links_data.get("links", [])
             else:
@@ -341,7 +343,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         links_data = self.enrich_links_data(links_data, obj, server_key=server_key)
 
         # Cache after enrichment so verify/sync views read current NetBox state
-        cache_key = self.get_cache_key(obj, "links", server_key)
+        cache_key = self.get_cache_key(cache_device, "links", server_key)
         if fetch_fresh:
             cache.set(
                 cache_key,

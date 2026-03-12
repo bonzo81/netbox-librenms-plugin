@@ -133,6 +133,7 @@
                 <td>{{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }}</td>
               </tr>
 
+              {# Show only for non-VM contexts: true when no existing device (new import, not VM) OR when existing device is not a VM. #}
               {% if not validation.existing_device and not validation.import_as_vm or validation.existing_device and existing_device_model_name != "virtualmachine" %}
               {# Site row #}
               <tr>
@@ -206,6 +207,7 @@
               {% endif %}
 
               {# Serial row (only for devices) #}
+              {# Show only for non-VM contexts: true when no existing device (new import, not VM) OR when existing device is not a VM. #}
               {% if not validation.existing_device and not validation.import_as_vm or validation.existing_device and existing_device_model_name != "virtualmachine" %}
               <tr>
                 <td style="padding-left: 0.75rem;">Serial</td>

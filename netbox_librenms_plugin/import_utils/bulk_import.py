@@ -7,7 +7,7 @@ from typing import List
 from core.choices import JobStatusChoices
 from django.core.cache import cache
 
-from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status
+from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
 from ..librenms_api import LibreNMSAPI
 from ..utils import find_by_librenms_id
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
@@ -384,7 +384,9 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 if hasattr(refreshed, "role") and refreshed.role:
                     apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
                 elif not validation.get("import_as_vm"):
-                    apply_role_to_validation(validation, None)
+                    validation["device_role"] = {"found": False, "role": None}
+                    remove_validation_issue(validation, "role")
+                    validation.setdefault("issues", []).append("Device role must be manually selected before import")
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                 return
             else:

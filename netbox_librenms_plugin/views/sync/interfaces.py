@@ -115,7 +115,7 @@ class SyncInterfacesView(
         # On VC member pages the GET tab writes ports under the resolved sync device's
         # cache key. Resolve the same device here so the POST path reads the same entry.
         cache_obj = obj
-        if isinstance(obj, Device) and get_librenms_device_id(obj, server_key, auto_save=False) is None:
+        if isinstance(obj, Device) and not get_librenms_device_id(obj, server_key, auto_save=False):
             sync_device = get_librenms_sync_device(obj, server_key=server_key)
             if sync_device is not None:
                 cache_obj = sync_device

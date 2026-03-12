@@ -535,13 +535,15 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     if isinstance(cf_value, int) and not isinstance(cf_value, bool):
         # Legacy bare integer — universal fallback for any server to ensure
         # devices imported before multi-server support remain discoverable.
-        return cf_value
+        return cf_value if cf_value > 0 else None
     if isinstance(cf_value, str):
         # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
         # Treated as a legacy universal fallback for any server.
         try:
             int_id = int(cf_value)
         except (ValueError, TypeError):
+            return None
+        if int_id <= 0:
             return None
         if auto_save:
             obj.custom_field_data["librenms_id"] = int_id
@@ -563,7 +565,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
                 obj.save(update_fields=["custom_field_data"])
             return value
         if isinstance(value, int):
-            return value
+            return value if value > 0 else None
         return None
     return None
 

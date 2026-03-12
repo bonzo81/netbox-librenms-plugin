@@ -77,8 +77,19 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     def check_existing_cable(self, local_interface, remote_interface):
         """Return True if a cable already exists for either interface."""
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Interface as DCIMInterface
+
+        interface_ct = ContentType.objects.get_for_model(DCIMInterface)
         return Cable.objects.filter(
-            Q(terminations__termination_id=local_interface.pk) | Q(terminations__termination_id=remote_interface.pk)
+            Q(
+                terminations__termination_type=interface_ct,
+                terminations__termination_id=local_interface.pk,
+            )
+            | Q(
+                terminations__termination_type=interface_ct,
+                terminations__termination_id=remote_interface.pk,
+            )
         ).exists()
 
     def validate_prerequisites(self, cached_links, selected_interfaces):
