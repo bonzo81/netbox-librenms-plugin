@@ -606,7 +606,9 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         librenms_serial = (device_info.get("serial") or "").strip()
         netbox_serial = (getattr(obj, "serial", None) or "").strip()
-        if not netbox_serial or not librenms_serial or netbox_serial != librenms_serial:
+        # VMs have no serial field in NetBox; skip the serial gate for them.
+        is_vm = (object_type == "vm")
+        if not is_vm and (not netbox_serial or not librenms_serial or netbox_serial != librenms_serial):
             messages.error(
                 request,
                 "Serial number mismatch — cannot convert legacy ID without serial confirmation.",

@@ -369,7 +369,7 @@ class TestLibreNMSAPIErrorResponses:
     def test_null_inventory_returns_false(self, mock_server):
         """{"status":"ok","inventory":null} must not raise, must return (False, ...)."""
         api = _make_api(mock_server.url)
-        mock_server.register("/api/v0/devices/1/inventory", {"status": "ok", "inventory": None})
+        mock_server.register("/api/v0/inventory/1/all", {"status": "ok", "inventory": None})
         success, data = api.get_device_inventory(1)
         assert success is False
 

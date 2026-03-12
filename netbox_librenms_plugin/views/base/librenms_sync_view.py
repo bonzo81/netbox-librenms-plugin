@@ -112,10 +112,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             isinstance(_raw_cf, str) and _raw_cf.isdigit()
         )
 
-        # Determine if serial match allows legacy ID conversion
+        # Determine if serial match allows legacy ID conversion.
+        # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
         _librenms_serial = librenms_info["librenms_device_details"].get("librenms_device_serial", "-")
         _netbox_serial = getattr(_lookup_device, "serial", "") or ""
-        librenms_id_serial_confirmed = bool(
+        _lookup_is_vm = _lookup_device._meta.model_name == "virtualmachine" if _lookup_device else False
+        librenms_id_serial_confirmed = _lookup_is_vm or bool(
             _librenms_serial and _librenms_serial != "-" and _netbox_serial and _librenms_serial == _netbox_serial
         )
 
