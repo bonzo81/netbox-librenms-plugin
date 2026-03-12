@@ -7,13 +7,12 @@ from netbox.views import generic
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
-from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
-    get_user_pref,
     match_librenms_hardware_to_device_type,
+    resolve_naming_preferences,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
@@ -231,22 +230,6 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         result.sort(key=lambda e: 0 if e["is_active"] else (1 if e["is_configured"] else 2))
         return result or None
 
-    def _resolve_naming_preferences(self, request):
-        """Resolve use_sysname/strip_domain from user prefs or plugin settings."""
-        use_sysname_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
-        strip_domain_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
-
-        if use_sysname_pref is not None and strip_domain_pref is not None:
-            return use_sysname_pref, strip_domain_pref
-
-        settings = LibreNMSSettings.objects.first()
-        if use_sysname_pref is None:
-            use_sysname_pref = getattr(settings, "use_sysname_default", True) if settings else True
-        if strip_domain_pref is None:
-            strip_domain_pref = getattr(settings, "strip_domain_default", False) if settings else False
-
-        return use_sysname_pref, strip_domain_pref
-
     def get_librenms_device_info(self, obj, request=None):
         """Get the LibreNMS device information for the given object."""
         found_in_librenms = False
@@ -287,7 +270,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 # Compute resolved name using naming preferences
                 resolved_name = None
                 if request:
-                    use_sysname, strip_domain = self._resolve_naming_preferences(request)
+                    use_sysname, strip_domain = resolve_naming_preferences(request)
                     resolved_name = _determine_device_name(
                         device_info,
                         use_sysname=use_sysname,

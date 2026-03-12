@@ -12,12 +12,12 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
-from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.utils import (
     find_by_librenms_id,
-    get_user_pref,
+    get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
     migrate_legacy_librenms_id,
+    resolve_naming_preferences,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
@@ -37,7 +37,16 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return error
 
         device = get_object_or_404(Device, pk=pk)
-        self.librenms_id = self.librenms_api.get_librenms_id(device)
+
+        # For VC members without their own librenms_id, use the VC sync device
+        librenms_lookup_device = device
+        if hasattr(device, "virtual_chassis") and device.virtual_chassis:
+            if not device.cf.get("librenms_id"):
+                sync_device = get_librenms_sync_device(device)
+                if sync_device:
+                    librenms_lookup_device = sync_device
+
+        self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -49,22 +58,12 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Failed to retrieve device info from LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        # Resolve naming preferences (user pref → plugin settings)
-        use_sysname_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
-        strip_domain_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
-        settings = None
-        if use_sysname_pref is None:
-            settings = LibreNMSSettings.objects.first()
-            use_sysname_pref = getattr(settings, "use_sysname_default", True) if settings else True
-        if strip_domain_pref is None:
-            if settings is None:
-                settings = LibreNMSSettings.objects.first()
-            strip_domain_pref = getattr(settings, "strip_domain_default", False) if settings else False
+        use_sysname, strip_domain = resolve_naming_preferences(request)
 
         resolved_name = _determine_device_name(
             device_info,
-            use_sysname=use_sysname_pref,
-            strip_domain=strip_domain_pref,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
             device_id=self.librenms_id,
         )
 

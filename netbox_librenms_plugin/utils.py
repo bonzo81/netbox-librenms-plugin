@@ -188,6 +188,48 @@ def save_user_pref(request, path, value):
             pass
 
 
+def resolve_naming_preferences(request) -> tuple[bool, bool]:
+    """Resolve use_sysname/strip_domain: POST/GET toggle → user pref → plugin settings.
+
+    This is the single source of truth for naming preference resolution,
+    used by the import page, sync page, and sync action views.
+
+    Returns:
+        (use_sysname, strip_domain) booleans.
+    """
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    settings = None
+
+    # Check POST first (import form submissions), then GET (HTMX hx-include)
+    if "use-sysname-toggle" in request.POST:
+        use_sysname = request.POST.get("use-sysname-toggle") == "on"
+    elif "use-sysname-toggle" in request.GET:
+        use_sysname = request.GET.get("use-sysname-toggle") == "on"
+    else:
+        pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        if pref is not None:
+            use_sysname = pref
+        else:
+            settings = LibreNMSSettings.objects.first()
+            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
+
+    if "strip-domain-toggle" in request.POST:
+        strip_domain = request.POST.get("strip-domain-toggle") == "on"
+    elif "strip-domain-toggle" in request.GET:
+        strip_domain = request.GET.get("strip-domain-toggle") == "on"
+    else:
+        pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        if pref is not None:
+            strip_domain = pref
+        else:
+            if settings is None:
+                settings = LibreNMSSettings.objects.first()
+            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
+
+    return use_sysname, strip_domain
+
+
 def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
     """
     Get interface name field with request override support.
