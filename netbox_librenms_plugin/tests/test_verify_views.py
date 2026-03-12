@@ -1,8 +1,8 @@
 """Tests for SingleCableVerifyView and SingleInterfaceVerifyView VC resolution.
 
-Covers the fix for the NoneType crash when a VC device has no primary_ip
-on any member — both views must use get_librenms_sync_device() and guard
-against None.
+Verifies that both views delegate VC device resolution to
+get_librenms_sync_device() and handle the None return gracefully
+(e.g. empty VC members or vc_position type errors).
 """
 
 import json
@@ -17,14 +17,14 @@ def _make_request(body: dict) -> MagicMock:
     return request
 
 
-def _make_device(pk=1, has_vc=False, name="test-device"):
-    """Create a mock Device with optional virtual_chassis."""
+def _make_vc_device(pk=1, name="vc-device"):
+    """Create a mock Device that belongs to a virtual chassis."""
     device = MagicMock()
     device.pk = pk
     device.id = pk
     device.name = name
     device._meta.model_name = "device"
-    device.virtual_chassis = MagicMock() if has_vc else None
+    device.virtual_chassis = MagicMock()
     device.interfaces.filter.return_value.first.return_value = None
     return device
 
@@ -45,9 +45,9 @@ class TestSingleCableVerifyView:
     @patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_device_no_primary_ip_returns_empty_row(self, mock_cache, mock_sync, mock_get_obj):
-        """VC with no primary_ip: get_librenms_sync_device returns None → empty row, no crash."""
-        device = _make_device(pk=1, has_vc=True)
+    def test_vc_no_resolvable_sync_device_returns_empty_row(self, mock_cache, mock_sync, mock_get_obj):
+        """VC where get_librenms_sync_device returns None → empty row, no crash."""
+        device = _make_vc_device(pk=1)
         mock_get_obj.return_value = device
         mock_sync.return_value = None
 
@@ -63,10 +63,10 @@ class TestSingleCableVerifyView:
     @patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_device_with_sync_device_uses_cache(self, mock_cache, mock_sync, mock_get_obj):
-        """VC with valid sync device: cache is queried with the sync device's key."""
-        device = _make_device(pk=1, has_vc=True)
-        sync_device = _make_device(pk=2, name="sync-device")
+    def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync, mock_get_obj):
+        """VC with resolved sync device: cache is queried with that device's key."""
+        device = _make_vc_device(pk=1)
+        sync_device = _make_vc_device(pk=2, name="sync-device")
         mock_get_obj.return_value = device
         mock_sync.return_value = sync_device
         mock_cache.get.return_value = None  # No cached data
@@ -84,10 +84,10 @@ class TestSingleCableVerifyView:
     @patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync, mock_get_obj):
+    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync, mock_get_obj, mock_netbox_device):
         """Non-VC device: get_librenms_sync_device is NOT called."""
-        device = _make_device(pk=5, has_vc=False)
-        mock_get_obj.return_value = device
+        mock_netbox_device.virtual_chassis = None
+        mock_get_obj.return_value = mock_netbox_device
         mock_cache.get.return_value = None
 
         view = self._make_view()
@@ -123,9 +123,9 @@ class TestSingleInterfaceVerifyView:
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_vc_device_no_sync_device_returns_404(self, mock_cache, mock_sync, mock_get_obj):
-        """VC with no sync device: returns 404 JSON error, no crash."""
-        device = _make_device(pk=1, has_vc=True)
+    def test_vc_no_resolvable_sync_device_returns_404(self, mock_cache, mock_sync, mock_get_obj):
+        """VC where get_librenms_sync_device returns None → 404 JSON error, no crash."""
+        device = _make_vc_device(pk=1)
         mock_get_obj.return_value = device
         mock_sync.return_value = None
 
@@ -148,10 +148,10 @@ class TestSingleInterfaceVerifyView:
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_vc_device_with_sync_device_uses_cache(self, mock_cache, mock_sync, mock_get_obj):
-        """VC with valid sync device: cache is queried with the sync device's key."""
-        device = _make_device(pk=1, has_vc=True)
-        sync_device = _make_device(pk=3, name="sync-member")
+    def test_vc_resolved_sync_device_uses_cache(self, mock_cache, mock_sync, mock_get_obj):
+        """VC with resolved sync device: cache is queried with that device's key."""
+        device = _make_vc_device(pk=1)
+        sync_device = _make_vc_device(pk=3, name="sync-member")
         mock_get_obj.return_value = device
         mock_sync.return_value = sync_device
         mock_cache.get.return_value = None
@@ -174,10 +174,10 @@ class TestSingleInterfaceVerifyView:
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
-    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync, mock_get_obj):
+    def test_non_vc_device_skips_sync_device_lookup(self, mock_cache, mock_sync, mock_get_obj, mock_netbox_device):
         """Non-VC device: get_librenms_sync_device is NOT called."""
-        device = _make_device(pk=5, has_vc=False)
-        mock_get_obj.return_value = device
+        mock_netbox_device.virtual_chassis = None
+        mock_get_obj.return_value = mock_netbox_device
         mock_cache.get.return_value = None
 
         view = self._make_view()
