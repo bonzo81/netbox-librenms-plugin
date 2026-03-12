@@ -997,9 +997,9 @@ class DeviceConflictActionView(
         if not action or not existing_device_id:
             return HttpResponse("Missing action or existing_device_id", status=400)
 
-        # VirtualMachine supports migrate_librenms_id and sync_name; all other actions
-        # operate on Device-specific fields (serial, device_type) and remain Device-only.
-        _VM_SUPPORTED_ACTIONS = frozenset({"migrate_librenms_id", "sync_name"})
+        # VirtualMachine supports migrate_librenms_id, sync_name, and sync_platform; all
+        # other actions operate on Device-specific fields (serial, device_type) and remain Device-only.
+        _VM_SUPPORTED_ACTIONS = frozenset({"migrate_librenms_id", "sync_name", "sync_platform"})
         if existing_device_type == "virtualmachine":
             if action not in _VM_SUPPORTED_ACTIONS:
                 return HttpResponse(
