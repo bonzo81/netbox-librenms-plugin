@@ -209,6 +209,7 @@ class MockLibreNMSServer:
             f"/api/v0/inventory/{device_id}/all",
             payload,
             status=status,
+            method="GET",
         )
 
     def vc_inventory_callable(self, device_id: int, root_items: list, children_by_parent_index: dict):
@@ -246,8 +247,8 @@ class MockLibreNMSServer:
                 all_items.extend(v)
             return 200, {"status": "ok", "inventory": all_items}
 
-        self.routes[f"/api/v0/inventory/{device_id}"] = _handler
-        self.routes[f"/api/v0/inventory/{device_id}/all"] = _handler
+        self.register(f"/api/v0/inventory/{device_id}", _handler, method="GET")
+        self.register(f"/api/v0/inventory/{device_id}/all", _handler, method="GET")
 
 
 @contextmanager
