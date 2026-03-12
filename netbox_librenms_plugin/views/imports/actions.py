@@ -865,19 +865,22 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         # Device type comparison (VMs don't have device_type)
         device_type_synced = True
         librenms_device_type = None
-        netbox_device_type = getattr(existing_device, "device_type", None)
-        if librenms_hardware and librenms_hardware != "-":
-            from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+        from virtualization.models import VirtualMachine
 
-            hw_match = match_librenms_hardware_to_device_type(librenms_hardware)
-            if hw_match is None:
-                device_type_synced = False
-            elif hw_match.get("matched"):
-                librenms_device_type = hw_match["device_type"]
-                if not netbox_device_type or netbox_device_type.pk != librenms_device_type.pk:
+        if not isinstance(existing_device, VirtualMachine):
+            netbox_device_type = getattr(existing_device, "device_type", None)
+            if librenms_hardware and librenms_hardware != "-":
+                from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+                hw_match = match_librenms_hardware_to_device_type(librenms_hardware)
+                if hw_match is None:
                     device_type_synced = False
-            else:
-                device_type_synced = False
+                elif hw_match.get("matched"):
+                    librenms_device_type = hw_match["device_type"]
+                    if not netbox_device_type or netbox_device_type.pk != librenms_device_type.pk:
+                        device_type_synced = False
+                else:
+                    device_type_synced = False
 
         all_synced = serial_synced and platform_synced and device_type_synced
 
@@ -1085,6 +1088,24 @@ class DeviceConflictActionView(
                     return HttpResponse(
                         f"LibreNMS ID conflict: ID {escape(str(librenms_id))} is already assigned to device "
                         f"'{escape(id_conflict.name)}' (ID: {id_conflict.pk})",
+                        status=409,
+                    )
+
+                # Reject legacy bare-int/string librenms_id: set_librenms_device_id
+                # silently skips writes for legacy formats, leaving the device partially
+                # updated. User must run "Convert mapping" migration first.
+                stored_id = existing_device.custom_field_data.get("librenms_id")
+                _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
+                if not _is_legacy and isinstance(stored_id, str):
+                    try:
+                        int(stored_id)
+                        _is_legacy = True
+                    except (ValueError, TypeError):
+                        pass
+                if _is_legacy:
+                    return HttpResponse(
+                        "Device has a legacy bare-integer librenms_id; use 'Convert mapping' "
+                        "to migrate to the multi-server format before linking.",
                         status=409,
                     )
 
