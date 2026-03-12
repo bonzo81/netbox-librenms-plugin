@@ -98,8 +98,6 @@ Below are the dev container defaults. The field name to change these defaults is
 - Plugin loader: enabled; reads `.devcontainer/config/plugin-config.py` if present
 - If `plugin-config.py` is missing: plugin is enabled with empty config (features won’t work until configured)
 
-
-
 ## 🔧 Configuration
 
 ### NetBox Version and Environment (use .devcontainer/.env)
