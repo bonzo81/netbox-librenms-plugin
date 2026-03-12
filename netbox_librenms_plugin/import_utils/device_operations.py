@@ -48,6 +48,7 @@ def _try_chassis_device_type_match(api, device_id):
         if not success or not inventory:
             return None
 
+        first_ambiguous_model = None
         for item in inventory:
             # Try entPhysicalName first (often the chassis part number like CHAS-BP-MX480-S)
             for field in ("entPhysicalName", "entPhysicalModelName"):
@@ -55,6 +56,9 @@ def _try_chassis_device_type_match(api, device_id):
                 if value and value not in skip_values:
                     chassis_match = match_librenms_hardware_to_device_type(value)
                     if chassis_match is None:
+                        # MultipleObjectsReturned — ambiguous match; remember first
+                        if first_ambiguous_model is None:
+                            first_ambiguous_model = value
                         continue
                     if chassis_match["matched"]:
                         chassis_match["match_type"] = "chassis"
@@ -62,7 +66,15 @@ def _try_chassis_device_type_match(api, device_id):
                         return chassis_match
     except Exception:
         logger.debug(f"Chassis inventory fallback failed for device {device_id}", exc_info=True)
+        return None
 
+    if first_ambiguous_model is not None:
+        return {
+            "matched": False,
+            "device_type": None,
+            "match_type": "chassis_ambiguous",
+            "chassis_model": first_ambiguous_model,
+        }
     return None
 
 
@@ -521,6 +533,18 @@ def validate_device_for_import(
                         chassis_match = _try_chassis_device_type_match(api, device_id)
                         if chassis_match and chassis_match["matched"]:
                             dt_match = chassis_match
+                        elif chassis_match and chassis_match.get("match_type") == "chassis_ambiguous":
+                            # Chassis inventory returned multiple matches — propagate ambiguity
+                            dt_match = {
+                                "matched": False,
+                                "device_type": None,
+                                "match_type": "ambiguous",
+                            }
+                            result["issues"].append(
+                                f"Multiple device types match chassis hardware"
+                                f" '{chassis_match['chassis_model']}'"
+                                " — resolve the ambiguity in NetBox."
+                            )
 
                 # Update result keys individually to preserve the existing schema (especially "found")
                 result["device_type"]["found"] = dt_match["matched"]
