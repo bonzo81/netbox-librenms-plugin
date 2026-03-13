@@ -1630,7 +1630,7 @@ class TestValidateDeviceChassisMatch:
         device_patch = patch("netbox_librenms_plugin.import_utils.device_operations.Device")
         mock_device_cls = device_patch.start()
         mock_device_cls.objects.filter.return_value.first.return_value = None
-        mock_device_cls.objects.exclude.return_value.first.return_value = None
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
 
         patches = [
             patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
