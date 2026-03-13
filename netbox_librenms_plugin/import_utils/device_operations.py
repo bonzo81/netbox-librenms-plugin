@@ -877,9 +877,6 @@ def import_single_device(
 
             # Create the device
             device = Device(**device_data)
-            # Store librenms_id in per-server dict format before validation so the
-            # mapping is present on the instance when full_clean() runs.
-            set_librenms_device_id(device, device_id, api.server_key)
             device.full_clean()
             device.save()
 

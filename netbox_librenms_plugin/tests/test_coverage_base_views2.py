@@ -26,6 +26,7 @@ def _mock_obj(model_name="device", pk=1, name="test-device"):
     obj._meta.model_name = model_name
     obj.pk = pk
     obj.name = name
+    obj.virtual_chassis = None
     return obj
 
 
@@ -1630,6 +1631,47 @@ class TestSingleIPAddressVerifyViewPost:
         assert response.status_code == 200
         # Cache entry was truthy but had no port_id → first device interface used
         mock_obj.interfaces.first.assert_called_once()
+
+    def test_verify_with_non_default_server_key(self):
+        """server_key='secondary' propagates to get_cache_key call."""
+        import json as json_mod
+
+        view = self._make_view()
+        req = MagicMock()
+        req.body = json_mod.dumps(
+            {
+                "ip_address": "192.168.1.1/24",
+                "device_id": 2,
+                "vrf_id": None,
+                "server_key": "secondary",
+            }
+        ).encode()
+
+        mock_obj = MagicMock()
+        mock_obj.name = "device2"
+        mock_obj.get_absolute_url.return_value = "/device/2/"
+        mock_obj.interfaces.first.return_value = None
+
+        with (
+            patch.object(view, "_get_object", return_value=mock_obj),
+            patch.object(view, "_parse_ip_address", return_value=("192.168.1.1", 24)),
+            patch.object(view, "get_cache_key", return_value="secondary-cache-key") as mock_get_cache_key,
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "_find_in_cache", return_value=(None, None, None)),
+            patch.object(view, "_find_existing_ip", return_value=(False, False, None)),
+            patch.object(view, "_determine_status", return_value="sync"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.IPAddressTable") as MockTable,
+        ):
+            mock_cache.get.return_value = None
+            mock_table_instance = MagicMock()
+            mock_table_instance.render_status.return_value = "<span>sync</span>"
+            MockTable.return_value = mock_table_instance
+
+            response = view.post(req)
+
+        assert response.status_code == 200
+        mock_get_cache_key.assert_called_once_with(mock_obj, "ip_addresses", "secondary")
+        mock_cache.get.assert_called_once_with("secondary-cache-key")
 
 
 # =============================================================================

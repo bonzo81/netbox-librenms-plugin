@@ -244,44 +244,45 @@ def bulk_import_devices_shared(
                         else:
                             vc_domain = f"librenms-{device_id}"
 
-                    # Guard VC creation with its own permission check — the upfront check
-                    # only covers add_device/change_device; VirtualChassis needs a separate perm.
-                    has_vc_perm, missing_vc_perms = check_user_permissions(user, ["dcim.add_virtualchassis"])
-                    if not has_vc_perm:
-                        warn_msg = (
-                            f"Skipping VC creation for device {device_id}: "
-                            f"missing permissions: {', '.join(missing_vc_perms)}"
-                        )
-                        if job and job.logger:
-                            job.logger.warning(warn_msg)
-                        else:
-                            logger.warning(warn_msg)
                     # Only create VC if we haven't processed this stack yet
-                    # Add to set BEFORE attempting creation to prevent race condition
-                    elif vc_domain not in processed_vc_domains:
-                        processed_vc_domains.add(vc_domain)
-                        try:
-                            vc = create_virtual_chassis_with_members(
-                                result["device"],
-                                vc_data["members"],
-                                libre_device,
-                                server_key=api.server_key,
+                    if vc_domain not in processed_vc_domains:
+                        # Guard VC creation with its own permission check — the upfront check
+                        # only covers add_device/change_device; VirtualChassis needs a separate perm.
+                        has_vc_perm, missing_vc_perms = check_user_permissions(user, ["dcim.add_virtualchassis"])
+                        if not has_vc_perm:
+                            warn_msg = (
+                                f"Skipping VC creation for device {device_id}: "
+                                f"missing permissions: {', '.join(missing_vc_perms)}"
                             )
-                            vc_created_count += 1
-                            log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
-                            if job and job.logger:
-                                job.logger.info(log_msg)
-                            else:
-                                logger.info(log_msg)
-                        except Exception as vc_error:
-                            # Remove from set on failure so retry is possible
-                            processed_vc_domains.discard(vc_domain)
-                            warn_msg = f"Failed to create VC for device {device_id}: {vc_error}"
                             if job and job.logger:
                                 job.logger.warning(warn_msg)
                             else:
                                 logger.warning(warn_msg)
-                            # Don't fail the import, just log the warning
+                        else:
+                            # Add to set BEFORE attempting creation to prevent race condition
+                            processed_vc_domains.add(vc_domain)
+                            try:
+                                vc = create_virtual_chassis_with_members(
+                                    result["device"],
+                                    vc_data["members"],
+                                    libre_device,
+                                    server_key=api.server_key,
+                                )
+                                vc_created_count += 1
+                                log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
+                                if job and job.logger:
+                                    job.logger.info(log_msg)
+                                else:
+                                    logger.info(log_msg)
+                            except Exception as vc_error:
+                                # Remove from set on failure so retry is possible
+                                processed_vc_domains.discard(vc_domain)
+                                warn_msg = f"Failed to create VC for device {device_id}: {vc_error}"
+                                if job and job.logger:
+                                    job.logger.warning(warn_msg)
+                                else:
+                                    logger.warning(warn_msg)
+                                # Don't fail the import, just log the warning
 
             elif result.get("device"):  # Device exists
                 skipped_list.append({"device_id": device_id, "reason": result["error"]})

@@ -750,6 +750,8 @@ class LibreNMSAPI:
                 poller_groups = result.get("get_poller_group")
                 if not isinstance(poller_groups, list):
                     return False, result.get("message") or "Unexpected response format: missing 'get_poller_group' list"
+                if not all(isinstance(item, dict) for item in poller_groups):
+                    return False, "Unexpected response format: invalid item shape in 'get_poller_group'"
                 return True, poller_groups
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
@@ -904,6 +906,8 @@ class LibreNMSAPI:
                 if not isinstance(devices, list):
                     msg = result.get("message")
                     return False, msg or "Unexpected response format: missing 'devices' list"
+                if not all(isinstance(item, dict) for item in devices):
+                    return False, "Unexpected response format: invalid item shape in 'devices'"
                 return True, devices
 
             return False, result.get("message", "Unexpected response format") if isinstance(
