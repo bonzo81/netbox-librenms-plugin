@@ -555,7 +555,7 @@ class LibreNMSAPI:
                 location_id = result["message"].split("#")[-1]
                 return True, {"id": location_id, "message": result["message"]}
             else:
-                return False, result.get("message", "Unexpected response format")
+                return False, result.get("message") or "Unexpected response format"
         except requests.exceptions.RequestException as e:
             error_message = str(e)
             if hasattr(e.response, "json"):
@@ -593,7 +593,7 @@ class LibreNMSAPI:
             if result.get("status") == "ok":
                 return True, result["message"]
             else:
-                return False, result.get("message", "Unexpected response format")
+                return False, result.get("message") or "Unexpected response format"
         except requests.exceptions.RequestException as e:
             error_message = str(e)
             if hasattr(e.response, "json"):
@@ -901,7 +901,7 @@ class LibreNMSAPI:
                     return False, "Unexpected response format: invalid item shape in 'devices'"
                 return True, devices
 
-            return False, result.get("message", "Unexpected response format") if isinstance(
+            return False, result.get("message") or "Unexpected response format" if isinstance(
                 result, dict
             ) else "Unexpected response format"
         except (requests.exceptions.RequestException, ValueError) as e:
@@ -958,7 +958,7 @@ class LibreNMSAPI:
                 ]
                 return True, device_vlans
             if isinstance(result, dict):
-                return False, result.get("message", "Unexpected response format")
+                return False, result.get("message") or "Unexpected response format"
             return False, "Unexpected response format"
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:

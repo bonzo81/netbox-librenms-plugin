@@ -386,6 +386,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     validation["device_role"] = {"found": False, "role": None}
                     remove_validation_issue(validation, "role")
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
+                # Re-assert non-importable state: recalculate bases can_import on
+                # issues alone, but an existing matched device must never be import-ready.
+                validation["can_import"] = False
+                validation["is_ready"] = False
                 return
             else:
                 # Device was deleted since caching — recompute readiness to match

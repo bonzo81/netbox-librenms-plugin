@@ -799,7 +799,7 @@ class TestValidateDeviceForImportEdgeCases:
         return patches, started
 
     def _stop_patches(self, patches):
-        for p in patches:
+        for p in reversed(patches):
             p.stop()
 
     def test_vm_librenms_id_not_int_falls_back(self):
