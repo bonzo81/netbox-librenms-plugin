@@ -16,26 +16,51 @@ from django.db import migrations
 
 
 def _convert_librenms_id_to_json(apps, schema_editor):
+    db_alias = schema_editor.connection.alias
     CustomField = apps.get_model("extras", "CustomField")
     try:
-        cf = CustomField.objects.get(name="librenms_id")
+        cf = CustomField.objects.using(db_alias).get(name="librenms_id")
     except CustomField.DoesNotExist:
         # Custom field hasn't been created yet — nothing to convert.
         return
     if cf.type == "integer":
         cf.type = "json"
-        cf.save(update_fields=["type"])
+        cf.save(using=db_alias, update_fields=["type"])
 
 
 def _revert_librenms_id_to_integer(apps, schema_editor):
+    db_alias = schema_editor.connection.alias
     CustomField = apps.get_model("extras", "CustomField")
     try:
-        cf = CustomField.objects.get(name="librenms_id")
+        cf = CustomField.objects.using(db_alias).get(name="librenms_id")
     except CustomField.DoesNotExist:
         return
+
+    # Prevent unsafe downgrade if JSON-scoped values already exist.
+    models_to_check = [
+        ("dcim", "Device"),
+        ("virtualization", "VirtualMachine"),
+        ("dcim", "Interface"),
+        ("virtualization", "VMInterface"),
+    ]
+    for app_label, model_name in models_to_check:
+        Model = apps.get_model(app_label, model_name)
+        for value in (
+            Model.objects.using(db_alias)
+            .exclude(custom_field_data__librenms_id=None)
+            .values_list("custom_field_data__librenms_id", flat=True)
+            .iterator()
+        ):
+            if isinstance(value, dict):
+                raise RuntimeError(
+                    "Cannot reverse librenms_id CustomField to integer: "
+                    "JSON-scoped values already exist. Migrate them back to "
+                    "bare integers first."
+                )
+
     if cf.type == "json":
         cf.type = "integer"
-        cf.save(update_fields=["type"])
+        cf.save(using=db_alias, update_fields=["type"])
 
 
 class Migration(migrations.Migration):
