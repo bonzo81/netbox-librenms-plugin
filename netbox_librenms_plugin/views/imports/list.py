@@ -92,6 +92,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         filters = job_data.get("filters", {})
         server_key = job_data.get("server_key", "default")
         vc_enabled = job_data.get("vc_detection_enabled", False)
+        use_sysname = job_data.get("use_sysname", True)
+        strip_domain = job_data.get("strip_domain", False)
 
         # Extract cache metadata for frontend warnings
         self._cache_timestamp = job_data.get("cached_at")
@@ -109,6 +111,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 filters=filters,
                 device_id=device_id,
                 vc_enabled=vc_enabled,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
             )
             device = cache.get(cache_key)
             if device:
@@ -133,6 +137,29 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         self._cache_timestamp = None
         self._cache_timeout = 300
         self._cache_metadata_missing = False
+
+        # Resolve naming preferences early so all paths (sync, background job,
+        # queryset loading) use the same use_sysname/strip_domain values.
+        # Cascade: user preference → plugin settings → defaults.
+        try:
+            settings_obj, _ = LibreNMSSettings.objects.get_or_create()
+        except Exception:
+            logger.exception(
+                "Failed to get or create LibreNMSSettings during LibreNMS import for user %s",
+                getattr(request, "user", None),
+            )
+            settings_obj = None
+
+        _use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        _strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        if _use_sysname is None:
+            _use_sysname = getattr(settings_obj, "use_sysname_default", True) if settings_obj else True
+        if _strip_domain is None:
+            _strip_domain = getattr(settings_obj, "strip_domain_default", False) if settings_obj else False
+
+        self._use_sysname = _use_sysname
+        self._strip_domain = _strip_domain
+        self._settings = settings_obj
 
         # Determine if new filters are being submitted
         libre_filter_fields = (
@@ -218,27 +245,28 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             if hardware := request.GET.get("librenms_hardware"):
                 libre_filters["hardware"] = hardware
 
-            # Check if data is already cached before deciding on background job
-            # This prevents creating a job when cached results are available
             from netbox_librenms_plugin.import_utils import (
+                get_cache_metadata_key,
                 get_device_count_for_filters,
-                get_librenms_devices_for_import,
             )
 
-            # Quick check: are the raw devices already cached?
-            devices_cached = False
+            # Check if validated results already exist for this naming-mode
+            # namespace.  The metadata key encodes server, filters, vc_enabled,
+            # use_sysname and strip_domain, so a naming-preference change
+            # correctly shows the cache as cold and triggers the background path.
+            validated_cached = False
             if not self._cache_cleared:
                 try:
-                    _, devices_from_cache = get_librenms_devices_for_import(
-                        api=self.librenms_api,
+                    metadata_key = get_cache_metadata_key(
+                        server_key=self.librenms_api.server_key,
                         filters=libre_filters,
-                        force_refresh=False,
-                        return_cache_status=True,
+                        vc_enabled=self._vc_detection_enabled,
+                        use_sysname=self._use_sysname,
+                        strip_domain=self._strip_domain,
                     )
-                    devices_cached = devices_from_cache
-                except Exception:
-                    # Cache check failed; proceed with background job decision based on device_count
-                    pass
+                    validated_cached = cache.get(metadata_key) is not None
+                except Exception as e:
+                    logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
 
             # Get device count for background job decision
             try:
@@ -252,11 +280,9 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 logger.error(f"Error getting device count: {e}")
                 device_count = 0
 
-            # Load settings for background job decision
-            settings = None
             # Decide whether to use background job
-            # Skip background job if data is already cached
-            if not devices_cached and self.should_use_background_job():
+            # Skip background job if validated data is already cached
+            if not validated_cached and self.should_use_background_job():
                 # Check if RQ workers are available
                 if get_workers_for_queue("default") > 0:
                     from netbox_librenms_plugin.jobs import FilterDevicesJob
@@ -270,6 +296,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                         show_disabled=bool(self._filter_form_data.get("show_disabled")),
                         exclude_existing=bool(self._filter_form_data.get("exclude_existing")),
                         server_key=self.librenms_api.server_key,
+                        use_sysname=self._use_sysname,
+                        strip_domain=self._strip_domain,
                     )
 
                     logger.info(
@@ -301,21 +329,6 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         filter_warning = self._filter_warning
 
-        # Load settings for import defaults
-        try:
-            settings, _ = LibreNMSSettings.objects.get_or_create()
-        except Exception:
-            settings = None
-
-        # User preference overrides for toggles (persisted per-user)
-        use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
-        strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
-        # Fall back to server-level settings
-        if use_sysname is None:
-            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
-        if strip_domain is None:
-            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
-
         # Get active cached searches for this server
         cached_searches = get_active_cached_searches(self.librenms_api.server_key)
 
@@ -327,9 +340,9 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             "filter_warning": filter_warning,
             "filters_submitted": filters_submitted,
             "show_filter_warning": bool(filter_warning),
-            "settings": settings,
-            "use_sysname": use_sysname,
-            "strip_domain": strip_domain,
+            "settings": self._settings,
+            "use_sysname": self._use_sysname,
+            "strip_domain": self._strip_domain,
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),
@@ -417,6 +430,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             exclude_existing=exclude_existing,
             request=self._request,
             return_cache_status=True,
+            use_sysname=self._use_sysname,
+            strip_domain=self._strip_domain,
         )
 
         self._from_cache = from_cache
@@ -430,6 +445,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 server_key=self.librenms_api.server_key,
                 filters=libre_filters,
                 vc_enabled=vc_detection_enabled,
+                use_sysname=self._use_sysname,
+                strip_domain=self._strip_domain,
             )
             cache_metadata = cache.get(cache_metadata_key)
             if cache_metadata:

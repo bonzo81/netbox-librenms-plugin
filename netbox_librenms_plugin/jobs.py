@@ -46,6 +46,8 @@ class FilterDevicesJob(JobRunner):
         show_disabled,
         exclude_existing=False,
         server_key=None,
+        use_sysname=True,
+        strip_domain=False,
         **kwargs,
     ):
         """
@@ -60,6 +62,8 @@ class FilterDevicesJob(JobRunner):
             show_disabled: Whether to include disabled devices
             exclude_existing: Whether to exclude devices that already exist in NetBox
             server_key: Optional LibreNMS server key for multi-server setups
+            use_sysname: If True, prefer sysName over hostname for device name resolution
+            strip_domain: If True, strip domain suffix from device names
             **kwargs: Additional job parameters
         """
         from netbox_librenms_plugin.import_utils import process_device_filters
@@ -88,6 +92,8 @@ class FilterDevicesJob(JobRunner):
             show_disabled=show_disabled,
             exclude_existing=exclude_existing,
             job=self,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         # Store device IDs for result retrieval
@@ -107,6 +113,8 @@ class FilterDevicesJob(JobRunner):
             "filters": filters,
             "server_key": server_key,
             "vc_detection_enabled": vc_detection_enabled,
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
             "cache_timeout": api.cache_timeout,
             "cached_at": cached_at,
             "completed": True,

@@ -333,6 +333,10 @@ function openVlanDetailModal(btn) {
     modal.dataset.currentSafeName = safeName;
     modal.dataset.currentDeviceId = deviceId;
 
+    // Clear any stale error from a previous save attempt
+    const staleAlert = modal.querySelector('.vlan-override-error');
+    if (staleAlert) { staleAlert.remove(); }
+
     // Build table rows
     const tbody = document.getElementById('vlanDetailTableBody');
     tbody.innerHTML = '';
@@ -624,17 +628,33 @@ function initializeVlanModalSave() {
                 })
             }).then(response => {
                 if (!response.ok) {
-                    console.error('Failed to persist VLAN group overrides: HTTP', response.status);
+                    return response.text().then(t => {
+                        let msg = `HTTP ${response.status}`;
+                        try { const data = JSON.parse(t); if (data.message) msg = data.message; } catch (_) {}
+                        throw new Error(msg);
+                    });
+                }
+                // Close modal only on success
+                const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
+                if (closeBtn) {
+                    closeBtn.click();
                 }
             }).catch(error => {
-                console.error('Failed to persist VLAN group overrides:', error);
+                console.error('Failed to persist VLAN group overrides:', error.message);
+                let alertEl = modalEl.querySelector('.vlan-override-error');
+                if (!alertEl) {
+                    alertEl = document.createElement('div');
+                    alertEl.className = 'vlan-override-error alert alert-danger mt-2';
+                    modalEl.querySelector('.modal-body')?.appendChild(alertEl);
+                }
+                alertEl.textContent = 'Failed to save VLAN group overrides: ' + error.message;
             });
-        }
-
-        // Close the modal
-        const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
-        if (closeBtn) {
-            closeBtn.click();
+        } else {
+            // No server persist needed — close immediately
+            const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
+            if (closeBtn) {
+                closeBtn.click();
+            }
         }
     });
 }
@@ -743,6 +763,7 @@ function handleVRFChange(select, value) {
         return;
     }
     const deviceId = deviceInfo.id;
+    const row = select.closest('tr');
 
     fetch('/plugins/librenms_plugin/verify-ipaddress/', {
         method: 'POST',
@@ -756,10 +777,13 @@ function handleVRFChange(select, value) {
             vrf_id: value
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(t => { throw new Error(t); });
+            }
+            return response.json();
+        })
         .then(data => {
-            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
-
             if (data.status === 'success' && row && data.formatted_row) {
                 const statusCell = row.querySelector('td[data-col="status"]');
                 if (statusCell) {
@@ -768,7 +792,7 @@ function handleVRFChange(select, value) {
             }
         })
         .catch(error => {
-            console.error('VRF verification failed:', error);
+            console.error('VRF verification failed:', error.message);
         });
 }
 
@@ -789,10 +813,17 @@ function handleInterfaceChange(select, value) {
         body: JSON.stringify({
             device_id: value,
             interface_name: select.dataset.interface,
-            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value
+            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(text => {
+                    throw new Error(`Server error ${response.status}: ${text}`);
+                });
+            }
+            return response.json();
+        })
         .then(data => {
             const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
             if (data.status === 'success' && row) {
@@ -806,6 +837,9 @@ function handleInterfaceChange(select, value) {
                 row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
                 initializeFilters();
             }
+        })
+        .catch(error => {
+            console.error('Error verifying interface:', error.message);
         });
 }
 
@@ -825,23 +859,31 @@ function handleCableChange(select, value) {
         },
         body: JSON.stringify({
             device_id: value,
-            local_port: select.dataset.interface
+            local_port_id: select.dataset.interface
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(text => {
+                    throw new Error(`Server error ${response.status}: ${text}`);
+                });
+            }
+            return response.json();
+        })
         .then(data => {
             const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
 
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
-                const actionsCell = row.querySelector('td[data-col="actions"]');
                 row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
                 row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
                 row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
                 row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
                 row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
-
             }
+        })
+        .catch(error => {
+            console.error('Error verifying cable:', error.message);
         });
 }
 

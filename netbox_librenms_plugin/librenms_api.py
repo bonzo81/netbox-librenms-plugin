@@ -191,8 +191,15 @@ class LibreNMSAPI:
             otherwise caches the value.
         """
         librenms_id = obj.cf.get("librenms_id")
-        if librenms_id:
-            return librenms_id
+        if librenms_id is not None:
+            if isinstance(librenms_id, str):
+                try:
+                    librenms_id = int(librenms_id)
+                    self._store_librenms_id(obj, librenms_id)
+                except (ValueError, TypeError):
+                    librenms_id = None  # empty or invalid string — fall through to discovery
+            if librenms_id is not None:
+                return librenms_id
 
         # Check cache
         cache_key = self._get_cache_key(obj)
@@ -255,7 +262,7 @@ class LibreNMSAPI:
         """
         if "librenms_id" in obj.cf:
             obj.custom_field_data["librenms_id"] = librenms_id
-            obj.save()
+            obj.save(update_fields=["custom_field_data"])
         else:
             # Use cache as fallback
             cache_key = self._get_cache_key(obj)

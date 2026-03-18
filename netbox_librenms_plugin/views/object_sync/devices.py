@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tables.interfaces import (
 )
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_sync_device,
     get_missing_vlan_warning,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
@@ -106,15 +107,14 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
+        # Resolve the VC device that holds cached LibreNMS data
         if selected_device.virtual_chassis:
-            primary_device = selected_device.virtual_chassis.master
-            if not primary_device or not primary_device.primary_ip:
-                primary_device = next(
-                    (member for member in selected_device.virtual_chassis.members.all() if member.primary_ip),
-                    None,
-                )
+            primary_device = get_librenms_sync_device(selected_device)
         else:
             primary_device = selected_device
+
+        if not primary_device:
+            return JsonResponse({"status": "error", "message": "No sync device found for virtual chassis"}, status=404)
 
         cached_data = cache.get(self.get_cache_key(primary_device, "ports"))
 

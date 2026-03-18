@@ -265,7 +265,6 @@
                 <label for="bulk-vc-member-select">Select Virtual Chassis Member:</label>
                 <select id="bulk-vc-member-select" class="form-select">
                     {% for member in interface_sync.virtual_chassis_members %}
-                    {{ member.name }}
                     <option value="{{ member.id }}">{{ member.name }}</option>
                     {% endfor %}
                 </select>

@@ -26,17 +26,14 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """Handle GET request for the LibreNMS sync view."""
         obj = get_object_or_404(self.model, pk=pk)
 
-        # For Virtual Chassis members, determine which device should handle LibreNMS sync
-        # NOTE: VC members should NOT have their own librenms_id - LibreNMS only tracks
-        # one logical device per VC
+        # For Virtual Chassis members, determine which device should handle LibreNMS sync.
+        # Always delegate to get_librenms_sync_device() which implements the full priority
+        # order (explicit per-server dict > legacy bare-int > master with IP > any IP > position).
         librenms_lookup_device = obj
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            # Check if this device has its own librenms_id
-            if not obj.cf.get("librenms_id"):
-                # Use helper function to determine the sync device
-                sync_device = get_librenms_sync_device(obj)
-                if sync_device:
-                    librenms_lookup_device = sync_device
+            sync_device = get_librenms_sync_device(obj)
+            if sync_device:
+                librenms_lookup_device = sync_device
 
         # Get librenms_id using the determined lookup device
         self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
@@ -270,7 +267,8 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
     @staticmethod
     def _strip_vc_pattern(name):
-        """Strip the VC member naming suffix from a device name.
+        """
+        Strip the VC member naming suffix from a device name.
 
         Uses the vc_member_name_pattern from LibreNMSSettings to build a
         regex that removes the suffix.  For example, with the default

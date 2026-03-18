@@ -1,325 +1,552 @@
 {# HTMX template for device validation details modal #}
-{# Shows detailed reasons why a device cannot be imported #}
+{# Redesigned to match the sync page's clean table layout #}
 
 <div class="modal-header">
   <h5 class="modal-title">
-    <i class="mdi mdi-information-outline"></i> Import Validation: {{ libre_device.hostname }}
+    {% if validation.existing_device %}
+      {% if validation.device_type_mismatch %}
+        <i class="mdi mdi-alert-circle text-danger"></i>
+      {% elif validation.existing_match_type == 'librenms_id' %}
+        <i class="mdi mdi-check-decagram text-info"></i>
+      {% else %}
+        <i class="mdi mdi-alert text-warning"></i>
+      {% endif %}
+    {% elif validation.is_ready %}
+      <i class="mdi mdi-check-circle text-success"></i>
+    {% elif validation.can_import %}
+      <i class="mdi mdi-alert text-warning"></i>
+    {% else %}
+      <i class="mdi mdi-close-circle text-danger"></i>
+    {% endif %}
+    Import Validation: {{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }}
   </h5>
   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
 </div>
 
 <div class="modal-body">
 
-  {# Device Summary #}
-  <div class="card mb-3">
-    <div class="card-header">
-      <i class="mdi mdi-server"></i> LibreNMS Device Information
+  {# Compute existing device URL once for use throughout #}
+  {% if validation.existing_device %}
+    {% if validation.import_as_vm or validation.existing_device.cluster %}
+      {% url 'virtualization:virtualmachine' pk=validation.existing_device.pk as existing_device_url %}
+    {% else %}
+      {% url 'dcim:device' pk=validation.existing_device.pk as existing_device_url %}
+    {% endif %}
+  {% endif %}
+
+  {# Row: LibreNMS Status (left) + Device Info table (right) #}
+  <div class="row mb-3">
+
+    {# Left: LibreNMS Status card #}
+    <div class="col-md-4">
+      <div class="card h-100">
+        <h6 class="card-header">LibreNMS Status</h6>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <tbody>
+              <tr>
+                <th style="padding-left: 0.75rem;">Status</th>
+                <td>
+                  {% if libre_device.status == 1 or libre_device.status == "1" %}
+                    <span class="badge bg-success text-white"><i class="mdi mdi-check"></i> Up</span>
+                  {% elif libre_device.status == 0 or libre_device.status == "0" %}
+                    <span class="badge bg-danger text-white"><i class="mdi mdi-close"></i> Down</span>
+                  {% else %}
+                    <span class="badge bg-secondary text-white"><i class="mdi mdi-help"></i> Unknown</span>
+                  {% endif %}
+                </td>
+              </tr>
+              <tr>
+                <th style="padding-left: 0.75rem;">Hostname</th>
+                <td>{{ libre_device.hostname }}</td>
+              </tr>
+              <tr>
+                <th style="padding-left: 0.75rem;">ID</th>
+                <td>{{ libre_device.device_id }}</td>
+              </tr>
+              <tr>
+                <th style="padding-left: 0.75rem;">IP</th>
+                <td>{{ libre_device.ip|default:"—" }}</td>
+              </tr>
+              <tr>
+                <th style="padding-left: 0.75rem;">Location</th>
+                <td>{{ libre_device.location|default:"—" }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
-    <div class="card-body">
-      <dl class="row mb-0">
-        <dt class="col-sm-3">Hostname:</dt>
-        <dd class="col-sm-9"><strong>{{ libre_device.hostname }}</strong></dd>
 
-        <dt class="col-sm-3">System Name:</dt>
-        <dd class="col-sm-9">{{ libre_device.sysName|default:"N/A" }}</dd>
+    {# Right: Device Information table #}
+    <div class="col-md-8">
+      <div class="card h-100">
+        <h6 class="card-header d-flex justify-content-between align-items-center">
+          Device Information
+          <span class="d-flex gap-1">
+            {% if use_sysname %}
+              <span class="badge bg-success-lt"><i class="mdi mdi-check-circle-outline"></i> sysName</span>
+            {% else %}
+              <span class="badge bg-success-lt"><i class="mdi mdi-check-circle-outline"></i> hostname</span>
+            {% endif %}
+            {% if strip_domain %}
+              <span class="badge bg-success-lt"><i class="mdi mdi-check-circle-outline"></i> Domain stripped</span>
+            {% endif %}
+          </span>
+        </h6>
+        <div class="card-body p-0">
+          <table class="table table-sm table-hover mb-0">
+            <thead>
+              <tr>
+                <th style="width: 22%; padding-left: 0.75rem;">Field</th>
+                <th style="width: 39%;">NetBox Value</th>
+                <th style="width: 39%;">LibreNMS Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {# Name row #}
+              <tr>
+                <td style="padding-left: 0.75rem;">Name</td>
+                <td>
+                  {% if validation.existing_device %}
+                    <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">
+                      {{ validation.existing_device.name }}
+                    </a>
+                    {% if validation.name_sync_available and existing_device_model_name != "virtualmachine" %}
+                      <form style="display:inline" class="ms-2"
+                            hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                            hx-swap="none"
+                            hx-include="#use-sysname-toggle, #strip-domain-toggle">
+                        {% csrf_token %}
+                        <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                        <input type="hidden" name="action" value="sync_name">
+                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync name to {{ validation.suggested_name }}" aria-label="Sync name to {{ validation.suggested_name }}">
+                          <i class="mdi mdi-sync"></i>
+                        </button>
+                      </form>
+                    {% endif %}
+                  {% else %}
+                    <span class="text-muted">New device</span>
+                  {% endif %}
+                </td>
+                <td>{{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }}</td>
+              </tr>
 
-        <dt class="col-sm-3">LibreNMS ID:</dt>
-        <dd class="col-sm-9">{{ libre_device.device_id }}</dd>
+              {% if not validation.import_as_vm %}
+              {# Site row #}
+              <tr>
+                <td style="padding-left: 0.75rem;">Site</td>
+                <td>
+                  {% if validation.existing_device and validation.existing_device.site %}
+                    {{ validation.existing_device.site }}
+                    {% if validation.site.site and validation.existing_device.site.pk == validation.site.site.pk %}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% endif %}
+                  {% elif validation.site.site %}
+                    {{ validation.site.site.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% else %}
+                    <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching site</span>
+                  {% endif %}
+                </td>
+                <td>{{ libre_device.location|default:"—" }}</td>
+              </tr>
 
-        <dt class="col-sm-3">IP Address:</dt>
-        <dd class="col-sm-9">{{ libre_device.ip|default:"N/A" }}</dd>
+              {# Device Type row #}
+              <tr>
+                <td style="padding-left: 0.75rem;">Device Type</td>
+                <td>
+                  {% if validation.device_type_mismatch %}
+                    <span class="text-danger">
+                      {{ validation.existing_device.device_type }}
+                      <i class="mdi mdi-alert-circle"></i>
+                    </span>
+                    <form style="display:inline" class="ms-1"
+                          hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                          hx-swap="none"
+                          hx-include="#use-sysname-toggle, #strip-domain-toggle">
+                      {% csrf_token %}
+                      <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                      <input type="hidden" name="action" value="update_type">
+                      <input type="hidden" name="force" value="on">
+                      <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1" title="Update to LibreNMS type" aria-label="Update to LibreNMS type">
+                        <i class="mdi mdi-sync"></i>
+                      </button>
+                    </form>
+                  {% elif validation.existing_device and validation.existing_device.device_type %}
+                    {{ validation.existing_device.device_type }}
+                    {% if sync_info and not sync_info.device_type_synced and sync_info.librenms_device_type %}
+                      <form style="display:inline" class="ms-1"
+                            hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                            hx-swap="none">
+                        {% csrf_token %}
+                        <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                        <input type="hidden" name="action" value="sync_device_type">
+                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync device type" aria-label="Sync device type">
+                          <i class="mdi mdi-sync"></i>
+                        </button>
+                      </form>
+                    {% elif validation.device_type.device_type %}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% endif %}
+                  {% elif validation.device_type.device_type %}
+                    <span {% if validation.device_type.match_type == 'chassis' %}title="Matched via chassis inventory ({{ validation.device_type.chassis_model }})"{% elif validation.device_type.match_type == 'mapping' %}title="Matched via device type mapping"{% endif %}>
+                      {{ validation.device_type.device_type }}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    </span>
+                  {% else %}
+                    <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
+                  {% endif %}
+                </td>
+                <td>{{ libre_device.hardware|default:"—" }}</td>
+              </tr>
+              {% endif %}
 
-        <dt class="col-sm-3">Hardware:</dt>
-        <dd class="col-sm-9">{{ libre_device.hardware|default:"N/A" }}</dd>
+              {# Serial row (only for devices) #}
+              {% if not validation.import_as_vm %}
+              <tr>
+                <td style="padding-left: 0.75rem;">Serial</td>
+                <td>
+                  {% if validation.existing_device %}
+                    {% if validation.existing_device.serial %}
+                      {{ validation.existing_device.serial }}
+                    {% else %}
+                      <span class="text-muted">Not set</span>
+                    {% endif %}
+                    {% if sync_info and not sync_info.serial_synced %}
+                      {% if validation.serial_action == 'conflict' %}
+                        <span class="text-danger ms-1" title="Serial conflict — another device already has this serial">
+                          <i class="mdi mdi-alert-circle"></i>
+                        </span>
+                      {% else %}
+                      <form style="display:inline" class="ms-1"
+                            hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                            hx-swap="none">
+                        {% csrf_token %}
+                        <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                        <input type="hidden" name="action" value="sync_serial">
+                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync serial from LibreNMS" aria-label="Sync serial from LibreNMS">
+                          <i class="mdi mdi-sync"></i>
+                        </button>
+                      </form>
+                      {% endif %}
+                    {% elif sync_info and sync_info.serial_synced and sync_info.librenms_serial != '-' %}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% endif %}
+                  {% else %}
+                    <span class="text-muted">—</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {{ libre_device.serial|default:"—" }}
+                  {% if validation.serial_duplicate %}
+                    <span class="badge bg-danger ms-1">Conflict</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endif %}
 
-        <dt class="col-sm-3">OS:</dt>
-        <dd class="col-sm-9">{{ libre_device.os|default:"N/A" }}</dd>
+              {# Role row #}
+              <tr>
+                <td style="padding-left: 0.75rem;">
+                  {% if validation.import_as_vm %}Role{% else %}Device Role{% endif %}
+                </td>
+                <td>
+                  {% if validation.existing_device and validation.existing_device.role %}
+                    {{ validation.existing_device.role }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% elif validation.device_role.role %}
+                    {{ validation.device_role.role.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% else %}
+                    <span class="text-danger"><i class="mdi mdi-close-circle"></i> No role assigned</span>
+                  {% endif %}
+                </td>
+                <td><span class="text-muted">—</span></td>
+              </tr>
 
-        <dt class="col-sm-3">Location:</dt>
-        <dd class="col-sm-9">{{ libre_device.location|default:"N/A" }}</dd>
+              {# Platform row #}
+              <tr>
+                <td style="padding-left: 0.75rem;">Platform</td>
+                <td>
+                  {% if validation.existing_device and validation.existing_device.platform %}
+                    {{ validation.existing_device.platform }}
+                    {% if sync_info and not sync_info.platform_synced %}
+                      {% if sync_info.platform_info.platform_exists %}
+                        {% if not validation.import_as_vm and not validation.existing_device.cluster %}
+                        <form style="display:inline" class="ms-1"
+                              hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                              hx-swap="none">
+                          {% csrf_token %}
+                          <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                          <input type="hidden" name="action" value="sync_platform">
+                          <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform" aria-label="Sync platform">
+                            <i class="mdi mdi-sync"></i>
+                          </button>
+                        </form>
+                        {% endif %}
+                      {% else %}
+                        <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
+                          <i class="mdi mdi-alert-outline"></i>
+                        </span>
+                      {% endif %}
+                    {% elif sync_info and sync_info.platform_synced %}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% endif %}
+                  {% elif validation.platform.platform %}
+                    {{ validation.platform.platform.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% elif sync_info and sync_info.platform_info.platform_exists %}
+                    <span class="text-muted">Not set</span>
+                    {% if validation.existing_device and not validation.import_as_vm and not validation.existing_device.cluster %}
+                    <form style="display:inline" class="ms-1"
+                          hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                          hx-swap="none">
+                      {% csrf_token %}
+                      <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                      <input type="hidden" name="action" value="sync_platform">
+                      <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform" aria-label="Sync platform">
+                        <i class="mdi mdi-sync"></i>
+                      </button>
+                    </form>
+                    {% endif %}
+                  {% else %}
+                    <span class="text-muted">Optional</span>
+                  {% endif %}
+                </td>
+                <td>{{ libre_device.os|default:"—" }}</td>
+              </tr>
 
-        <dt class="col-sm-3">Status:</dt>
-        <dd class="col-sm-9">
-          {% if libre_device.status == 1 %}
-            <span class="badge bg-success text-white"><i class="mdi mdi-check"></i> Up</span>
-          {% elif libre_device.status == 0 %}
-            <span class="badge bg-danger text-white"><i class="mdi mdi-close"></i> Down</span>
-          {% else %}
-            <span class="badge bg-secondary text-white"><i class="mdi mdi-help"></i> Unknown</span>
-          {% endif %}
-        </dd>
-      </dl>
+              {% if validation.import_as_vm %}
+              {# Cluster row (VMs only) #}
+              <tr>
+                <td style="padding-left: 0.75rem;">Cluster</td>
+                <td>
+                  {% if validation.cluster.cluster %}
+                    {{ validation.cluster.cluster.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% else %}
+                    <span class="text-danger"><i class="mdi mdi-close-circle"></i> No cluster assigned</span>
+                  {% endif %}
+                </td>
+                <td><span class="text-muted">—</span></td>
+              </tr>
+              {% else %}
+              {# Rack row #}
+              <tr>
+                <td style="padding-left: 0.75rem;">Rack</td>
+                <td>
+                  {% if validation.rack.rack %}
+                    {% if validation.rack.rack.location %}
+                      {{ validation.rack.rack.location.name }} — {{ validation.rack.rack.name }}
+                    {% else %}
+                      {{ validation.rack.rack.name }}
+                    {% endif %}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% else %}
+                    <span class="text-muted">Optional</span>
+                  {% endif %}
+                </td>
+                <td><span class="text-muted">—</span></td>
+              </tr>
+              {% endif %}
+
+              {# Primary IP row #}
+              <tr>
+                <td style="padding-left: 0.75rem;">Primary IP</td>
+                <td>
+                  {% if validation.existing_device and validation.existing_device.primary_ip %}
+                    {{ validation.existing_device.primary_ip }}
+                  {% elif libre_device.ip %}
+                    {{ libre_device.ip }}
+                  {% else %}
+                    <span class="text-muted">No primary IP</span>
+                  {% endif %}
+                </td>
+                <td>{{ libre_device.ip|default:"—" }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 
-  {# Validation Status #}
-  <div class="row mb-3">
-    <div class="col-md-12">
-      {% if validation.existing_device %}
-        {% if validation.existing_match_type == 'librenms_id' %}
-          {# Device was imported via this plugin #}
-          <div class="alert alert-info">
-            <h6 class="alert-heading">
-              <i class="mdi mdi-check-decagram"></i> Device Already Imported
-            </h6>
-            <p>
-              This device has already been imported to NetBox as
-              <strong><a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" target="_blank">
-                {{ validation.existing_device.name }}
-              </a></strong>
-            </p>
-            <p class="mb-0">
-              <i class="mdi mdi-information-outline"></i>
-              Matched by LibreNMS ID ({{ libre_device.device_id }}) - device is linked and synchronized.
-            </p>
-          </div>
-        {% elif validation.existing_match_type == 'hostname' %}
-          {# Device exists with same hostname but wasn't imported from LibreNMS #}
-          <div class="alert alert-warning">
-            <h6 class="alert-heading">
-              <i class="mdi mdi-link-variant"></i> Device Exists (Hostname Match)
-            </h6>
-            <p>
-              A device with the same hostname exists in NetBox as
-              <strong><a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" target="_blank">
-                {{ validation.existing_device.name }}
-              </a></strong>
-            </p>
-            <p class="mb-0">
-              <i class="mdi mdi-alert"></i>
-              Matched by hostname only - this device is not linked to LibreNMS.
-              If this is the same device, consider adding the LibreNMS ID custom field manually.
-            </p>
-          </div>
-        {% elif validation.existing_match_type == 'primary_ip' %}
-          {# Device exists with same IP but wasn't imported from LibreNMS #}
-          <div class="alert alert-warning">
-            <h6 class="alert-heading">
-              <i class="mdi mdi-ip-network"></i> Device Exists (IP Match)
-            </h6>
-            <p>
-              A device with the same IP address ({{ libre_device.ip }}) exists in NetBox as
-              <strong><a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" target="_blank">
-                {{ validation.existing_device.name }}
-              </a></strong>
-            </p>
-            <p class="mb-0">
-              <i class="mdi mdi-alert"></i>
-              Matched by IP address only - verify this is the same device.
-              If correct, consider adding the LibreNMS ID custom field manually.
-            </p>
-          </div>
-        {% else %}
-          {# Fallback for unknown match type #}
-          <div class="alert alert-info">
-            <h6 class="alert-heading">
-              <i class="mdi mdi-link"></i> Device Already Exists
-            </h6>
-            <p>
-              This device already exists in NetBox as
-              <strong><a href="{% url 'dcim:device' pk=validation.existing_device.pk %}" target="_blank">
-                {{ validation.existing_device.name }}
-              </a></strong>
-            </p>
-            <p class="mb-0">
-              No import is needed.
-            </p>
-          </div>
+  {# Status & Actions #}
+  {% if validation.existing_device %}
+    {% if validation.existing_match_type == 'librenms_id' %}
+      <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-info-lt me-1"><i class="mdi mdi-check-decagram"></i> Linked — ID {{ libre_device.device_id }}</span>
+        {% if validation.name_matches %}
+          <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Name match</span>
+        {% elif validation.name_sync_available %}
+          <span class="badge bg-warning-lt me-1"><i class="mdi mdi-alert"></i> Name differs</span>
         {% endif %}
-      {% elif validation.is_ready %}
-        <div class="alert alert-success">
-          <h6 class="alert-heading">
-            <i class="mdi mdi-check-circle"></i> Ready to Import
-          </h6>
-          <p class="mb-0">
-            All prerequisites are met. This device can be imported into NetBox without any issues.
-          </p>
+        {% if validation.serial_confirmed %}
+          <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Serial confirmed</span>
+        {% elif validation.serial_action == 'conflict' %}
+          <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Serial conflict</span>
+        {% elif validation.serial_action == 'update_serial' %}
+          <span class="badge bg-warning-lt me-1"><i class="mdi mdi-alert"></i> Serial differs</span>
+        {% endif %}
+        {% if validation.device_type_mismatch %}
+          <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Type mismatch</span>
+        {% endif %}
+      </div>
+
+    {% elif validation.existing_match_type == 'hostname' %}
+      <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-warning-lt me-1"><i class="mdi mdi-link-variant"></i> Hostname match</span>
+        {% if validation.serial_confirmed %}
+          <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Serial confirmed</span>
+        {% elif validation.serial_action == 'conflict' %}
+          <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Serial conflict</span>
+        {% elif validation.serial_action == 'update_serial' %}
+          <span class="badge bg-warning-lt me-1"><i class="mdi mdi-alert"></i> Serial differs</span>
+        {% endif %}
+        {% if validation.device_type_mismatch %}
+          <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Type mismatch</span>
+        {% endif %}
+        <span class="text-muted ms-1">
+          — Exists as
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
+          not linked to LibreNMS.
+        </span>
+      </div>
+      {% if validation.serial_action == 'conflict' %}
+        <div class="alert alert-danger py-2 mb-3">
+          <i class="mdi mdi-alert-circle"></i>
+          Import blocked: The incoming serial number is already assigned to another device in NetBox.
+          Resolve the duplicate serial before linking.
         </div>
-      {% elif validation.can_import %}
-        <div class="alert alert-warning">
-          <h6 class="alert-heading">
-            <i class="mdi mdi-alert"></i> Can Import with Warnings
-          </h6>
-          <p class="mb-0">
-            This device can be imported, but there are some warnings to review below.
-          </p>
+      {% elif validation.import_as_vm %}
+        <div class="alert alert-info py-2 mb-3">
+          <i class="mdi mdi-information-outline"></i>
+          Hostname match found for a VM — use the import action to proceed.
         </div>
       {% else %}
-        <div class="alert alert-danger">
-          <h6 class="alert-heading">
-            <i class="mdi mdi-close-circle"></i> Cannot Import
-          </h6>
-          <p class="mb-0">
-            This device cannot be imported due to validation issues listed below.
-          </p>
-        </div>
-      {% endif %}
-    </div>
-  </div>
-
-  {# Validation Details #}
-  <div class="card mb-3">
-    <div class="card-header">
-      <i class="mdi mdi-database-import"></i> NetBox Import Matching
-    </div>
-    <div class="card-body">
-      <p class="text-muted mb-3">
-        <small>
-          The following NetBox objects will be used when importing this
-          {% if validation.import_as_vm %}<strong>Virtual Machine</strong>{% else %}<strong>Device</strong>{% endif %}:
-        </small>
-      </p>
-      <table class="table table-sm table-borderless mb-0">
-        <tbody>
-          {% if validation.import_as_vm %}
-            {# VM-specific fields #}
-            <tr>
-              <td width="30%"><strong>Import Type:</strong></td>
-              <td>
-                <i class="mdi mdi-cloud text-info"></i>
-                <span class="badge bg-info text-white">Virtual Machine</span>
-              </td>
-            </tr>
-
-            <tr>
-              <td><strong>Cluster:</strong></td>
-              <td>
-                {% if validation.cluster.cluster %}
-                  <i class="mdi mdi-check-circle text-success"></i>
-                  <span class="badge bg-success text-white">{{ validation.cluster.cluster.name }}</span>
-                {% else %}
-                  <i class="mdi mdi-close-circle text-danger"></i>
-                  <span class="text-danger">No cluster assigned (required for VMs)</span>
-                {% endif %}
-              </td>
-            </tr>
-
-            <tr>
-              <td><strong>Role:</strong></td>
-              <td>
-                {% if validation.device_role.role %}
-                  <i class="mdi mdi-check-circle text-success"></i>
-                  <span class="badge bg-success text-white">{{ validation.device_role.role.name }}</span>
-                {% else %}
-                  <i class="mdi mdi-information-outline text-secondary"></i>
-                  <span class="text-secondary">Optional - not assigned</span>
-                {% endif %}
-              </td>
-            </tr>
-
+      <div class="mb-3">
+        <form style="display:inline"
+              hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+              hx-swap="none"
+              hx-include="#use-sysname-toggle, #strip-domain-toggle">
+          {% csrf_token %}
+          <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+          {% if validation.device_type_mismatch %}
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" name="force" id="force-hostname-{{ libre_device.device_id }}"
+                     onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+              <label class="form-check-label text-danger" for="force-hostname-{{ libre_device.device_id }}">
+                <i class="mdi mdi-alert-circle"></i> Device type mismatch — check to force
+              </label>
+            </div>
+          {% endif %}
+          {% if validation.serial_action == 'update_serial' %}
+            <input type="hidden" name="action" value="update_serial">
+            <button type="submit" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+              <i class="mdi mdi-swap-horizontal"></i> Update Serial &amp; Link
+            </button>
           {% else %}
-            {# Device-specific fields #}
-            <tr>
-              <td width="30%"><strong>Import Type:</strong></td>
-              <td>
-                <i class="mdi mdi-server text-primary"></i>
-                <span class="badge bg-primary text-white">Device</span>
-              </td>
-            </tr>
-
-            <tr>
-              <td><strong>Site:</strong></td>
-              <td>
-                {% if validation.site.site %}
-                  <i class="mdi mdi-check-circle text-success"></i>
-                  <span class="badge bg-success text-white">{{ validation.site.site.name }}</span>
-                {% else %}
-                  <i class="mdi mdi-close-circle text-danger"></i>
-                  <span class="text-danger">No matching site found</span>
-                {% endif %}
-              </td>
-            </tr>
-
-            <tr>
-              <td><strong>Device Type:</strong></td>
-              <td>
-                {% if validation.device_type.device_type %}
-                  <i class="mdi mdi-check-circle text-success"></i>
-                  <span class="badge bg-success text-white">{{ validation.device_type.device_type }}</span>
-                {% else %}
-                  <i class="mdi mdi-close-circle text-danger"></i>
-                  <span class="text-danger">No matching device type found</span>
-                {% endif %}
-              </td>
-            </tr>
-
-            <tr>
-              <td><strong>Device Role:</strong></td>
-              <td>
-                {% if validation.device_role.role %}
-                  <i class="mdi mdi-check-circle text-success"></i>
-                  <span class="badge bg-success text-white">{{ validation.device_role.role.name }}</span>
-                {% else %}
-                  <i class="mdi mdi-close-circle text-danger"></i>
-                  <span class="text-danger">No device role assigned</span>
-                {% endif %}
-              </td>
-            </tr>
+            <input type="hidden" name="action" value="link">
+            <button type="submit" class="btn btn-sm btn-primary{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+              <i class="mdi mdi-link-plus"></i> Link to LibreNMS
+            </button>
           {% endif %}
+        </form>
+      </div>
+      {% endif %}
 
-          {# Common fields for both Device and VM #}
-          <tr>
-            <td><strong>Platform:</strong></td>
-            <td>
-              {% if validation.platform.platform %}
-                <i class="mdi mdi-check-circle text-success"></i>
-                <span class="badge bg-success text-white">{{ validation.platform.platform.name }}</span>
-              {% else %}
-                <i class="mdi mdi-information-outline text-secondary"></i>
-                <span class="text-secondary">Optional - will be auto-mapped if available</span>
-              {% endif %}
-            </td>
-          </tr>
-
-          {% if not validation.import_as_vm %}
-          <tr>
-            <td><strong>Rack:</strong></td>
-            <td>
-              {% if validation.rack.rack %}
-                <i class="mdi mdi-check-circle text-success"></i>
-                <span class="badge bg-success text-white">
-                  {% if validation.rack.rack.location %}
-                    {{ validation.rack.rack.location.name }} - {{ validation.rack.rack.name }}
-                  {% else %}
-                    {{ validation.rack.rack.name }}
-                  {% endif %}
-                </span>
-              {% else %}
-                <i class="mdi mdi-information-outline text-secondary"></i>
-                <span class="text-secondary">Optional - not assigned</span>
-              {% endif %}
-            </td>
-          </tr>
+    {% elif validation.existing_match_type == 'serial' %}
+      <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-warning-lt me-1"><i class="mdi mdi-barcode"></i> Serial match</span>
+        {% if validation.serial_action == 'hostname_differs' %}
+          <span class="badge bg-warning-lt me-1"><i class="mdi mdi-alert"></i> Name differs</span>
+        {% elif validation.serial_action == 'link' %}
+          <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Name match</span>
+        {% endif %}
+        {% if validation.device_type_mismatch %}
+          <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Type mismatch</span>
+        {% endif %}
+        <span class="text-muted ms-1">
+          — Exists as
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
+          not linked to LibreNMS.
+        </span>
+      </div>
+      <div class="mb-3">
+        <form style="display:inline"
+              hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+              hx-swap="none"
+              hx-include="#use-sysname-toggle, #strip-domain-toggle">
+          {% csrf_token %}
+          <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+          {% if validation.device_type_mismatch %}
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" name="force" id="force-serial-{{ libre_device.device_id }}"
+                     onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+              <label class="form-check-label text-danger" for="force-serial-{{ libre_device.device_id }}">
+                <i class="mdi mdi-alert-circle"></i> Device type mismatch — check to force
+              </label>
+            </div>
           {% endif %}
+          {% if validation.serial_action == 'link' %}
+            <input type="hidden" name="action" value="link">
+            <button type="submit" class="btn btn-sm btn-primary{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+              <i class="mdi mdi-link-plus"></i> Link to LibreNMS
+            </button>
+          {% elif validation.serial_action == 'hostname_differs' %}
+            <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+              <i class="mdi mdi-pencil"></i> Update &amp; Link
+            </button>
+          {% endif %}
+        </form>
+      </div>
 
-          <tr>
-            <td><strong>Primary IP:</strong></td>
-            <td>
-              {% if libre_device.ip %}
-                <i class="mdi mdi-check-circle text-success"></i>
-                {{ libre_device.ip }}
-              {% else %}
-                <i class="mdi mdi-information-outline text-secondary"></i>
-                <span class="text-secondary">No primary IP - will import without</span>
-              {% endif %}
-            </td>
-          </tr>
-        </tbody>
-      </table>
+    {% elif validation.existing_match_type == 'primary_ip' %}
+      <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-warning-lt me-1"><i class="mdi mdi-ip-network"></i> IP match</span>
+        <span class="text-muted ms-1">
+          — Device with IP {{ libre_device.ip }} exists as
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
+          Consider adding LibreNMS ID manually.
+        </span>
+      </div>
+
+    {% else %}
+      <div class="alert alert-info py-2 mb-3">
+        <i class="mdi mdi-link"></i>
+        <strong>Exists</strong> — Device already exists as
+        <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
+      </div>
+    {% endif %}
+
+  {% elif validation.is_ready %}
+    <div class="alert alert-success py-2 mb-3">
+      <i class="mdi mdi-check-circle"></i>
+      <strong>Ready to Import</strong> — All prerequisites are met.
     </div>
-  </div>
+  {% elif validation.can_import %}
+    <div class="alert alert-warning py-2 mb-3">
+      <i class="mdi mdi-alert"></i>
+      <strong>Can Import</strong> — Review warnings below before importing.
+    </div>
+  {% else %}
+    <div class="alert alert-danger py-2 mb-3">
+      <i class="mdi mdi-close-circle"></i>
+      <strong>Cannot Import</strong> — Validation issues prevent import.
+    </div>
+  {% endif %}
 
   {# Warnings #}
   {% if validation.warnings %}
   <div class="card mb-3">
-    <div class="card-header">
+    <div class="card-header py-2">
       <i class="mdi mdi-alert"></i> Warnings ({{ validation.warnings|length }})
     </div>
-    <div class="card-body">
-      <p>These warnings won't prevent import but should be reviewed:</p>
-      <ul>
+    <div class="card-body py-2">
+      <ul class="mb-0 ps-3">
         {% for warning in validation.warnings %}
-          <li><strong>{{ warning }}</strong></li>
+          <li><small>{{ warning }}</small></li>
         {% endfor %}
       </ul>
     </div>
@@ -331,23 +558,24 @@
 <div class="modal-footer">
   {% if validation.existing_device %}
     {% if validation.import_as_vm or validation.existing_device.cluster %}
-      {# It's a VM #}
-      <a href="{% url 'virtualization:virtualmachine' pk=validation.existing_device.pk %}"
-         class="btn btn-primary"
-         target="_blank">
+      <a href="{{ existing_device_url }}"
+         class="btn btn-primary btn-sm" target="_blank" rel="noopener noreferrer">
         <i class="mdi mdi-open-in-new"></i> View VM in NetBox
       </a>
     {% else %}
-      {# It's a Device #}
-      <a href="{% url 'dcim:device' pk=validation.existing_device.pk %}"
-         class="btn btn-primary"
-         target="_blank">
-        <i class="mdi mdi-open-in-new"></i> View Device in NetBox
+      <a href="{{ existing_device_url }}"
+         class="btn btn-primary btn-sm" target="_blank" rel="noopener noreferrer">
+        <i class="mdi mdi-open-in-new"></i> View in NetBox
       </a>
+      {% if validation.existing_match_type == 'librenms_id' %}
+        <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}"
+           class="btn btn-outline-primary btn-sm" target="_blank" rel="noopener noreferrer">
+          <i class="mdi mdi-sync"></i> Full Sync Page
+        </a>
+      {% endif %}
     {% endif %}
   {% endif %}
-
-  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+  <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">
     <i class="mdi mdi-close"></i> Close
   </button>
 </div>

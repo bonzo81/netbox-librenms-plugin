@@ -1,12 +1,63 @@
+import logging
+
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 
 from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+logger = logging.getLogger(__name__)
+
+
+class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Update NetBox device name from LibreNMS sysName."""
+
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
+    def post(self, request, pk):
+        """Sync the device name from LibreNMS sysName."""
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        self.librenms_id = self.librenms_api.get_librenms_id(device)
+
+        if not self.librenms_id:
+            messages.error(request, "Device not found in LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+
+        if not success or not device_info:
+            messages.error(request, "Failed to retrieve device info from LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        sys_name = device_info.get("sysName")
+
+        if not sys_name:
+            messages.warning(request, "No sysName available in LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        old_name = device.name
+        device.name = sys_name
+        try:
+            device.full_clean()
+            device.save()
+        except (ValidationError, IntegrityError) as e:
+            device.name = old_name
+            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+            messages.error(request, f"Failed to update device name to '{sys_name}': {error_msg}")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        messages.success(request, f"Device name updated from '{old_name}' to '{sys_name}'")
+
+        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
 
 class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -230,28 +281,74 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             except Manufacturer.DoesNotExist:
                 pass
 
-        try:
-            platform = Platform.objects.create(
-                name=platform_name,
-                manufacturer=manufacturer,
-            )
-        except IntegrityError:
-            messages.error(
-                request,
-                f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
-            )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        with transaction.atomic():
+            try:
+                platform = Platform(
+                    name=platform_name,
+                    manufacturer=manufacturer,
+                )
+                platform.full_clean()
+                platform.save()
+            except ValidationError as e:
+                transaction.set_rollback(True)
+                error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+                logger.exception(
+                    "ValidationError creating platform '%s' for device pk=%s: %s",
+                    platform_name,
+                    pk,
+                    error_msg,
+                )
+                messages.error(
+                    request,
+                    f"Platform '{platform_name}' could not be created: {error_msg}",
+                )
+                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            except IntegrityError as e:
+                transaction.set_rollback(True)
+                logger.exception(
+                    "IntegrityError creating platform '%s' for device pk=%s",
+                    platform_name,
+                    pk,
+                )
+                messages.error(
+                    request,
+                    f"Platform '{platform_name}' could not be created: {e}",
+                )
+                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        old_platform = device.platform
-        device.platform = platform
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.platform = old_platform
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to assign platform '{platform}': {error_msg}")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            try:
+                device = Device.objects.select_for_update().get(pk=pk)
+            except Device.DoesNotExist:
+                transaction.set_rollback(True)
+                messages.error(request, "Device no longer exists.")
+                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+            device.platform = platform
+            try:
+                device.full_clean()
+            except ValidationError as e:
+                transaction.set_rollback(True)
+                error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+                logger.exception(
+                    "ValidationError validating device pk=%s: %s",
+                    pk,
+                    error_msg,
+                )
+                messages.error(
+                    request,
+                    f"Device (pk={pk}) validation failed: {error_msg}",
+                )
+                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            try:
+                device.save()
+            except IntegrityError as e:
+                transaction.set_rollback(True)
+                logger.exception("IntegrityError saving device pk=%s after platform assignment", pk)
+                messages.error(
+                    request,
+                    f"Error saving device (pk={pk}): {e}",
+                )
+                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(
             request,

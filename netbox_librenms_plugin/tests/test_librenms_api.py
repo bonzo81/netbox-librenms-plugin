@@ -472,6 +472,40 @@ class TestLibreNMSAPIDeviceLookup:
         result = api.get_librenms_id(device)
         assert result == 42
 
+    def test_get_librenms_id_normalizes_string_to_int(self, mock_librenms_config):
+        """Converts a string-stored librenms_id to int and writes it back."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        device = MagicMock()
+        device.name = "test-device"
+        device.cf = {"librenms_id": "42"}
+        device.custom_field_data = {"librenms_id": "42"}
+
+        result = api.get_librenms_id(device)
+        assert result == 42
+        # normalized value written back
+        assert device.custom_field_data["librenms_id"] == 42
+        device.save.assert_called_once()
+
+    def test_get_librenms_id_empty_string_falls_through_to_discovery(self, mock_librenms_config):
+        """An empty-string librenms_id is treated as not set (falls through to API discovery)."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        device = MagicMock()
+        device.name = "test-device"
+        device.cf = {"librenms_id": ""}
+        device.primary_ip = None
+
+        with patch.object(api, "get_device_id_by_hostname", return_value=None):
+            result = api.get_librenms_id(device)
+        assert result is None
+
     @patch("netbox_librenms_plugin.librenms_api.cache")
     def test_get_librenms_id_from_cache(self, mock_cache, mock_librenms_config):
         """Returns ID from Django cache when not in custom field."""
@@ -643,7 +677,7 @@ class TestLibreNMSAPIDeviceOperations:
     @patch("netbox_librenms_plugin.librenms_api.requests.post")
     def test_add_device_duplicate_error(self, mock_post, mock_librenms_config):
         """Verify duplicate device handling."""
-        mock_post.return_value.status_code = 500
+        mock_post.return_value.status_code = 200
         mock_post.return_value.json.return_value = {
             "status": "error",
             "message": "Device already exists",

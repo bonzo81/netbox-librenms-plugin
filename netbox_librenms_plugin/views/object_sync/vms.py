@@ -1,3 +1,5 @@
+import copy
+
 from django.urls import reverse
 from utilities.views import ViewTab, register_model_view
 from virtualization.models import VirtualMachine
@@ -26,15 +28,21 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
         """Return interface sync context for the virtual machine."""
         interface_name_field = get_interface_name_field(request)
         interface_sync_view = VMInterfaceTableView()
+        interface_sync_view.request = copy.copy(request)
         return interface_sync_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
         """Return None; VMs do not support cable sync."""
         return None  # VMs do not expose cable sync data
 
+    def get_vlan_context(self, request, obj):
+        """VMs do not support VLAN sync."""
+        return None
+
     def get_ip_context(self, request, obj):
         """Return IP address sync context for the virtual machine."""
         ipaddress_sync_view = VMIPAddressTableView()
+        ipaddress_sync_view.request = copy.copy(request)
         return ipaddress_sync_view.get_context_data(request, obj)
 
 

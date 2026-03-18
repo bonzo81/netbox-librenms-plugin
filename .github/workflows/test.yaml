@@ -39,17 +39,17 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           path: netbox-librenms-plugin
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Checkout NetBox
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: "netbox-community/netbox"
           path: netbox
@@ -59,7 +59,7 @@ jobs:
         working-directory: netbox-librenms-plugin
         run: |
           pip install -e .
-          pip install pytest pytest-django
+          pip install pytest pytest-django pytest-cov
 
       - name: Set up configuration
         working-directory: netbox
@@ -75,4 +75,14 @@ jobs:
         env:
           NETBOX_CONFIGURATION: netbox.configuration
         run: |
-          python -m pytest ../../netbox-librenms-plugin/netbox_librenms_plugin/tests/ -v
+          python -m pytest ../../netbox-librenms-plugin/netbox_librenms_plugin/tests/ -v \
+            --cov=netbox_librenms_plugin \
+            --cov-report=html:../../netbox-librenms-plugin/coverage_html \
+            --cov-report=term-missing
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-report
+          path: netbox-librenms-plugin/coverage_html/

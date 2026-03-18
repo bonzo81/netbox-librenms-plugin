@@ -1,4 +1,5 @@
-"""Tests for netbox_librenms_plugin.utils module.
+"""
+Tests for netbox_librenms_plugin.utils module.
 
 Phase 2 tests covering device type matching, site matching,
 platform matching, and conversion helper functions.
@@ -345,6 +346,68 @@ class TestVirtualChassisHelpers:
         result = get_librenms_sync_device(mock_device)
 
         assert result == mock_member_with_id
+
+    def test_get_librenms_sync_device_member_with_id_preferred(self):
+        """A VC member with librenms_id set is preferred over members without."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        member_a = MagicMock()
+        member_a.cf = {}
+
+        member_b = MagicMock()
+        member_b.cf = {"librenms_id": 42}
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device)
+
+        assert result == member_b
+
+    def test_get_librenms_sync_device_fallback_to_master_with_ip(self):
+        """When no member has librenms_id, fall back to master with primary IP."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        member_a = MagicMock()
+        member_a.cf = {}
+        member_a.primary_ip = MagicMock()
+
+        member_b = MagicMock()
+        member_b.cf = {}
+        member_b.primary_ip = None
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.master = member_a
+        mock_device.virtual_chassis.master.primary_ip = MagicMock()
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device)
+
+        assert result == member_a
+
+    def test_get_librenms_sync_device_fallback_to_any_member_with_ip(self):
+        """When no member has librenms_id and master has no IP, fall back to any member with IP."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        member_a = MagicMock()
+        member_a.cf = {}
+        member_a.primary_ip = None
+
+        member_b = MagicMock()
+        member_b.cf = {}
+        member_b.primary_ip = MagicMock()
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.master = member_a
+        mock_device.virtual_chassis.master.primary_ip = None
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device)
+
+        assert result == member_b
 
 
 # =============================================================================
