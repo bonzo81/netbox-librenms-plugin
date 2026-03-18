@@ -91,7 +91,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         cf, created = CustomField.objects.get_or_create(
             name="librenms_id",
             defaults={
-                "type": "integer",
+                "type": "json",
                 "label": "LibreNMS ID",
                 "description": "LibreNMS Device ID for synchronization (auto-created by plugin)",
                 "required": False,

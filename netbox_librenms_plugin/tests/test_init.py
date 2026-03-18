@@ -46,7 +46,7 @@ class TestEnsureLibreNMSIdCustomField:
         MockCustomField.objects.get_or_create.assert_called_once_with(
             name="librenms_id",
             defaults={
-                "type": "integer",
+                "type": "json",
                 "label": "LibreNMS ID",
                 "description": "LibreNMS Device ID for synchronization (auto-created by plugin)",
                 "required": False,
