@@ -458,6 +458,11 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
     const saveBtn = document.getElementById('saveVlanGroups');
     _vlanVerifyStart(saveBtn);
 
+    // Capture safeName before the async fetch to avoid stale closure if the modal
+    // is opened for a different interface while this request is in flight.
+    const modal = document.getElementById('vlanDetailModal');
+    const capturedSafeName = modal?.dataset.currentSafeName;
+
     fetch('/plugins/librenms_plugin/verify-vlan-group/', {
         method: 'POST',
         headers: {
@@ -506,10 +511,8 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
                 }
 
                 // Update the css in the source edit button's data-vlans
-                const modal = document.getElementById('vlanDetailModal');
-                const safeName = modal?.dataset.currentSafeName;
-                if (safeName) {
-                    const btn = document.querySelector(`.vlan-edit-btn[data-safe-name="${safeName}"]`);
+                if (capturedSafeName) {
+                    const btn = document.querySelector(`.vlan-edit-btn[data-safe-name="${capturedSafeName}"]`);
                     if (btn) {
                         try {
                             const btnVlans = JSON.parse(btn.dataset.vlans);
@@ -1572,6 +1575,9 @@ function initializeModuleReplaceButtons() {
             // Fetch preview content and inject into modal body
             fetch(`${previewUrl}?${params.toString()}`, {
                 signal,
+                headers: {
+                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+                },
             })
                 .then(response => {
                     if (!response.ok) return response.text().then(t => { throw new Error(t); });
@@ -1581,6 +1587,7 @@ function initializeModuleReplaceButtons() {
                     const modalBody = document.getElementById('htmx-modal-body');
                     if (modalBody) {
                         modalBody.innerHTML = html;
+                        htmx.process(modalBody);
                     }
                 })
                 .catch(err => {

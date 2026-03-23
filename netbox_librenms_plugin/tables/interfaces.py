@@ -47,7 +47,7 @@ class LibreNMSInterfaceTable(tables.Table):
             "id": "librenms-interface-table",
         }
 
-    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, server_key="default", **kwargs):
+    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, server_key=None, **kwargs):
         """Initialize table with device context and interface name field."""
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()

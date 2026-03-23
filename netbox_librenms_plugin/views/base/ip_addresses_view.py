@@ -408,7 +408,10 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         POST request to return json response with formatted IP address status.
         """
         try:
-            data = json.loads(request.body)
+            try:
+                data = json.loads(request.body)
+            except json.JSONDecodeError as e:
+                return JsonResponse({"status": "error", "message": f"Invalid JSON: {e}"}, status=400)
             ip_address = data.get("ip_address")
             vrf_id = data.get("vrf_id")
             object_id = data.get("device_id")
