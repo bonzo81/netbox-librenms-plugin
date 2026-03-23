@@ -199,6 +199,47 @@ class MockLibreNMSServer:
     def auth_error_response(self, path="/api/v0/devices"):
         self.register(path, {"status": "error", "message": "Authentication failed"}, status=401)
 
+    def inventory_response(self, device_id: int, items: list, status: int = 200):
+        """Register a plain inventory response for /api/v0/inventory/{device_id}/all."""
+        self.register(
+            f"/api/v0/inventory/{device_id}/all",
+            {"status": "ok", "inventory": items},
+            status=status,
+        )
+
+    def vc_inventory_callable(self, device_id: int, root_items: list, children_by_parent_index: dict):
+        """
+        Register a callable route for VC detection two-call pattern.
+
+        detect_virtual_chassis_from_inventory() calls get_inventory_filtered() twice:
+          1. entPhysicalContainedIn=0 → root items
+          2. entPhysicalClass=chassis&entPhysicalContainedIn=<parent_index> → member chassis items
+
+        children_by_parent_index: dict mapping parent index (int) → list of chassis items
+        """
+        root = root_items
+        children = children_by_parent_index
+
+        def _handler(method, path, query, headers, body):
+            contained_in = query.get("entPhysicalContainedIn", [None])[0]
+            if contained_in == "0":
+                return 200, {"status": "ok", "inventory": root}
+            if contained_in is not None:
+                try:
+                    idx = int(contained_in)
+                except (TypeError, ValueError):
+                    return 404, {"status": "error", "message": "bad contained_in"}
+                items = children.get(idx, [])
+                return 200, {"status": "ok", "inventory": items}
+            # No filter → return all (fallback for /all)
+            all_items = list(root)
+            for v in children.values():
+                all_items.extend(v)
+            return 200, {"status": "ok", "inventory": all_items}
+
+        self.routes[f"/api/v0/inventory/{device_id}"] = _handler
+        self.routes[f"/api/v0/inventory/{device_id}/all"] = _handler
+
 
 @contextmanager
 def librenms_mock_server():

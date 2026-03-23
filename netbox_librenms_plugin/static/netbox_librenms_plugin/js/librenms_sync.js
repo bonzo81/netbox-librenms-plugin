@@ -441,8 +441,22 @@ function updateHiddenVlanGroupInput(safeName, vid, groupId) {
  * @param {string} vlanType - "U" for untagged, "T" for tagged
  * @param {string} groupId - Selected group ID
  */
+let pendingVlanVerifications = 0;
+
+function _vlanVerifyStart(saveBtn) {
+    pendingVlanVerifications++;
+    if (saveBtn) saveBtn.disabled = true;
+}
+
+function _vlanVerifyEnd(saveBtn) {
+    pendingVlanVerifications = Math.max(0, pendingVlanVerifications - 1);
+    if (saveBtn && pendingVlanVerifications === 0) saveBtn.disabled = false;
+}
+
 function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
-    if (!deviceId) return;
+
+    const saveBtn = document.getElementById('saveVlanGroups');
+    _vlanVerifyStart(saveBtn);
 
     fetch('/plugins/librenms_plugin/verify-vlan-group/', {
         method: 'POST',
@@ -458,7 +472,12 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             vlan_type: vlanType
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(t => { throw new Error(t || `HTTP ${response.status}`); });
+            }
+            return response.json();
+        })
         .then(data => {
             if (data.status === 'success') {
                 const newCss = data.css_class || 'text-danger';
@@ -505,8 +524,12 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
                 }
             }
         })
-        .catch(error => {
-            console.error('VLAN verification error:', error);
+        .catch(err => {
+            console.error('VLAN group verify failed:', err);
+        })
+        .finally(() => {
+            const saveBtn = document.getElementById('saveVlanGroups');
+            _vlanVerifyEnd(saveBtn);
         });
 }
 
@@ -544,74 +567,80 @@ function initializeVlanModalSave() {
             ? document.querySelectorAll('.vlan-edit-btn')
             : document.querySelectorAll(`.vlan-edit-btn[data-safe-name="${currentSafeName}"]`);
 
-        buttonsToUpdate.forEach(btn => {
-            try {
-                const btnVlans = JSON.parse(btn.dataset.vlans);
-                const groups = JSON.parse(btn.dataset.vlanGroups);
-                const btnSafeName = btn.dataset.safeName;
-                let changed = false;
+        // Apply DOM mutations (btn.dataset.vlans, hidden inputs, summary spans)
+        // Called only after a successful server response when persisting, or immediately otherwise.
+        function applyButtonUpdates() {
+            buttonsToUpdate.forEach(btn => {
+                try {
+                    const btnVlans = JSON.parse(btn.dataset.vlans);
+                    const groups = JSON.parse(btn.dataset.vlanGroups);
+                    const btnSafeName = btn.dataset.safeName;
+                    let changed = false;
 
-                btnVlans.forEach(v => {
-                    if (vidGroupMap.hasOwnProperty(String(v.vid))) {
-                        const newGroupId = vidGroupMap[String(v.vid)];
-                        v.group_id = newGroupId;
-                        if (v.missing) {
-                            v.group_name = 'Not in NetBox';
-                        } else {
-                            const matchedGroup = groups.find(g => String(g.id) === String(newGroupId));
-                            v.group_name = matchedGroup ? matchedGroup.name : '-- No Group (Global) --';
+                    btnVlans.forEach(v => {
+                        if (vidGroupMap.hasOwnProperty(String(v.vid))) {
+                            const newGroupId = vidGroupMap[String(v.vid)];
+                            v.group_id = newGroupId;
+
+                            // Apply resolved missing/css state BEFORE computing group_name
+                            // so group_name reflects the verified state from the server.
+                            if (vidCssMap.hasOwnProperty(String(v.vid))) {
+                                v.css = vidCssMap[String(v.vid)];
+                                v.missing = vidMissingMap[String(v.vid)] || false;
+                            }
+
+                            if (v.missing) {
+                                v.group_name = 'Not in NetBox';
+                            } else {
+                                const matchedGroup = groups.find(g => String(g.id) === String(newGroupId));
+                                v.group_name = matchedGroup ? matchedGroup.name : '-- No Group (Global) --';
+                            }
+
+                            changed = true;
+
+                            // Update the hidden input for this VID on this interface
+                            const input = document.querySelector(
+                                `input.vlan-group-hidden[name="vlan_group_${btnSafeName}_${v.vid}"]`
+                            );
+                            if (input) {
+                                input.value = newGroupId;
+                            }
                         }
+                    });
 
-                        // Apply resolved CSS from verify endpoint if available
-                        if (vidCssMap.hasOwnProperty(String(v.vid))) {
-                            v.css = vidCssMap[String(v.vid)];
-                            v.missing = vidMissingMap[String(v.vid)] || false;
-                        }
+                    if (changed) {
+                        btn.dataset.vlans = JSON.stringify(btnVlans);
+                        // Update the tooltip and re-render inline summary colors
+                        const summarySpan = btn.previousElementSibling;
+                        if (summarySpan && summarySpan.tagName === 'SPAN') {
+                            const tooltipLines = btnVlans.map(v =>
+                                v.missing
+                                    ? `VLAN ${v.vid}(${v.type}) \u2192 \u26A0 Not in NetBox`
+                                    : `VLAN ${v.vid}(${v.type}) \u2192 ${v.group_name}`
+                            );
+                            summarySpan.title = tooltipLines.join('\n');
 
-                        changed = true;
-
-                        // Update the hidden input for this VID on this interface
-                        const input = document.querySelector(
-                            `input.vlan-group-hidden[name="vlan_group_${btnSafeName}_${v.vid}"]`
-                        );
-                        if (input) {
-                            input.value = newGroupId;
+                            // Re-render inline VLAN summary with correct colors
+                            const MAX_INLINE = 3;
+                            const inlineParts = btnVlans.slice(0, MAX_INLINE).map(v => {
+                                const warning = v.missing
+                                    ? ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>'
+                                    : '';
+                                return `<span class="${v.css}">${v.vid}(${v.type})${warning}</span>`;
+                            });
+                            let html = inlineParts.join(', ');
+                            if (btnVlans.length > MAX_INLINE) {
+                                const extra = btnVlans.length - MAX_INLINE;
+                                html += ` <span class="text-muted">+${extra} more</span>`;
+                            }
+                            summarySpan.innerHTML = html;
                         }
                     }
-                });
-
-                if (changed) {
-                    btn.dataset.vlans = JSON.stringify(btnVlans);
-                    // Update the tooltip and re-render inline summary colors
-                    const summarySpan = btn.previousElementSibling;
-                    if (summarySpan && summarySpan.tagName === 'SPAN') {
-                        const tooltipLines = btnVlans.map(v =>
-                            v.missing
-                                ? `VLAN ${v.vid}(${v.type}) \u2192 \u26A0 Not in NetBox`
-                                : `VLAN ${v.vid}(${v.type}) \u2192 ${v.group_name}`
-                        );
-                        summarySpan.title = tooltipLines.join('\n');
-
-                        // Re-render inline VLAN summary with correct colors
-                        const MAX_INLINE = 3;
-                        const inlineParts = btnVlans.slice(0, MAX_INLINE).map(v => {
-                            const warning = v.missing
-                                ? ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>'
-                                : '';
-                            return `<span class="${v.css}">${v.vid}(${v.type})${warning}</span>`;
-                        });
-                        let html = inlineParts.join(', ');
-                        if (btnVlans.length > MAX_INLINE) {
-                            const extra = btnVlans.length - MAX_INLINE;
-                            html += ` <span class="text-muted">+${extra} more</span>`;
-                        }
-                        summarySpan.innerHTML = html;
-                    }
+                } catch (e) {
+                    // Skip buttons with invalid data
                 }
-            } catch (e) {
-                // Skip buttons with invalid data
-            }
-        });
+            });
+        }
 
         // Persist overrides in server cache so other table pages pick them up
         if (applyToAll && Object.keys(vidGroupMap).length > 0) {
@@ -624,7 +653,8 @@ function initializeVlanModalSave() {
                 },
                 body: JSON.stringify({
                     device_id: deviceId,
-                    vid_group_map: vidGroupMap
+                    vid_group_map: vidGroupMap,
+                    server_key: document.querySelector('input[name="server_key"]')?.value || null
                 })
             }).then(response => {
                 if (!response.ok) {
@@ -634,6 +664,8 @@ function initializeVlanModalSave() {
                         throw new Error(msg);
                     });
                 }
+                // Apply DOM mutations only after the server has persisted the overrides
+                applyButtonUpdates();
                 // Close modal only on success
                 const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
                 if (closeBtn) {
@@ -650,7 +682,8 @@ function initializeVlanModalSave() {
                 alertEl.textContent = 'Failed to save VLAN group overrides: ' + error.message;
             });
         } else {
-            // No server persist needed — close immediately
+            // No server persist needed — apply DOM mutations and close immediately
+            applyButtonUpdates();
             const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
             if (closeBtn) {
                 closeBtn.click();
@@ -774,7 +807,8 @@ function handleVRFChange(select, value) {
         body: JSON.stringify({
             device_id: deviceId,
             ip_address: fullIpAddress,  // Use full IP address with prefix
-            vrf_id: value
+            vrf_id: value,
+            server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
         .then(response => {
@@ -813,7 +847,8 @@ function handleInterfaceChange(select, value) {
         body: JSON.stringify({
             device_id: value,
             interface_name: select.dataset.interface,
-            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null
+            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
+            server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
         .then(response => {
@@ -859,7 +894,8 @@ function handleCableChange(select, value) {
         },
         body: JSON.stringify({
             device_id: value,
-            local_port_id: select.dataset.interface
+            local_port_id: select.dataset.interface,
+            server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
         .then(response => {
@@ -1434,6 +1470,155 @@ function initializeSyncFormSpinners() {
     });
 }
 
+
+/**
+ * Wire the "Install Selected" form to collect checked module-table rows before submit.
+ * The form is separate from the table (to avoid nested forms), so we copy the
+ * selected checkbox values into hidden inputs just before the form is submitted.
+ * Guard against duplicate listeners on repeated HTMX swaps via a data attribute.
+ */
+function handleInstallSelectedSubmit() {
+    // Remove any previously-injected hidden inputs to avoid duplicates
+    const form = document.getElementById('install-selected-form');
+    if (!form) return;
+    form.querySelectorAll('input[data-injected-select]').forEach(el => { el.remove(); });
+
+    const table = document.getElementById('librenms-module-table');
+    if (!table) return;
+
+    table.querySelectorAll('input[name="select"]:checked').forEach(cb => {
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'select';
+        hidden.value = cb.value;
+        hidden.dataset.injectedSelect = '1';
+        form.appendChild(hidden);
+    });
+}
+
+function initializeInstallSelectedForm() {
+    const form = document.getElementById('install-selected-form');
+    if (!form) return;
+    if (form.dataset.installInit) return;
+    form.dataset.installInit = 'true';
+    form.addEventListener('submit', handleInstallSelectedSubmit);
+}
+
+/**
+ * Tracks the in-flight AbortController for the module replace preview fetch.
+ * Cancelled when a new Replace button is clicked before the previous fetch completes.
+ */
+let _activeReplaceController = null;
+
+/**
+ * Initialize Replace buttons on the module sync table.
+ * Each button carries module/ent_index/server_key as data attributes and opens
+ * the mismatch comparison modal by fetching the preview fragment from the server.
+ */
+function initializeModuleReplaceButtons() {
+    document.querySelectorAll('.module-replace-btn').forEach(btn => {
+        if (btn.dataset.replaceInitialized) return;
+        btn.dataset.replaceInitialized = 'true';
+
+        btn.addEventListener('click', function () {
+            // Cancel any in-flight preview request before starting a new one
+            if (_activeReplaceController) {
+                _activeReplaceController.abort();
+            }
+            _activeReplaceController = new AbortController();
+            const signal = _activeReplaceController.signal;
+
+            const previewUrl = this.dataset.previewUrl;
+            const moduleId = this.dataset.moduleId;
+            const entIndex = this.dataset.entIndex;
+            const serverKey = this.dataset.serverKey;
+
+            const params = new URLSearchParams({
+                module_id: moduleId,
+                ent_index: entIndex,
+                server_key: serverKey,
+            });
+
+            // Show shared HTMX modal with loading state
+            const modalContent = document.getElementById('htmx-modal-content');
+            if (modalContent) {
+                modalContent.innerHTML =
+                    '<div class="modal-header">' +
+                    '<h5 class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
+                    '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
+                    '</div>' +
+                    '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
+                    '<i class="mdi mdi-loading mdi-spin mdi-36px"></i>' +
+                    '<p class="mt-2">Loading\u2026</p>' +
+                    '</div>';
+            }
+
+            // Show modal using direct class manipulation (consistent with openBulkVCModal)
+            const htmxModal = document.getElementById('htmx-modal');
+            if (htmxModal) {
+                htmxModal.classList.add('show');
+                htmxModal.style.display = 'block';
+                htmxModal.setAttribute('aria-modal', 'true');
+                htmxModal.removeAttribute('aria-hidden');
+                let backdrop = document.querySelector('.modal-backdrop');
+                if (!backdrop) {
+                    backdrop = document.createElement('div');
+                    backdrop.className = 'modal-backdrop fade show';
+                    document.body.appendChild(backdrop);
+                }
+                document.body.classList.add('modal-open');
+            }
+
+            // Fetch preview content and inject into modal body
+            fetch(`${previewUrl}?${params.toString()}`, {
+                signal,
+            })
+                .then(response => {
+                    if (!response.ok) return response.text().then(t => { throw new Error(t); });
+                    return response.text();
+                })
+                .then(html => {
+                    const modalBody = document.getElementById('htmx-modal-body');
+                    if (modalBody) {
+                        modalBody.innerHTML = html;
+                    }
+                })
+                .catch(err => {
+                    if (err.name === 'AbortError') return; // Superseded by a newer click — ignore
+                    const modalBody = document.getElementById('htmx-modal-body');
+                    if (modalBody) {
+                        const alert = document.createElement('div');
+                        alert.className = 'alert alert-danger';
+                        const icon = document.createElement('i');
+                        icon.className = 'mdi mdi-alert me-1';
+                        alert.appendChild(icon);
+                        alert.appendChild(document.createTextNode(err.message || 'Failed to load preview.'));
+                        modalBody.textContent = '';
+                        modalBody.appendChild(alert);
+                    }
+                });
+        });
+    });
+}
+
+function closeHtmxModal() {
+    // Abort any in-flight module-replace preview request
+    if (typeof _activeReplaceController !== 'undefined' && _activeReplaceController) {
+        _activeReplaceController.abort();
+        _activeReplaceController = null;
+    }
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal) {
+        htmxModal.classList.remove('show');
+        htmxModal.style.display = 'none';
+        htmxModal.setAttribute('aria-hidden', 'true');
+        htmxModal.removeAttribute('aria-modal');
+        const backdrop = document.querySelector('.modal-backdrop');
+        if (backdrop) backdrop.remove();
+        document.body.classList.remove('modal-open');
+    }
+}
+
 // ============================================
 // INITIALIZATION
 // ============================================
@@ -1458,6 +1643,8 @@ function initializeScripts() {
     initializeNetBoxOnlyInterfaces();
     initializeSyncFormSpinners();
     initializeVlanSyncGroupSelects();
+    initializeInstallSelectedForm();
+    initializeModuleReplaceButtons();
 }
 
 

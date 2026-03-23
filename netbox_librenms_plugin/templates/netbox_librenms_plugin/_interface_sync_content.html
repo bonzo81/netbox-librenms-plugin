@@ -9,6 +9,7 @@
     action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
     {% endwith %}
     {% csrf_token %}
+    {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
     {% block table_actions %}
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>

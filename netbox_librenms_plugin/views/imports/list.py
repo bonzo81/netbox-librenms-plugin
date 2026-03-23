@@ -122,6 +122,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         if not validated_devices and device_ids:
             logger.error(f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache.")
+        else:
+            # Mirror the job's naming settings so toggle state matches the cached results
+            self._use_sysname = use_sysname
+            self._strip_domain = strip_domain
 
         return validated_devices
 
@@ -142,10 +146,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         # queryset loading) use the same use_sysname/strip_domain values.
         # Cascade: user preference → plugin settings → defaults.
         try:
-            settings_obj, _ = LibreNMSSettings.objects.get_or_create()
+            settings_obj = LibreNMSSettings.objects.first()
         except Exception:
             logger.exception(
-                "Failed to get or create LibreNMSSettings during LibreNMS import for user %s",
+                "Failed to read LibreNMSSettings during LibreNMS import for user %s",
                 getattr(request, "user", None),
             )
             settings_obj = None

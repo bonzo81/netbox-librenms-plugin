@@ -131,6 +131,7 @@
         hx-target="body"
         hx-swap="none">
     {% csrf_token %}
+    <input type="hidden" name="server_key" value="{{ server_key }}">
     {% for entry in devices %}
       <input type="hidden" name="select" value="{{ entry.device_id }}">
       {% if entry.role %}<input type="hidden" name="role_{{ entry.device_id }}" value="{{ entry.role.pk }}">{% endif %}

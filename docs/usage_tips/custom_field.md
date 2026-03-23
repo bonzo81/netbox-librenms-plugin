@@ -38,7 +38,16 @@ Follow these steps to create the `librenms_id` custom field in NetBox:
     - **Name:** `librenms_id`
     - **Label:** `LibreNMS ID`
     - **Description:** (Optional) Add a description like "LibreNMS Device ID for synchronization".
-    - **Type:** Integer
+    - **Type:** JSON (object) — stores a per-server mapping.
+      - Multi-server example:
+        ```json
+        {"production": 42, "staging": 17}
+        ```
+      - Legacy single-server example (integer) — read-only/deprecated; do not use for new entries:
+        ```
+        42
+        ```
+        > Note: to create new entries manually use the JSON format shown above.
     - **Required:** Leave unchecked (optional).
     - **Default Value:** Leave blank.
 
@@ -61,7 +70,11 @@ You can manually assign a value to the `librenms_id` custom field for a device u
 2. **Set the LibreNMS ID:**
 
     - Scroll to the **Custom Fields** section.
-    - Enter the LibreNMS device ID in the `librenms_id` field.
+    - Enter the `librenms_id` value as a JSON object with your server key(s):
+      ```json
+      {"production": 42}
+      ```
+      For multiple servers: `{"production": 42, "staging": 17}`
 
 3. **Save Changes:**
 

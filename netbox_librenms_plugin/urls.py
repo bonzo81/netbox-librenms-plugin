@@ -30,6 +30,7 @@ from .views import (
     InterfaceTypeMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
+    RemoveServerMappingView,
     SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -52,6 +53,7 @@ from .views import (
     VMIPAddressTableView,
     VMLibreNMSSyncView,
     VMStatusListView,
+    ConvertLegacyLibreNMSIdView,
 )
 
 urlpatterns = [
@@ -220,6 +222,16 @@ urlpatterns = [
         "devices/<int:pk>/assign-vc-serial/",
         AssignVCSerialView.as_view(),
         name="assign_vc_serial",
+    ),
+    path(
+        "devices/<int:pk>/remove-server-mapping/",
+        RemoveServerMappingView.as_view(),
+        name="remove_server_mapping",
+    ),
+    path(
+        "devices/<int:pk>/convert-legacy-id/",
+        ConvertLegacyLibreNMSIdView.as_view(),
+        name="convert_legacy_librenms_id",
     ),
     path(
         "device-status/",

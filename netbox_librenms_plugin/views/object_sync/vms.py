@@ -29,21 +29,21 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
         interface_name_field = get_interface_name_field(request)
         interface_sync_view = VMInterfaceTableView()
         interface_sync_view.request = copy.copy(request)
-        return interface_sync_view.get_context_data(request, obj, interface_name_field)
+        return interface_sync_view.get_context_data(interface_sync_view.request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
         """Return None; VMs do not support cable sync."""
         return None  # VMs do not expose cable sync data
 
     def get_vlan_context(self, request, obj):
-        """VMs do not support VLAN sync."""
+        """Return None; VMs do not support VLAN sync."""
         return None
 
     def get_ip_context(self, request, obj):
         """Return IP address sync context for the virtual machine."""
         ipaddress_sync_view = VMIPAddressTableView()
         ipaddress_sync_view.request = copy.copy(request)
-        return ipaddress_sync_view.get_context_data(request, obj)
+        return ipaddress_sync_view.get_context_data(ipaddress_sync_view.request, obj)
 
 
 class VMInterfaceTableView(BaseInterfaceTableView):
@@ -53,7 +53,13 @@ class VMInterfaceTableView(BaseInterfaceTableView):
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """Return a VM interface table for the given data."""
-        return LibreNMSVMInterfaceTable(data, device=obj, vlan_groups=vlan_groups)
+        return LibreNMSVMInterfaceTable(
+            data,
+            device=obj,
+            vlan_groups=vlan_groups,
+            server_key=self.librenms_api.server_key,
+            interface_name_field=interface_name_field,
+        )
 
     def get_interfaces(self, obj):
         """Return all interfaces for the virtual machine."""

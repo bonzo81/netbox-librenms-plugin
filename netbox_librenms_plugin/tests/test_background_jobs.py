@@ -225,6 +225,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = [{"device_id": 1, "hostname": "test1"}]
 
@@ -251,6 +252,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
 
         mock_process.return_value = [
@@ -435,7 +437,9 @@ class TestImportDevicesJob:
         """Import both devices and VMs."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        mock_api_instance = MagicMock()
+        mock_api_instance.server_key = "default"
+        mock_api_class.return_value = mock_api_instance
 
         # Mock device imports
         mock_device = MagicMock()
@@ -446,6 +450,7 @@ class TestImportDevicesJob:
             "failed": [],
             "skipped": [],
             "virtual_chassis_created": 0,
+            "cancelled": False,
         }
 
         # Mock VM imports
@@ -469,6 +474,10 @@ class TestImportDevicesJob:
         # Both should be called
         mock_bulk_devices.assert_called_once()
         mock_bulk_vms.assert_called_once()
+
+        # Verify server_key is forwarded to bulk_import_devices_shared
+        bulk_devices_kwargs = mock_bulk_devices.call_args[1]
+        assert bulk_devices_kwargs.get("server_key") == "default"
 
         # Verify combined results
         assert job.job.data["imported_device_pks"] == [100]
@@ -686,6 +695,8 @@ class TestLoadJobResults:
             "vc_detection_enabled": True,
             "cached_at": "2026-01-20T10:00:00Z",
             "cache_timeout": 600,
+            "use_sysname": True,
+            "strip_domain": False,
         }
         mock_job_class.objects.get.return_value = mock_job
 
@@ -738,6 +749,8 @@ class TestLoadJobResults:
             "vc_detection_enabled": False,
             "cached_at": "2026-01-20T10:00:00Z",
             "cache_timeout": 300,
+            "use_sysname": True,
+            "strip_domain": False,
         }
         mock_job_class.objects.get.return_value = mock_job
         mock_get_key.return_value = "test_key"

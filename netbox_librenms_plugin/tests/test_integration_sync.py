@@ -347,3 +347,52 @@ class TestLibreNMSAPIDiscovery:
                     result = api.get_librenms_id(obj)
 
         assert result == 42
+
+
+class TestLibreNMSAPIErrorResponses:
+    """Integration tests: API client handles unusual server responses gracefully."""
+
+    def test_401_returns_false(self, mock_server):
+        """HTTP 401 Unauthorized must return (False, ...) not raise."""
+        api = _make_api(mock_server.url)
+        mock_server.register("/api/v0/devices", {"message": "Unauthorized"}, status=401)
+        success, data = api.list_devices()
+        assert success is False
+
+    def test_500_returns_false(self, mock_server):
+        """HTTP 500 must return (False, ...) not raise."""
+        api = _make_api(mock_server.url)
+        mock_server.register("/api/v0/devices", {"message": "Internal error"}, status=500)
+        success, data = api.list_devices()
+        assert success is False
+
+    def test_null_inventory_returns_false(self, mock_server):
+        """{"status":"ok","inventory":null} must not raise, must return (False, ...)."""
+        api = _make_api(mock_server.url)
+        mock_server.register("/api/v0/inventory/1/all", {"status": "ok", "inventory": None})
+        success, data = api.get_device_inventory(1)
+        assert success is False
+
+    def test_null_devices_field_get_device_info(self, mock_server):
+        """{"devices": null} in get_device_info must return (False, None) not crash."""
+        api = _make_api(mock_server.url)
+        mock_server.register("/api/v0/devices/42", {"devices": None})
+        success, data = api.get_device_info(42)
+        assert success is False
+        assert data is None
+
+    def test_empty_devices_list_get_device_info(self, mock_server):
+        """{"devices": []} in get_device_info must return (False, None)."""
+        api = _make_api(mock_server.url)
+        mock_server.register("/api/v0/devices/42", {"devices": []})
+        success, data = api.get_device_info(42)
+        assert success is False
+        assert data is None
+
+    def test_404_get_device_info(self, mock_server):
+        """404 on device endpoint must return (False, None)."""
+        api = _make_api(mock_server.url)
+        mock_server.register("/api/v0/devices/99", {"message": "Device not found"}, status=404)
+        success, data = api.get_device_info(99)
+        assert success is False
+        assert data is None

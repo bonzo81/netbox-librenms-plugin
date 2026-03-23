@@ -64,13 +64,14 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             return False, f"Failed to fetch VLANs: {vlans_data}"
 
         # Cache VLANs
+        server_key = self.librenms_api.server_key
         cache.set(
-            self.get_cache_key(obj, "vlans"),
+            self.get_cache_key(obj, "vlans", server_key),
             vlans_data,
             timeout=self.librenms_api.cache_timeout,
         )
         cache.set(
-            self.get_last_fetched_key(obj, "vlans"),
+            self.get_last_fetched_key(obj, "vlans", server_key),
             timezone.now(),
             timeout=self.librenms_api.cache_timeout,
         )
@@ -88,8 +89,9 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         vlan_table = None
 
         # Get cached data
-        cached_vlans = cache.get(self.get_cache_key(obj, "vlans"))
-        last_fetched = cache.get(self.get_last_fetched_key(obj, "vlans"))
+        server_key = getattr(self.librenms_api, "server_key", None)
+        cached_vlans = cache.get(self.get_cache_key(obj, "vlans", server_key))
+        last_fetched = cache.get(self.get_last_fetched_key(obj, "vlans", server_key))
 
         # Get available VLAN groups for this device
         vlan_groups = self.get_vlan_groups_for_device(obj)
@@ -105,8 +107,8 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             vlan_table.configure(request)
 
         # Calculate cache TTL
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans"))
-        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans", server_key))
+        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl and cache_ttl > 0 else None
 
         return {
             "object": obj,
@@ -114,6 +116,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             "vlan_groups": vlan_groups,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
+            "server_key": server_key,
         }
 
     def _get_error_context(self, obj, error_message):
@@ -123,6 +126,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             "error_message": error_message,
             "vlan_table": None,
             "vlan_groups": self.get_vlan_groups_for_device(obj),
+            "server_key": getattr(self.librenms_api, "server_key", None),
         }
 
     def compare_vlans(self, librenms_vlans, lookup_maps=None, device=None):
