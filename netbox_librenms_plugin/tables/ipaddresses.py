@@ -1,5 +1,5 @@
 import django_tables2 as tables
-from django.utils.html import format_html
+from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
@@ -91,14 +91,14 @@ class IPAddressTable(tables.Table):
                 record["ip_address"],
             )
         elif value == "matched":
-            return format_html('<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>')
+            return mark_safe('<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>')
         elif record.get("interface_url"):
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-primary" onclick="document.getElementById(\'selected_ip\').value=\'{}\'">'
                 '<i class="mdi mdi-plus-thick" aria-hidden="true"></i> Create</button>',
                 record["ip_address"],
             )
-        return format_html('<span class="text-muted">Missing NetBox Object</span>')
+        return mark_safe('<span class="text-muted">Missing NetBox Object</span>')
 
     def render_device(self, value, record):
         """Render the device column with a link if available"""

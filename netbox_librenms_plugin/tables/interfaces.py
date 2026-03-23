@@ -13,6 +13,7 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     format_mac_address,
     get_interface_name_field,
+    get_librenms_device_id,
     get_missing_vlan_warning,
     get_table_paginate_count,
     get_tagged_vlan_css_class,
@@ -46,11 +47,12 @@ class LibreNMSInterfaceTable(tables.Table):
             "id": "librenms-interface-table",
         }
 
-    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
+    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, server_key="default", **kwargs):
         """Initialize table with device context and interface name field."""
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()
         self.vlan_groups = vlan_groups or []
+        self.server_key = server_key
 
         # Update column accessors after initialization
         for column in ["selection", "name"]:
@@ -149,7 +151,7 @@ class LibreNMSInterfaceTable(tables.Table):
             all_vlans.append(("T", vid))
 
         if not all_vlans:
-            return format_html("—")
+            return mark_safe("—")
 
         interface_name = record.get(self.interface_name_field, "")
         safe_name = interface_name.replace("/", "_").replace(":", "_")
@@ -360,7 +362,7 @@ class LibreNMSInterfaceTable(tables.Table):
         if not netbox_interface:
             return mark_safe(f'<span class="text-danger">{value}</span>')
 
-        netbox_librenms_id = netbox_interface.custom_field_data.get("librenms_id")
+        netbox_librenms_id = get_librenms_device_id(netbox_interface, self.server_key, auto_save=False)
 
         if netbox_librenms_id is None:
             return mark_safe(
@@ -467,7 +469,7 @@ class LibreNMSInterfaceTable(tables.Table):
             )
         else:
             display = value
-            icon = format_html('<i class="mdi mdi-link-variant-off" title="No mapping to NetBox type"></i>')
+            icon = mark_safe('<i class="mdi mdi-link-variant-off" title="No mapping to NetBox type"></i>')
         return display, icon
 
     def format_interface_data(self, port_data, device):

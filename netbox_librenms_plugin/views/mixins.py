@@ -288,32 +288,42 @@ class CacheMixin:
     A mixin class that provides caching functionality.
     """
 
-    def get_cache_key(self, obj, data_type="ports"):
+    def get_cache_key(self, obj, data_type="ports", server_key=None):
         """
         Get the cache key for the object.
 
         Args:
             obj: The object to cache data for
-            data_type: Type of data being cached ('ports' or 'links')
+            data_type: Type of data being cached ('ports', 'links', 'inventory', etc.)
+            server_key: Optional LibreNMS server key for namespacing per-server data
         """
         model_name = obj._meta.model_name
-        return f"librenms_{data_type}_{model_name}_{obj.pk}"
+        base = f"librenms_{data_type}_{model_name}_{obj.pk}"
+        if server_key:
+            return f"{base}_{server_key}"
+        return base
 
-    def get_last_fetched_key(self, obj, data_type="ports"):
+    def get_last_fetched_key(self, obj, data_type="ports", server_key=None):
         """
         Get the cache key for the last fetched time of the object.
         """
         model_name = obj._meta.model_name
-        return f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
+        base = f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
+        if server_key:
+            return f"{base}_{server_key}"
+        return base
 
-    def get_vlan_overrides_key(self, obj):
+    def get_vlan_overrides_key(self, obj, server_key=None):
         """
         Get the cache key for user VLAN group override selections.
 
         Stores a {vid_str: group_id_str} map so that "apply to all" VLAN
-        group choices persist across table pages.
+        group choices persist across table pages. Including server_key scopes
+        overrides per-server to avoid leakage when multiple servers are configured.
         """
         model_name = obj._meta.model_name
+        if server_key:
+            return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}_{server_key}"
         return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}"
 
 
@@ -413,11 +423,12 @@ class VlanAssignmentMixin:
             group_id = group.pk if group else None
             name = vlan.name
 
-            # Build VID to groups lookup for ambiguity detection
-            if vid not in vid_to_groups:
-                vid_to_groups[vid] = []
-            if group and group not in vid_to_groups[vid]:
-                vid_to_groups[vid].append(group)
+            # Build VID to groups lookup for ambiguity detection (group VLANs only)
+            if group:
+                if vid not in vid_to_groups:
+                    vid_to_groups[vid] = []
+                if group not in vid_to_groups[vid]:
+                    vid_to_groups[vid].append(group)
 
             # Build (vid, group_id) to vlan lookup
             vid_group_to_vlan[(vid, group_id)] = vlan
@@ -559,7 +570,7 @@ class VlanAssignmentMixin:
             return VLANGroup.objects.none()
 
         content_type = ContentType.objects.get_for_model(model_class)
-        object_ids = [obj.pk for obj in objects if obj is not None]
+        object_ids = [obj.pk for obj in objects if obj is not None and obj.pk is not None]
 
         if not object_ids:
             return VLANGroup.objects.none()

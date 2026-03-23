@@ -1,5 +1,5 @@
 import django_tables2 as tables
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
@@ -124,12 +124,30 @@ class LibreNMSVLANTable(tables.Table):
             # Priority 2: unique VID match
             selected_group_id = record["auto_selected_group_id"]
 
-        # Build the select element
-        options = ['<option value="">-- No Group (Global) --</option>']
-        for group in self.vlan_groups:
-            selected = "selected" if group.pk == selected_group_id else ""
-            scope_info = f" ({group.scope})" if group.scope else ""
-            options.append(f'<option value="{group.pk}" {selected}>{group.name}{scope_info}</option>')
+        # Build the select element using format_html_join to prevent XSS
+        options_html = format_html_join(
+            "",
+            '<option value="{}" data-scope="{}"{}>{}{}</option>',
+            [
+                (
+                    "",
+                    "",
+                    "",
+                    "-- No Group (Global) --",
+                    "",
+                ),
+            ]
+            + [
+                (
+                    group.pk,
+                    group.scope_id if group.scope_id else "",
+                    " selected" if group.pk == selected_group_id else "",
+                    group.name,
+                    f" ({group.scope})" if group.scope else "",
+                )
+                for group in self.vlan_groups
+            ],
+        )
 
         select_html = format_html(
             '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'
@@ -137,12 +155,12 @@ class LibreNMSVLANTable(tables.Table):
             vlan_id,
             vlan_id,
             record.get("name", ""),
-            mark_safe("".join(options)),
+            options_html,
         )
 
         # Add warning icon if ambiguous (VID exists in multiple groups at same priority level)
         if record.get("is_ambiguous") and not record.get("exists_in_netbox"):
-            warning_html = format_html(
+            warning_html = mark_safe(
                 '<i class="mdi mdi-alert text-warning ms-1" '
                 'title="VID exists in multiple groups at the same scope level. Please select the target group."></i>'
             )
@@ -153,8 +171,8 @@ class LibreNMSVLANTable(tables.Table):
     def render_state(self, value, record):
         """Render VLAN state (active/inactive)."""
         if value == LIBRENMS_VLAN_STATE_ACTIVE or value == "active":
-            return format_html('<span class="text-success">Active</span>')
-        return format_html('<span class="text-muted">Inactive</span>')
+            return mark_safe('<span class="text-success">Active</span>')
+        return mark_safe('<span class="text-muted">Inactive</span>')
 
     def configure(self, request):
         """Configure the table with pagination."""

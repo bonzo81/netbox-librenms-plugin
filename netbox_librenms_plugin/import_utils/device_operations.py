@@ -14,6 +14,7 @@ from ..utils import (
     find_matching_platform,
     find_matching_site,
     match_librenms_hardware_to_device_type,
+    set_librenms_device_id,
 )
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
@@ -48,7 +49,6 @@ def _try_chassis_device_type_match(api, device_id):
         if not success or not inventory:
             return None
 
-        first_ambiguous_model = None
         for item in inventory:
             # Try entPhysicalName first (often the chassis part number like CHAS-BP-MX480-S)
             for field in ("entPhysicalName", "entPhysicalModelName"):
@@ -56,9 +56,6 @@ def _try_chassis_device_type_match(api, device_id):
                 if value and value not in skip_values:
                     chassis_match = match_librenms_hardware_to_device_type(value)
                     if chassis_match is None:
-                        # MultipleObjectsReturned — ambiguous match; remember first
-                        if first_ambiguous_model is None:
-                            first_ambiguous_model = value
                         continue
                     if chassis_match["matched"]:
                         chassis_match["match_type"] = "chassis"
@@ -66,15 +63,7 @@ def _try_chassis_device_type_match(api, device_id):
                         return chassis_match
     except Exception:
         logger.debug(f"Chassis inventory fallback failed for device {device_id}", exc_info=True)
-        return None
 
-    if first_ambiguous_model is not None:
-        return {
-            "matched": False,
-            "device_type": None,
-            "match_type": "chassis_ambiguous",
-            "chassis_model": first_ambiguous_model,
-        }
     return None
 
 
@@ -143,6 +132,7 @@ def validate_device_for_import(
     force_vc_refresh: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    server_key: str = "default",
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -217,6 +207,7 @@ def validate_device_for_import(
         "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "serial_duplicate": False,  # True when incoming serial is already on a different device
+        "librenms_id_needs_migration": False,  # True when existing device has legacy bare-int ID
         "name_matches": False,  # True when existing device name matches LibreNMS sysName
         "name_sync_available": False,  # True when existing device name differs from sysName
         "suggested_name": None,  # sysName to suggest when name_sync_available is True
@@ -289,10 +280,13 @@ def validate_device_for_import(
 
         from virtualization.models import VirtualMachine
 
+        server_key = api.server_key if api is not None else server_key
+
         # Check for existing VM first (by librenms_id custom field)
-        # Always query with int to match custom field type
         try:
-            existing_vm = VirtualMachine.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
+            from netbox_librenms_plugin.utils import find_by_librenms_id
+
+            existing_vm = find_by_librenms_id(VirtualMachine, librenms_id, server_key)
         except (ValueError, TypeError):
             # librenms_id is not convertible to int; no match will be found
             existing_vm = None
@@ -304,18 +298,29 @@ def validate_device_for_import(
             result["import_as_vm"] = True  # Force VM mode since VM exists
             result["can_import"] = False
 
-            # Check if name matches sysName
-            # Note: name_sync_available/suggested_name are intentionally not set for VMs
-            # because UpdateDeviceNameView only supports Device objects; VM name-sync
-            # would require a separate implementation.
+            # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
+            # Direct access needed to detect legacy format for migration prompt:
+            # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
+            # raw type check on custom_field_data reveals whether migration is needed.
+            _vm_cf_id = existing_vm.custom_field_data.get("librenms_id")
+            if (isinstance(_vm_cf_id, int) and not isinstance(_vm_cf_id, bool)) or (
+                isinstance(_vm_cf_id, str) and _vm_cf_id.isdigit()
+            ):
+                result["librenms_id_needs_migration"] = True
+
+            # Check if name matches resolved name (accounts for use_sysname/strip_domain)
             if hostname and existing_vm.name == hostname:
                 result["name_matches"] = True
+            elif hostname and existing_vm.name != hostname:
+                result["name_sync_available"] = True
+                result["suggested_name"] = hostname
 
         # Check for existing Device (by librenms_id custom field)
-        # Always query with int to match custom field type
         if not result["existing_device"]:
             try:
-                existing_device = Device.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
+                from netbox_librenms_plugin.utils import find_by_librenms_id
+
+                existing_device = find_by_librenms_id(Device, librenms_id, server_key)
             except (ValueError, TypeError):
                 # librenms_id is not convertible to int; no match will be found
                 existing_device = None
@@ -325,6 +330,16 @@ def validate_device_for_import(
                 result["existing_device"] = existing_device
                 result["existing_match_type"] = "librenms_id"
                 result["can_import"] = False
+
+                # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
+                # Direct access needed to detect legacy format for migration prompt:
+                # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
+                # raw type check on custom_field_data reveals whether migration is needed.
+                _dev_cf_id = existing_device.custom_field_data.get("librenms_id")
+                if (isinstance(_dev_cf_id, int) and not isinstance(_dev_cf_id, bool)) or (
+                    isinstance(_dev_cf_id, str) and _dev_cf_id.isdigit()
+                ):
+                    result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
                 if hostname and existing_device.virtual_chassis and existing_device.vc_position:
@@ -481,11 +496,8 @@ def validate_device_for_import(
 
         # Validate based on import type (Device or VM)
         if import_as_vm:
-            # 2. For VMs: Validate Cluster (required) - Must be manually selected
-            result["cluster"]["found"] = False
-            if not result.get("existing_device"):
-                result["issues"].append("Cluster must be manually selected before importing as VM")
-            # Provide list of available clusters for user selection (cached)
+            # Always populate available clusters for all VMs (new or existing) so
+            # the cluster dropdown has options whether creating or updating a VM.
             cache_key = "librenms_import_all_clusters"
             all_clusters = cache.get(cache_key)
             if all_clusters is None:
@@ -495,7 +507,13 @@ def validate_device_for_import(
                 cache.set(cache_key, all_clusters, cache_timeout)
             result["cluster"]["available_clusters"] = all_clusters
 
-            # Skip device-specific validations for VMs
+        if import_as_vm:
+            if not result.get("existing_device"):
+                # 2. For NEW VMs: Validate Cluster (required) - Must be manually selected
+                result["cluster"]["found"] = False
+                result["issues"].append("Cluster must be manually selected before importing as VM")
+
+            # Skip device-specific validations for all VMs (new and existing)
             result["site"]["found"] = True  # Not required for VMs
             result["device_type"]["found"] = True  # Not required for VMs
             result["device_role"]["found"] = True  # Not required for VMs
@@ -533,18 +551,6 @@ def validate_device_for_import(
                         chassis_match = _try_chassis_device_type_match(api, device_id)
                         if chassis_match and chassis_match["matched"]:
                             dt_match = chassis_match
-                        elif chassis_match and chassis_match.get("match_type") == "chassis_ambiguous":
-                            # Chassis inventory returned multiple matches — propagate ambiguity
-                            dt_match = {
-                                "matched": False,
-                                "device_type": None,
-                                "match_type": "ambiguous",
-                            }
-                            result["issues"].append(
-                                f"Multiple device types match chassis hardware"
-                                f" '{chassis_match['chassis_model']}'"
-                                " — resolve the ambiguity in NetBox."
-                            )
 
                 # Update result keys individually to preserve the existing schema (especially "found")
                 result["device_type"]["found"] = dt_match["matched"]
@@ -552,6 +558,7 @@ def validate_device_for_import(
                 result["device_type"]["match_type"] = dt_match.get("match_type")
 
             if not result["device_type"]["found"] and result["device_type"].get("match_type") != "ambiguous":
+                result["device_type"]["found"] = False
                 result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
                 # Get some device types for user to choose from
                 all_device_types = DeviceType.objects.all()[:10]
@@ -564,12 +571,12 @@ def validate_device_for_import(
                     for dt in all_device_types
                 ]
 
-            # 4. DeviceRole (required) - Must be manually selected by user
-            logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
-            result["device_role"]["found"] = False
             if not result.get("existing_device"):
+                # 4. DeviceRole (required for new devices) - Must be manually selected
+                logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
+                result["device_role"]["found"] = False
                 result["issues"].append("Device role must be manually selected before import")
-            logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
+                logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
             # Provide list of available roles for user selection (cached)
             cache_key = "librenms_import_all_roles"
             all_roles = cache.get(cache_key)
@@ -761,6 +768,7 @@ def import_single_device(
                 api=api,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
         # Check if device already exists
@@ -795,8 +803,6 @@ def import_single_device(
             if rack_id:
                 rack = Rack.objects.select_related("location", "site").filter(id=rack_id).first() or rack
 
-        rack = rack or validation.get("rack", {}).get("rack")
-
         # Validate required fields
         if not site:
             return {
@@ -825,16 +831,20 @@ def import_single_device(
 
         # Create device in NetBox
         with transaction.atomic():
-            # Determine device name based on sync options
-            use_sysname = sync_options.get("use_sysname", True) if sync_options else True
-            strip_domain = sync_options.get("strip_domain", False) if sync_options else False
-
-            device_name = _determine_device_name(
-                libre_device,
-                use_sysname=use_sysname,
-                strip_domain=strip_domain,
-                device_id=device_id,
-            )
+            # Use pre-computed resolved_name from validation when available so the
+            # created device name matches exactly what was displayed in the import UI.
+            # Only fall back to recomputing from sync_options when no validation exists.
+            if validation and validation.get("resolved_name"):
+                device_name = validation["resolved_name"]
+            else:
+                use_sysname = sync_options.get("use_sysname", True) if sync_options else True
+                strip_domain = sync_options.get("strip_domain", False) if sync_options else False
+                device_name = _determine_device_name(
+                    libre_device,
+                    use_sysname=use_sysname,
+                    strip_domain=strip_domain,
+                    device_id=device_id,
+                )
 
             # Generate import timestamp comment
             import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -846,7 +856,6 @@ def import_single_device(
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-                "custom_field_data": {"librenms_id": int(device_id)},
             }
 
             # Add optional fields
@@ -871,6 +880,7 @@ def import_single_device(
 
             # Create the device
             device = Device(**device_data)
+            set_librenms_device_id(device, device_id, api.server_key)
             device.full_clean()
             device.save()
 

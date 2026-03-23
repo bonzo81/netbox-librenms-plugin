@@ -6,7 +6,7 @@ get_librenms_sync_device() and handle the None return gracefully
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 
 def _make_request(body: dict) -> MagicMock:
@@ -75,7 +75,7 @@ class TestSingleCableVerifyView:
         request = _make_request({"device_id": 1, "local_port_id": "42"})
         view.post(request)
 
-        mock_sync.assert_called_once_with(device)
+        mock_sync.assert_called_once_with(device, server_key=ANY)
         mock_cache.get.assert_called_once()
         cache_key = mock_cache.get.call_args[0][0]
         assert "device" in cache_key
@@ -118,6 +118,7 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         view = object.__new__(SingleInterfaceVerifyView)
+        view._librenms_api = MagicMock()
         return view
 
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
@@ -166,7 +167,7 @@ class TestSingleInterfaceVerifyView:
         )
         view.post(request)
 
-        mock_sync.assert_called_once_with(device)
+        mock_sync.assert_called_once_with(device, server_key=ANY)
         mock_cache.get.assert_called_once()
         cache_key = mock_cache.get.call_args[0][0]
         assert "3" in cache_key

@@ -31,7 +31,7 @@ from ..base.interfaces_view import BaseInterfaceTableView
 from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
 from ..base.vlan_table_view import BaseVLANTableView
-from ..mixins import CacheMixin, LibreNMSPermissionMixin
+from ..mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
@@ -80,19 +80,28 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """Return the appropriate interface table, selecting VC variant if needed."""
+        server_key = self.librenms_api.server_key
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table = VCInterfaceTable(
-                data, device=obj, interface_name_field=interface_name_field, vlan_groups=vlan_groups
+                data,
+                device=obj,
+                interface_name_field=interface_name_field,
+                vlan_groups=vlan_groups,
+                server_key=server_key,
             )
         else:
             table = LibreNMSInterfaceTable(
-                data, device=obj, interface_name_field=interface_name_field, vlan_groups=vlan_groups
+                data,
+                device=obj,
+                interface_name_field=interface_name_field,
+                vlan_groups=vlan_groups,
+                server_key=server_key,
             )
-        table.htmx_url = f"{self.request.path}?tab=interfaces"
+        table.htmx_url = f"{self.request.path}?tab=interfaces" + (f"&server_key={server_key}" if server_key else "")
         return table
 
 
-class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
+class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Verify single interface data for a device via cached LibreNMS payload."""
 
     def post(self, request):
@@ -101,22 +110,26 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()
+        server_key = data.get("server_key") or self.librenms_api.server_key
 
         if not selected_device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-        # Resolve the VC device that holds cached LibreNMS data
-        if selected_device.virtual_chassis:
-            primary_device = get_librenms_sync_device(selected_device)
+        # For VC devices, resolve to the primary sync device so cache keys match;
+        # return 404 if the VC has no resolvable sync device.
+        if hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
+            primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
+            if primary_device is None:
+                return JsonResponse(
+                    {"status": "error", "message": "Cannot resolve sync device for this virtual chassis"},
+                    status=404,
+                )
         else:
             primary_device = selected_device
 
-        if not primary_device:
-            return JsonResponse({"status": "error", "message": "No sync device found for virtual chassis"}, status=404)
-
-        cached_data = cache.get(self.get_cache_key(primary_device, "ports"))
+        cached_data = cache.get(self.get_cache_key(primary_device, "ports", server_key))
 
         if cached_data:
             port_data = next(
@@ -130,6 +143,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
                     [],
                     device=selected_device,
                     interface_name_field=interface_name_field,
+                    server_key=server_key,
                 )
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})
@@ -311,7 +325,7 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
         )
 
 
-class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
+class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Persist user VLAN-group-override selections in cache.
 
@@ -330,14 +344,20 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
         data = json.loads(request.body)
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})
+        server_key = data.get("server_key") or self.librenms_api.server_key
 
         if not device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
 
         device = get_object_or_404(Device, pk=device_id)
 
+        # Normalise to the VC sync device so cache keys match what the sync view stored
+        sync_device = get_librenms_sync_device(device, server_key=server_key)
+        if sync_device is None:
+            sync_device = device
+
         # Use the remaining TTL of the ports cache so both expire together
-        ports_ttl = cache.ttl(self.get_cache_key(device, "ports"))
+        ports_ttl = cache.ttl(self.get_cache_key(sync_device, "ports", server_key))
         if ports_ttl is None or ports_ttl <= 0:
             return JsonResponse(
                 {"status": "error", "message": "No cached port data; refresh interfaces first"},
@@ -345,10 +365,10 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
             )
 
         # Merge with any existing overrides (user may save multiple times)
-        existing = cache.get(self.get_vlan_overrides_key(device)) or {}
+        existing = cache.get(self.get_vlan_overrides_key(sync_device, server_key)) or {}
         existing.update(vid_group_map)
 
-        cache.set(self.get_vlan_overrides_key(device), existing, timeout=ports_ttl)
+        cache.set(self.get_vlan_overrides_key(sync_device, server_key), existing, timeout=ports_ttl)
 
         return JsonResponse({"status": "success"})
 

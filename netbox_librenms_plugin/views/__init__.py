@@ -52,7 +52,9 @@ from .status_check import DeviceStatusListView, VMStatusListView  # noqa: F401
 from .sync.cables import SyncCablesView  # noqa: F401
 from .sync.device_fields import (  # noqa: F401
     AssignVCSerialView,
+    ConvertLegacyLibreNMSIdView,
     CreateAndAssignPlatformView,
+    RemoveServerMappingView,
     UpdateDeviceNameView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,

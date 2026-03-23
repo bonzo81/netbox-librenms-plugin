@@ -49,12 +49,10 @@ def mock_librenms_api(mock_multi_server_config):
     """Pre-configured LibreNMSAPI instance with mocked dependencies."""
     with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_config:
         mock_config.return_value = mock_multi_server_config
-        with patch("netbox_librenms_plugin.librenms_api.LibreNMSSettings") as mock_settings:
-            mock_settings.objects.filter.return_value.first.return_value = None
-            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-            api = LibreNMSAPI(server_key="default")
-            yield api
+        api = LibreNMSAPI(server_key="default")
+        yield api
 
 
 # =============================================================================
@@ -291,3 +289,48 @@ def mock_netbox_rack():
     rack.name = "Rack A1"
     rack.site = MagicMock(id=1, name="DC1")
     return rack
+
+
+# =============================================================================
+# Server Mapping Fixtures (used by test_sync_view_mismatch.py)
+# =============================================================================
+
+
+@pytest.fixture
+def mock_plugins_config_single_server():
+    """PLUGINS_CONFIG with a single 'production' server (for _build_all_server_mappings tests)."""
+    return {
+        "netbox_librenms_plugin": {
+            "servers": {
+                "production": {
+                    "display_name": "Production LibreNMS",
+                    "librenms_url": "https://librenms.example.com",
+                },
+            }
+        }
+    }
+
+
+@pytest.fixture
+def mock_plugins_config_empty_servers():
+    """PLUGINS_CONFIG with no configured servers (simulates all orphaned)."""
+    return {"netbox_librenms_plugin": {"servers": {}}}
+
+
+@pytest.fixture
+def mock_plugins_config_multi_server_mapping():
+    """PLUGINS_CONFIG with 'production' and 'mock-dev' servers (for multi-server mapping tests)."""
+    return {
+        "netbox_librenms_plugin": {
+            "servers": {
+                "production": {
+                    "display_name": "Production LibreNMS",
+                    "librenms_url": "https://librenms.example.com",
+                },
+                "mock-dev": {
+                    "display_name": "Mock",
+                    "librenms_url": "http://mock.example.com",
+                },
+            }
+        }
+    }

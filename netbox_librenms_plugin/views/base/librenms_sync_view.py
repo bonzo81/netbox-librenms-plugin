@@ -1,11 +1,13 @@
 import re
 
+from django.conf import settings as django_settings
 from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_device_id,
     get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
 )
@@ -26,14 +28,19 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """Handle GET request for the LibreNMS sync view."""
         obj = get_object_or_404(self.model, pk=pk)
 
-        # For Virtual Chassis members, determine which device should handle LibreNMS sync.
-        # Always delegate to get_librenms_sync_device() which implements the full priority
-        # order (explicit per-server dict > legacy bare-int > master with IP > any IP > position).
+        # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
+        # self._librenms_lookup_device and self.librenms_id are consistent with the
+        # helper-based VC status computed in get_context_data().  A legacy bare-int mapping
+        # on the viewed member must not shadow an explicit per-server mapping on another
+        # member — get_librenms_sync_device() applies the full priority order.
         librenms_lookup_device = obj
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            sync_device = get_librenms_sync_device(obj)
+            sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
             if sync_device:
                 librenms_lookup_device = sync_device
+
+        # Store for use in get_context_data (badge generation needs the same object)
+        self._librenms_lookup_device = librenms_lookup_device
 
         # Get librenms_id using the determined lookup device
         self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
@@ -58,14 +65,17 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             # Use helper function to determine the sync device
-            librenms_sync_device = get_librenms_sync_device(obj)
+            librenms_sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
 
             # Determine sync device status
             sync_device_has_librenms_id = False
             sync_device_has_primary_ip = False
 
             if librenms_sync_device:
-                sync_device_has_librenms_id = bool(librenms_sync_device.cf.get("librenms_id"))
+                sync_device_has_librenms_id = (
+                    get_librenms_device_id(librenms_sync_device, self.librenms_api.server_key, auto_save=False)
+                    is not None
+                )
                 sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
 
             context.update(
@@ -83,6 +93,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
         vlan_context = self.get_vlan_context(request, obj)
+        module_context = self.get_module_context(request, obj)
 
         interface_name_field = get_interface_name_field(request)
 
@@ -94,12 +105,29 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         manufacturers = Manufacturer.objects.all().order_by("name")
 
+        # Detect legacy bare-int librenms_id format for conversion badge
+        _lookup_device = getattr(self, "_librenms_lookup_device", obj)
+        _raw_cf = _lookup_device.cf.get("librenms_id") if _lookup_device else None
+        librenms_id_is_legacy = (isinstance(_raw_cf, int) and not isinstance(_raw_cf, bool)) or (
+            isinstance(_raw_cf, str) and _raw_cf.isdigit()
+        )
+
+        # Determine if serial match allows legacy ID conversion.
+        # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
+        _librenms_serial = librenms_info["librenms_device_details"].get("librenms_device_serial", "-")
+        _netbox_serial = getattr(_lookup_device, "serial", "") or ""
+        _lookup_is_vm = _lookup_device._meta.model_name == "virtualmachine" if _lookup_device else False
+        librenms_id_serial_confirmed = _lookup_is_vm or bool(
+            _librenms_serial and _librenms_serial != "-" and _netbox_serial and _librenms_serial == _netbox_serial
+        )
+
         context.update(
             {
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
                 "ip_sync": ip_context,
                 "vlan_sync": vlan_context,
+                "module_sync": module_context,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -111,10 +139,93 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "platform_info": platform_info,
                 "vc_inventory_serials": librenms_info["librenms_device_details"].get("vc_inventory_serials", []),
                 "manufacturers": manufacturers,
+                "all_server_mappings": self._build_all_server_mappings(_lookup_device, self.librenms_api.server_key),
+                "librenms_id_is_legacy": librenms_id_is_legacy,
+                "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
+                # Lookup device may differ from object (e.g. VC master vs member).
+                # Used by the Remove server mapping form to post to the correct device.
+                "lookup_device_pk": _lookup_device.pk if _lookup_device else obj.pk,
+                "lookup_device_model_name": (
+                    _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
+                ),
+                "object_model_name": obj._meta.model_name,
             }
         )
 
         return context
+
+    @staticmethod
+    def _build_all_server_mappings(obj, active_server_key):
+        """
+        Build a list of all LibreNMS server mappings for the given device.
+
+        Each entry describes one server<->ID mapping stored in the ``librenms_id``
+        custom field:
+
+        * ``server_key``    – the key as stored in the CF dict.
+        * ``display_name``  – human-readable name from PLUGINS_CONFIG, or the key.
+        * ``librenms_url``  – base URL of that server (``None`` when not configured).
+        * ``device_id``     – the integer device ID on that server.
+        * ``device_url``    – direct URL to the device page on that server (or ``None``).
+        * ``is_configured`` – True when the server key exists in current plugin config.
+        * ``is_active``     – True when this is the currently active server.
+
+        Returns ``None`` for legacy bare-int format (no per-server info to show)
+        and ``None`` when the CF is absent/invalid.
+        """
+        cf_value = obj.custom_field_data.get("librenms_id")
+        if not isinstance(cf_value, dict) or not cf_value:
+            return None
+
+        plugins_cfg = getattr(django_settings, "PLUGINS_CONFIG", {}).get("netbox_librenms_plugin", {})
+        servers_config = plugins_cfg.get("servers") or {}
+        if not isinstance(servers_config, dict):
+            servers_config = {}
+
+        result = []
+        for sk, did in cf_value.items():
+            # Validate device ID — accept int or digit-string, skip bool/None/junk.
+            if isinstance(did, bool) or did is None:
+                continue
+            if isinstance(did, str):
+                if not did.isdigit():
+                    continue
+                did = int(did)
+            elif not isinstance(did, int):
+                continue
+            srv_cfg = servers_config.get(sk)
+            # Legacy single-server config: "default" key with no matching servers entry —
+            # fall back to root-level librenms_url/display_name in plugins_cfg.
+            if srv_cfg is None and sk == "default":
+                legacy_url = plugins_cfg.get("librenms_url")
+                if legacy_url:
+                    srv_cfg = {
+                        "librenms_url": legacy_url,
+                        "display_name": plugins_cfg.get("display_name") or f"Default Server ({legacy_url})",
+                    }
+            is_configured = srv_cfg is not None
+            # Treat malformed (non-dict) server config entries as unconfigured
+            if srv_cfg is not None and not isinstance(srv_cfg, dict):
+                srv_cfg = None
+                is_configured = False
+            librenms_url = srv_cfg.get("librenms_url") if srv_cfg else None
+            display_name = (srv_cfg.get("display_name") or sk) if srv_cfg else sk
+            device_url = f"{librenms_url}/device/device={did}/" if librenms_url else None
+            result.append(
+                {
+                    "server_key": sk,
+                    "display_name": display_name,
+                    "librenms_url": librenms_url,
+                    "device_id": did,
+                    "device_url": device_url,
+                    "is_configured": is_configured,
+                    "is_active": sk == active_server_key,
+                }
+            )
+
+        # Sort: active first, then configured, then orphaned
+        result.sort(key=lambda e: 0 if e["is_active"] else (1 if e["is_configured"] else 2))
+        return result or None
 
     def get_librenms_device_info(self, obj):
         """Get the LibreNMS device information for the given object."""
@@ -262,6 +373,13 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """
         Get the context data for VLAN sync.
         Subclasses should override this method.
+        """
+        return None
+
+    def get_module_context(self, request, obj):
+        """
+        Get the context data for module sync.
+        Subclasses should override this method if applicable (e.g. VMs return None).
         """
         return None
 

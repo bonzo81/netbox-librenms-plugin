@@ -471,12 +471,12 @@ class DeviceImportTable(tables.Table):
                 btn_class = "btn-outline-danger"
                 btn_icon = "mdi-alert-circle"
                 btn_label = " Conflict"
-                btn_title = "Resolve conflict"
+                btn_title = "View conflict details"
             elif has_actions:
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-alert"
                 btn_label = " Conflict"
-                btn_title = "Resolve conflict"
+                btn_title = "View conflict details"
             elif has_name_sync or has_sync_needed:
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-information-outline"
@@ -486,7 +486,7 @@ class DeviceImportTable(tables.Table):
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-database-alert"
                 btn_label = " Legacy ID"
-                btn_title = "Migrate Legacy ID"
+                btn_title = "View legacy ID migration details"
             else:
                 btn_class = "btn-outline-success"
                 btn_icon = "mdi-check-circle"

@@ -4,6 +4,7 @@ import logging
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
+from django.db.models import Case, IntegerField, Value, When
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
@@ -60,8 +61,8 @@ def _get_librenms_poller_group_choices():
         api = LibreNMSAPI()
         success, poller_groups = api.get_poller_groups()
 
-        if success and poller_groups:
-            for group in poller_groups:
+        if success:
+            for group in poller_groups or []:
                 group_id = str(group.get("id", ""))
                 group_name = group.get("group_name", "")
                 group_descr = group.get("descr", "")
@@ -545,8 +546,13 @@ class LibreNMSImportFilterForm(forms.Form):
             ]
             has_filters = any(data.get(field) for field in filter_fields)
 
-            # Apply default only on initial load (no filters, no job_id)
-            if "use_background_job" not in data and not data.get("job_id") and not has_filters:
+            non_option_fields = [
+                f for f in filter_fields if data.get(f) not in (None, "", []) and str(data.get(f, "")).strip()
+            ]
+            has_option_only = bool(data) and not bool(non_option_fields) and not has_filters
+
+            # Apply default only on initial load (no filters, no job_id, no real submission)
+            if "use_background_job" not in data and not data.get("job_id") and not has_filters and not has_option_only:
                 data["use_background_job"] = "on"
             args = (data,) + args[1:]
 
@@ -577,19 +583,36 @@ class LibreNMSImportFilterForm(forms.Form):
         """Fetch and populate LibreNMS locations in the dropdown."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.import_utils.cache import get_location_choices_cache_key
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         try:
-            # Use caching to avoid repeated API calls
-            cache_key = "librenms_locations_choices"
-            cached_choices = cache.get(cache_key)
+            # Determine server_key cheaply from settings to check cache before instantiating the API
+            try:
+                from netbox_librenms_plugin.models import LibreNMSSettings
 
-            if cached_choices:
+                _settings = LibreNMSSettings.objects.first()
+                _server_key = (_settings.selected_server if _settings else None) or "default"
+            except Exception:
+                _server_key = "default"
+
+            cache_key = get_location_choices_cache_key(_server_key)
+            cached_choices = cache.get(cache_key)
+            if cached_choices is not None:
+                self.fields["librenms_location"].choices = cached_choices
+                return
+
+            # Cache miss — instantiate the API client and fetch
+            api = LibreNMSAPI()
+            # Recompute cache_key with the resolved server_key in case it differs from settings
+            cache_key = get_location_choices_cache_key(api.server_key)
+            # Second cache check: the resolved server_key may differ from the settings key
+            cached_choices = cache.get(cache_key)
+            if cached_choices is not None:
                 self.fields["librenms_location"].choices = cached_choices
                 return
 
             # Fetch locations from LibreNMS
-            api = LibreNMSAPI()
             success, locations = api.get_locations()
 
             if success and locations:
@@ -752,8 +775,13 @@ class DeviceImportConfigForm(forms.Form):
         if validation and validation.get("device_type", {}).get("suggestions"):
             suggestions = validation["device_type"]["suggestions"]
             if suggestions:
-                # Include suggested device types first, then all others
+                # Annotate with suggested_order so suggested types sort first
                 suggested_ids = [s["device_type"].id for s in suggestions]
-                self.fields["device_type"].queryset = DeviceType.objects.filter(
-                    id__in=suggested_ids
-                ) | DeviceType.objects.exclude(id__in=suggested_ids)
+                priority = Case(
+                    *[When(id=pk, then=Value(i)) for i, pk in enumerate(suggested_ids)],
+                    default=Value(len(suggested_ids)),
+                    output_field=IntegerField(),
+                )
+                self.fields["device_type"].queryset = DeviceType.objects.annotate(suggested_order=priority).order_by(
+                    "suggested_order", "manufacturer__name", "model"
+                )

@@ -29,7 +29,72 @@
 {% block content %}
 
 <!-- LibreNMS Server Information -->
-{% if librenms_server_info %}
+{% if all_server_mappings %}
+<div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center py-2">
+        <span><i class="mdi mdi-server-network text-primary me-1"></i><strong>LibreNMS Connections</strong></span>
+        {% if librenms_server_info and not librenms_server_info.is_legacy %}
+        <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary">
+            <i class="mdi mdi-cog"></i> Change Server
+        </a>
+        {% endif %}
+    </div>
+    <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+            <tbody>
+            {% for mapping in all_server_mappings %}
+            <tr>
+                <td class="ps-3" style="width:40%">
+                    {% if mapping.is_active %}
+                    <i class="mdi mdi-check-circle text-success me-1" title="Currently active server"></i>
+                    {% elif mapping.is_configured %}
+                    <i class="mdi mdi-server-network text-muted me-1"></i>
+                    {% else %}
+                    <i class="mdi mdi-server-off text-danger me-1" title="Server not configured in NetBox"></i>
+                    {% endif %}
+                    {% if mapping.is_configured %}
+                    <strong>{{ mapping.display_name }}</strong>
+                    {% else %}
+                    <strong class="text-danger">{{ mapping.server_key }}</strong>
+                    <span class="badge bg-danger-lt ms-1">Not configured</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if mapping.device_url %}
+                    <a href="{{ mapping.device_url }}" target="_blank" rel="noopener noreferrer"
+                       class="text-decoration-none">
+                        ID {{ mapping.device_id }}
+                        <i class="mdi mdi-open-in-new ms-1" style="font-size:.8em"></i>
+                    </a>
+                    {% else %}
+                    <span class="text-muted">ID {{ mapping.device_id }}</span>
+                    {% endif %}
+                </td>
+                <td class="text-end pe-3">
+                    {% if not mapping.is_configured %}
+                    {% if lookup_device_model_name == "device" or lookup_device_model_name == "virtualmachine" %}
+                    <form method="post"
+                          action="{% url 'plugins:netbox_librenms_plugin:remove_server_mapping' pk=lookup_device_pk %}"
+                          style="display:inline"
+                          onsubmit="return confirm('Remove mapping for server \'{{ mapping.server_key|escapejs }}\'? This cannot be undone.');">
+                        {% csrf_token %}
+                        <input type="hidden" name="server_key" value="{{ mapping.server_key }}">
+                        <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
+                        <button type="submit" class="btn btn-sm btn-danger"
+                                title="Remove stale mapping for unconfigured server '{{ mapping.server_key }}'">
+                            <i class="mdi mdi-trash-can-outline"></i> Remove
+                        </button>
+                    </form>
+                    {% endif %}
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% elif librenms_server_info %}
 <div class="card mb-3">
     <div class="card-body p-2">
         <div class="d-flex justify-content-between align-items-center">
@@ -88,7 +153,27 @@
                         <!-- LibreNMS ID Row -->
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">ID</th>
-                            <td>{{ librenms_device_id }}</td>
+                            <td>
+                                {{ librenms_device_id }}
+                                {% if librenms_id_is_legacy %}
+                                <form style="display:inline" method="post"
+                                      action="{% url 'plugins:netbox_librenms_plugin:convert_legacy_librenms_id' pk=lookup_device_pk %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
+                                    {% if librenms_id_serial_confirmed %}
+                                    <button type="submit" class="btn btn-sm btn-outline-warning py-0 px-1 ms-1"
+                                            title="Convert legacy ID to server-scoped format">
+                                        <i class="mdi mdi-database-sync"></i> Convert ID
+                                    </button>
+                                    {% else %}
+                                    <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1" disabled
+                                            title="Conversion requires matching NetBox and LibreNMS serial numbers">
+                                        <i class="mdi mdi-database-sync"></i> Convert ID
+                                    </button>
+                                    {% endif %}
+                                </form>
+                                {% endif %}
+                            </td>
                         </tr>
 
                         <!-- Hostname Row -->
@@ -249,7 +334,7 @@
                                 <div class="d-flex align-items-center">
                                     <div>{{ object.name }}</div>
                                     <div class="ms-3">
-                                        {% if sysName and sysName != object.name %}
+                                        {% if sysName and sysName != "-" and sysName != object.name %}
                                         <form method="post"
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_name' pk=object.pk %}"
                                               style="display: inline;">
@@ -259,7 +344,7 @@
                                                 <i class="mdi mdi-sync"></i> Sync to NetBox
                                             </button>
                                         </form>
-                                        {% elif sysName %}
+                                        {% elif sysName and sysName != "-" %}
                                         <span class="text-success" title="Name matches LibreNMS">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
@@ -697,6 +782,7 @@
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
                     id="snmpv1v2-form" name="snmpv1v2-form" style="display: block;">
                     {% csrf_token %}
+                    <input type="hidden" name="object_type" value="{{ object_model_name }}">
                     <!-- v1/v2c Toggle Button -->
                     <div class="mb-3">
                         <label class="form-label">Protocol Version</label>
@@ -746,6 +832,7 @@
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
                     id="snmpv3-form" name="snmpv3-form" style="display: none;">
                     {% csrf_token %}
+                    <input type="hidden" name="object_type" value="{{ object_model_name }}">
                     {{ v3form.snmp_version }}
 
                     <div class="row">

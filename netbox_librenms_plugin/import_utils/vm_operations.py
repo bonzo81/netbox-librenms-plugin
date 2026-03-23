@@ -1,8 +1,9 @@
-"""Virtual machine import operations."""
+"""Virtual machine creation and import operations."""
 
 import logging
 
 from dcim.models import DeviceRole
+from django.db import transaction
 from django.utils import timezone
 from virtualization.models import Cluster
 
@@ -13,7 +14,13 @@ from .permissions import require_permissions
 logger = logging.getLogger(__name__)
 
 
-def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: bool = True, role=None):
+def create_vm_from_librenms(
+    libre_device: dict,
+    validation: dict,
+    server_key: str,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
+):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
 
@@ -21,7 +28,7 @@ def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: b
         libre_device: Device data from LibreNMS
         validation: Validation result from validate_device_for_import with import_as_vm=True
         use_sysname: If True, prefer sysName; if False, use hostname
-        role: Optional DeviceRole to assign to the VM
+        server_key: LibreNMS server key used to store the librenms_id custom field
 
     Returns:
         Created VirtualMachine instance
@@ -37,14 +44,16 @@ def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: b
     # Extract matched objects from validation
     cluster = validation["cluster"]["cluster"]
     platform = validation["platform"].get("platform")
+    role = validation.get("device_role", {}).get("role")
 
-    # Determine VM name - use pre-computed name if available (handles strip_domain)
-    vm_name = libre_device.get("_computed_name")
+    # Determine VM name - use pre-computed name if available (handles strip_domain),
+    # falling back to the validated resolved_name before recomputing from raw fields.
+    vm_name = libre_device.get("_computed_name") or validation.get("resolved_name")
     if not vm_name:
         vm_name = _determine_device_name(
             libre_device,
             use_sysname=use_sysname,
-            strip_domain=False,
+            strip_domain=strip_domain,
             device_id=libre_device.get("device_id"),
         )
 
@@ -58,15 +67,20 @@ def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: b
         raise ValueError(f"device_id is a boolean ({raw_device_id!r}); expected an integer")
     librenms_device_id = int(raw_device_id)
 
-    # Create the VM with librenms_id custom field
-    vm = VirtualMachine.objects.create(
-        name=vm_name,
-        cluster=cluster,
-        role=role,  # Optional VM role
-        platform=platform,
-        comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
-        custom_field_data={"librenms_id": librenms_device_id},
-    )
+    from ..utils import set_librenms_device_id
+
+    # Create the VM and assign its LibreNMS ID atomically so a failure in
+    # set_librenms_device_id never leaves a VM without a mapping.
+    with transaction.atomic():
+        vm = VirtualMachine.objects.create(
+            name=vm_name,
+            cluster=cluster,
+            role=role,
+            platform=platform,
+            comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
+        )
+        set_librenms_device_id(vm, librenms_device_id, server_key)
+        vm.save()
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm
@@ -136,15 +150,27 @@ def bulk_import_vms(
     log = job.logger if job else logger
 
     for idx, vm_id in enumerate(vm_ids, start=1):
-        # Check for job cancellation every 5 VMs
-        if job and idx % 5 == 0:
-            job.job.refresh_from_db()
-            job_status = job.job.status
-            status_value = job_status.value if hasattr(job_status, "value") else job_status
-            if status_value in ("failed", "errored"):
+        # Check for job cancellation before first VM and every 5 thereafter
+        if job and (idx == 1 or idx % 5 == 0):
+            cancelled = False
+            try:
+                from django_rq import get_queue
+                from rq.job import Job as RQJob
+
+                queue = get_queue("default")
+                rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
+                if rq_job.is_failed or rq_job.is_stopped:
+                    cancelled = True
+            except Exception:
+                job.job.refresh_from_db()
+                job_status = job.job.status
+                status_value = job_status.value if hasattr(job_status, "value") else job_status
+                if status_value in ("failed", "errored", "stopped"):
+                    cancelled = True
+            if cancelled:
                 log.warning(f"Job cancelled at VM {idx} of {len(vm_ids)}")
                 break
-            log.info(f"Imported VM {idx} of {len(vm_ids)}")
+            log.info(f"Processing VM {idx} of {len(vm_ids)}")
 
         try:
             # Fetch device data (uses cache helper)
@@ -169,6 +195,7 @@ def bulk_import_vms(
                 api=api,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
             # Check if VM already exists
@@ -191,21 +218,28 @@ def bulk_import_vms(
                 cluster = Cluster.objects.filter(id=cluster_id).first()
                 if cluster:
                     apply_cluster_to_validation(validation, cluster)
+                else:
+                    result["failed"].append(
+                        {"device_id": vm_id, "error": f"Selected cluster (id={cluster_id}) no longer exists"}
+                    )
+                    continue
 
             role = None
             if role_id:
                 role = DeviceRole.objects.filter(id=role_id).first()
                 if role:
                     apply_role_to_validation(validation, role, is_vm=True)
+                else:
+                    result["failed"].append(
+                        {"device_id": vm_id, "error": f"Selected role (id={role_id}) no longer exists"}
+                    )
+                    continue
 
             # Determine VM name
-            use_sysname = sync_options.get("use_sysname", True) if sync_options else True
-            strip_domain = sync_options.get("strip_domain", False) if sync_options else False
-
             vm_name = _determine_device_name(
                 libre_device,
-                use_sysname=use_sysname,
-                strip_domain=strip_domain,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
                 device_id=vm_id,
             )
 
@@ -213,7 +247,13 @@ def bulk_import_vms(
             libre_device["_computed_name"] = vm_name
 
             # Create VM
-            vm = create_vm_from_librenms(libre_device, validation, use_sysname=use_sysname, role=role)
+            vm = create_vm_from_librenms(
+                libre_device,
+                validation,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
+                server_key=api.server_key,
+            )
 
             result["success"].append(
                 {

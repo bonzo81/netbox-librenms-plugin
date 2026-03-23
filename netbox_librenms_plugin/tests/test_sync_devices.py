@@ -254,3 +254,110 @@ class TestCreatePlatformFullClean:
             error_msg = mock_messages.error.call_args[0][1]
             assert "could not be created" in error_msg
             assert "Slug already exists" in error_msg
+
+
+class TestRemoveServerMappingViewWiring:
+    def test_does_not_have_librenms_api_mixin(self):
+        """RemoveServerMappingView does not call LibreNMS API — it only modifies NetBox."""
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        assert LibreNMSAPIMixin not in RemoveServerMappingView.__mro__
+
+    def test_has_permission_mixin(self):
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+        assert LibreNMSPermissionMixin in RemoveServerMappingView.__mro__
+        assert NetBoxObjectPermissionMixin in RemoveServerMappingView.__mro__
+
+    def test_post_with_virtualmachine_sets_vm_permissions_and_redirects(self):
+        """post() with object_type='virtualmachine' sets VirtualMachine permissions and redirects to VM URL."""
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+        from virtualization.models import VirtualMachine
+
+        view = object.__new__(RemoveServerMappingView)
+
+        permissions_at_check = {}
+
+        def capture_perms(method):
+            permissions_at_check[method] = list(view.required_object_permissions.get(method, []))
+            return None  # permission passes
+
+        mock_vm = MagicMock()
+        mock_vm.pk = 10
+        mock_vm.custom_field_data = {"librenms_id": {"orphaned-server": 42}}
+
+        # Use a mock model class so the select_for_update().get() call doesn't hit the DB
+        mock_model = MagicMock()
+        mock_model.objects.select_for_update.return_value.get.return_value = mock_vm
+
+        request = MagicMock()
+        request.POST = {"object_type": "virtualmachine", "server_key": "orphaned-server"}
+
+        with (
+            patch.object(view, "require_all_permissions", side_effect=capture_perms),
+            patch.object(view, "_get_object", return_value=(mock_vm, mock_model)),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch(
+                "django.conf.settings",
+                PLUGINS_CONFIG={"netbox_librenms_plugin": {}},
+            ),
+        ):
+            view.post(request, pk=10)
+
+        # required_object_permissions must be scoped to VirtualMachine, not Device
+        assert ("change", VirtualMachine) in permissions_at_check.get("POST", [])
+        # Response must redirect to the VM-specific sync URL
+        mock_redirect.assert_called_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=10)
+
+
+class TestNormalizeLibreNMSMapping:
+    """_normalize_librenms_mapping must reject booleans and non-digit strings."""
+
+    def _call(self, value):
+        # Instantiate the view class minimally to access the method
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+
+        view = object.__new__(RemoveServerMappingView)
+        return view._normalize_librenms_mapping(value)
+
+    def test_int_becomes_default_dict(self):
+        assert self._call(42) == {"default": 42}
+
+    def test_bool_true_returns_empty(self):
+        assert self._call(True) == {}
+
+    def test_bool_false_returns_empty(self):
+        assert self._call(False) == {}
+
+    def test_digit_string_coerced(self):
+        assert self._call("42") == {"default": 42}
+
+    def test_non_digit_string_returns_empty(self):
+        assert self._call("not-a-number") == {}
+
+    def test_plus_prefix_rejected(self):
+        """'+1' is not strictly digit-only."""
+        assert self._call("+1") == {}
+
+    def test_space_padded_rejected(self):
+        """' 42 ' is not strictly digit-only."""
+        assert self._call(" 42 ") == {}
+
+    def test_dict_passed_through(self):
+        d = {"production": 7}
+        assert self._call(d) is d
+
+    def test_none_returns_empty(self):
+        assert self._call(None) == {}
+
+    def test_list_returns_empty(self):
+        assert self._call([1, 2]) == {}
+
+
+# ---------------------------------------------------------------------------
+# all_server_mappings — did validation
+# ---------------------------------------------------------------------------
