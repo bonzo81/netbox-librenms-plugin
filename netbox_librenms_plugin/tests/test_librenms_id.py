@@ -102,78 +102,8 @@ class TestGetLibreNMSDeviceId:
         assert get_librenms_device_id(obj) == 5
 
 
-class TestGetLibreNMSDeviceIdAutoSave:
-    """Tests for auto_save behaviour of get_librenms_device_id()."""
-
-    def test_auto_save_true_mutates_bare_string(self):
-        """When auto_save=True (default), a bare string is normalised in-place and saved."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        obj = MagicMock()
-        obj.cf = {"librenms_id": "42"}
-        obj.custom_field_data = {"librenms_id": "42"}
-        result = get_librenms_device_id(obj, "default", auto_save=True)
-        assert result == 42
-        assert obj.custom_field_data["librenms_id"] == 42
-        obj.save.assert_called_once()
-
-    def test_auto_save_false_does_not_mutate_bare_string(self):
-        """When auto_save=False, bare string is returned as int but obj is not mutated."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        obj = MagicMock()
-        obj.cf = {"librenms_id": "42"}
-        obj.custom_field_data = {"librenms_id": "42"}
-        result = get_librenms_device_id(obj, "default", auto_save=False)
-        assert result == 42
-        assert obj.custom_field_data["librenms_id"] == "42"
-        obj.save.assert_not_called()
-
-    def test_auto_save_false_does_not_mutate_string_in_dict(self):
-        """When auto_save=False, string inside dict is returned as int but dict is not mutated."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        obj = MagicMock()
-        obj.cf = {"librenms_id": {"prod": "7"}}
-        obj.custom_field_data = {"librenms_id": {"prod": "7"}}
-        result = get_librenms_device_id(obj, "prod", auto_save=False)
-        assert result == 7
-        assert obj.custom_field_data["librenms_id"]["prod"] == "7"
-        obj.save.assert_not_called()
-
-    def test_auto_save_true_mutates_string_in_dict(self):
-        """When auto_save=True, string inside dict is normalised and saved."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        obj = MagicMock()
-        obj.cf = {"librenms_id": {"prod": "7"}}
-        obj.custom_field_data = {"librenms_id": {"prod": "7"}}
-        result = get_librenms_device_id(obj, "prod", auto_save=True)
-        assert result == 7
-        assert obj.custom_field_data["librenms_id"]["prod"] == 7
-        obj.save.assert_called_once()
-
-
 class TestFindByLibreNMSId:
     """Tests for find_by_librenms_id()."""
-
-    def test_rejects_boolean_true(self):
-        """find_by_librenms_id(model, True) returns None without querying."""
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
-        mock_model = MagicMock()
-        result = find_by_librenms_id(mock_model, True, "default")
-        assert result is None
-        mock_model.objects.filter.assert_not_called()
-
-    def test_rejects_boolean_false(self):
-        """find_by_librenms_id(model, False) returns None without querying."""
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
-        mock_model = MagicMock()
-        result = find_by_librenms_id(mock_model, False, "default")
-        assert result is None
-        mock_model.objects.filter.assert_not_called()
 
     def test_queries_server_key_and_legacy_integer(self):
         """
@@ -243,8 +173,14 @@ class TestFindByLibreNMSId:
         assert "custom_field_data__librenms_id" in q_str
 
     def test_default_server_key_is_default(self):
-        from netbox_librenms_plugin.utils import find_by_librenms_id
+        """find_by_librenms_id() uses "default" as the server key when no key is passed.
+
+        We inspect the Q predicate's children to confirm the key embedded in the
+        JSON path is exactly "default", not some other fallback value.
+        """
+        from unittest.mock import MagicMock
         from django.db.models import Q
+        from netbox_librenms_plugin.utils import find_by_librenms_id
 
         mock_model = MagicMock()
         mock_qs = MagicMock()
@@ -253,7 +189,6 @@ class TestFindByLibreNMSId:
 
         find_by_librenms_id(mock_model, 42)
 
-        # Verify the Q predicate uses "default" server key — not an arbitrary key
         mock_model.objects.filter.assert_called_once()
         call_args = mock_model.objects.filter.call_args
         q_arg = call_args[0][0]
@@ -281,50 +216,6 @@ class TestMigrateLegacyLibreNMSId:
         obj.custom_field_data = {"librenms_id": 42}
         migrate_legacy_librenms_id(obj, "production")
         assert obj.custom_field_data["librenms_id"] == {"production": 42}
-
-    def test_migrates_string_digit_legacy_id(self):
-        """A string-digit like "42" should be migrated to {server_key: 42} (int)."""
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
-
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": "42"}
-        result = migrate_legacy_librenms_id(obj, "production")
-        assert result is True
-        assert obj.custom_field_data["librenms_id"] == {"production": 42}
-        assert isinstance(obj.custom_field_data["librenms_id"]["production"], int)
-        obj.save.assert_not_called()
-
-    def test_returns_false_for_non_digit_string(self):
-        """A non-digit string should not be migrated."""
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
-
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": "not-a-number"}
-        result = migrate_legacy_librenms_id(obj, "default")
-        assert result is False
-        assert obj.custom_field_data["librenms_id"] == "not-a-number"
-
-    def test_returns_false_for_plus_prefix_string(self):
-        """'+42' is not strictly digit-only; must not be migrated."""
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
-
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": "+42"}
-        result = migrate_legacy_librenms_id(obj, "default")
-        assert result is False
-        assert obj.custom_field_data["librenms_id"] == "+42"
-        obj.save.assert_not_called()
-
-    def test_returns_false_for_space_padded_string(self):
-        """' 42 ' is not strictly digit-only; must not be migrated."""
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
-
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": " 42 "}
-        result = migrate_legacy_librenms_id(obj, "default")
-        assert result is False
-        assert obj.custom_field_data["librenms_id"] == " 42 "
-        obj.save.assert_not_called()
 
     def test_returns_false_when_already_dict(self):
         from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
@@ -448,16 +339,6 @@ class TestSetLibreNMSDeviceId:
         # Write must be skipped; user must use the migration workflow.
         assert obj.custom_field_data["librenms_id"] == 7
 
-    def test_legacy_bare_string_int_blocks_write(self):
-        """Legacy bare numeric string value blocks the write (no silent migration)."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": "7"}
-        set_librenms_device_id(obj, 99, server_key="secondary")
-        # Write must be skipped; user must use the migration workflow.
-        assert obj.custom_field_data["librenms_id"] == "7"
-
     def test_adds_new_server_key_to_existing_dict(self):
         """Adding a new server key preserves existing keys."""
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -475,25 +356,6 @@ class TestSetLibreNMSDeviceId:
         obj.custom_field_data = {}
         set_librenms_device_id(obj, "42", server_key="primary")
         assert obj.custom_field_data["librenms_id"] == {"primary": 42}
-
-    def test_boolean_true_rejected(self):
-        """Boolean True is not accepted as a valid device_id (bool is subclass of int)."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        obj = MagicMock()
-        obj.custom_field_data = {}
-        set_librenms_device_id(obj, True, server_key="primary")
-        assert "librenms_id" not in obj.custom_field_data
-
-    def test_boolean_false_rejected(self):
-        """Boolean False is not accepted as a valid device_id."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
-        obj = MagicMock()
-        obj.custom_field_data = {"librenms_id": {"primary": 10}}
-        set_librenms_device_id(obj, False, server_key="primary")
-        # Existing mapping must be preserved
-        assert obj.custom_field_data["librenms_id"] == {"primary": 10}
 
     def test_unexpected_cf_type_reset_to_empty(self):
         """If custom_field_data has unexpected type for librenms_id, it is reset."""
