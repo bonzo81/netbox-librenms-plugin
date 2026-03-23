@@ -9,6 +9,19 @@ from django.core.cache import cache
 logger = logging.getLogger(__name__)
 
 
+def _build_filter_hash(filters: dict) -> str:
+    """
+    Build a stable, collision-free hash from a filter dict.
+
+    Removes None values (preserves valid falsy values like 0 and False),
+    sorts by key, and returns the first 16 hex characters of the SHA-256
+    digest of the JSON-serialized result.
+    """
+    return hashlib.sha256(
+        json.dumps({k: v for k, v in filters.items() if v is not None}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+
+
 def get_location_choices_cache_key(server_key: str) -> str:
     """Return the cache key for LibreNMS location choices for a given server."""
     return f"librenms_locations_choices:{server_key}"
@@ -34,11 +47,7 @@ def get_cache_metadata_key(
     # valid falsy values like 0 and False (filtering only None/missing entries).
     # Use JSON serialization for a stable, collision-free hash (avoids issues with
     # values containing "=" or "_" that could collide with the key separators).
-    filter_hash = hashlib.sha256(
-        json.dumps(
-            {k: v for k, v in sorted(filters.items()) if v is not None}, sort_keys=True, separators=(",", ":")
-        ).encode()
-    ).hexdigest()[:16]
+    filter_hash = _build_filter_hash(filters)
     return f"librenms_filter_cache_metadata_{server_key}_{filter_hash}_{vc_enabled}_sysname={use_sysname}_strip={strip_domain}"
 
 
@@ -94,9 +103,12 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
             now = datetime.now(timezone.utc)
             try:
                 cached_at_raw = metadata.get("cached_at")
-                cached_at = (
-                    datetime.fromisoformat(cached_at_raw) if cached_at_raw else datetime.fromtimestamp(0, timezone.utc)
-                )
+                if isinstance(cached_at_raw, datetime):
+                    cached_at = cached_at_raw
+                elif cached_at_raw:
+                    cached_at = datetime.fromisoformat(cached_at_raw)
+                else:
+                    cached_at = datetime.fromtimestamp(0, timezone.utc)
                 # Normalize naive datetimes (e.g., stored without tzinfo) to UTC
                 if cached_at.tzinfo is None:
                     cached_at = cached_at.replace(tzinfo=timezone.utc)
@@ -109,6 +121,8 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
                 # Add remaining time and cache key
                 metadata["remaining_seconds"] = int(remaining_seconds)
                 metadata["cache_key"] = cache_key
+                # Store numeric sort key so the final sort is unambiguous
+                metadata["cached_at_ts"] = cached_at.timestamp()
 
                 # Enrich filters with human-readable display values
                 if "filters" in metadata:
@@ -132,7 +146,7 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
         cache.set(cache_index_key, valid_cache_keys, timeout=3600)
 
     # Sort by most recent first
-    active_searches.sort(key=lambda x: x.get("cached_at", ""), reverse=True)
+    active_searches.sort(key=lambda x: x.get("cached_at_ts", 0.0), reverse=True)
 
     return active_searches
 
@@ -167,15 +181,16 @@ def get_validated_device_cache_key(
         >>> key
         'validated_device_default_e3b0c44298fc1c14_123_vc'
     """
-    # Sort filters for a deterministic, cross-process stable hash
-    filter_hash = hashlib.sha256(json.dumps(sorted(filters.items()), sort_keys=True).encode()).hexdigest()[:16]
+    # Sort filters for a deterministic, cross-process stable hash; None values are excluded
+    # (consistent with get_cache_metadata_key).
+    filter_hash = _build_filter_hash(filters)
     vc_part = "vc" if vc_enabled else "novc"
     return (
         f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}_sysname={use_sysname}_strip={strip_domain}"
     )
 
 
-def get_import_device_cache_key(device_id: int | str, server_key: str) -> str:
+def get_import_device_cache_key(device_id: int | str, server_key: str = "default") -> str:
     """
     Generate cache key for raw LibreNMS device data.
 
@@ -185,7 +200,7 @@ def get_import_device_cache_key(device_id: int | str, server_key: str) -> str:
 
     Args:
         device_id: LibreNMS device ID
-        server_key: LibreNMS server identifier for multi-server setups (required)
+        server_key: LibreNMS server identifier for multi-server setups. Defaults to "default" for backward compatibility.
 
     Returns:
         str: Cache key for the device data
@@ -212,12 +227,6 @@ def get_import_search_cache_key(server_key: str, api_filters: dict, client_filte
     Returns:
         str: Cache key for the import search result.
     """
-    import hashlib
-    import json
-
-    def _hash(d):
-        return hashlib.sha256(
-            json.dumps(sorted(d.items()) if isinstance(d, dict) else d, sort_keys=True).encode()
-        ).hexdigest()[:16]
-
-    return f"librenms_devices_import_{server_key}_{_hash(api_filters)}_{_hash(client_filters)}"
+    return (
+        f"librenms_devices_import_{server_key}_{_build_filter_hash(api_filters)}_{_build_filter_hash(client_filters)}"
+    )

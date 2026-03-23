@@ -276,12 +276,12 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
     except DeviceType.DoesNotExist:
         pass
     except DeviceType.MultipleObjectsReturned:
-        device_type = DeviceType.objects.filter(part_number__iexact=hardware_name).first()
-        return {
-            "matched": True,
-            "device_type": device_type,
-            "match_type": "exact",
-        }
+        logger.warning(
+            "Multiple DeviceType entries match part_number %r — cannot auto-select; "
+            "resolve the ambiguity by ensuring part numbers are unique across manufacturers.",
+            hardware_name,
+        )
+        return None
 
     # Try exact model match (case-insensitive)
     try:
@@ -290,8 +290,12 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
     except DeviceType.DoesNotExist:
         pass
     except DeviceType.MultipleObjectsReturned:
-        device_type = DeviceType.objects.filter(model__iexact=hardware_name).first()
-        return {"matched": True, "device_type": device_type, "match_type": "exact"}
+        logger.warning(
+            "Multiple DeviceType entries match model %r — cannot auto-select; "
+            "resolve the ambiguity by ensuring model names are unique across manufacturers.",
+            hardware_name,
+        )
+        return None
 
     return {"matched": False, "device_type": None, "match_type": None}
 

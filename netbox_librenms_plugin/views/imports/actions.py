@@ -1291,13 +1291,6 @@ class DeviceConflictActionView(
             # confirmed by serial match (or explicit force).
             from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
-            # Verify that the import workflow flagged this device as needing migration,
-            # preventing direct POST bypass of the modal validation gate.
-            if not validation.get("librenms_id_needs_migration"):
-                return HttpResponse(
-                    "Device is not flagged for librenms_id migration.",
-                    status=400,
-                )
             # Direct access needed to detect legacy integer format for migration prompt:
             # LibreNMSAPI.get_librenms_id() returns an int in both formats; only the raw
             # type check on custom_field_data reveals whether migration is needed.
