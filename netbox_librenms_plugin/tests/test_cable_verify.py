@@ -111,26 +111,73 @@ class TestStaleFieldStripping:
         assert received_link_data.get("netbox_remote_device_id") == 777
         assert received_link_data.get("netbox_remote_interface_id") == 666
 
-    def test_raw_keys_match_prepare_context(self):
-        """The _raw_keys set in post() must match the one in _prepare_context()."""
-        import ast
-        import inspect
-        import re
+    def test_post_strips_derived_fields_from_cached_link(self):
+        """post() must strip derived fields (URLs, IDs) before re-enrichment.
 
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView, SingleCableVerifyView
+        Both _prepare_context and post() define a _raw_keys set that controls
+        which cached fields survive into re-enrichment. This test verifies the
+        behavior: derived fields in the cached link must not leak through.
+        """
+        view = _make_view()
 
-        # Extract _raw_keys from _prepare_context source
-        prepare_src = inspect.getsource(BaseCableTableView._prepare_context)
-        post_src = inspect.getsource(SingleCableVerifyView.post)
+        # Cached link with both raw and derived (stale) fields
+        cached_link = {
+            "local_port": "eth0",
+            "local_port_id": 100,
+            "remote_port": "eth1",
+            "remote_device": "switch-a",
+            "remote_port_id": 200,
+            "remote_device_id": 42,
+            # Derived fields that must be stripped:
+            "netbox_local_interface_id": 999,
+            "netbox_remote_interface_id": 888,
+            "netbox_remote_device_id": 777,
+            "local_port_url": "/stale/",
+            "remote_port_url": "/stale/",
+            "remote_device_url": "/stale/",
+            "cable_status": "stale",
+            "can_create_cable": True,
+        }
 
-        def extract_raw_keys(src, label):
-            match = re.search(r"_raw_keys\s*=\s*(\{[^}]*\})", src, re.S)
-            assert match, f"_raw_keys missing from {label}"
-            return set(ast.literal_eval(match.group(1)))
+        # Mock process_remote_device to avoid DB access during re-enrichment;
+        # it should receive the link WITHOUT derived fields.
+        received_link = {}
 
-        prepare_keys = extract_raw_keys(prepare_src, "_prepare_context")
-        post_keys = extract_raw_keys(post_src, "post()")
-        assert prepare_keys == post_keys, f"_raw_keys mismatch: {prepare_keys} != {post_keys}"
+        def fake_process_remote(link, hostname, device_id, server_key=None):
+            received_link.update(link)
+            return link
+
+        view.process_remote_device = fake_process_remote
+
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.get_object_or_404") as mock_get,
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_token", return_value="tok"),
+        ):
+            device = MagicMock()
+            device.pk = 1
+            device.virtual_chassis = None
+            device.interfaces.filter.return_value.first.return_value = None
+            mock_get.return_value = device
+            mock_cache.get.return_value = {"links": [cached_link]}
+
+            request = MagicMock()
+            request.body = json.dumps(
+                {
+                    "device_id": 1,
+                    "local_port_id": 100,
+                    "server_key": "default",
+                }
+            )
+            view.post(request)
+
+            # The link passed to process_remote_device must have derived fields stripped
+            assert "netbox_local_interface_id" not in received_link
+            assert "netbox_remote_interface_id" not in received_link
+            assert "netbox_remote_device_id" not in received_link
+            assert "local_port_url" not in received_link
+            assert "cable_status" not in received_link
 
 
 class TestXSSEscaping:
