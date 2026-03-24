@@ -1,11 +1,12 @@
 """
-Convert the ``librenms_id`` custom field type from integer to JSON.
+Convert the ``librenms_id`` custom field type to JSON.
 
 Multi-server support stores ``librenms_id`` as a JSON dict
 (``{"server_key": device_id, …}``).  Installations created before this
-change will have the custom field defined as type *integer*.  This
-migration updates the CustomField type so that NetBox validation accepts
-the new dict format.
+change will have the custom field defined as type *integer* (documented)
+or *text* (some users created it with the wrong type).  This migration
+converts any non-JSON type to JSON so that NetBox validation accepts the
+new dict format.
 
 Existing bare-integer **values** on devices/VMs/interfaces are left
 untouched — they are migrated to the dict format on a per-object basis
@@ -23,9 +24,13 @@ def _convert_librenms_id_to_json(apps, schema_editor):
     except CustomField.DoesNotExist:
         # Custom field hasn't been created yet — nothing to convert.
         return
-    if cf.type == "integer":
+    if cf.type != "json":
+        # Store the original type in description so reverse can restore it.
+        _marker = "\n[migrated_from_type:"
+        if _marker not in (cf.description or ""):
+            cf.description = (cf.description or "") + f"{_marker}{cf.type}]"
         cf.type = "json"
-        cf.save(using=db_alias, update_fields=["type"])
+        cf.save(using=db_alias, update_fields=["type", "description"])
 
 
 def _revert_librenms_id_to_integer(apps, schema_editor):
@@ -59,8 +64,15 @@ def _revert_librenms_id_to_integer(apps, schema_editor):
                 )
 
     if cf.type == "json":
-        cf.type = "integer"
-        cf.save(using=db_alias, update_fields=["type"])
+        # Restore original type from marker, default to integer.
+        _marker = "\n[migrated_from_type:"
+        original_type = "integer"
+        if cf.description and _marker in cf.description:
+            tail = cf.description.split(_marker, 1)[1]
+            original_type = tail.split("]", 1)[0]
+            cf.description = cf.description.split(_marker, 1)[0]
+        cf.type = original_type
+        cf.save(using=db_alias, update_fields=["type", "description"])
 
 
 class Migration(migrations.Migration):
