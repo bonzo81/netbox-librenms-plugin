@@ -2009,3 +2009,28 @@ class TestConvertLegacyLibreNMSIdViewPost:
         mock_msg.success.assert_called_once()
         mock_locked.full_clean.assert_called_once()
         mock_locked.save.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Wiring assertions — ensure views keep required mixins and permissions
+# ---------------------------------------------------------------------------
+
+
+class TestDeviceFieldsViewWiring:
+    """Structural checks: views must retain required mixins and permissions."""
+
+    def test_convert_legacy_id_has_librenms_api_mixin(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+        assert issubclass(ConvertLegacyLibreNMSIdView, LibreNMSAPIMixin)
+
+    def test_convert_legacy_id_has_required_object_permissions(self):
+        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+        assert "POST" in ConvertLegacyLibreNMSIdView.required_object_permissions
+
+    def test_remove_server_mapping_has_required_object_permissions(self):
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+
+        assert "POST" in RemoveServerMappingView.required_object_permissions

@@ -1573,11 +1573,14 @@ function initializeModuleReplaceButtons() {
             }
 
             // Fetch preview content and inject into modal body
+            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+            const fetchHeaders = {};
+            if (csrfToken) {
+                fetchHeaders['X-CSRFToken'] = csrfToken;
+            }
             fetch(`${previewUrl}?${params.toString()}`, {
                 signal,
-                headers: {
-                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
-                },
+                headers: fetchHeaders,
             })
                 .then(response => {
                     if (!response.ok) return response.text().then(t => { throw new Error(t); });
