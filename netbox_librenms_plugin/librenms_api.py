@@ -234,9 +234,8 @@ class LibreNMSAPI:
     def _normalize_librenms_id(value):
         """Coerce a raw LibreNMS ID value to int or None.
 
-        Treats booleans as None (LibreNMS occasionally returns True/False for
-        missing devices) and converts any other value to int, returning None on
-        failure.
+        Booleans are rejected because bool is a subclass of int in Python,
+        so int(True) silently becomes 1 — a valid-looking device ID.
         """
         if value is None or isinstance(value, bool):
             return None
