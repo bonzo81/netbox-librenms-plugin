@@ -140,6 +140,9 @@ class TestUpdateInterfaceAttributes:
         Previously the call was guarded by ``"librenms_id" in interface.cf``, which
         prevented the mapping from being created for brand-new interfaces. The fix
         (this PR) drops that guard so first-time writes are handled correctly.
+        Historically the call was guarded by ``"librenms_id" in interface.cf``, which
+        prevented the mapping from being created for brand-new interfaces. This test
+        ensures the mapping is created even when no existing custom-field mapping is present.
         """
         from dcim.models import Interface
 
