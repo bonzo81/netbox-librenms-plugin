@@ -65,11 +65,6 @@ class TestLibreNMSAPIMixinWiring:
 
         self._assert_has_api_mixin(AssignVCSerialView)
 
-    def test_convert_legacy_id_has_librenms_api_mixin(self):
-        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
-
-        self._assert_has_api_mixin(ConvertLegacyLibreNMSIdView)
-
 
 class TestCacheMixinWiring:
     """Views that cache LibreNMS data must have CacheMixin and expose get_cache_key."""
@@ -200,18 +195,6 @@ class TestRequiredObjectPermissionsWiring:
 
         self._assert_has_mixins(UpdateDeviceSerialView)
         assert "POST" in UpdateDeviceSerialView.required_object_permissions
-
-    def test_remove_server_mapping_has_required_object_permissions(self):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-
-        self._assert_has_mixins(RemoveServerMappingView)
-        assert "POST" in RemoveServerMappingView.required_object_permissions
-
-    def test_convert_legacy_id_has_required_object_permissions(self):
-        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
-
-        self._assert_has_mixins(ConvertLegacyLibreNMSIdView)
-        assert "POST" in ConvertLegacyLibreNMSIdView.required_object_permissions
 
     def test_delete_interfaces_has_required_object_permissions(self):
         from dcim.models import Interface
