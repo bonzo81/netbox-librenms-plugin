@@ -473,7 +473,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         if object_type == "virtualmachine":
             object_type = "vm"
         if object_type not in ("device", "vm"):
-            return HttpResponse("Invalid object_type", status=400)
+            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
         target_model = VirtualMachine if object_type == "vm" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
 
@@ -577,7 +577,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if object_type == "virtualmachine":
             object_type = "vm"
         if object_type not in ("device", "vm"):
-            return HttpResponse("Invalid object_type", status=400)
+            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
 
         target_model = VirtualMachine if object_type == "vm" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
@@ -589,7 +589,10 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         # Verify the device actually has a legacy bare-int librenms_id
         cf_value = obj.custom_field_data.get("librenms_id")
-        if not isinstance(cf_value, (int, str)) or isinstance(cf_value, bool):
+        if isinstance(cf_value, bool):
+            messages.error(request, "librenms_id has an invalid boolean value; cannot convert.")
+            return self._sync_url(object_type, pk)
+        if not isinstance(cf_value, (int, str)):
             messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
             return self._sync_url(object_type, pk)
         if isinstance(cf_value, str):
