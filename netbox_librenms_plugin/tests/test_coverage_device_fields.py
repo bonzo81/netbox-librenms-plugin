@@ -114,6 +114,7 @@ class TestUpdateDeviceNameView:
 
         mock_device = MagicMock()
         mock_device.name = "old-name"
+        mock_device.virtual_chassis = None
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
@@ -136,6 +137,7 @@ class TestUpdateDeviceNameView:
 
         mock_device = MagicMock()
         mock_device.name = "old-name"
+        mock_device.virtual_chassis = None
         exc = ValidationError({"name": ["duplicate"]})
         mock_device.full_clean.side_effect = exc
 
@@ -159,6 +161,7 @@ class TestUpdateDeviceNameView:
 
         mock_device = MagicMock()
         mock_device.name = "old-name"
+        mock_device.virtual_chassis = None
         mock_device.full_clean.side_effect = IntegrityError("duplicate key")
 
         with (

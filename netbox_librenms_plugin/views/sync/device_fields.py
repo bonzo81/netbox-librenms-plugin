@@ -58,13 +58,19 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Failed to retrieve device info from LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
+        # Bail out early when LibreNMS has no usable name – the fallback
+        # names that _determine_device_name generates (e.g. "device-42")
+        # are only useful during import, not for renaming an existing device.
+        if not (device_info.get("sysName") or device_info.get("hostname")):
+            messages.warning(request, "No name could be determined from LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
         use_sysname, strip_domain = resolve_naming_preferences(request)
 
         resolved_name = _determine_device_name(
             device_info,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
-            device_id=self.librenms_id,
         )
 
         # For VC members, generate the expected VC member name
