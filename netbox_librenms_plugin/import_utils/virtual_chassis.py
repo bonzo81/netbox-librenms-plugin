@@ -238,7 +238,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             # position is already 1-based, so pass it directly (no +1).
             if master_name:
                 member_data["suggested_name"] = _generate_vc_member_name(
-                    master_name, position, serial=member_data.get("serial"), pattern=vc_name_pattern
+                    master_name, position, serial=_norm_serial(member_data.get("serial")), pattern=vc_name_pattern
                 )
             else:
                 member_data["suggested_name"] = f"Member-{position}"
@@ -344,7 +344,7 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
             position = idx + 1
         member["position"] = position
         member["suggested_name"] = _generate_vc_member_name(
-            master_name, position, serial=member.get("serial"), pattern=vc_pattern
+            master_name, position, serial=_norm_serial(member.get("serial")), pattern=vc_pattern
         )
 
     return vc_data
@@ -393,8 +393,11 @@ def create_virtual_chassis_with_members(
         ]
     """
 
-    # original_master_name is still referenced in warning messages inside the atomic block.
+    # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
+    # not in-memory model fields.
     original_master_name = master_device.name
+    original_vc = master_device.virtual_chassis
+    original_vc_position = master_device.vc_position
 
     # Find master's actual VC position from members_info by serial match; default to 1
     _master_pos = 1
@@ -412,7 +415,7 @@ def create_virtual_chassis_with_members(
             vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
             master_device_new_name = _generate_vc_member_name(
-                original_master_name, _master_pos, serial=master_device.serial, pattern=vc_pattern
+                original_master_name, _master_pos, serial=_norm_serial(master_device.serial), pattern=vc_pattern
             )
 
             # Check if renamed master conflicts with existing device
@@ -456,7 +459,7 @@ def create_virtual_chassis_with_members(
                 member_pos = _safe_pos(member.get("position"))
 
                 # Skip if this is the master's serial (only when both serials are non-empty)
-                if serial and serial == (master_device.serial or "").strip():
+                if serial and serial == _norm_serial(master_device.serial):
                     continue
                 # Skip blank-serial entries that represent the master slot by position
                 if (
@@ -524,7 +527,10 @@ def create_virtual_chassis_with_members(
                 [
                     m
                     for m in members_info
-                    if not (_norm_serial(m.get("serial")) and _norm_serial(m.get("serial")) == master_device.serial)
+                    if not (
+                        _norm_serial(m.get("serial"))
+                        and _norm_serial(m.get("serial")) == _norm_serial(master_device.serial)
+                    )
                     and not (
                         not _norm_serial(m.get("serial"))
                         and m.get("position") is not None
@@ -547,10 +553,11 @@ def create_virtual_chassis_with_members(
             return vc
 
     except Exception as e:
-        # The transaction.atomic() block above will roll back all DB changes automatically.
-        # Manual state restoration is redundant and the save() would fail in a broken transaction.
+        master_device.name = original_master_name
+        master_device.virtual_chassis = original_vc
+        master_device.vc_position = original_vc_position
         logger.error(
-            f"Virtual Chassis creation failed for device {master_device.name}: {e}",
+            f"Virtual Chassis creation failed for device {original_master_name}: {e}",
             exc_info=True,
         )
         raise

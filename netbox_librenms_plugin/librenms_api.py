@@ -209,41 +209,40 @@ class LibreNMSAPI:
 
         # Try IP address
         if ip_address:
-            librenms_id = self.get_device_id_by_ip(ip_address)
+            librenms_id = self._normalize_librenms_id(self.get_device_id_by_ip(ip_address))
             if librenms_id is not None:
-                try:
-                    librenms_id = int(librenms_id)
-                except (ValueError, TypeError):
-                    librenms_id = None
-                if librenms_id is not None:
-                    self._store_librenms_id(obj, librenms_id)
-                    return librenms_id
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
         # Try primary IP's DNS name
         if dns_name:
-            librenms_id = self.get_device_id_by_hostname(dns_name)
+            librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(dns_name))
             if librenms_id is not None:
-                try:
-                    librenms_id = int(librenms_id)
-                except (ValueError, TypeError):
-                    librenms_id = None
-                if librenms_id is not None:
-                    self._store_librenms_id(obj, librenms_id)
-                    return librenms_id
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
         # Try hostname if FQDN
         if hostname:
-            librenms_id = self.get_device_id_by_hostname(hostname)
+            librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(hostname))
             if librenms_id is not None:
-                try:
-                    librenms_id = int(librenms_id)
-                except (ValueError, TypeError):
-                    librenms_id = None
-                if librenms_id is not None:
-                    self._store_librenms_id(obj, librenms_id)
-                    return librenms_id
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
         return None
+
+    @staticmethod
+    def _normalize_librenms_id(value):
+        """Coerce a raw LibreNMS ID value to int or None.
+
+        Booleans are rejected because bool is a subclass of int in Python,
+        so int(True) silently becomes 1 — a valid-looking device ID.
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return None
 
     def _get_cache_key(self, obj):
         """
@@ -300,7 +299,7 @@ class LibreNMSAPI:
             response.raise_for_status()
             device_data = response.json()["devices"][0]
             return device_data["device_id"]
-        except (requests.exceptions.RequestException, IndexError, KeyError, TypeError):
+        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
     def get_device_id_by_hostname(self, hostname):
@@ -323,7 +322,7 @@ class LibreNMSAPI:
             response.raise_for_status()
             device_data = response.json()["devices"][0]
             return device_data["device_id"]
-        except (requests.exceptions.RequestException, IndexError, KeyError, TypeError):
+        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
     def get_device_info(self, device_id):
@@ -346,9 +345,11 @@ class LibreNMSAPI:
             )
             if response.status_code == 200:
                 device_data = response.json()["devices"][0]
+                if not isinstance(device_data, dict):
+                    return False, None
                 return True, device_data
             return False, None
-        except (requests.exceptions.RequestException, IndexError, KeyError, TypeError):
+        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return False, None
 
     def get_ports(self, device_id, with_vlans=True):
@@ -553,7 +554,7 @@ class LibreNMSAPI:
                 location_id = result["message"].split("#")[-1]
                 return True, {"id": location_id, "message": result["message"]}
             else:
-                return False, result.get("message", "Unexpected response format")
+                return False, result.get("message") or "Unexpected response format"
         except requests.exceptions.RequestException as e:
             error_message = str(e)
             if hasattr(e.response, "json"):
@@ -591,7 +592,7 @@ class LibreNMSAPI:
             if result.get("status") == "ok":
                 return True, result["message"]
             else:
-                return False, result.get("message", "Unexpected response format")
+                return False, result.get("message") or "Unexpected response format"
         except requests.exceptions.RequestException as e:
             error_message = str(e)
             if hasattr(e.response, "json"):
@@ -645,7 +646,7 @@ class LibreNMSAPI:
                 message = data.get("message") if isinstance(data, dict) else None
                 return False, message or "Unexpected response format: 'addresses' must be a list"
             return True, addresses
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
     def get_port_by_id(self, port_id):
@@ -702,12 +703,12 @@ class LibreNMSAPI:
             response.raise_for_status()
             inventory_data = response.json()
             inventory = inventory_data.get("inventory") if isinstance(inventory_data, dict) else None
-            if not isinstance(inventory, list):
+            if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
                 msg = inventory_data.get("message", "") if isinstance(inventory_data, dict) else ""
                 logger.warning(f"Unexpected inventory response for device {device_id}: {inventory_data}")
-                return False, msg or "Unexpected response format: missing 'inventory' list"
+                return False, msg or "Unexpected response format: invalid 'inventory' payload"
             return True, inventory
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
     def get_poller_groups(self):
@@ -739,11 +740,13 @@ class LibreNMSAPI:
                 poller_groups = result.get("get_poller_group")
                 if not isinstance(poller_groups, list):
                     return False, result.get("message") or "Unexpected response format: missing 'get_poller_group' list"
+                if not all(isinstance(item, dict) for item in poller_groups):
+                    return False, "Unexpected response format: invalid item shape in 'get_poller_group'"
                 return True, poller_groups
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
             return False, "Unexpected response format: non-object JSON"
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
     def get_inventory_filtered(self, device_id, ent_physical_class=None, ent_physical_contained_in=None):
@@ -790,9 +793,9 @@ class LibreNMSAPI:
             data = response.json()
             if isinstance(data, dict) and data.get("status") == "ok":
                 inventory = data.get("inventory")
-                if not isinstance(inventory, list):
+                if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
                     msg = data.get("message")
-                    return False, msg or "Unexpected response format: missing 'inventory' list"
+                    return False, msg or "Unexpected response format: invalid 'inventory' payload"
                 logger.debug(f"API returned {len(inventory)} items")
 
                 # If we got results or didn't specify filters, return
@@ -821,11 +824,13 @@ class LibreNMSAPI:
 
                 return True, filtered
 
-            return False, data.get("message", "Unexpected response format") if isinstance(
-                data, dict
-            ) else "Unexpected response format"
+            # LibreNMS API v0 always returns JSON objects, so data is always
+            # a dict here; the isinstance guard is purely defensive.
+            if isinstance(data, dict):
+                return False, data.get("message") or "Unexpected response format"
+            return False, "Unexpected response format"
 
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             logger.warning(f"Failed to fetch filtered inventory: {e}")
             return False, str(e)
 
@@ -893,12 +898,16 @@ class LibreNMSAPI:
                 if not isinstance(devices, list):
                     msg = result.get("message")
                     return False, msg or "Unexpected response format: missing 'devices' list"
+                if not all(isinstance(item, dict) for item in devices):
+                    return False, "Unexpected response format: invalid item shape in 'devices'"
                 return True, devices
 
-            return False, result.get("message", "Unexpected response format") if isinstance(
-                result, dict
-            ) else "Unexpected response format"
-        except requests.exceptions.RequestException as e:
+            # LibreNMS API v0 always returns JSON objects, so result is always
+            # a dict here; the isinstance guard is purely defensive.
+            if isinstance(result, dict):
+                return False, result.get("message") or "Unexpected response format"
+            return False, "Unexpected response format"
+        except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
     # =========================================================================
@@ -952,13 +961,13 @@ class LibreNMSAPI:
                 ]
                 return True, device_vlans
             if isinstance(result, dict):
-                return False, result.get("message", "Unexpected response format")
+                return False, result.get("message") or "Unexpected response format"
             return False, "Unexpected response format"
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "VLANs resource not found"
             return False, f"HTTP error: {str(e)}"
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
     def get_port_vlan_details(self, port_id: int) -> tuple[bool, dict | str]:
@@ -1000,17 +1009,21 @@ class LibreNMSAPI:
                 result = response.json()
                 if not isinstance(result, dict):
                     return False, "Unexpected response format"
-                port_data = result.get("port", [])
-                if port_data and len(port_data) > 0:
-                    return True, port_data[0]
-                return False, "Port not found"
+                port_data = result.get("port")
+                if not isinstance(port_data, list):
+                    return False, result.get("message", "Unexpected response format: missing 'port' list")
+                if not port_data:
+                    return False, "Port not found"
+                if not isinstance(port_data[0], dict):
+                    return False, "Unexpected response format: invalid 'port' entry"
+                return True, port_data[0]
 
             return False, f"HTTP {response.status_code}"
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "Port not found in LibreNMS"
             return False, f"HTTP error: {str(e)}"
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
     def parse_port_vlan_data(self, port_data: dict, interface_name_field: str = "ifName") -> dict:
@@ -1051,7 +1064,7 @@ class LibreNMSAPI:
         untagged_vlan = None
         tagged_vlans = []
 
-        if vlans_data:
+        if isinstance(vlans_data, list) and vlans_data:
             # Parse from detailed vlans array
             for vlan_entry in vlans_data:
                 if not isinstance(vlan_entry, dict):
