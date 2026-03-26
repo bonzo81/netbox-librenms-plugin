@@ -212,33 +212,59 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             return None
 
         # Step 5: Extract member info
+        # First pass: collect raw entPhysicalParentRelPos values to detect 0-based
+        # indexing.  Some vendors use 0-based positions (0,1,2,3,4) instead of the
+        # RFC 2737 standard 1-based (1,2,3,4,5).  If any raw position is 0, shift
+        # all valid positions up by 1 so the resulting set is always 1-based.
+        raw_positions = []
+        for chassis in chassis_items:
+            raw = chassis.get("entPhysicalParentRelPos")
+            try:
+                raw_positions.append(int(raw))
+            except (TypeError, ValueError):
+                raw_positions.append(None)
+
+        valid_positions = [p for p in raw_positions if p is not None]
+        zero_based = bool(valid_positions) and min(valid_positions) == 0
+
+        # Identify the master member by matching the LibreNMS device serial
+        # against the ENTITY-MIB serials.  The device-level serial reported by
+        # LibreNMS corresponds to the active/master switch in the stack.
+        device_serial = ""
+        if success and device_info:
+            device_serial = _norm_serial(device_info.get("serial"))
+
         # Load naming pattern once to avoid a DB query per member.
         vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
         members = []
         for idx, chassis in enumerate(chassis_items):
-            # entPhysicalParentRelPos is 1-based; fall back to idx+1 (not idx) so
-            # position 0 is never produced — VC positions must be ≥ 1.
-            raw_position = chassis.get("entPhysicalParentRelPos", idx + 1)
-            try:
-                position = int(raw_position)
+            raw_pos = raw_positions[idx]
+            if raw_pos is not None:
+                position = raw_pos + 1 if zero_based else raw_pos
+                # Guard against negative or zero after shift
                 if position <= 0:
                     position = idx + 1
-            except (TypeError, ValueError):
+            else:
                 position = idx + 1
+
+            serial = chassis.get("entPhysicalSerialNum", "")
+            is_master = bool(device_serial and _norm_serial(serial) == device_serial)
+
             member_data = {
-                "serial": chassis.get("entPhysicalSerialNum", ""),
+                "serial": serial,
                 "position": position,
                 "model": chassis.get("entPhysicalModelName", ""),
                 "name": chassis.get("entPhysicalName", ""),
                 "index": chassis.get("entPhysicalIndex"),
                 "description": chassis.get("entPhysicalDescr", ""),
+                "is_master": is_master,
             }
 
             # Generate suggested name if we have master name.
             # position is already 1-based, so pass it directly (no +1).
             if master_name:
                 member_data["suggested_name"] = _generate_vc_member_name(
-                    master_name, position, serial=_norm_serial(member_data.get("serial")), pattern=vc_name_pattern
+                    master_name, position, serial=_norm_serial(serial), pattern=vc_name_pattern
                 )
             else:
                 member_data["suggested_name"] = f"Member-{position}"
@@ -248,7 +274,23 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         # Sort by position
         members.sort(key=lambda m: m["position"])
 
-        logger.info(f"Detected stack with {len(members)} members for device {device_id}")
+        if zero_based:
+            logger.debug(
+                f"VC detection: corrected 0-based entPhysicalParentRelPos for device {device_id} "
+                f"(raw min={min(valid_positions)})"
+            )
+
+        master_member = next((m for m in members if m["is_master"]), None)
+        if master_member:
+            logger.info(
+                f"Detected stack with {len(members)} members for device {device_id}; "
+                f"master at position {master_member['position']} (serial {device_serial})"
+            )
+        else:
+            logger.info(
+                f"Detected stack with {len(members)} members for device {device_id}; "
+                f"master could not be identified by serial"
+            )
 
         return {"is_stack": True, "member_count": len(members), "members": members}
 
@@ -399,9 +441,15 @@ def create_virtual_chassis_with_members(
     original_vc = master_device.virtual_chassis
     original_vc_position = master_device.vc_position
 
-    # Find master's actual VC position from members_info by serial match; default to 1
+    # Find master's actual VC position from members_info.
+    # Priority: is_master flag (set during detection) → serial match → default 1.
     _master_pos = 1
-    if _norm_serial(master_device.serial):
+    _master_member = next((m for m in members_info if m.get("is_master")), None)
+    if _master_member:
+        _found_pos = _safe_pos(_master_member.get("position"))
+        if _found_pos and _found_pos >= 1:
+            _master_pos = _found_pos
+    elif _norm_serial(master_device.serial):
         for _m in members_info:
             if _norm_serial(_m.get("serial")) == _norm_serial(master_device.serial):
                 _found_pos = _safe_pos(_m.get("position"))
@@ -458,6 +506,10 @@ def create_virtual_chassis_with_members(
                     serial = ""
                 member_pos = _safe_pos(member.get("position"))
 
+                # Skip the master member — identified by is_master flag, serial match,
+                # or position match.
+                if member.get("is_master"):
+                    continue
                 # Skip if this is the master's serial (only when both serials are non-empty)
                 if serial and serial == _norm_serial(master_device.serial):
                     continue

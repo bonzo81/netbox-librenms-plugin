@@ -67,14 +67,14 @@
               <li class="py-3 {% if not forloop.last %}border-bottom{% endif %}">
                 <div class="d-flex flex-wrap align-items-center gap-2">
                   <span class="text-muted me-2">
-                    {% if member.position or member.position == 0 %}
-                      Pos {{ member.position|add:'1' }}
+                    {% if member.position %}
+                      Pos {{ member.position }}
                     {% else %}
                       Pos —
                     {% endif %}
                   </span>
                   <code class="flex-grow-1 mb-0">{{ member.suggested_name|default:member.name|default:"(unknown)" }}</code>
-                  {% if forloop.first %}
+                  {% if member.is_master %}
                     <span class="badge bg-success text-white">Master</span>
                   {% endif %}
                 </div>

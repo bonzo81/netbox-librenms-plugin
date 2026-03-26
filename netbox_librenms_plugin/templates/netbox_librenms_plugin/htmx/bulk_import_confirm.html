@@ -76,15 +76,15 @@
                   {% for member in vc.members %}
                     <li class="d-flex flex-wrap align-items-center py-2 {% if not forloop.last %}border-bottom{% endif %}">
                       <span class="text-muted me-2">
-                        {% if member.position or member.position == 0 %}
-                          Pos {{ member.position|add:'1' }}
+                        {% if member.position %}
+                          Pos {{ member.position }}
                         {% else %}
                           Pos —
                         {% endif %}
                       </span>
                       <div class="flex-grow-1 d-flex align-items-center gap-2">
                         <code class="flex-grow-1 mb-0">{{ member.suggested_name }}
-                        {% if forloop.first %}
+                        {% if member.is_master %}
                           <span class="badge bg-success text-white">Master</span>
                         {% endif %}
                         </code>
@@ -140,6 +140,7 @@
     {% endfor %}
     <input type="hidden" name="use_sysname" value="{{ use_sysname|yesno:'true,false' }}">
     <input type="hidden" name="strip_domain" value="{{ strip_domain|yesno:'true,false' }}">
+    {% if vc_detection_enabled %}<input type="hidden" name="enable_vc_detection" value="true">{% endif %}
     <input type="hidden" name="use_background_job" id="use-background-job-hidden" value="on">
     <button type="submit" class="btn btn-success d-inline-flex align-items-center gap-1" data-bulk-confirm-submit>
       <span data-state="idle" class="d-inline-flex align-items-center gap-1">
