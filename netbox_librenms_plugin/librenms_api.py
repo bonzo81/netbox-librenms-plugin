@@ -234,9 +234,8 @@ class LibreNMSAPI:
     def _normalize_librenms_id(value):
         """Coerce a raw LibreNMS ID value to int or None.
 
-        Treats booleans as None (LibreNMS occasionally returns True/False for
-        missing devices) and converts any other value to int, returning None on
-        failure.
+        Booleans are rejected because bool is a subclass of int in Python,
+        so int(True) silently becomes 1 — a valid-looking device ID.
         """
         if value is None or isinstance(value, bool):
             return None
@@ -825,9 +824,11 @@ class LibreNMSAPI:
 
                 return True, filtered
 
-            return False, data.get("message") or "Unexpected response format" if isinstance(
-                data, dict
-            ) else "Unexpected response format"
+            # LibreNMS API v0 always returns JSON objects, so data is always
+            # a dict here; the isinstance guard is purely defensive.
+            if isinstance(data, dict):
+                return False, data.get("message") or "Unexpected response format"
+            return False, "Unexpected response format"
 
         except (requests.exceptions.RequestException, ValueError) as e:
             logger.warning(f"Failed to fetch filtered inventory: {e}")
@@ -901,9 +902,11 @@ class LibreNMSAPI:
                     return False, "Unexpected response format: invalid item shape in 'devices'"
                 return True, devices
 
-            return False, result.get("message") or "Unexpected response format" if isinstance(
-                result, dict
-            ) else "Unexpected response format"
+            # LibreNMS API v0 always returns JSON objects, so result is always
+            # a dict here; the isinstance guard is purely defensive.
+            if isinstance(result, dict):
+                return False, result.get("message") or "Unexpected response format"
+            return False, "Unexpected response format"
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
