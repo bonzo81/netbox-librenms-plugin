@@ -447,6 +447,10 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     status=400,
                 )
 
+        # Derive VC detection flag from actual validation results — if any device
+        # was identified as a stack, the final import must have VC creation enabled.
+        vc_detection_enabled = any(entry["validation"].get("virtual_chassis", {}).get("is_stack") for entry in devices)
+
         context = {
             "devices": devices,
             "device_count": len(devices),
@@ -454,6 +458,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
             "server_key": self.librenms_api.server_key,
+            "vc_detection_enabled": vc_detection_enabled,
         }
 
         return render(
