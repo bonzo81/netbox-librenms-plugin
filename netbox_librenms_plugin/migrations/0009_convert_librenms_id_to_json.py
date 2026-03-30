@@ -25,12 +25,8 @@ def _convert_librenms_id_to_json(apps, schema_editor):
         # Custom field hasn't been created yet — nothing to convert.
         return
     if cf.type != "json":
-        # Store the original type in description so reverse can restore it.
-        _marker = "\n[migrated_from_type:"
-        if _marker not in (cf.description or ""):
-            cf.description = (cf.description or "") + f"{_marker}{cf.type}]"
         cf.type = "json"
-        cf.save(using=db_alias, update_fields=["type", "description"])
+        cf.save(using=db_alias, update_fields=["type"])
 
 
 def _revert_librenms_id_to_integer(apps, schema_editor):
@@ -64,15 +60,8 @@ def _revert_librenms_id_to_integer(apps, schema_editor):
                 )
 
     if cf.type == "json":
-        # Restore original type from marker, default to integer.
-        _marker = "\n[migrated_from_type:"
-        original_type = "integer"
-        if cf.description and _marker in cf.description:
-            tail = cf.description.split(_marker, 1)[1]
-            original_type = tail.split("]", 1)[0]
-            cf.description = cf.description.split(_marker, 1)[0]
-        cf.type = original_type
-        cf.save(using=db_alias, update_fields=["type", "description"])
+        cf.type = "integer"
+        cf.save(using=db_alias, update_fields=["type"])
 
 
 class Migration(migrations.Migration):
