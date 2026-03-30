@@ -5089,7 +5089,7 @@ class TestResolveNamingPreferencesKeys:
         from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
 
         request = self._make_request(post={"use-sysname-toggle": "on", "strip-domain-toggle": "off"})
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             use_sysname, strip_domain = _resolve_naming_preferences(request)
         assert use_sysname is True
         assert strip_domain is False
@@ -5101,7 +5101,7 @@ class TestResolveNamingPreferencesKeys:
         from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
 
         request = self._make_request(post={"use_sysname-toggle": "on", "strip_domain-toggle": "on"})
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             use_sysname, strip_domain = _resolve_naming_preferences(request)
         assert use_sysname is True
         assert strip_domain is True
@@ -5112,7 +5112,7 @@ class TestResolveNamingPreferencesKeys:
         from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
 
         request = self._make_request(get={"use-sysname-toggle": "off", "strip-domain-toggle": "on"})
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             use_sysname, strip_domain = _resolve_naming_preferences(request)
         assert use_sysname is False
         assert strip_domain is True
@@ -5123,7 +5123,7 @@ class TestResolveNamingPreferencesKeys:
         from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
 
         request = self._make_request()
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref") as mock_pref:
+        with patch("netbox_librenms_plugin.utils.get_user_pref") as mock_pref:
             mock_pref.side_effect = lambda req, key: False if "use_sysname" in key else True
             use_sysname, strip_domain = _resolve_naming_preferences(request)
         assert use_sysname is False
@@ -5136,7 +5136,7 @@ class TestResolveNamingPreferencesKeys:
 
         request = self._make_request(post={"use-sysname-toggle": "off"})
         # user_pref would say True — POST should win
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=True):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=True):
             use_sysname, _ = _resolve_naming_preferences(request)
         assert use_sysname is False
 
@@ -5148,7 +5148,7 @@ class TestResolveNamingPreferencesKeys:
 
         for truthy_val in ("true", "True", "TRUE", "1"):
             request = self._make_request(post={"use-sysname-toggle": truthy_val, "strip-domain-toggle": "off"})
-            with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+            with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
                 use_sysname, _ = _resolve_naming_preferences(request)
             assert use_sysname is True, f"Expected True for value {truthy_val!r}"
 
@@ -5160,7 +5160,7 @@ class TestResolveNamingPreferencesKeys:
 
         for falsy_val in ("off", "false", "0", "", "no"):
             request = self._make_request(post={"use-sysname-toggle": falsy_val, "strip-domain-toggle": "off"})
-            with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+            with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
                 use_sysname, _ = _resolve_naming_preferences(request)
             assert use_sysname is False, f"Expected False for value {falsy_val!r}"
 
