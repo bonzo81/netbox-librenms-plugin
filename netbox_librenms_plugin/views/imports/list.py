@@ -232,6 +232,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         # Check if this should be processed as a background job
         # Skip if we're loading results from a completed job (job_id in URL)
         # IMPORTANT: Only process if form is valid (filter requirement enforced)
+        device_count = 0
         if filters_submitted and form_valid and not self._job_results_loaded and not request.GET.get("job_id"):
             # Build filter dict
             libre_filters = {}
@@ -356,6 +357,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             "cached_searches": cached_searches,
             "librenms_server_info": self.get_server_info(),
             "can_use_background_jobs": request.user.is_superuser,
+            "device_count": device_count,
         }
         return render(request, self.template_name, context)
 

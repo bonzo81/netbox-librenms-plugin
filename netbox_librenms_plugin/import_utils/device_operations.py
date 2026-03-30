@@ -1,6 +1,7 @@
 """Device validation, import, and fetch operations."""
 
 import logging
+from types import SimpleNamespace
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site
 from django.core.cache import cache
@@ -11,6 +12,7 @@ from virtualization.models import Cluster  # noqa: F401 — used by test mock.pa
 
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
+    find_by_librenms_id,
     find_matching_platform,
     find_matching_site,
     match_librenms_hardware_to_device_type,
@@ -128,11 +130,11 @@ def validate_device_for_import(
     import_as_vm: bool = False,
     api: "LibreNMSAPI" = None,
     *,
+    server_key: str = "default",
     include_vc_detection: bool = True,
     force_vc_refresh: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
-    server_key: str = "default",
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -282,14 +284,10 @@ def validate_device_for_import(
 
         server_key = api.server_key if api is not None else server_key
 
-        # Check for existing VM first (by librenms_id custom field)
-        try:
-            from netbox_librenms_plugin.utils import find_by_librenms_id
-
-            existing_vm = find_by_librenms_id(VirtualMachine, librenms_id, server_key)
-        except (ValueError, TypeError):
-            # librenms_id is not convertible to int; no match will be found
-            existing_vm = None
+        # Check for existing VM first (by librenms_id custom field).
+        # find_by_librenms_id() covers both the new per-server JSON format
+        # and legacy bare-integer values so neither is missed.
+        existing_vm = find_by_librenms_id(VirtualMachine, librenms_id, server_key)
 
         if existing_vm:
             logger.info(f"Found existing VM: {existing_vm.name} (matched by librenms_id={librenms_id})")
@@ -315,15 +313,11 @@ def validate_device_for_import(
                 result["name_sync_available"] = True
                 result["suggested_name"] = hostname
 
-        # Check for existing Device (by librenms_id custom field)
+        # Check for existing Device (by librenms_id custom field).
+        # find_by_librenms_id() covers both the new per-server JSON format
+        # and legacy bare-integer values so neither is missed.
         if not result["existing_device"]:
-            try:
-                from netbox_librenms_plugin.utils import find_by_librenms_id
-
-                existing_device = find_by_librenms_id(Device, librenms_id, server_key)
-            except (ValueError, TypeError):
-                # librenms_id is not convertible to int; no match will be found
-                existing_device = None
+            existing_device = find_by_librenms_id(Device, librenms_id, server_key)
 
             if existing_device:
                 logger.info(f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})")
@@ -849,6 +843,8 @@ def import_single_device(
             # Generate import timestamp comment
             import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
 
+            _cf_proxy = SimpleNamespace(custom_field_data={})
+            set_librenms_device_id(_cf_proxy, device_id, api.server_key)
             device_data = {
                 "name": device_name,
                 "site": site,
@@ -856,6 +852,7 @@ def import_single_device(
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
+                "custom_field_data": _cf_proxy.custom_field_data,
             }
 
             # Add optional fields
@@ -880,7 +877,6 @@ def import_single_device(
 
             # Create the device
             device = Device(**device_data)
-            set_librenms_device_id(device, device_id, api.server_key)
             device.full_clean()
             device.save()
 

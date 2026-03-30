@@ -367,11 +367,12 @@ class TestLibreNMSAPIErrorResponses:
         assert success is False
 
     def test_null_inventory_returns_false(self, mock_server):
-        """{"status":"ok","inventory":null} must not raise, must return (False, ...)."""
+        """{"status":"ok","inventory":null} must not raise, must return (False, error_string)."""
         api = _make_api(mock_server.url)
         mock_server.register("/api/v0/inventory/1/all", {"status": "ok", "inventory": None})
         success, data = api.get_device_inventory(1)
         assert success is False
+        assert isinstance(data, str) and data, "expected a non-empty error string describing the malformed inventory"
 
     def test_null_devices_field_get_device_info(self, mock_server):
         """{"devices": null} in get_device_info must return (False, None) not crash."""

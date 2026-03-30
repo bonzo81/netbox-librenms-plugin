@@ -90,6 +90,48 @@ class TestDeviceTypeMatching:
         assert result["matched"] is False
         assert result["device_type"] is None
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
+    @patch("dcim.models.DeviceType")
+    def test_match_device_type_ambiguous_part_number_returns_none(self, mock_device_type, mock_dtm):
+        """MultipleObjectsReturned on part_number should return None, not pick .first()."""
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
+        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        mock_dtm.DoesNotExist = DoesNotExist
+        mock_dtm.MultipleObjectsReturned = type("DTMMult", (Exception,), {})
+        mock_dtm.objects.get.side_effect = DoesNotExist  # DTM not found
+        mock_device_type.DoesNotExist = DoesNotExist
+        mock_device_type.MultipleObjectsReturned = MultipleObjectsReturned
+        mock_device_type.objects.get.side_effect = MultipleObjectsReturned
+
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        result = match_librenms_hardware_to_device_type("DUPLICATE-PARTNUM")
+
+        assert result is None
+
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
+    @patch("dcim.models.DeviceType")
+    def test_match_device_type_ambiguous_model_returns_none(self, mock_device_type, mock_dtm):
+        """MultipleObjectsReturned on model should return None, not pick .first()."""
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
+        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        mock_dtm.DoesNotExist = DoesNotExist
+        mock_dtm.MultipleObjectsReturned = type("DTMMult", (Exception,), {})
+        mock_dtm.objects.get.side_effect = DoesNotExist  # DTM not found
+        mock_device_type.DoesNotExist = DoesNotExist
+        mock_device_type.MultipleObjectsReturned = MultipleObjectsReturned
+        # part_number raises DoesNotExist, model raises MultipleObjectsReturned
+        mock_device_type.objects.get.side_effect = [
+            DoesNotExist("not found"),
+            MultipleObjectsReturned("ambiguous"),
+        ]
+
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        result = match_librenms_hardware_to_device_type("DUPLICATE-MODEL")
+
+        assert result is None
+
 
 # =============================================================================
 # TestSiteMatching - 4 tests

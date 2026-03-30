@@ -32,7 +32,11 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import get_user_pref, save_user_pref, set_librenms_device_id
+from netbox_librenms_plugin.utils import (
+    resolve_naming_preferences as _resolve_naming_preferences,
+    save_user_pref,
+    set_librenms_device_id,
+)
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -55,57 +59,6 @@ def _save_device(device) -> HttpResponse | None:
     except IntegrityError as exc:
         return HttpResponse(f"Integrity error: {escape(str(exc))}", status=409)
     return None
-
-
-def _resolve_naming_preferences(request) -> tuple[bool, bool]:
-    """Resolve use_sysname/strip_domain: POST/GET data → user pref → plugin settings."""
-    from netbox_librenms_plugin.models import LibreNMSSettings
-
-    settings = None
-
-    # Check POST first (form submissions), then GET (HTMX hx-include on hx-get).
-    # Support hyphenated ("use-sysname-toggle"), underscored ("use_sysname-toggle"),
-    # and plain canonical ("use_sysname") key variants for compatibility across
-    # different form/hidden-input implementations.
-    _USE_SYSNAME_KEYS = ("use-sysname-toggle", "use_sysname-toggle", "use_sysname")
-    _STRIP_DOMAIN_KEYS = ("strip-domain-toggle", "strip_domain-toggle", "strip_domain")
-    _TRUTHY = frozenset({"on", "true", "1"})
-
-    def _is_truthy(val):
-        return val.lower() in _TRUTHY if val is not None else False
-
-    _use_sysname_post = next((request.POST.get(k) for k in _USE_SYSNAME_KEYS if k in request.POST), None)
-    _use_sysname_get = next((request.GET.get(k) for k in _USE_SYSNAME_KEYS if k in request.GET), None)
-
-    if _use_sysname_post is not None:
-        use_sysname = _is_truthy(_use_sysname_post)
-    elif _use_sysname_get is not None:
-        use_sysname = _is_truthy(_use_sysname_get)
-    else:
-        pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
-        if pref is not None:
-            use_sysname = pref
-        else:
-            settings = LibreNMSSettings.objects.first()
-            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
-
-    _strip_domain_post = next((request.POST.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.POST), None)
-    _strip_domain_get = next((request.GET.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.GET), None)
-
-    if _strip_domain_post is not None:
-        strip_domain = _is_truthy(_strip_domain_post)
-    elif _strip_domain_get is not None:
-        strip_domain = _is_truthy(_strip_domain_get)
-    else:
-        pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
-        if pref is not None:
-            strip_domain = pref
-        else:
-            if settings is None:
-                settings = LibreNMSSettings.objects.first()
-            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
-
-    return use_sysname, strip_domain
 
 
 def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> str:
@@ -1291,13 +1244,6 @@ class DeviceConflictActionView(
             # confirmed by serial match (or explicit force).
             from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
-            # Verify that the import workflow flagged this device as needing migration,
-            # preventing direct POST bypass of the modal validation gate.
-            if not validation.get("librenms_id_needs_migration"):
-                return HttpResponse(
-                    "Device is not flagged for librenms_id migration.",
-                    status=400,
-                )
             # Direct access needed to detect legacy integer format for migration prompt:
             # LibreNMSAPI.get_librenms_id() returns an int in both formats; only the raw
             # type check on custom_field_data reveals whether migration is needed.

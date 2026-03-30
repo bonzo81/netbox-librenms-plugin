@@ -188,6 +188,60 @@ def save_user_pref(request, path, value):
             pass
 
 
+def resolve_naming_preferences(request) -> tuple[bool, bool]:
+    """Resolve use_sysname/strip_domain: POST/GET toggle → user pref → plugin settings.
+
+    This is the single source of truth for naming preference resolution,
+    used by the import page, sync page, and sync action views.
+
+    Returns:
+        (use_sysname, strip_domain) booleans.
+    """
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    settings = None
+    _TRUTHY = frozenset({"on", "true", "1"})
+    _USE_SYSNAME_KEYS = ("use-sysname-toggle", "use_sysname-toggle", "use_sysname")
+    _STRIP_DOMAIN_KEYS = ("strip-domain-toggle", "strip_domain-toggle", "strip_domain")
+
+    def _is_truthy(val):
+        return val.lower() in _TRUTHY if val is not None else False
+
+    # Check POST first (import form submissions), then GET (HTMX hx-include)
+    _use_sysname_post = next((request.POST.get(k) for k in _USE_SYSNAME_KEYS if k in request.POST), None)
+    _use_sysname_get = next((request.GET.get(k) for k in _USE_SYSNAME_KEYS if k in request.GET), None)
+
+    if _use_sysname_post is not None:
+        use_sysname = _is_truthy(_use_sysname_post)
+    elif _use_sysname_get is not None:
+        use_sysname = _is_truthy(_use_sysname_get)
+    else:
+        pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        if pref is not None:
+            use_sysname = pref
+        else:
+            settings = LibreNMSSettings.objects.first()
+            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
+
+    _strip_domain_post = next((request.POST.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.POST), None)
+    _strip_domain_get = next((request.GET.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.GET), None)
+
+    if _strip_domain_post is not None:
+        strip_domain = _is_truthy(_strip_domain_post)
+    elif _strip_domain_get is not None:
+        strip_domain = _is_truthy(_strip_domain_get)
+    else:
+        pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        if pref is not None:
+            strip_domain = pref
+        else:
+            if settings is None:
+                settings = LibreNMSSettings.objects.first()
+            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
+
+    return use_sysname, strip_domain
+
+
 def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
     """
     Get interface name field with request override support.
@@ -276,12 +330,12 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
     except DeviceType.DoesNotExist:
         pass
     except DeviceType.MultipleObjectsReturned:
-        device_type = DeviceType.objects.filter(part_number__iexact=hardware_name).first()
-        return {
-            "matched": True,
-            "device_type": device_type,
-            "match_type": "exact",
-        }
+        logger.warning(
+            "Multiple DeviceType entries match part_number %r — cannot auto-select; "
+            "resolve the ambiguity by ensuring part numbers are unique across manufacturers.",
+            hardware_name,
+        )
+        return None
 
     # Try exact model match (case-insensitive)
     try:
@@ -290,8 +344,12 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
     except DeviceType.DoesNotExist:
         pass
     except DeviceType.MultipleObjectsReturned:
-        device_type = DeviceType.objects.filter(model__iexact=hardware_name).first()
-        return {"matched": True, "device_type": device_type, "match_type": "exact"}
+        logger.warning(
+            "Multiple DeviceType entries match model %r — cannot auto-select; "
+            "resolve the ambiguity by ensuring model names are unique across manufacturers.",
+            hardware_name,
+        )
+        return None
 
     return {"matched": False, "device_type": None, "match_type": None}
 

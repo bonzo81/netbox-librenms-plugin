@@ -99,13 +99,13 @@ def bulk_import_devices_shared(
     if user is None and job is not None:
         user = getattr(job.job, "user", None)
 
-    # Check permissions at start of bulk operation — both device and VM perms are
+    # Check permissions at start of bulk operation — device and VM add perms are
     # required because any device may be flagged as import_as_vm during validation.
+    # change_device is needed for VC master/member updates; VMs are only created, not changed.
     required_perms = [
         "dcim.add_device",
         "dcim.change_device",
         "virtualization.add_virtualmachine",
-        "virtualization.change_virtualmachine",
     ]
     require_permissions(user, required_perms, "import devices")
 
@@ -239,51 +239,50 @@ def bulk_import_devices_shared(
                             for m in vc_data.get("members", [])
                         )
                         if member_parts:
-                            fingerprint = hashlib.md5((f"{device_id}," + ",".join(member_parts)).encode()).hexdigest()[
-                                :12
-                            ]
+                            fingerprint = hashlib.md5(",".join(member_parts).encode()).hexdigest()[:12]
                             vc_domain = f"librenms-stack-{fingerprint}"
                         else:
                             vc_domain = f"librenms-{device_id}"
 
-                    # Guard VC creation with its own permission check — the upfront check
-                    # only covers add_device/change_device; VirtualChassis needs a separate perm.
-                    has_vc_perm, missing_vc_perms = check_user_permissions(user, ["dcim.add_virtualchassis"])
-                    if not has_vc_perm:
-                        warn_msg = (
-                            f"Skipping VC creation for device {device_id}: "
-                            f"missing permissions: {', '.join(missing_vc_perms)}"
-                        )
-                        if job and job.logger:
-                            job.logger.warning(warn_msg)
-                        else:
-                            logger.warning(warn_msg)
                     # Only create VC if we haven't processed this stack yet
-                    # Add to set BEFORE attempting creation to prevent race condition
-                    elif vc_domain not in processed_vc_domains:
-                        processed_vc_domains.add(vc_domain)
-                        try:
-                            vc = create_virtual_chassis_with_members(
-                                result["device"],
-                                vc_data["members"],
-                                libre_device,
-                                server_key=api.server_key,
+                    if vc_domain not in processed_vc_domains:
+                        # Guard VC creation with its own permission check — the upfront check
+                        # only covers add_device/change_device; VirtualChassis needs a separate perm.
+                        has_vc_perm, missing_vc_perms = check_user_permissions(user, ["dcim.add_virtualchassis"])
+                        if not has_vc_perm:
+                            warn_msg = (
+                                f"Skipping VC creation for device {device_id}: "
+                                f"missing permissions: {', '.join(missing_vc_perms)}"
                             )
-                            vc_created_count += 1
-                            log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
-                            if job and job.logger:
-                                job.logger.info(log_msg)
-                            else:
-                                logger.info(log_msg)
-                        except Exception as vc_error:
-                            # Remove from set on failure so retry is possible
-                            processed_vc_domains.discard(vc_domain)
-                            warn_msg = f"Failed to create VC for device {device_id}: {vc_error}"
                             if job and job.logger:
                                 job.logger.warning(warn_msg)
                             else:
                                 logger.warning(warn_msg)
-                            # Don't fail the import, just log the warning
+                        else:
+                            # Add to set BEFORE attempting creation to prevent race condition
+                            processed_vc_domains.add(vc_domain)
+                            try:
+                                vc = create_virtual_chassis_with_members(
+                                    result["device"],
+                                    vc_data["members"],
+                                    libre_device,
+                                    server_key=api.server_key,
+                                )
+                                vc_created_count += 1
+                                log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
+                                if job and job.logger:
+                                    job.logger.info(log_msg)
+                                else:
+                                    logger.info(log_msg)
+                            except Exception as vc_error:
+                                # Remove from set on failure so retry is possible
+                                processed_vc_domains.discard(vc_domain)
+                                warn_msg = f"Failed to create VC for device {device_id}: {vc_error}"
+                                if job and job.logger:
+                                    job.logger.warning(warn_msg)
+                                else:
+                                    logger.warning(warn_msg)
+                                # Don't fail the import, just log the warning
 
             elif result.get("device"):  # Device exists
                 skipped_list.append({"device_id": device_id, "reason": result["error"]})
@@ -386,8 +385,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 elif not validation.get("import_as_vm"):
                     validation["device_role"] = {"found": False, "role": None}
                     remove_validation_issue(validation, "role")
-                    validation.setdefault("issues", []).append("Device role must be manually selected before import")
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
+                # Re-assert non-importable state: recalculate bases can_import on
+                # issues alone, but an existing matched device must never be import-ready.
+                validation["can_import"] = False
+                validation["is_ready"] = False
                 return
             else:
                 # Device was deleted since caching — recompute readiness to match
@@ -403,7 +405,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"
             logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
-        return
+            return
 
     # existing_device was None at cache time — check if device was imported since
     if not libre_device:
@@ -468,9 +470,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             actual_is_vm = found_as_cross_model != import_as_vm  # XOR: cross flips the flag
             validation["import_as_vm"] = actual_is_vm  # Update so future refreshes query correct model
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
-                validation["device_role"] = {"found": True, "role": new_device.role}
+                apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:
-                validation.setdefault("device_role", {}).update({"found": False, "role": None})
+                validation["device_role"] = {"found": False, "role": None}
+            recalculate_validation_status(validation, is_vm=actual_is_vm)
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
 

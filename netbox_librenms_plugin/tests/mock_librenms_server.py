@@ -201,10 +201,15 @@ class MockLibreNMSServer:
 
     def inventory_response(self, device_id: int, items: list, status: int = 200):
         """Register a plain inventory response for /api/v0/inventory/{device_id}/all."""
+        payload_status = "ok" if 200 <= status < 300 else "error"
+        payload = (
+            {"status": payload_status, "inventory": items} if payload_status == "ok" else {"status": payload_status}
+        )
         self.register(
             f"/api/v0/inventory/{device_id}/all",
-            {"status": "ok", "inventory": items},
+            payload,
             status=status,
+            method="GET",
         )
 
     def vc_inventory_callable(self, device_id: int, root_items: list, children_by_parent_index: dict):
@@ -225,6 +230,11 @@ class MockLibreNMSServer:
             if contained_in == "0":
                 return 200, {"status": "ok", "inventory": root}
             if contained_in is not None:
+                # Require entPhysicalClass=chassis for child queries so tests catch
+                # any regression where the production code stops sending the class filter.
+                phy_class = query.get("entPhysicalClass", [None])[0]
+                if phy_class != "chassis":
+                    return 200, {"status": "ok", "inventory": []}
                 try:
                     idx = int(contained_in)
                 except (TypeError, ValueError):
@@ -237,8 +247,8 @@ class MockLibreNMSServer:
                 all_items.extend(v)
             return 200, {"status": "ok", "inventory": all_items}
 
-        self.routes[f"/api/v0/inventory/{device_id}"] = _handler
-        self.routes[f"/api/v0/inventory/{device_id}/all"] = _handler
+        self.register(f"/api/v0/inventory/{device_id}", _handler, method="GET")
+        self.register(f"/api/v0/inventory/{device_id}/all", _handler, method="GET")
 
 
 @contextmanager

@@ -81,11 +81,6 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if not success or "error" in data:
             return None
 
-        # TODO: local_port names are baked into the cache using the requesting
-        # user's interface_name_field preference.  Subsequent users with a
-        # different preference will see (and match against) the wrong label.
-        # Fix requires either rebuilding names per-request from local_port_id
-        # or partitioning the cache key by interface_name_field.
         interface_name_field = get_interface_name_field(getattr(self, "request", None))
         ports_data = self.get_ports_data(obj)
         local_ports_map = {}
@@ -432,9 +427,10 @@ class SingleCableVerifyView(BaseCableTableView):
         if selected_device_id:
             selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-            # For VC devices, resolve to the primary sync device so the cache key
-            # matches what _prepare_context wrote; return empty row if unresolvable.
-            if hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
+            # Use the same sync-device resolution as the GET path so the cache
+            # key matches what _prepare_context wrote. When the VC has no
+            # resolvable sync device, return an empty row rather than crashing.
+            if selected_device.virtual_chassis:
                 primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
                 if primary_device is None:
                     return JsonResponse({"status": "success", "formatted_row": formatted_row})
