@@ -437,7 +437,7 @@ class TestBulkImportVms:
         assert "Connection error" in result["failed"][0]["error"]
 
     def test_job_cancellation_breaks_loop(self):
-        """Loop exits early when job status becomes 'failed' at the 5th-iteration check."""
+        """Loop exits early when _is_job_cancelled returns True at idx=1 check."""
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         mock_api = MagicMock()
@@ -445,22 +445,19 @@ class TestBulkImportVms:
 
         mock_job = MagicMock()
         mock_job.logger = MagicMock()
-        # Start as "running"; switches to "failed" on the 2nd refresh (idx=5 check)
-        mock_job.job.status = "running"
-        refresh_calls = [0]
 
-        def _refresh():
-            refresh_calls[0] += 1
-            if refresh_calls[0] >= 2:
-                mock_job.job.status = "failed"
+        # 5 VMs; _is_job_cancelled returns False for first check (idx=1), True for second (idx=5)
+        cancel_calls = [0]
 
-        mock_job.job.refresh_from_db.side_effect = _refresh
+        def _cancelled(job):
+            cancel_calls[0] += 1
+            return cancel_calls[0] >= 2
 
-        # 5 VMs: idx=1 check fires (running → no cancel); idx=5 fires (failed → cancel)
         vm_imports = {i: {} for i in range(1, 6)}
 
         with (
             patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.vm_operations._is_job_cancelled", side_effect=_cancelled),
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
                 return_value=None,  # VMs 1-4 → failed; VM-5 never reached
@@ -472,7 +469,7 @@ class TestBulkImportVms:
         assert len(result["failed"]) == 4
 
     def test_job_cancellation_with_errored_status(self):
-        """Loop also exits for 'errored' job status."""
+        """Loop also exits when _is_job_cancelled returns True (rq_job.is_failed)."""
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         mock_api = MagicMock()
@@ -480,21 +477,18 @@ class TestBulkImportVms:
 
         mock_job = MagicMock()
         mock_job.logger = MagicMock()
-        # Start as "running"; switches to "errored" on the 2nd refresh (idx=5 check)
-        mock_job.job.status = "running"
-        refresh_calls = [0]
 
-        def _refresh():
-            refresh_calls[0] += 1
-            if refresh_calls[0] >= 2:
-                mock_job.job.status = "errored"
+        cancel_calls = [0]
 
-        mock_job.job.refresh_from_db.side_effect = _refresh
+        def _cancelled(job):
+            cancel_calls[0] += 1
+            return cancel_calls[0] >= 2
 
         vm_imports = {i: {} for i in range(1, 6)}
 
         with (
             patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.vm_operations._is_job_cancelled", side_effect=_cancelled),
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
                 return_value=None,
@@ -607,7 +601,7 @@ class TestBulkImportVms:
         mock_apply_cluster.assert_not_called()
 
     def test_job_status_value_attribute_used_when_present(self):
-        """Status enum .value is used for cancellation check when present."""
+        """Redis unavailable (exception in _is_job_cancelled) returns False so loop continues."""
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         mock_api = MagicMock()
@@ -615,26 +609,16 @@ class TestBulkImportVms:
 
         mock_job = MagicMock()
         mock_job.logger = MagicMock()
-        # Status object with .value attribute (simulates Django choices enum)
-        # Initially "running", switches to "failed" on 2nd refresh (idx=5 check)
-        mock_running = MagicMock()
-        mock_running.value = "running"
-        mock_failed = MagicMock()
-        mock_failed.value = "failed"
-        mock_job.job.status = mock_running
-        refresh_calls = [0]
 
-        def _refresh():
-            refresh_calls[0] += 1
-            if refresh_calls[0] >= 2:
-                mock_job.job.status = mock_failed
-
-        mock_job.job.refresh_from_db.side_effect = _refresh
-
-        vm_imports = {i: {} for i in range(1, 6)}
+        vm_imports = {i: {} for i in range(1, 3)}
 
         with (
             patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
+            # Simulate Redis unavailable → _is_job_cancelled returns False (not cancelled)
+            patch(
+                "netbox_librenms_plugin.import_utils.vm_operations._is_job_cancelled",
+                return_value=False,
+            ),
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
                 return_value=None,
@@ -642,7 +626,8 @@ class TestBulkImportVms:
         ):
             result = bulk_import_vms(vm_imports, mock_api, job=mock_job)
 
-        assert len(result["failed"]) == 4
+        # Both VMs should be attempted (not cancelled) → both failed (fetch returned None)
+        assert len(result["failed"]) == 2
 
     def test_job_log_info_when_not_cancelled_at_checkpoint(self):
         """log.info is called at a non-cancelling 5-iteration checkpoint."""

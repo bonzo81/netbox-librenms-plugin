@@ -181,3 +181,29 @@ class TestEnsureLibreNMSIdCustomField:
             # asserting getLogger was never called, which is fragile.
             logger_instance = mock_get_logger.return_value
             logger_instance.info.assert_not_called()
+
+    @patch("dcim.models.Interface", new_callable=MagicMock)
+    @patch("dcim.models.Device", new_callable=MagicMock)
+    @patch("virtualization.models.VMInterface", new_callable=MagicMock)
+    @patch("virtualization.models.VirtualMachine", new_callable=MagicMock)
+    @patch("django.contrib.contenttypes.models.ContentType")
+    @patch("extras.models.CustomField")
+    def test_integer_field_migrated_to_json(
+        self, MockCustomField, MockContentType, mock_vm, mock_vmif, mock_device, mock_iface
+    ):
+        """When existing field has type='integer', it is migrated to 'json' and saved."""
+        from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+        mock_cf = MagicMock()
+        mock_cf.type = "integer"
+        mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
+        self._setup_cf_mock(MockCustomField, mock_cf, False)
+
+        mock_ct = MagicMock()
+        mock_ct.pk = 1
+        self._setup_ct_mock(MockContentType, mock_ct)
+
+        _ensure_librenms_id_custom_field(sender=None)
+
+        assert mock_cf.type == "json"
+        mock_cf.save.assert_called_once_with(using="default", update_fields=["type"])

@@ -4724,19 +4724,13 @@ class TestBulkImportCancellation:
         assert count == 0
         assert result.get("cancelled") is True
 
-    def test_rq_unavailable_falls_back_to_db_check(self):
-        """When RQ is unavailable, DB status check is used as fallback."""
+    def test_rq_unavailable_treats_as_not_cancelled(self):
+        """When RQ is unavailable, _is_job_cancelled returns False so import continues."""
         # mock_rq_job=None triggers the side_effect=Exception path
-        count, result = self._run_bulk_import(mock_rq_job=None, db_status="failed", device_ids=[1])
-        # With DB status "failed", import should not run
-        assert count == 0
-        assert result.get("cancelled") is True
-
-    def test_db_errored_status_also_terminates_loop(self):
-        """When DB job status is 'errored', import loop should terminate early."""
-        count, result = self._run_bulk_import(mock_rq_job=None, db_status="errored", device_ids=[1, 2, 3])
-        assert count == 0
-        assert result.get("cancelled") is True
+        count, result = self._run_bulk_import(mock_rq_job=None, db_status="failed", device_ids=[1, 2, 3])
+        # Redis unavailable → not cancelled → all devices processed
+        assert count == 3
+        assert result.get("cancelled") is False
 
     def test_healthy_job_runs_all_devices(self):
         """When job is healthy, all devices should be imported."""
