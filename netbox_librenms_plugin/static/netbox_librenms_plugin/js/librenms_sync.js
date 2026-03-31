@@ -122,13 +122,17 @@ function getDeviceIdFromUrl() {
     const pluginVMIndex = pathParts.indexOf('virtualmachine');
 
     if (deviceIndex !== -1 && deviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[deviceIndex + 1], type: 'device' };
+        const id = pathParts[deviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (vmIndex !== -1 && vmIndex + 1 < pathParts.length) {
-        return { id: pathParts[vmIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[vmIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     } else if (pluginDeviceIndex !== -1 && pluginDeviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginDeviceIndex + 1], type: 'device' };
+        const id = pathParts[pluginDeviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (pluginVMIndex !== -1 && pluginVMIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginVMIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[pluginVMIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     }
 
     return null;
@@ -189,7 +193,6 @@ function initializeCountdowns() {
     if (window.vlanCountdownInterval) {
         clearInterval(window.vlanCountdownInterval);
     }
-
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
     window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
@@ -554,7 +557,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             }
         })
         .catch(err => {
-            console.error('VLAN group verify failed:', err);
+            console.error('VLAN group verify failed:', err && err.message ? err.message : String(err));
         })
         .finally(() => {
             const saveBtn = document.getElementById('saveVlanGroups');
@@ -687,11 +690,7 @@ function initializeVlanModalSave() {
                 })
             }).then(response => {
                 if (!response.ok) {
-                    return response.text().then(t => {
-                        let msg = `HTTP ${response.status}`;
-                        try { const data = JSON.parse(t); if (data.message) msg = data.message; } catch (_) {}
-                        throw new Error(msg);
-                    });
+                    return response.text().then(t => { throw new Error(`HTTP ${response.status}: ${t}`); });
                 }
                 // Apply DOM mutations only after the server has persisted the overrides
                 applyButtonUpdates();
@@ -825,7 +824,6 @@ function handleVRFChange(select, value) {
         return;
     }
     const deviceId = deviceInfo.id;
-    const row = select.closest('tr');
 
     fetch('/plugins/librenms_plugin/verify-ipaddress/', {
         method: 'POST',
@@ -847,6 +845,8 @@ function handleVRFChange(select, value) {
             return response.json();
         })
         .then(data => {
+            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+
             if (data.status === 'success' && row && data.formatted_row) {
                 const statusCell = row.querySelector('td[data-col="status"]');
                 if (statusCell) {
@@ -1273,6 +1273,7 @@ function setInterfaceNameFieldFromURL() {
     const urlParams = new URLSearchParams(window.location.search);
     const interfaceNameField = urlParams.get('interface_name_field');
     if (interfaceNameField) {
+        if (!['ifDescr', 'ifName'].includes(interfaceNameField)) return;
         const radio = document.querySelector(`input[name="interface_name_field"][value="${interfaceNameField}"]`);
         if (radio) {
             radio.checked = true;
@@ -1318,11 +1319,6 @@ function initializeNetBoxOnlyInterfaces() {
             if (selectedCheckboxes.length === 0) {
                 return;
             }
-
-            const interfaceNames = Array.from(selectedCheckboxes).map(cb => {
-                const row = cb.closest('tr');
-                return row.querySelector('td:nth-child(2) a').textContent;
-            });
 
             deleteSelectedInterfaces(selectedCheckboxes);
         });
@@ -1593,6 +1589,7 @@ function closeHtmxModal() {
  * Initialize all sync page functionality.
  * Called on DOMContentLoaded and after HTMX content swaps.
  */
+
 function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
@@ -1630,4 +1627,19 @@ document.addEventListener('DOMContentLoaded', function () {
 // Initialize scripts after HTMX swaps content
 document.body.addEventListener('htmx:afterSwap', function (event) {
     initializeScripts();
+});
+
+// Update HTMX modal accessible label after content loads so screen readers
+// announce the actual dialog title rather than the static "Loading" placeholder.
+document.addEventListener('DOMContentLoaded', function () {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal) {
+        htmxModal.addEventListener('htmx:afterSettle', function () {
+            const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
+            const label = document.getElementById('htmx-modal-label');
+            if (header && label) {
+                label.textContent = header.textContent.trim();
+            }
+        });
+    }
 });
