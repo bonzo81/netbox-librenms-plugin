@@ -169,8 +169,9 @@ class TestGetVlanGroupsForDeviceInnerBranches:
 
         # SiteGroup ancestors should have been processed
         assert len(scope_calls) >= 1
-        # Verify the SiteGroup model class was passed to _get_vlan_groups_for_scope
+        # Verify the SiteGroup model class and ancestor objects were passed to _get_vlan_groups_for_scope
         assert any(c[0] is MockSiteGroup for c in scope_calls)
+        assert any(c[0] is MockSiteGroup and c[1] == [site_group] for c in scope_calls)
 
     def test_device_with_location_triggers_location_scope_query(self):
         """When device.location is set, location-scoped VLAN groups are queried."""
@@ -566,6 +567,10 @@ class TestSelectMostSpecificGroupPriorityPaths:
         site_group.scope_type = site_ct
         site_group.scope_id = 7
 
+        # Competing global group (less specific — scope_type=None)
+        global_group = MagicMock()
+        global_group.scope_type = None
+
         device = MagicMock()
         device.rack = None
         device.location = None
@@ -580,8 +585,9 @@ class TestSelectMostSpecificGroupPriorityPaths:
             patch("django.contrib.contenttypes.models.ContentType") as MockCT,
         ):
             MockCT.objects.get_for_model.return_value = site_ct
-            result = mixin._select_most_specific_group([site_group], device)
+            result = mixin._select_most_specific_group([global_group, site_group], device)
 
+        # site-scoped group wins over global group
         assert result is site_group
 
     def test_region_priority_path_executed(self):
@@ -607,6 +613,10 @@ class TestSelectMostSpecificGroupPriorityPaths:
         region_group.scope_type = region_ct
         region_group.scope_id = 15
 
+        # Competing global group (less specific — scope_type=None)
+        global_group = MagicMock()
+        global_group.scope_type = None
+
         device = MagicMock()
         device.rack = None
         device.location = None
@@ -629,21 +639,34 @@ class TestSelectMostSpecificGroupPriorityPaths:
                 id(MockRegion): region_ct,
             }
             MockCT.objects.get_for_model.side_effect = lambda m: ct_map[id(m)]
-            result = mixin._select_most_specific_group([region_group], device)
+            result = mixin._select_most_specific_group([global_group, region_group], device)
 
+        # region-scoped group wins over global group
         assert result is region_group
 
     def test_global_scope_group_lowest_priority(self):
-        """Global scope group (scope_type=None) gets global_priority (line 523)."""
+        """Global scope group (scope_type=None) loses to any scoped group."""
         mixin = self._make_mixin()
 
         global_group = MagicMock()
         global_group.scope_type = None  # global
 
+        site = MagicMock()
+        site.pk = 5
+        site.region = None
+        site.group = None
+
+        site_ct = MagicMock()
+        site_ct.pk = 3
+
+        site_group = MagicMock()
+        site_group.scope_type = site_ct
+        site_group.scope_id = 5
+
         device = MagicMock()
         device.rack = None
         device.location = None
-        device.site = None
+        device.site = site
 
         with (
             patch("dcim.models.Rack"),
@@ -651,11 +674,13 @@ class TestSelectMostSpecificGroupPriorityPaths:
             patch("dcim.models.Site"),
             patch("dcim.models.SiteGroup"),
             patch("dcim.models.Region"),
-            patch("django.contrib.contenttypes.models.ContentType"),
+            patch("django.contrib.contenttypes.models.ContentType") as MockCT,
         ):
-            result = mixin._select_most_specific_group([global_group], device)
+            MockCT.objects.get_for_model.return_value = site_ct
+            result = mixin._select_most_specific_group([global_group, site_group], device)
 
-        assert result is global_group
+        # site-scoped group wins over global (global has lowest priority)
+        assert result is site_group
 
     def test_site_group_priority_path_executed(self):
         """Device with site.group executes site-group hierarchy path."""

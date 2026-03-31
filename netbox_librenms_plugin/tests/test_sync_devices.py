@@ -121,8 +121,7 @@ class TestUpdateDeviceLocationView:
     """UpdateDeviceLocationView.post calls update_device_field with site name."""
 
     def test_calls_update_device_field_with_site(self):
-        """
-        post() resolves the NetBox site name and passes the exact API payload
+        """post() resolves the NetBox site name and passes the exact API payload
         expected by LibreNMS's PATCH /api/v0/devices/{id}/field endpoint:
         ``{"field": ["location", "override_sysLocation"], "data": [name, "1"]}``.
         """
@@ -169,6 +168,22 @@ class TestUpdateDeviceLocationView:
 
         view._librenms_api.update_device_field.assert_not_called()
         mock_msg.warning.assert_called_once()
+
+
+class TestAddDeviceObjectResolution:
+    """Regression tests for AddDeviceToLibreNMSView.get_object()."""
+
+    def test_get_object_uses_get_object_or_404_for_virtualmachine(self):
+        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+
+        view = object.__new__(AddDeviceToLibreNMSView)
+        vm_obj = MagicMock()
+
+        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=vm_obj) as mock_get_obj:
+            result = view.get_object(123, object_type="virtualmachine")
+
+        assert result is vm_obj
+        assert mock_get_obj.call_args[0][0].__name__ == "VirtualMachine"
 
 
 class TestUpdateDeviceNameViewWiring:

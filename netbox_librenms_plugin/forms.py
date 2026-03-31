@@ -1,8 +1,9 @@
 # forms.py
 import logging
+import re
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, ModuleType, Platform, Rack, Site
 from django import forms
 from django.db.models import Case, IntegerField, Value, When
 from django.http import QueryDict
@@ -13,10 +14,24 @@ from netbox.forms import (
     NetBoxModelImportForm,
 )
 from netbox.plugins import get_plugin_config
-from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
+from utilities.forms.fields import (
+    CSVChoiceField,
+    CSVModelChoiceField,
+    DynamicModelChoiceField,
+    DynamicModelMultipleChoiceField,
+)
 from virtualization.models import Cluster, VirtualMachine
 
-from .models import InterfaceTypeMapping, LibreNMSSettings
+from .models import (
+    DeviceTypeMapping,
+    InterfaceTypeMapping,
+    InventoryIgnoreRule,
+    LibreNMSSettings,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+    NormalizationRule,
+    PlatformMapping,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +66,31 @@ def _get_librenms_server_choices():
 def _get_librenms_poller_group_choices():
     """
     Helper function to get poller group choices from LibreNMS API.
-    Shared between AddToLIbreSNMPV1V2 and AddToLIbreSNMPV3 forms.
+    Shared between AddToLibreSNMPV1V2 and AddToLibreSNMPV3 forms (via BaseSNMPForm).
+    Results are cached to avoid repeated API calls on every form instantiation.
     """
+    from django.core.cache import cache
+
     from .librenms_api import LibreNMSAPI
 
     choices = [("0", "Default (0)")]
 
+    api = None
+    cache_key = "librenms_poller_group_choices"
     try:
         api = LibreNMSAPI()
+        cache_key = f"librenms_poller_group_choices_{api.server_key}"
+    except Exception:
+        pass
+
+    cached_choices = cache.get(cache_key)
+    if cached_choices is not None:
+        return cached_choices
+
+    try:
+        if api is None:
+            api = LibreNMSAPI()
+            cache_key = f"librenms_poller_group_choices_{api.server_key}"
         success, poller_groups = api.get_poller_groups()
 
         if success:
@@ -73,6 +105,8 @@ def _get_librenms_poller_group_choices():
                     else:
                         label = f"{group_name} ({group_id})"
                     choices.append((group_id, label))
+
+            cache.set(cache_key, choices, timeout=api.cache_timeout)
     except Exception:
         logger.exception("Failed to fetch LibreNMS poller groups; using default choices")
 
@@ -153,8 +187,6 @@ class ImportSettingsForm(NetBoxModelForm):
             return pattern
 
         # Check for valid placeholder names using regex
-        import re
-
         valid_placeholders = {"position", "serial"}
         found_placeholders = set(re.findall(r"\{(\w+)\}", pattern))
         invalid_placeholders = found_placeholders - valid_placeholders
@@ -261,11 +293,307 @@ class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     model = InterfaceTypeMapping
 
 
-class AddToLIbreSNMPV1V2(forms.Form):
+class DeviceTypeMappingForm(NetBoxModelForm):
+    """Form for creating and editing device type mappings between LibreNMS and NetBox."""
+
+    netbox_device_type = forms.ModelChoiceField(
+        queryset=DeviceType.objects.all(),
+        label="NetBox Device Type",
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    class Meta:
+        """Meta options for DeviceTypeMappingForm."""
+
+        model = DeviceTypeMapping
+        fields = ["librenms_hardware", "netbox_device_type", "description"]
+
+
+class DeviceTypeMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing device type mappings."""
+
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Manufacturer name — required when the model name is not unique across manufacturers",
+    )
+    netbox_device_type = CSVModelChoiceField(
+        queryset=DeviceType.objects.all(),
+        to_field_name="model",
+        help_text="NetBox device type model name",
+    )
+
+    class Meta:
+        """Meta options for DeviceTypeMappingImportForm."""
+
+        model = DeviceTypeMapping
+        fields = ["librenms_hardware", "manufacturer", "netbox_device_type", "description"]
+
+    def __init__(self, data=None, *args, **kwargs):
+        super().__init__(data, *args, **kwargs)
+        if data:
+            mfr_val = (data.get("manufacturer") or "").strip()
+            if mfr_val:
+                mfr_field = self.fields["manufacturer"]
+                params = {f"manufacturer__{mfr_field.to_field_name}": mfr_val}
+                self.fields["netbox_device_type"].queryset = DeviceType.objects.filter(**params)
+
+
+class DeviceTypeMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering device type mappings."""
+
+    librenms_hardware = forms.CharField(required=False, label="LibreNMS Hardware")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = DeviceTypeMapping
+
+
+class ModuleTypeMappingForm(NetBoxModelForm):
+    """Form for creating and editing module type mappings between LibreNMS and NetBox."""
+
+    class Meta:
+        """Meta options for ModuleTypeMappingForm."""
+
+        model = ModuleTypeMapping
+        fields = ["librenms_model", "netbox_module_type", "description"]
+
+
+class ModuleTypeMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing module type mappings."""
+
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Manufacturer name — required when the model name is not unique across manufacturers",
+    )
+    netbox_module_type = CSVModelChoiceField(
+        queryset=ModuleType.objects.all(),
+        to_field_name="model",
+        help_text="NetBox module type model name",
+    )
+
+    class Meta:
+        """Meta options for ModuleTypeMappingImportForm."""
+
+        model = ModuleTypeMapping
+        fields = ["librenms_model", "manufacturer", "netbox_module_type", "description"]
+
+    def __init__(self, data=None, *args, **kwargs):
+        super().__init__(data, *args, **kwargs)
+        if data:
+            mfr_val = (data.get("manufacturer") or "").strip()
+            if mfr_val:
+                mfr_field = self.fields["manufacturer"]
+                params = {f"manufacturer__{mfr_field.to_field_name}": mfr_val}
+                self.fields["netbox_module_type"].queryset = ModuleType.objects.filter(**params)
+
+
+class ModuleTypeMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering module type mappings."""
+
+    librenms_model = forms.CharField(required=False, label="LibreNMS Model")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = ModuleTypeMapping
+
+
+class ModuleBayMappingForm(NetBoxModelForm):
+    """Form for creating and editing module bay mappings between LibreNMS and NetBox."""
+
+    class Meta:
+        """Meta options for ModuleBayMappingForm."""
+
+        model = ModuleBayMapping
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+
+
+class ModuleBayMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing module bay mappings."""
+
+    class Meta:
+        """Meta options for ModuleBayMappingImportForm."""
+
+        model = ModuleBayMapping
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+
+
+class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering module bay mappings."""
+
+    librenms_name = forms.CharField(required=False, label="LibreNMS Name")
+    librenms_class = forms.CharField(required=False, label="LibreNMS Class")
+    netbox_bay_name = forms.CharField(required=False, label="NetBox Bay Name")
+    is_regex = forms.NullBooleanField(
+        required=False,
+        widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
+        label="Regex",
+    )
+
+    model = ModuleBayMapping
+
+
+class NormalizationRuleForm(NetBoxModelForm):
+    """Form for creating and editing normalization rules."""
+
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        help_text="Optional: scope this rule to a specific manufacturer",
+    )
+
+    class Meta:
+        """Meta options for NormalizationRuleForm."""
+
+        model = NormalizationRule
+        fields = ["scope", "manufacturer", "match_pattern", "replacement", "priority", "description"]
+
+
+class NormalizationRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing normalization rules."""
+
+    scope = CSVChoiceField(
+        choices=NormalizationRule.SCOPE_CHOICES,
+        help_text="Scope: module_type, device_type, or module_bay",
+    )
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Optional manufacturer name (must already exist in NetBox)",
+    )
+
+    class Meta:
+        """Meta options for NormalizationRuleImportForm."""
+
+        model = NormalizationRule
+        fields = ["scope", "manufacturer", "match_pattern", "replacement", "priority", "description"]
+
+
+class NormalizationRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering normalization rules."""
+
+    scope = forms.ChoiceField(
+        required=False,
+        choices=[("", "---------")] + NormalizationRule.SCOPE_CHOICES,
+        label="Scope",
+    )
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
+
+    model = NormalizationRule
+
+
+class InventoryIgnoreRuleForm(NetBoxModelForm):
+    """Form for creating and editing inventory ignore rules."""
+
+    class Meta:
+        """Meta options for InventoryIgnoreRuleForm."""
+
+        model = InventoryIgnoreRule
+        fields = ["name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled", "description"]
+
+
+class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing inventory ignore rules."""
+
+    match_type = CSVChoiceField(
+        choices=InventoryIgnoreRule.MATCH_TYPE_CHOICES,
+        help_text="Match type: ends_with, starts_with, contains, regex, or serial_matches_device",
+    )
+    action = CSVChoiceField(
+        choices=InventoryIgnoreRule.ACTION_CHOICES,
+        help_text="Action: skip (remove from table) or transparent (hide row, promote children)",
+    )
+
+    class Meta:
+        """Meta options for InventoryIgnoreRuleImportForm."""
+
+        model = InventoryIgnoreRule
+        fields = ["name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled", "description"]
+
+
+class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering inventory ignore rules."""
+
+    match_type = forms.ChoiceField(
+        required=False,
+        choices=[("", "---------")] + InventoryIgnoreRule.MATCH_TYPE_CHOICES,
+        label="Match Type",
+    )
+    action = forms.ChoiceField(
+        required=False,
+        choices=[("", "---------")] + InventoryIgnoreRule.ACTION_CHOICES,
+        label="Action",
+    )
+    enabled = forms.NullBooleanField(
+        required=False,
+        widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
+        label="Enabled",
+    )
+
+    model = InventoryIgnoreRule
+
+
+class PlatformMappingForm(NetBoxModelForm):
+    """Form for creating and editing platform mappings between LibreNMS and NetBox."""
+
+    netbox_platform = DynamicModelChoiceField(
+        queryset=Platform.objects.all(),
+        label="NetBox Platform",
+    )
+
+    class Meta:
+        """Meta options for PlatformMappingForm."""
+
+        model = PlatformMapping
+        fields = ["librenms_os", "netbox_platform", "description"]
+
+
+class PlatformMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing platform mappings."""
+
+    netbox_platform = CSVModelChoiceField(
+        queryset=Platform.objects.all(),
+        to_field_name="name",
+        help_text="NetBox platform name",
+    )
+
+    class Meta:
+        """Meta options for PlatformMappingImportForm."""
+
+        model = PlatformMapping
+        fields = ["librenms_os", "netbox_platform", "description"]
+
+
+class PlatformMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering platform mappings."""
+
+    librenms_os = forms.CharField(required=False, label="LibreNMS OS")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = PlatformMapping
+
+
+class BaseSNMPForm(forms.Form):
     """
-    Form for adding devices to LibreNMS using SNMPv1 or SNMPv2c authentication.
-    Collects hostname/IP and SNMP community string information.
-    The SNMP version (v1 or v2c) is selected via a toggle button in the template.
+    Base form with fields shared by both SNMPv1/v2c and SNMPv3 LibreNMS device forms.
     """
 
     hostname = forms.CharField(
@@ -273,7 +601,6 @@ class AddToLIbreSNMPV1V2(forms.Form):
         max_length=255,
         required=True,
     )
-    community = forms.CharField(label="SNMP Community", max_length=255, required=True)
     port = forms.IntegerField(
         label="SNMP Port",
         required=False,
@@ -320,17 +647,31 @@ class AddToLIbreSNMPV1V2(forms.Form):
         self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
 
 
-class AddToLIbreSNMPV3(forms.Form):
+class AddToLibreSNMPV1V2(BaseSNMPForm):
+    """
+    Form for adding devices to LibreNMS using SNMPv1 or SNMPv2c authentication.
+    Collects hostname/IP and SNMP community string information.
+    The SNMP version (v1 or v2c) is selected via a toggle button in the template.
+    """
+
+    community = forms.CharField(
+        label="SNMP Community",
+        max_length=255,
+        required=True,
+        widget=forms.PasswordInput(),
+    )
+
+
+# Backwards-compatible alias — remove once all references are updated.
+AddToLIbreSNMPV1V2 = AddToLibreSNMPV1V2
+
+
+class AddToLibreSNMPV3(BaseSNMPForm):
     """
     Form for adding devices to LibreNMS using SNMPv3 authentication.
     Provides comprehensive SNMPv3 configuration options including authentication and encryption settings.
     """
 
-    hostname = forms.CharField(
-        label="Hostname/IP",
-        max_length=255,
-        required=True,
-    )
     snmp_version = forms.CharField(widget=forms.HiddenInput(), initial="v3")
     authlevel = forms.ChoiceField(
         label="Auth Level",
@@ -345,8 +686,8 @@ class AddToLIbreSNMPV3(forms.Form):
     authpass = forms.CharField(
         label="Auth Password",
         max_length=255,
-        required=True,
-        widget=forms.PasswordInput(render_value=True),
+        required=False,
+        widget=forms.PasswordInput(),
     )
     authalgo = forms.ChoiceField(
         label="Auth Algorithm",
@@ -358,63 +699,41 @@ class AddToLIbreSNMPV3(forms.Form):
             ("SHA-384", "SHA-384"),
             ("SHA-512", "SHA-512"),
         ],
-        required=True,
+        required=False,
     )
     cryptopass = forms.CharField(
         label="Crypto Password",
         max_length=255,
-        required=True,
-        widget=forms.PasswordInput(render_value=True),
+        required=False,
+        widget=forms.PasswordInput(),
     )
     cryptoalgo = forms.ChoiceField(
         label="Crypto Algorithm",
         choices=[("AES", "AES"), ("DES", "DES")],
-        required=True,
-    )
-    port = forms.IntegerField(
-        label="SNMP Port",
         required=False,
-        help_text="Leave blank to use default SNMP port (161)",
-        widget=forms.NumberInput(attrs={"placeholder": "161"}),
-    )
-    transport = forms.ChoiceField(
-        label="Transport",
-        choices=[
-            ("udp", "UDP"),
-            ("tcp", "TCP"),
-            ("udp6", "UDP6"),
-            ("tcp6", "TCP6"),
-        ],
-        required=False,
-        initial="udp",
-    )
-    port_association_mode = forms.ChoiceField(
-        label="Port Association Mode",
-        choices=[
-            ("ifIndex", "ifIndex"),
-            ("ifName", "ifName"),
-            ("ifDescr", "ifDescr"),
-            ("ifAlias", "ifAlias"),
-        ],
-        required=False,
-        initial="ifIndex",
-        help_text="Method to identify ports",
-    )
-    poller_group = forms.ChoiceField(
-        label="Poller Group",
-        required=False,
-        help_text="Poller group for distributed poller setup",
-    )
-    force_add = forms.BooleanField(
-        label="Force Add",
-        required=False,
-        initial=False,
-        help_text="Skip duplicate device and SNMP reachability checks (hostname must still be unique)",
     )
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
+    def clean(self):
+        cleaned = super().clean()
+        authlevel = cleaned.get("authlevel")
+
+        if authlevel in ("authNoPriv", "authPriv"):
+            if not cleaned.get("authpass"):
+                self.add_error("authpass", "Auth password is required for this auth level.")
+            if not cleaned.get("authalgo"):
+                self.add_error("authalgo", "Auth algorithm is required for this auth level.")
+
+        if authlevel == "authPriv":
+            if not cleaned.get("cryptopass"):
+                self.add_error("cryptopass", "Crypto password is required for authPriv.")
+            if not cleaned.get("cryptoalgo"):
+                self.add_error("cryptoalgo", "Crypto algorithm is required for authPriv.")
+
+        return cleaned
+
+
+# Backwards-compatible alias — remove once all references are updated.
+AddToLIbreSNMPV3 = AddToLibreSNMPV3
 
 
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):

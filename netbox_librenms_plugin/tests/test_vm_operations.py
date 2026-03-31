@@ -1,5 +1,4 @@
-"""
-Tests for netbox_librenms_plugin.import_utils.vm_operations module.
+"""Tests for netbox_librenms_plugin.import_utils.vm_operations module.
 
 Covers create_vm_from_librenms and bulk_import_vms.
 All DB interactions are mocked — no @pytest.mark.django_db used.
@@ -11,6 +10,18 @@ from unittest.mock import MagicMock, patch
 
 class TestCreateVmFromLibrenms:
     """Tests for create_vm_from_librenms function."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_atomic(self):
+        """transaction.atomic() is a no-op; tests mock all DB interactions."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        with patch("netbox_librenms_plugin.import_utils.vm_operations.transaction.atomic", noop_atomic):
+            yield
 
     def test_success_with_computed_name(self):
         """VM is created using pre-computed _computed_name when present."""
@@ -32,10 +43,7 @@ class TestCreateVmFromLibrenms:
         mock_vm.name = "vm01-computed"
         mock_vm.pk = 10
 
-        with (
-            patch("django.db.transaction.atomic"),
-            patch("virtualization.models.VirtualMachine") as mock_vm_class,
-        ):
+        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
             result = create_vm_from_librenms(libre_device, validation)
 
@@ -64,7 +72,6 @@ class TestCreateVmFromLibrenms:
                 "netbox_librenms_plugin.import_utils.vm_operations._determine_device_name",
                 return_value="vm02-determined",
             ) as mock_det,
-            patch("django.db.transaction.atomic"),
             patch("virtualization.models.VirtualMachine") as mock_vm_class,
         ):
             mock_vm_class.objects.create.return_value = mock_vm
@@ -106,16 +113,15 @@ class TestCreateVmFromLibrenms:
         mock_vm.custom_field_data = {}
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-            with patch("django.db.transaction.atomic"):
-                with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_setter:
-                    mock_vm_class.objects.create.return_value = mock_vm
-                    create_vm_from_librenms(libre_device, validation, server_key="secondary")
+            with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_setter:
+                mock_vm_class.objects.create.return_value = mock_vm
+                create_vm_from_librenms(libre_device, validation, server_key="secondary")
 
         mock_setter.assert_called_once_with(mock_vm, 5, "secondary")
         mock_vm.save.assert_called_once()
 
-    def test_role_is_passed_to_create(self):
-        """Optional role parameter is forwarded to VirtualMachine.objects.create."""
+    def test_role_is_read_from_validation(self):
+        """Role is read from validation[device_role] and forwarded to VirtualMachine.objects.create."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 6, "hostname": "vm06", "_computed_name": "vm06"}
@@ -129,10 +135,7 @@ class TestCreateVmFromLibrenms:
         mock_vm.name = "vm06"
         mock_vm.pk = 60
 
-        with (
-            patch("django.db.transaction.atomic"),
-            patch("virtualization.models.VirtualMachine") as mock_vm_class,
-        ):
+        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
             create_vm_from_librenms(libre_device, validation, role=mock_role)
 
@@ -153,10 +156,7 @@ class TestCreateVmFromLibrenms:
         mock_vm.name = "vm07"
         mock_vm.pk = 70
 
-        with (
-            patch("django.db.transaction.atomic"),
-            patch("virtualization.models.VirtualMachine") as mock_vm_class,
-        ):
+        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
             create_vm_from_librenms(libre_device, validation)
 
@@ -164,7 +164,7 @@ class TestCreateVmFromLibrenms:
         assert call_kwargs["platform"] is None
 
     def test_import_comment_contains_device_id(self):
-        """The comments field contains a reference to LibreNMS and device_id."""
+        """The comments field contains a reference to LibreNMS."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 8, "hostname": "vm08", "_computed_name": "vm08"}
@@ -177,15 +177,13 @@ class TestCreateVmFromLibrenms:
         mock_vm.name = "vm08"
         mock_vm.pk = 80
 
-        with (
-            patch("django.db.transaction.atomic"),
-            patch("virtualization.models.VirtualMachine") as mock_vm_class,
-        ):
+        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
             create_vm_from_librenms(libre_device, validation)
 
         call_kwargs = mock_vm_class.objects.create.call_args[1]
         assert "LibreNMS" in call_kwargs["comments"]
+        assert "netbox-librenms-plugin" in call_kwargs["comments"]
         assert str(libre_device["device_id"]) in call_kwargs["comments"]
 
 
@@ -291,6 +289,8 @@ class TestBulkImportVms:
         mock_vm = MagicMock()
         mock_vm.name = "new-vm"
 
+        mock_create_vm = MagicMock(return_value=mock_vm)
+
         with (
             patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
             patch(
@@ -307,7 +307,7 @@ class TestBulkImportVms:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations.create_vm_from_librenms",
-                return_value=mock_vm,
+                mock_create_vm,
             ),
             patch("netbox_librenms_plugin.import_utils.vm_operations.Cluster"),
             patch("netbox_librenms_plugin.import_utils.vm_operations.DeviceRole"),
@@ -321,6 +321,9 @@ class TestBulkImportVms:
         assert result["success"][0]["device"] == mock_vm
         assert len(result["failed"]) == 0
         assert len(result["skipped"]) == 0
+        # Verify api.server_key is forwarded to create_vm_from_librenms
+        call_kwargs = mock_create_vm.call_args[1]
+        assert call_kwargs.get("server_key") == mock_api.server_key
 
     def test_cluster_assignment_applied(self):
         """apply_cluster_to_validation is called when cluster_id is provided and found."""
@@ -552,6 +555,7 @@ class TestBulkImportVms:
         call_kwargs = mock_validate.call_args[1]
         assert call_kwargs["use_sysname"] is False
         assert call_kwargs["strip_domain"] is True
+        assert call_kwargs["server_key"] == mock_api.server_key
 
     def test_no_cluster_id_skips_cluster_lookup(self):
         """Cluster lookup is skipped when cluster_id is absent from vm_mappings."""
@@ -664,3 +668,95 @@ class TestBulkImportVms:
 
         # log.info called at idx=5 checkpoint
         mock_job.logger.info.assert_called()
+
+
+# ===========================================================================
+# Issue #34 — warnings when cluster/role FK lookup fails
+# ===========================================================================
+
+
+class TestMissingFKWarnings:
+    """#34: bulk_import_vms must fail device when a selected cluster or role no longer exists."""
+
+    def _run_bulk_with_mappings(self, vm_mappings, mock_cluster_result, mock_role_result):
+        """Helper: run bulk_import_vms with one VM and given mapping FK results. Returns (job, result)."""
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        mock_api.cache_timeout = 300
+
+        mock_job = MagicMock()
+        mock_job.logger = MagicMock()
+        mock_job.job.status = "running"
+
+        libre_device = {
+            "device_id": 1,
+            "hostname": "vm01",
+            "_computed_name": "vm01",
+            "sysName": "vm01",
+            "type": "",
+            "os": "",
+            "version": "",
+        }
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
+            patch(
+                "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
+                return_value=libre_device,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.vm_operations.validate_device_for_import",
+                return_value={
+                    "can_import": True,
+                    "is_ready": True,
+                    "cluster": {"cluster": MagicMock()},
+                    "platform": {"platform": None},
+                    "device_role": {"role": None},
+                    "issues": [],
+                },
+            ),
+            patch("netbox_librenms_plugin.import_utils.vm_operations.Cluster") as mock_Cluster,
+            patch("netbox_librenms_plugin.import_utils.vm_operations.DeviceRole") as mock_DeviceRole,
+            patch(
+                "netbox_librenms_plugin.import_utils.vm_operations.create_vm_from_librenms",
+                return_value=MagicMock(),
+            ),
+        ):
+            mock_Cluster.objects.filter.return_value.first.return_value = mock_cluster_result
+            mock_DeviceRole.objects.filter.return_value.first.return_value = mock_role_result
+            result = bulk_import_vms({1: vm_mappings}, mock_api, job=mock_job)
+            return mock_job, result
+
+    def test_warning_logged_when_cluster_deleted(self):
+        """Device fails when cluster_id is set but cluster no longer exists."""
+        _mock_job, result = self._run_bulk_with_mappings(
+            vm_mappings={"cluster_id": 99, "device_role_id": None},
+            mock_cluster_result=None,
+            mock_role_result=None,
+        )
+        assert len(result["failed"]) == 1, f"Expected 1 failed entry but got: {result['failed']}"
+        error_msg = result["failed"][0]["error"].lower()
+        assert "cluster" in error_msg, f"Expected 'cluster' in error message but got: {error_msg}"
+
+    def test_warning_logged_when_role_deleted(self):
+        """Device fails when role_id is set but role no longer exists."""
+        _mock_job, result = self._run_bulk_with_mappings(
+            vm_mappings={"cluster_id": None, "device_role_id": 55},
+            mock_cluster_result=None,
+            mock_role_result=None,
+        )
+        assert len(result["failed"]) == 1, f"Expected 1 failed entry but got: {result['failed']}"
+        error_msg = result["failed"][0]["error"].lower()
+        assert "role" in error_msg, f"Expected 'role' in error message but got: {error_msg}"
+
+    def test_no_warning_when_cluster_found(self):
+        """No failure when cluster exists."""
+        mock_cluster = MagicMock()
+        _mock_job, result = self._run_bulk_with_mappings(
+            vm_mappings={"cluster_id": 99, "device_role_id": None},
+            mock_cluster_result=mock_cluster,
+            mock_role_result=None,
+        )
+        assert result["failed"] == [], f"Expected no failures but got: {result['failed']}"

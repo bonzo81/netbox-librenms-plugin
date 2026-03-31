@@ -1,5 +1,4 @@
-"""
-Tests for multi-server librenms_id helpers.
+"""Tests for multi-server librenms_id helpers.
 
 Covers get_librenms_device_id, set_librenms_device_id, find_by_librenms_id,
 and migrate_legacy_librenms_id.
@@ -28,8 +27,7 @@ class TestGetLibreNMSDeviceId:
         assert result == 42
 
     def test_legacy_bare_int_returned_for_any_server_key(self):
-        """
-        Legacy bare integers are returned as a universal fallback for any server_key.
+        """Legacy bare integers are returned as a universal fallback for any server_key.
 
         Devices imported before multi-server support store a bare integer in
         librenms_id.  These must remain discoverable regardless of which server is
@@ -106,8 +104,7 @@ class TestFindByLibreNMSId:
     """Tests for find_by_librenms_id()."""
 
     def test_queries_server_key_and_legacy_integer(self):
-        """
-        find_by_librenms_id() issues a Q that covers both the JSON server-key branch
+        """find_by_librenms_id() issues a Q that covers both the JSON server-key branch
         and the legacy bare-int branch in a single filter() call.
 
         We inspect the Q object's children directly because the two branches must
@@ -132,11 +129,13 @@ class TestFindByLibreNMSId:
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
         # The combined Q should contain four children: JSON key (int), JSON key (str), bare-int, bare-string
-        q_str = str(q_arg)
-        assert "librenms_id__default" in q_str
-        assert "custom_field_data__librenms_id__default" in q_str
-        assert "custom_field_data__librenms_id" in q_str
-        assert "42" in q_str
+        assert len(q_arg.children) == 4
+        children_keys = {child[0] for child in q_arg.children}
+        children_values = {child[1] for child in q_arg.children}
+        assert "custom_field_data__librenms_id__default" in children_keys
+        assert "custom_field_data__librenms_id" in children_keys
+        assert 42 in children_values
+        assert "42" in children_values
 
     def test_returns_first_matching_object(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
@@ -168,12 +167,13 @@ class TestFindByLibreNMSId:
         call_args = mock_model.objects.filter.call_args
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
-        q_str = str(q_arg)
-        assert "custom_field_data__librenms_id__production" in q_str
-        assert "custom_field_data__librenms_id" in q_str
+        keys = [child[0] for child in q_arg.children]
+        assert "custom_field_data__librenms_id__production" in keys
+        assert "custom_field_data__librenms_id" in keys
 
     def test_default_server_key_is_default(self):
-        """find_by_librenms_id() uses "default" as the server key when no key is passed.
+        """
+        find_by_librenms_id() uses "default" as the server key when no key is passed.
 
         We inspect the Q predicate's children to confirm the key embedded in the
         JSON path is exactly "default", not some other fallback value.
@@ -194,8 +194,14 @@ class TestFindByLibreNMSId:
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
-        q_str = str(q_arg)
-        assert "custom_field_data__librenms_id__default" in q_str
+        assert len(q_arg.children) == 4
+        children_keys = {child[0] for child in q_arg.children}
+        children_values = {child[1] for child in q_arg.children}
+        # The JSON-path branch must use "default" as the server key
+        assert "custom_field_data__librenms_id__default" in children_keys
+        assert "custom_field_data__librenms_id" in children_keys
+        assert 42 in children_values
+        assert "42" in children_values
 
 
 class TestMigrateLegacyLibreNMSId:

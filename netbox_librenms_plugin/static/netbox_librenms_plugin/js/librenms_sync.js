@@ -18,6 +18,42 @@
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 
+/**
+ * Show a Bootstrap-style modal using direct DOM manipulation.
+ * @param {HTMLElement} el - The modal element to show
+ */
+function showModal(el) {
+    if (!el) return;
+    el.classList.add('show');
+    el.style.display = 'block';
+    el.setAttribute('aria-modal', 'true');
+    el.removeAttribute('aria-hidden');
+    let backdrop = document.querySelector('.modal-backdrop');
+    if (!backdrop) {
+        backdrop = document.createElement('div');
+        backdrop.className = 'modal-backdrop fade show';
+        document.body.appendChild(backdrop);
+    }
+    document.body.classList.add('modal-open');
+}
+
+/**
+ * Hide a Bootstrap-style modal and clean up backdrop/body state.
+ * @param {HTMLElement} el - The modal element to hide
+ */
+function hideModal(el) {
+    if (!el) return;
+    el.classList.remove('show');
+    el.style.display = 'none';
+    el.setAttribute('aria-hidden', 'true');
+    el.removeAttribute('aria-modal');
+    const backdrop = document.querySelector('.modal-backdrop');
+    if (backdrop) backdrop.remove();
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('padding-right');
+    document.body.style.removeProperty('overflow');
+}
+
 // Helper to read CSRF token from cookies
 function getCookie(name) {
     let cookieValue = null;
@@ -153,11 +189,15 @@ function initializeCountdowns() {
     if (window.vlanCountdownInterval) {
         clearInterval(window.vlanCountdownInterval);
     }
+    if (window.moduleCountdownInterval) {
+        clearInterval(window.moduleCountdownInterval);
+    }
 
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
     window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
     window.vlanCountdownInterval = initializeCountdown("vlan-countdown-timer");
+    window.moduleCountdownInterval = initializeCountdown("module-countdown-timer");
 }
 
 // ============================================
@@ -217,6 +257,7 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-ipaddress-table');
     initializeTableCheckboxes('librenms-vlan-table');
     initializeTableCheckboxes('librenms-port-vlan-table');
+    initializeTableCheckboxes('librenms-module-table');
 }
 
 // ============================================
@@ -1557,20 +1598,7 @@ function initializeModuleReplaceButtons() {
             }
 
             // Show modal using direct class manipulation (consistent with openBulkVCModal)
-            const htmxModal = document.getElementById('htmx-modal');
-            if (htmxModal) {
-                htmxModal.classList.add('show');
-                htmxModal.style.display = 'block';
-                htmxModal.setAttribute('aria-modal', 'true');
-                htmxModal.removeAttribute('aria-hidden');
-                let backdrop = document.querySelector('.modal-backdrop');
-                if (!backdrop) {
-                    backdrop = document.createElement('div');
-                    backdrop.className = 'modal-backdrop fade show';
-                    document.body.appendChild(backdrop);
-                }
-                document.body.classList.add('modal-open');
-            }
+            showModal(document.getElementById('htmx-modal'));
 
             // Fetch preview content and inject into modal body
             const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
@@ -1617,16 +1645,7 @@ function closeHtmxModal() {
         _activeReplaceController.abort();
         _activeReplaceController = null;
     }
-    const htmxModal = document.getElementById('htmx-modal');
-    if (htmxModal) {
-        htmxModal.classList.remove('show');
-        htmxModal.style.display = 'none';
-        htmxModal.setAttribute('aria-hidden', 'true');
-        htmxModal.removeAttribute('aria-modal');
-        const backdrop = document.querySelector('.modal-backdrop');
-        if (backdrop) backdrop.remove();
-        document.body.classList.remove('modal-open');
-    }
+    hideModal(document.getElementById('htmx-modal'));
 }
 
 // ============================================
@@ -1674,4 +1693,19 @@ document.addEventListener('DOMContentLoaded', function () {
 // Initialize scripts after HTMX swaps content
 document.body.addEventListener('htmx:afterSwap', function (event) {
     initializeScripts();
+});
+
+// Update HTMX modal accessible label after content loads so screen readers
+// announce the actual dialog title rather than the static "Loading" placeholder.
+document.addEventListener('DOMContentLoaded', function () {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal) {
+        htmxModal.addEventListener('htmx:afterSettle', function () {
+            const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
+            const label = document.getElementById('htmx-modal-label');
+            if (header && label) {
+                label.textContent = header.textContent.trim();
+            }
+        });
+    }
 });

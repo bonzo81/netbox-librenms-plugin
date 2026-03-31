@@ -12,11 +12,35 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.filters import InterfaceTypeMappingFilterSet
+from netbox_librenms_plugin.filters import (
+    DeviceTypeMappingFilterSet,
+    InterfaceTypeMappingFilterSet,
+    InventoryIgnoreRuleFilterSet,
+    ModuleBayMappingFilterSet,
+    ModuleTypeMappingFilterSet,
+    NormalizationRuleFilterSet,
+    PlatformMappingFilterSet,
+)
 from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
-from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.models import (
+    DeviceTypeMapping,
+    InterfaceTypeMapping,
+    InventoryIgnoreRule,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+    NormalizationRule,
+    PlatformMapping,
+)
 
-from .serializers import InterfaceTypeMappingSerializer
+from .serializers import (
+    DeviceTypeMappingSerializer,
+    InterfaceTypeMappingSerializer,
+    InventoryIgnoreRuleSerializer,
+    ModuleBayMappingSerializer,
+    ModuleTypeMappingSerializer,
+    NormalizationRuleSerializer,
+    PlatformMappingSerializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +67,66 @@ class InterfaceTypeMappingViewSet(NetBoxModelViewSet):
 
     queryset = InterfaceTypeMapping.objects.all()
     serializer_class = InterfaceTypeMappingSerializer
+
+
+class DeviceTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for DeviceTypeMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = DeviceTypeMappingFilterSet
+
+    queryset = DeviceTypeMapping.objects.select_related("netbox_device_type")
+    serializer_class = DeviceTypeMappingSerializer
+
+
+class ModuleTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for ModuleTypeMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = ModuleTypeMappingFilterSet
+
+    queryset = ModuleTypeMapping.objects.select_related("netbox_module_type")
+    serializer_class = ModuleTypeMappingSerializer
+
+
+class ModuleBayMappingViewSet(NetBoxModelViewSet):
+    """API viewset for ModuleBayMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = ModuleBayMappingFilterSet
+
+    queryset = ModuleBayMapping.objects.all()
+    serializer_class = ModuleBayMappingSerializer
+
+
+class NormalizationRuleViewSet(NetBoxModelViewSet):
+    """API viewset for NormalizationRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = NormalizationRuleFilterSet
+
+    queryset = NormalizationRule.objects.select_related("manufacturer")
+    serializer_class = NormalizationRuleSerializer
+
+
+class InventoryIgnoreRuleViewSet(NetBoxModelViewSet):
+    """API viewset for InventoryIgnoreRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = InventoryIgnoreRuleFilterSet
+
+    queryset = InventoryIgnoreRule.objects.all()
+    serializer_class = InventoryIgnoreRuleSerializer
+
+
+class PlatformMappingViewSet(NetBoxModelViewSet):
+    """API viewset for PlatformMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = PlatformMappingFilterSet
+
+    queryset = PlatformMapping.objects.select_related("netbox_platform")
+    serializer_class = PlatformMappingSerializer
 
 
 @api_view(["POST"])

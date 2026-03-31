@@ -521,7 +521,6 @@ def create_virtual_chassis_with_members(
                 )
                 members_created += 1
 
-            # Validate member count
             # Validate member count — exclude master-slot entries with blank serials
             expected_members = len(
                 [

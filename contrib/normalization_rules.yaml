@@ -1,0 +1,61 @@
+# Normalization Rules — Examples
+#
+# Regex-based string transformations applied before module type, device type,
+# or module bay matching.  Rules run in priority order (lower first); each
+# rule's output feeds the next.
+#
+# Import via: LibreNMS → Normalization Rules → Import → YAML
+#
+# Fields:
+#   scope          — module_type, device_type, or module_bay
+#   manufacturer   — Optional manufacturer name (must exist in NetBox).
+#                    When set, the rule only fires for that manufacturer.
+#   match_pattern  — Python regex (re.sub pattern)
+#   replacement    — Replacement string (supports \1, \2 back-references)
+#   priority       — Lower values run first (default 100)
+#   description    — Optional note
+
+# ── Nokia revision suffix stripping ──────────────────────────────────────────
+# Nokia ENTITY-MIB reports module/transceiver models with 4-char revision
+# suffixes (e.g. 3HE16474AARA01).  NetBox module types use the base part
+# number (3HE16474AA).  This rule strips the suffix before matching.
+#
+# Captures the 10-char base (3HE + 5 alnum + 2 quality-tier letters),
+# discards the 2-letter revision code + 2-digit build number.
+- scope: module_type
+  manufacturer: Nokia
+  match_pattern: "^(3HE\\w{5}[A-Z]{2})[A-Z]{2}\\d{2}$"
+  replacement: "\\1"
+  priority: 100
+  description: "Strip Nokia revision suffixes (e.g. RA01, RB01, RG01) from ENTITY-MIB model strings"
+
+# ── Finisar / II-VI / Coherent suffix stripping ─────────────────────────────
+# Finisar part numbers have customer-specific suffixes after a hyphen:
+#   FTLC1154RDPL-A5  (original Finisar)
+#   FTLC1154RDPL-C   (Prolabs compatible)
+#   FTLX1474D3BCL-C1 (Cisco-coded Finisar)
+# This rule strips everything after the last hyphen for FT... models.
+- scope: module_type
+  match_pattern: "^(FT[A-Z0-9]+)-[A-Z0-9]+$"
+  replacement: "\\1"
+  priority: 100
+  description: "Strip Finisar/II-VI customer suffixes (-A5, -C, -CN, -C1, etc.)"
+
+# ── Prolabs LGI- prefix stripping ───────────────────────────────────────────
+# Prolabs-compatible optics sometimes prepend LGI- to the OEM part number:
+#   LGI-FTLC9152RGPL → FTLC9152RGPL
+- scope: module_type
+  match_pattern: "^LGI-(.+)$"
+  replacement: "\\1"
+  priority: 50
+  description: "Strip Prolabs LGI- prefix from OEM part numbers"
+
+# ── Nokia transceiver model field cleanup ────────────────────────────────────
+# Nokia transceiver API sometimes returns model strings with trailing vendor
+# info: "3HE10550AARA01  NOK  IPU3BFUEAA" — extract just the part number.
+- scope: module_type
+  manufacturer: Nokia
+  match_pattern: "^(3HE\\w+)\\s+.*$"
+  replacement: "\\1"
+  priority: 50
+  description: "Extract Nokia part number from transceiver model field (strip trailing vendor/oui info)"
