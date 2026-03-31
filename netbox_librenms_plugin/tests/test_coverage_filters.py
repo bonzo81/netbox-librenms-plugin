@@ -766,3 +766,5 @@ class TestCacheKeyServerKeyIsolation:
         assert mock_cache.set.call_count == 2
         keys = [call.args[0] for call in mock_cache.set.call_args_list]
         assert keys[0] != keys[1]
+        assert "server1" in keys[0]
+        assert "server2" in keys[1]

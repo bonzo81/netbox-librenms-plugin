@@ -1,0 +1,34 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <table class="table table-hover attr-table">
+        <thead>
+          <tr>
+            <th>Scope</th>
+            <th>Manufacturer</th>
+            <th>Match Pattern</th>
+            <th>Replacement</th>
+            <th>Priority</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{{ object.get_scope_display }}</td>
+            <td>{% if object.manufacturer %}<a href="{{ object.manufacturer.get_absolute_url }}">{{ object.manufacturer }}</a>{% else %}—{% endif %}</td>
+            <td><code>{{ object.match_pattern }}</code></td>
+            <td><code>{{ object.replacement }}</code></td>
+            <td>{{ object.priority }}</td>
+            <td>{{ object.description|default:"—" }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

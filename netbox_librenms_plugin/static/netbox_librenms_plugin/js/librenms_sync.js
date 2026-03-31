@@ -193,10 +193,15 @@ function initializeCountdowns() {
     if (window.vlanCountdownInterval) {
         clearInterval(window.vlanCountdownInterval);
     }
+    if (window.moduleCountdownInterval) {
+        clearInterval(window.moduleCountdownInterval);
+    }
+
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
     window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
     window.vlanCountdownInterval = initializeCountdown("vlan-countdown-timer");
+    window.moduleCountdownInterval = initializeCountdown("module-countdown-timer");
 }
 
 // ============================================
@@ -256,6 +261,7 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-ipaddress-table');
     initializeTableCheckboxes('librenms-vlan-table');
     initializeTableCheckboxes('librenms-port-vlan-table');
+    initializeTableCheckboxes('librenms-module-table');
 }
 
 // ============================================

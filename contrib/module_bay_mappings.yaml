@@ -1,0 +1,216 @@
+# Module Bay Mappings - Map LibreNMS inventory container names to NetBox module bay names
+#
+# These mappings replace heuristic matching between LibreNMS inventory and NetBox module bays.
+# Import via: LibreNMS Plugin → Module Bay Mappings → Import
+#
+# Fields:
+#   librenms_name:  LibreNMS entPhysicalName or container name (exact match or regex)
+#   librenms_class: Optional entPhysicalClass filter (powerSupply, fan, module, etc.)
+#                   Leave empty for class-independent mappings
+#   netbox_bay_name: Target NetBox module bay name (supports \1, \2 backreferences with regex)
+#   is_regex:       Set to true to treat librenms_name as a Python regex pattern
+#   description:    Optional description
+#
+# Regex patterns use Python re.fullmatch() — the pattern must match the entire string.
+# Backreferences (\1, \2) in netbox_bay_name reference capture groups in the pattern.
+
+# ─── Regex Patterns ──────────────────────────────────────────────────────────
+# These patterns replace many individual exact-match entries.
+
+# Arcos/UfiSpace: sfpN → Transceiver N (covers sfp0 through sfp53+)
+- librenms_name: "^sfp(\\d+)$"
+  netbox_bay_name: "Transceiver \\1"
+  is_regex: true
+  description: "Arcos sfpN → Transceiver N"
+
+# Cisco X2: Port Container slot/port → X2 Port port
+- librenms_name: "^Port Container (\\d+)/(\\d+)$"
+  netbox_bay_name: "X2 Port \\2"
+  is_regex: true
+  description: "Cisco X2 Port Container → X2 Port N"
+
+# Cisco modules: Linecard/Supervisor(slot N) → Slot N
+- librenms_name: "^Linecard\\(slot (\\d+)\\)$"
+  librenms_class: "module"
+  netbox_bay_name: "Slot \\1"
+  is_regex: true
+  description: "Cisco Linecard slot → Slot N"
+- librenms_name: "^Supervisor\\(slot (\\d+)\\)$"
+  librenms_class: "module"
+  netbox_bay_name: "Slot \\1"
+  is_regex: true
+  description: "Cisco Supervisor slot → Slot N"
+
+# Generic power supplies and fans
+- librenms_name: "^Power Supply (\\d+)$"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PS\\1"
+  is_regex: true
+  description: "Power Supply N → PSN"
+- librenms_name: "^FanTray (\\d+)$"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan Tray \\1"
+  is_regex: true
+  description: "FanTray N → Fan Tray N"
+
+# Nokia 7750 SR chassis fans and power modules
+- librenms_name: "^Chassis 1 Fan (\\d+)$"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan \\1"
+  is_regex: true
+  description: "Nokia chassis fan → Fan N"
+- librenms_name: "^Chassis 1 PowShelf 1 PM (\\d+)$"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PM \\1"
+  is_regex: true
+  description: "Nokia power module → PM N"
+
+# Nokia MDA and XIOM sub-module bays
+# Bay names resolve from {module}/N templates: IOM Slot 1 pos=1 → bay {module}/1 = 1/1
+- librenms_name: "^MDA (\\d+)/(\\d+)$"
+  librenms_class: "mdaModule"
+  netbox_bay_name: "\\1/\\2"
+  is_regex: true
+  description: "Nokia MDA N/M → N/M (matches {module}/M on IOM)"
+- librenms_name: "^XIOM (\\d+)/x(\\d+)$"
+  librenms_class: "xioModule"
+  netbox_bay_name: "\\1/x\\2"
+  is_regex: true
+  description: "Nokia XIOM N/xM → N/xM (matches {module}/xM on IOM)"
+- librenms_name: "^MDA (\\d+)/x(\\d+)/(\\d+)$"
+  librenms_class: "mdaModule"
+  netbox_bay_name: "x\\2/\\3"
+  is_regex: true
+  description: "Nokia MDA in XIOM N/xP/Q → xP/Q (matches {module}/Q on XIOM)"
+
+# Nokia transceiver connector bays
+# LibreNMS ifName "1/1/c1" (slot/mda/connector) → NetBox bay "1/c1"
+# ({module} on MDA resolves to position, stripping the slot prefix)
+- librenms_name: "(\\d+)/(\\d+)/(c\\d+)"
+  librenms_class: "port"
+  netbox_bay_name: "\\2/\\3"
+  is_regex: true
+  description: "Nokia transceiver slot/mda/cN → mda-pos/cN"
+# LibreNMS ifName "2/x1/1/c2" (slot/xiom/mda/connector) → NetBox bay "1/c2"
+- librenms_name: "(\\d+)/x(\\d+)/(\\d+)/(c\\d+)"
+  librenms_class: "port"
+  netbox_bay_name: "\\3/\\4"
+  is_regex: true
+  description: "Nokia XIOM transceiver slot/xiom/mda/cN → mda-pos/cN"
+
+# Juniper MX transceiver bays
+# LibreNMS entPhysicalDescr format: "SFP+-10G-SR @ {fpc}/{pic}/{port}"
+# NetBox MPC-3D-16XGE-SFPP bay format: "Transceiver {pic}/{port}"
+- librenms_name: "[^@]+ @ \\d+/(\\d+)/(\\d+)"
+  librenms_class: "port"
+  netbox_bay_name: "Transceiver \\1/\\2"
+  is_regex: true
+  description: "Juniper MX SFP+ @ fpc/pic/port → Transceiver pic/port"
+
+# ─── Exact Match Entries ─────────────────────────────────────────────────────
+# These are for special cases where names don't follow a regex pattern.
+
+# Nokia CPM slots
+- librenms_name: "Slot A"
+  librenms_class: "cpmModule"
+  netbox_bay_name: "Slot A"
+  description: "Nokia CPM slot A"
+- librenms_name: "Slot B"
+  librenms_class: "cpmModule"
+  netbox_bay_name: "Slot B"
+  description: "Nokia CPM slot B"
+- librenms_name: "SR-7s 2 CPM mini"
+  librenms_class: "cpmCarrier"
+  netbox_bay_name: "CMA"
+  description: "Nokia CMA2-7s CPM carrier bracket"
+
+# Juniper fixed-form devices
+- librenms_name: "PSM 0"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 0"
+  description: "Juniper PSU slot 0"
+- librenms_name: "PSM 1"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 1"
+  description: "Juniper PSU slot 1"
+
+# Juniper chassis devices (PTX10008 etc.): PSM → PEM
+# Regex runs after exact matches, so PSM 0/1 → PSU 0/1 above takes priority for ACX
+- librenms_name: "^PSM (\\d+)$"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PEM \\1"
+  is_regex: true
+  description: "Juniper chassis PSM N → PEM N"
+
+# Juniper FPC container: "FPC: <description> @ N/*/*" → FPC N
+- librenms_name: "^FPC: .+ @ (\\d+)/\\*/\\*$"
+  librenms_class: "container"
+  netbox_bay_name: "FPC \\1"
+  is_regex: true
+  description: "Juniper FPC container description → FPC N"
+
+# Juniper transceivers: "<type> @ slot/pic/port" description → Transceiver slot/pic/port
+- librenms_name: "^.+ @ (\\d+/\\d+/\\d+)$"
+  librenms_class: "port"
+  netbox_bay_name: "Transceiver \\1"
+  is_regex: true
+  description: "Juniper transceiver description → Transceiver slot/pic/port"
+
+# Juniper fan trays: "Fan Tray N" → "Fan N" (ACX7100, etc.)
+# Runs after exact match, so "Fan Tray 0" → "Fan Tray" (ACX7024) still works
+- librenms_name: "^Fan Tray (\\d+)$"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan \\1"
+  is_regex: true
+  description: "Juniper Fan Tray N → Fan N (ACX7100 etc.)"
+
+# Juniper MX304: PEM → PSU (MX304 bays are named PSU, not PEM)
+- librenms_name: "PEM 0"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 0"
+  description: "Juniper MX304 PEM 0 → PSU 0"
+- librenms_name: "PEM 1"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 1"
+  description: "Juniper MX304 PEM 1 → PSU 1"
+
+- librenms_name: "Fan Tray 0"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan Tray"
+  description: "Juniper single fan tray (ACX7024)"
+
+# Juniper PTX10008: SIB → CB (Switch Interface Board → Component Board slot)
+- librenms_name: "SIB 0"
+  librenms_class: "container"
+  netbox_bay_name: "CB 0"
+  description: "Juniper PTX10008 SIB 0 → CB 0"
+- librenms_name: "SIB 1"
+  librenms_class: "container"
+  netbox_bay_name: "CB 1"
+  description: "Juniper PTX10008 SIB 1 → CB 1"
+- librenms_name: "SIB 2"
+  librenms_class: "container"
+  netbox_bay_name: "CB 2"
+  description: "Juniper PTX10008 SIB 2 → CB 2"
+- librenms_name: "SIB 3"
+  librenms_class: "container"
+  netbox_bay_name: "CB 3"
+  description: "Juniper PTX10008 SIB 3 → CB 3"
+- librenms_name: "SIB 4"
+  librenms_class: "container"
+  netbox_bay_name: "CB 4"
+  description: "Juniper PTX10008 SIB 4 → CB 4"
+- librenms_name: "SIB 5"
+  librenms_class: "container"
+  netbox_bay_name: "CB 5"
+  description: "Juniper PTX10008 SIB 5 → CB 5"
+
+# Arcos power supplies
+- librenms_name: "psu0"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 0"
+  description: "Arcos PSU slot 0"
+- librenms_name: "psu1"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 1"
+  description: "Arcos PSU slot 1"

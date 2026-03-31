@@ -72,6 +72,22 @@ class TestDeviceTypeMatching:
         assert result["device_type"] is None
         assert result["match_type"] is None
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
+    def test_match_device_type_mapping_match(self, mock_dtm):
+        """DeviceTypeMapping entry should be used before part_number/model fallback."""
+        mock_dt = MagicMock(id=1, model="MX480")
+        mock_mapping_obj = MagicMock(netbox_device_type=mock_dt)
+        mock_dtm.DoesNotExist = Exception
+        mock_dtm.objects.get.return_value = mock_mapping_obj
+
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        result = match_librenms_hardware_to_device_type("Juniper MX480 Internet Backbone Router")
+
+        assert result["matched"] is True
+        assert result["device_type"] == mock_dt
+        assert result["match_type"] == "mapping"
+
     def test_match_device_type_empty_hardware(self):
         """Empty string returns None."""
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
@@ -197,11 +213,14 @@ class TestSiteMatching:
 class TestPlatformMatching:
     """Test platform matching logic."""
 
+    @patch("netbox_librenms_plugin.utils.PlatformMapping")
     @patch("dcim.models.Platform")
-    def test_find_platform_for_os_exact_match(self, mock_platform_model):
+    def test_find_platform_for_os_exact_match(self, mock_platform_model, mock_platform_mapping):
         """OS string matched to platform."""
         mock_platform = MagicMock(id=1, name="ios")
         mock_platform_model.objects.get.return_value = mock_platform
+        mock_platform_mapping.DoesNotExist = Exception
+        mock_platform_mapping.objects.get.side_effect = mock_platform_mapping.DoesNotExist
 
         from netbox_librenms_plugin.utils import find_matching_platform
 
@@ -211,9 +230,12 @@ class TestPlatformMatching:
         assert result["platform"] == mock_platform
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.utils.PlatformMapping")
     @patch("dcim.models.Platform")
-    def test_find_platform_for_os_not_found(self, mock_platform_model):
+    def test_find_platform_for_os_not_found(self, mock_platform_model, mock_platform_mapping):
         """Returns None when no match."""
+        mock_platform_mapping.DoesNotExist = Exception
+        mock_platform_mapping.objects.get.side_effect = mock_platform_mapping.DoesNotExist
         mock_platform_model.DoesNotExist = Exception
         mock_platform_model.objects.get.side_effect = mock_platform_model.DoesNotExist
 
@@ -457,6 +479,58 @@ class TestVirtualChassisHelpers:
         result = get_librenms_sync_device(mock_device, server_key="default")
 
         assert result == member_a
+
+    def test_get_librenms_sync_device_fallback_to_member_with_ip(self):
+        """Priority 3: no dict member, master has no IP, another member has primary IP → that member."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        vc = MagicMock()
+        master = MagicMock()
+        master.vc_position = 1
+        master.virtual_chassis = vc
+        master.cf = {}
+        master.primary_ip = None  # master has no IP
+
+        member_with_ip = MagicMock()
+        member_with_ip.vc_position = 2
+        member_with_ip.cf = {}
+        member_with_ip.primary_ip = MagicMock()  # this member has IP
+
+        vc.master = None  # no designated master
+        vc.members.all.return_value = [master, member_with_ip]
+
+        result = get_librenms_sync_device(master, server_key="prod")
+
+        assert result == member_with_ip
+
+    def test_get_librenms_sync_device_fallback_lowest_vc_position(self):
+        """Priority 4: no IPs anywhere → return member with lowest vc_position."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        vc = MagicMock()
+        member_pos3 = MagicMock()
+        member_pos3.vc_position = 3
+        member_pos3.cf = {}
+        member_pos3.primary_ip = None
+
+        member_pos1 = MagicMock()
+        member_pos1.vc_position = 1
+        member_pos1.cf = {}
+        member_pos1.primary_ip = None
+
+        member_pos2 = MagicMock()
+        member_pos2.vc_position = 2
+        member_pos2.cf = {}
+        member_pos2.primary_ip = None
+
+        vc.master = None
+        vc.members.all.return_value = [member_pos3, member_pos1, member_pos2]  # unordered
+
+        member_pos2.virtual_chassis = vc
+
+        result = get_librenms_sync_device(member_pos2, server_key="prod")
+
+        assert result == member_pos1  # lowest vc_position wins
 
     def test_zero_id_is_not_a_valid_librenms_id(self):
         """LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.

@@ -1,0 +1,28 @@
+{% load helpers %}
+
+<!-- Action Buttons -->
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>Module Sync</h2>
+    <div class="btn-list">
+        <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="server_key" value="{{ module_sync.server_key|default:'' }}">
+            {% if has_librenms_id %}
+                {% with model_name=object|meta:"model_name" %}
+                    {% if model_name == "device" %}
+                        <button type="button" hx-post="{% url 'plugins:netbox_librenms_plugin:device_module_sync' pk=object.pk %}"
+                                hx-target="#module-sync-content"
+                                class="btn btn-outline-primary">
+                            Refresh Modules
+                        </button>
+                    {% endif %}
+                {% endwith %}
+            {% endif %}
+        </form>
+    </div>
+</div>
+
+<!-- Container for the module sync content -->
+<div id="module-sync-content">
+    {% include 'netbox_librenms_plugin/_module_sync_content.html' %}
+</div>

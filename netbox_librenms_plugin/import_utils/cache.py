@@ -179,7 +179,7 @@ def get_validated_device_cache_key(
     Example:
         >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
         >>> key
-        'validated_device_default_e3b0c44298fc1c14_123_vc'
+        'validated_device_default_e3b0c44298fc1c14_123_vc_sysname=True_strip=False'
     """
     # Sort filters for a deterministic, cross-process stable hash; None values are excluded
     # (consistent with get_cache_metadata_key).
@@ -190,7 +190,7 @@ def get_validated_device_cache_key(
     )
 
 
-def get_import_device_cache_key(device_id: int | str, server_key: str = "default") -> str:
+def get_import_device_cache_key(device_id: int | str, server_key: str) -> str:
     """
     Generate cache key for raw LibreNMS device data.
 
@@ -200,7 +200,7 @@ def get_import_device_cache_key(device_id: int | str, server_key: str = "default
 
     Args:
         device_id: LibreNMS device ID
-        server_key: LibreNMS server identifier for multi-server setups. Defaults to "default" for backward compatibility.
+        server_key: LibreNMS server identifier for multi-server setups. Required.
 
     Returns:
         str: Cache key for the device data

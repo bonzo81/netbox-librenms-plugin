@@ -457,16 +457,21 @@ class TestFindMatchingPlatformMultipleReturned:
         mock_platform = MagicMock()
         Platform_DoesNotExist = type("DoesNotExist", (Exception,), {})
         Platform_MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        PlatformMapping_DoesNotExist = type("DoesNotExist", (Exception,), {})
 
-        with patch("dcim.models.Platform") as MockPlatform:
-            MockPlatform.DoesNotExist = Platform_DoesNotExist
-            MockPlatform.MultipleObjectsReturned = Platform_MultipleObjectsReturned
-            MockPlatform.objects.get.side_effect = Platform_MultipleObjectsReturned("multiple")
-            MockPlatform.objects.filter.return_value.first.return_value = mock_platform
+        with patch("netbox_librenms_plugin.utils.PlatformMapping") as MockPlatformMapping:
+            MockPlatformMapping.DoesNotExist = PlatformMapping_DoesNotExist
+            MockPlatformMapping.objects.get.side_effect = PlatformMapping_DoesNotExist("no mapping")
 
-            result = find_matching_platform("ios")
-            assert result["found"] is True
-            assert result["platform"] is mock_platform
+            with patch("dcim.models.Platform") as MockPlatform:
+                MockPlatform.DoesNotExist = Platform_DoesNotExist
+                MockPlatform.MultipleObjectsReturned = Platform_MultipleObjectsReturned
+                MockPlatform.objects.get.side_effect = Platform_MultipleObjectsReturned("multiple")
+                MockPlatform.objects.filter.return_value.first.return_value = mock_platform
+
+                result = find_matching_platform("ios")
+                assert result["found"] is True
+                assert result["platform"] is mock_platform
 
 
 class TestGetMissingVlanWarning:

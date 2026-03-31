@@ -106,10 +106,6 @@ class MockLibreNMSServer:
         If *method* is given the route is stored as ``"METHOD /path"`` and only
         matches requests using that HTTP verb.  Omit *method* (or pass ``None``)
         to match any verb on that path.
-
-        *body* may be a ``dict`` (serialised to JSON) or a callable.  When a
-        callable is provided it is stored directly and invoked by the handler on
-        each matching request; the *status* argument is ignored in that case.
         """
         key = f"{method} {path}" if method else path
         if callable(body):
