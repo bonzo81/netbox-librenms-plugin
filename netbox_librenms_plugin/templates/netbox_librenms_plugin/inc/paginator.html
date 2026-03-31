@@ -9,7 +9,7 @@
         <ul class="pagination mb-0">
           {% if table.page.has_previous %}
             <li class="page-item">
-              <a href="?tab={{ table.tab }}&{{ page_param }}={{ page.previous_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}" class="page-link">
+              <a href="?tab={{ table.tab }}&{{ page_param }}={{ table.page.previous_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}" class="page-link">
                 <i class="mdi mdi-chevron-left"></i>
               </a>
             </li>
@@ -27,7 +27,7 @@
 
           {% if table.page.has_next %}
             <li class="page-item">
-              <a href="?tab={{ table.tab }}&{{ page_param }}={{ page.next_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}" class="page-link">
+              <a href="?tab={{ table.tab }}&{{ page_param }}={{ table.page.next_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}" class="page-link">
                 <i class="mdi mdi-chevron-right"></i>
               </a>
             </li>
