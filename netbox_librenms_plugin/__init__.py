@@ -70,25 +70,28 @@ class LibreNMSSyncConfig(PluginConfig):
 
 def _ensure_librenms_id_custom_field(sender, **kwargs):
     """
-    Auto-create the 'librenms_id' custom field if it doesn't exist.
+    Auto-create (or migrate) the 'librenms_id' custom field.
     Runs after migrations via post_migrate signal to ensure tables exist.
     Uses dispatch_uid to avoid duplicate connections.
+
+    librenms_id stores a per-server JSON mapping {"server_key": device_id}.
+    Legacy installations may have this field typed as 'integer'; we upgrade it
+    to 'json' automatically so the UI and API accept the dict format.
     """
-    # Only run once per migrate invocation (post_migrate fires per-app).
-    # The _executed flag is intentionally never reset: migrations are expected to
-    # run in short-lived CLI processes (manage.py migrate) where the flag is
-    # naturally cleared on exit.  Long-running processes (e.g. gunicorn workers)
-    # should not rely on this handler re-executing after startup.
-    if getattr(_ensure_librenms_id_custom_field, "_executed", False):
+    # Track per-alias execution so each database alias is bootstrapped exactly once.
+    db_alias = kwargs.get("using") or "default"
+    executed_aliases = getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set())
+    if db_alias in executed_aliases:
         return
-    _ensure_librenms_id_custom_field._executed = True  # not reset; see comment above
+
+    import logging
 
     try:
         from django.contrib.contenttypes.models import ContentType
 
         from extras.models import CustomField
 
-        cf, created = CustomField.objects.get_or_create(
+        cf, created = CustomField.objects.using(db_alias).get_or_create(
             name="librenms_id",
             defaults={
                 "type": "json",
@@ -101,6 +104,15 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
             },
         )
 
+        # Migrate legacy integer-typed field to JSON so the multi-server
+        # dict format {"server_key": device_id} is accepted by the UI/API.
+        if not created and cf.type == "integer":
+            cf.type = "json"
+            cf.save(using=db_alias, update_fields=["type"])
+            logging.getLogger("netbox_librenms_plugin").info(
+                "Migrated 'librenms_id' custom field type from integer to json"
+            )
+
         # Ensure the field is assigned to the required object types
         from dcim.models import Device, Interface
         from virtualization.models import VirtualMachine, VMInterface
@@ -109,21 +121,21 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         current_types = set(cf.object_types.values_list("pk", flat=True))
 
         for model in required_models:
-            ct = ContentType.objects.get_for_model(model)
+            ct = ContentType.objects.db_manager(db_alias).get_for_model(model)
             if ct.pk not in current_types:
                 cf.object_types.add(ct)
 
         if created:
-            import logging
-
             logging.getLogger("netbox_librenms_plugin").info(
                 "Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface"
             )
+
+        # Mark this alias as executed after successful completion to allow retry on failure.
+        executed_aliases.add(db_alias)
+        _ensure_librenms_id_custom_field._executed_aliases = executed_aliases
     except Exception as e:
         # Don't break startup if custom field creation fails (e.g., during initial migration),
         # but log the error so it's not silently swallowed.
-        import logging
-
         logging.getLogger("netbox_librenms_plugin").exception("Failed to auto-create 'librenms_id' custom field: %s", e)
 
 

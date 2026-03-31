@@ -166,7 +166,6 @@ class ImportDevicesJob(JobRunner):
         vm_imports,
         server_key=None,
         sync_options=None,
-        vc_detection_enabled=False,
         manual_mappings_per_device=None,
         libre_devices_cache=None,
         **kwargs,
@@ -179,7 +178,6 @@ class ImportDevicesJob(JobRunner):
             vm_imports: Dict mapping device_id to cluster/role info for VM imports
             server_key: Optional LibreNMS server key for multi-server setups
             sync_options: Dict with sync_interfaces, sync_cables, sync_ips, use_sysname, strip_domain
-            vc_detection_enabled: Whether VC detection was enabled during the filter step.
             manual_mappings_per_device: Dict mapping device_id to manual_mappings dict
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             **kwargs: Additional job parameters
@@ -214,7 +212,6 @@ class ImportDevicesJob(JobRunner):
                 sync_options=sync_options,
                 manual_mappings_per_device=manual_mappings_per_device,
                 libre_devices_cache=libre_devices_cache,
-                vc_detection_enabled=vc_detection_enabled,
                 job=self,  # Pass job context for logging and cancellation
                 user=self.job.user,  # Pass user for permission checks
             )
