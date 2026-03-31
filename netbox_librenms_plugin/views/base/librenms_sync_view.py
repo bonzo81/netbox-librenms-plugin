@@ -5,11 +5,14 @@ from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
+from netbox_librenms_plugin.import_utils import _determine_device_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
+    resolve_naming_preferences,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
@@ -87,7 +90,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 }
             )
 
-        librenms_info = self.get_librenms_device_info(obj)
+        librenms_info = self.get_librenms_device_info(obj, request)
 
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
@@ -227,7 +230,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         result.sort(key=lambda e: 0 if e["is_active"] else (1 if e["is_configured"] else 2))
         return result or None
 
-    def get_librenms_device_info(self, obj):
+    def get_librenms_device_info(self, obj, request=None):
         """Get the LibreNMS device information for the given object."""
         found_in_librenms = False
         mismatched_device = False
@@ -264,6 +267,30 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 # Try to match hardware to NetBox DeviceType
                 hardware_match = match_librenms_hardware_to_device_type(hardware)
 
+                # Compute resolved name using naming preferences
+                resolved_name = None
+                if request:
+                    use_sysname, strip_domain = resolve_naming_preferences(request)
+                    resolved_name = _determine_device_name(
+                        device_info,
+                        use_sysname=use_sysname,
+                        strip_domain=strip_domain,
+                        device_id=self.librenms_id,
+                    )
+
+                    # For VC members, generate the expected VC member name
+                    if (
+                        resolved_name
+                        and hasattr(obj, "virtual_chassis")
+                        and obj.virtual_chassis is not None
+                        and obj.vc_position is not None
+                    ):
+                        resolved_name = _generate_vc_member_name(
+                            resolved_name,
+                            obj.vc_position,
+                            serial=getattr(obj, "serial", None),
+                        )
+
                 # Update device details regardless of match
                 librenms_device_details.update(
                     {
@@ -276,6 +303,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                         "librenms_device_location": device_info.get("location", "-"),
                         "librenms_device_ip": librenms_ip,
                         "sysName": librenms_sysname,
+                        "resolved_name": resolved_name or librenms_sysname,
                         "librenms_device_hostname": device_info.get("hostname", "-"),
                         "librenms_device_hardware_match": hardware_match,
                     }
