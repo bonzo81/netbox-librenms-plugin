@@ -462,7 +462,10 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
             "server_key": self.librenms_api.server_key,
-            "vc_detection_enabled": request.GET.get("enable_vc_detection") == "true",
+            "vc_detection_enabled": (
+                request.POST.get("enable_vc_detection") or request.GET.get("enable_vc_detection") or ""
+            ).lower()
+            in ("on", "true", "1"),
         }
 
         return render(

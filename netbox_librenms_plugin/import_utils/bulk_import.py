@@ -4,7 +4,6 @@ import hashlib
 import logging
 from typing import List
 
-from core.choices import JobStatusChoices
 from django.core.cache import cache
 
 from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
@@ -38,16 +37,8 @@ def _is_job_cancelled(job) -> bool:
         rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
         return rq_job.is_failed or rq_job.is_stopped
     except Exception:
-        job.job.refresh_from_db()
-        job_status = job.job.status
-        status_value = job_status.value if hasattr(job_status, "value") else job_status
-        return status_value in (
-            JobStatusChoices.STATUS_FAILED,
-            JobStatusChoices.STATUS_ERRORED,
-            "failed",
-            "errored",
-            "stopped",
-        )
+        # Redis unavailable — treat as not cancelled to avoid false positives.
+        return False
 
 
 def bulk_import_devices_shared(
@@ -102,13 +93,11 @@ def bulk_import_devices_shared(
 
     # Check permissions at start of bulk operation — device and VM add perms are
     # required because any device may be flagged as import_as_vm during validation.
-    # change_device is needed for VC master/member updates; change_virtualmachine is
-    # needed when refreshing an existing VM (e.g. setting librenms_id on a re-import).
+    # change_device is needed for VC master/member updates.
     required_perms = [
         "dcim.add_device",
         "dcim.change_device",
         "virtualization.add_virtualmachine",
-        "virtualization.change_virtualmachine",
     ]
     require_permissions(user, required_perms, "import devices")
 
