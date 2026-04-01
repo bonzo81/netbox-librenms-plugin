@@ -159,6 +159,42 @@ class TestGetModuleTypesIndexed:
         assert result["WS-X4516"] is mt2
         assert result["libre-model-a"] is mt1
 
+    def test_mapping_overrides_ambiguous_base_key(self):
+        """A unique ModuleTypeMapping entry overrides a base key that became ambiguous."""
+        from netbox_librenms_plugin.utils import get_module_types_indexed
+
+        # Two ModuleTypes share the same model name → base key becomes ambiguous
+        mt1 = MagicMock()
+        mt1.model = "SFP-1G-LX"
+        mt1.part_number = ""
+
+        mt2 = MagicMock()
+        mt2.model = "SFP-1G-LX"  # same → ambiguous in base pass
+        mt2.part_number = ""
+
+        # Explicit mapping for the same key → should win
+        mock_mapping = MagicMock()
+        mock_mapping.librenms_model = "SFP-1G-LX"
+        mock_mapping.netbox_module_type = mt1
+
+        mock_mt_cls = MagicMock()
+        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt1, mt2]
+
+        mock_map_cls = MagicMock()
+        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "dcim.models": type("m", (), {"ModuleType": mock_mt_cls})(),
+            },
+        ):
+            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
+                result = get_module_types_indexed()
+
+        # Base key was ambiguous but mapping should override it
+        assert result["SFP-1G-LX"] is mt1
+
 
 class TestInstallModuleViewWiring:
     """InstallModuleView must have correct mixins and attributes."""
@@ -1579,7 +1615,7 @@ class TestMatchBayLogic:
 
         child = {
             "entPhysicalIndex": 2,
-            "entPhysicalName": "Optics0/0/0/5",
+            "entPhysicalName": "Optics 0/0/0/5",
             "entPhysicalDescr": "",
             "entPhysicalClass": "module",
             "entPhysicalContainedIn": 0,
@@ -1590,7 +1626,7 @@ class TestMatchBayLogic:
         bay.name = "Optics0/0/0/5"
         bay.module = None
         module_bays = {"Optics0/0/0/5": bay}
-        regex = [self._make_regex_mapping(r"Optics(\d+/\d+/\d+/\d+)", r"Optics\1")]
+        regex = [self._make_regex_mapping(r"Optics (\d+/\d+/\d+/\d+)", r"Optics\1")]
 
         with patch(
             "netbox_librenms_plugin.views.base.modules_view.BaseModuleTableView._fpc_slot_matches", return_value=True
