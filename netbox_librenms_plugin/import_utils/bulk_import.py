@@ -26,8 +26,9 @@ def _is_job_cancelled(job) -> bool:
     """
     Return True if a background job has been stopped or cancelled.
 
-    Checks RQ/Redis state first (reflects stop API calls immediately);
-    falls back to the database status if Redis is unavailable.
+    Checks RQ/Redis state only (reflects stop API calls immediately).
+    On any Redis/redis-py exception (e.g., connection refused), returns False
+    immediately without any database fallback, to avoid false cancellation.
     """
     try:
         from django_rq import get_queue
