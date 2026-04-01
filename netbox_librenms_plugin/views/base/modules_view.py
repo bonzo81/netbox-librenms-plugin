@@ -326,7 +326,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         device_serial,
                     )
                 )
-                if action == "skip":
+                if action in ("skip", "transparent"):
                     continue
                 top_items.append(item)
                 continue
@@ -761,7 +761,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         while contained_in and contained_in in index_map and contained_in not in visited:
             visited.add(contained_in)
             parent = index_map[contained_in]
-            name = parent.get("entPhysicalName", "").strip()
+            name = (parent.get("entPhysicalName") or "").strip()
             if name:
                 return name
             contained_in = parent.get("entPhysicalContainedIn", 0)
@@ -774,9 +774,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         to exact parent name match, then positional matching.
         """
         parent_name = self._find_parent_container_name(item, index_map)
-        item_name = item.get("entPhysicalName", "").strip()
-        item_descr = item.get("entPhysicalDescr", "").strip()
-        phys_class = item.get("entPhysicalClass", "").strip()
+        item_name = (item.get("entPhysicalName") or "").strip()
+        item_descr = (item.get("entPhysicalDescr") or "").strip()
+        phys_class = (item.get("entPhysicalClass") or "").strip()
 
         # Build candidate names: parent, item name, item description
         candidate_names = [n for n in [parent_name, item_name, item_descr] if n]

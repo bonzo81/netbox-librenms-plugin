@@ -749,10 +749,16 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     q |= Q(custom_field_data__librenms_id=str(librenms_id))
     # When a string ID looks like an integer, also match the numeric JSON form so
     # "42" matches records that store the value as the JSON number 42.
-    if isinstance(librenms_id, str) and librenms_id.isdigit():
-        int_value = int(librenms_id)
-        q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
-        q |= Q(custom_field_data__librenms_id=int_value)
+    # Strip whitespace and canonicalize leading-zero forms ("042", "42 ") → "42".
+    if isinstance(librenms_id, str):
+        cleaned = librenms_id.strip()
+        if cleaned.isdigit():
+            int_value = int(cleaned)
+            canonical_str = str(int_value)
+            q |= Q(**{f"custom_field_data__librenms_id__{server_key}": canonical_str})
+            q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
+            q |= Q(custom_field_data__librenms_id=canonical_str)
+            q |= Q(custom_field_data__librenms_id=int_value)
     return model.objects.filter(q).first()
 
 
