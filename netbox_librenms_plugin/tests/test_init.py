@@ -15,10 +15,18 @@ class TestEnsureLibreNMSIdCustomField:
     """Test _ensure_librenms_id_custom_field signal handler."""
 
     def setup_method(self):
-        """Reset the _executed flag before each test for consistent isolation."""
+        """Reset per-alias execution tracking before each test."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        _ensure_librenms_id_custom_field._executed = False
+        _ensure_librenms_id_custom_field._executed_aliases = set()
+
+    def _setup_cf_mock(self, MockCustomField, mock_cf, created):
+        """Wire MockCustomField so that objects.using(alias).get_or_create(...) returns (mock_cf, created)."""
+        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, created)
+
+    def _setup_ct_mock(self, MockContentType, mock_ct):
+        """Wire MockContentType so that objects.db_manager(alias).get_for_model(...) returns mock_ct."""
+        MockContentType.objects.db_manager.return_value.get_for_model.return_value = mock_ct
 
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)
@@ -34,16 +42,16 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = []
-        MockCustomField.objects.get_or_create.return_value = (mock_cf, True)
+        self._setup_cf_mock(MockCustomField, mock_cf, True)
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
-        MockContentType.objects.get_for_model.return_value = mock_ct
+        self._setup_ct_mock(MockContentType, mock_ct)
 
         with patch("logging.getLogger") as mock_get_logger:
             _ensure_librenms_id_custom_field(sender=None)
 
-        MockCustomField.objects.get_or_create.assert_called_once_with(
+        MockCustomField.objects.using.return_value.get_or_create.assert_called_once_with(
             name="librenms_id",
             defaults={
                 "type": "json",
@@ -63,14 +71,14 @@ class TestEnsureLibreNMSIdCustomField:
         mock_get_logger.assert_called_with("netbox_librenms_plugin")
 
     def test_skips_when_already_executed(self):
-        """Handler is a no-op on second invocation (per-migrate dedup)."""
+        """Handler is a no-op on second invocation for the same DB alias."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        _ensure_librenms_id_custom_field._executed = True
+        _ensure_librenms_id_custom_field._executed_aliases = {"default"}
 
         with patch("extras.models.CustomField") as MockCustomField:
             _ensure_librenms_id_custom_field(sender=None)
-            MockCustomField.objects.get_or_create.assert_not_called()
+            MockCustomField.objects.using.assert_not_called()
 
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)
@@ -86,11 +94,11 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        MockCustomField.objects.get_or_create.return_value = (mock_cf, False)
+        self._setup_cf_mock(MockCustomField, mock_cf, False)
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
-        MockContentType.objects.get_for_model.return_value = mock_ct
+        self._setup_ct_mock(MockContentType, mock_ct)
 
         _ensure_librenms_id_custom_field(sender=None)
 
@@ -111,13 +119,18 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2]
-        MockCustomField.objects.get_or_create.return_value = (mock_cf, False)
+        self._setup_cf_mock(MockCustomField, mock_cf, False)
 
         ct_existing = MagicMock()
         ct_existing.pk = 1
         ct_new = MagicMock()
         ct_new.pk = 99
-        MockContentType.objects.get_for_model.side_effect = [ct_existing, ct_existing, ct_new, ct_new]
+        MockContentType.objects.db_manager.return_value.get_for_model.side_effect = [
+            ct_existing,
+            ct_existing,
+            ct_new,
+            ct_new,
+        ]
 
         _ensure_librenms_id_custom_field(sender=None)
 
@@ -129,7 +142,7 @@ class TestEnsureLibreNMSIdCustomField:
         """Exceptions during custom field creation are caught and logged."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        MockCustomField.objects.get_or_create.side_effect = Exception("DB not ready")
+        MockCustomField.objects.using.return_value.get_or_create.side_effect = Exception("DB not ready")
 
         with patch("logging.getLogger") as mock_get_logger:
             # Should not raise
@@ -155,11 +168,11 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        MockCustomField.objects.get_or_create.return_value = (mock_cf, False)
+        self._setup_cf_mock(MockCustomField, mock_cf, False)
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
-        MockContentType.objects.get_for_model.return_value = mock_ct
+        self._setup_ct_mock(MockContentType, mock_ct)
 
         with patch("logging.getLogger") as mock_get_logger:
             _ensure_librenms_id_custom_field(sender=None)
@@ -168,3 +181,29 @@ class TestEnsureLibreNMSIdCustomField:
             # asserting getLogger was never called, which is fragile.
             logger_instance = mock_get_logger.return_value
             logger_instance.info.assert_not_called()
+
+    @patch("dcim.models.Interface", new_callable=MagicMock)
+    @patch("dcim.models.Device", new_callable=MagicMock)
+    @patch("virtualization.models.VMInterface", new_callable=MagicMock)
+    @patch("virtualization.models.VirtualMachine", new_callable=MagicMock)
+    @patch("django.contrib.contenttypes.models.ContentType")
+    @patch("extras.models.CustomField")
+    def test_integer_field_migrated_to_json(
+        self, MockCustomField, MockContentType, mock_vm, mock_vmif, mock_device, mock_iface
+    ):
+        """When existing field has type='integer', it is migrated to 'json' and saved."""
+        from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+        mock_cf = MagicMock()
+        mock_cf.type = "integer"
+        mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
+        self._setup_cf_mock(MockCustomField, mock_cf, False)
+
+        mock_ct = MagicMock()
+        mock_ct.pk = 1
+        self._setup_ct_mock(MockContentType, mock_ct)
+
+        _ensure_librenms_id_custom_field(sender=None)
+
+        assert mock_cf.type == "json"
+        mock_cf.save.assert_called_once_with(using="default", update_fields=["type"])

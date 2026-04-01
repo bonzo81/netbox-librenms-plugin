@@ -4,7 +4,6 @@ import hashlib
 import logging
 from typing import List
 
-from core.choices import JobStatusChoices
 from django.core.cache import cache
 
 from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
@@ -12,7 +11,7 @@ from ..librenms_api import LibreNMSAPI
 from ..utils import find_by_librenms_id
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
 from .device_operations import import_single_device, validate_device_for_import
-from .filters import get_librenms_devices_for_import
+from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
     create_virtual_chassis_with_members,
@@ -23,27 +22,24 @@ from .virtual_chassis import (
 logger = logging.getLogger(__name__)
 
 
-def _safe_disabled(device: dict) -> int:
+def _is_job_cancelled(job) -> bool:
     """
-    Return 1 if the device is disabled, 0 otherwise.
+    Return True if a background job has been stopped or cancelled.
 
-    Handles None, booleans, numeric strings, and common truthy/falsy tokens
-    (e.g. "true"/"yes"/"on" → 1, "false"/"no"/"off" → 0) without raising.
+    Checks RQ/Redis state only (reflects stop API calls immediately).
+    On any Redis/redis-py exception (e.g., connection refused), returns False
+    immediately without any database fallback, to avoid false cancellation.
     """
-    val = device.get("disabled", 0)
-    if isinstance(val, bool):
-        return int(val)
-    if isinstance(val, str):
-        normalized = val.strip().lower()
-        if normalized in ("1", "true", "yes", "on"):
-            return 1
-        if normalized in ("0", "false", "no", "off", ""):
-            return 0
     try:
-        int_val = int(val)
-        return 1 if int_val else 0
-    except (TypeError, ValueError):
-        return 0
+        from django_rq import get_queue
+        from rq.job import Job as RQJob
+
+        queue = get_queue("default")
+        rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
+        return rq_job.is_failed or rq_job.is_stopped
+    except Exception:
+        # Redis unavailable — treat as not cancelled to avoid false positives.
+        return False
 
 
 def bulk_import_devices_shared(
@@ -52,7 +48,6 @@ def bulk_import_devices_shared(
     sync_options: dict = None,
     manual_mappings_per_device: dict = None,
     libre_devices_cache: dict = None,
-    vc_detection_enabled: bool = False,
     job=None,
     user=None,
 ) -> dict:
@@ -70,8 +65,6 @@ def bulk_import_devices_shared(
             Example: {1179: {'device_role_id': 5}, 1180: {'device_role_id': 3}}
         libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             to avoid redundant API calls. Example: {123: {...device_data...}}
-        vc_detection_enabled: Whether to enable virtual chassis detection during import.
-            Should match the flag used during the filter/preview step for consistency.
         job: Optional JobRunner instance for progress logging and cancellation checks
         user: User performing the import (for permission checks). If job is provided,
             user is extracted from job.job.user if not explicitly passed.
@@ -101,7 +94,7 @@ def bulk_import_devices_shared(
 
     # Check permissions at start of bulk operation — device and VM add perms are
     # required because any device may be flagged as import_as_vm during validation.
-    # change_device is needed for VC master/member updates; VMs are only created, not changed.
+    # change_device is needed for VC master/member updates.
     required_perms = [
         "dcim.add_device",
         "dcim.change_device",
@@ -122,35 +115,13 @@ def bulk_import_devices_shared(
 
     for idx, device_id in enumerate(device_ids, start=1):
         # Check for job cancellation on first iteration and every 5th thereafter.
-        # Check RQ/Redis state first (reflects stop API immediately); fall back to DB.
-        if job and (idx == 1 or idx % 5 == 0):
-            try:
-                from django_rq import get_queue
-                from rq.job import Job as RQJob
-
-                queue = get_queue("default")
-                rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
-                if rq_job.is_failed or rq_job.is_stopped:
-                    if job.logger:
-                        job.logger.warning(
-                            f"Import job stopped at device {idx} of {total} (RQ status: {rq_job.get_status()})"
-                        )
-                    else:
-                        logger.warning(f"Import cancelled at device {idx} of {total}")
-                    _cancelled = True
-                    break
-            except Exception:
-                # Fall back to DB check if RQ is unavailable
-                job.job.refresh_from_db()
-                job_status = job.job.status
-                status_value = job_status.value if hasattr(job_status, "value") else job_status
-                if status_value in (JobStatusChoices.STATUS_FAILED, "failed", "errored"):
-                    if job.logger:
-                        job.logger.warning(f"Import job cancelled at device {idx} of {total}")
-                    else:
-                        logger.warning(f"Import cancelled at device {idx} of {total}")
-                    _cancelled = True
-                    break
+        if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
+            if job.logger:
+                job.logger.warning(f"Import job stopped at device {idx} of {total}")
+            else:
+                logger.warning(f"Import cancelled at device {idx} of {total}")
+            _cancelled = True
+            break
 
         try:
             # Use cached device data if available to avoid redundant API calls
@@ -174,10 +145,10 @@ def bulk_import_devices_shared(
             validation = validate_device_for_import(
                 libre_device,
                 api=api,
+                include_vc_detection=bool(sync_options and sync_options.get("vc_detection_enabled", False)),
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
-                include_vc_detection=vc_detection_enabled,
             )
 
             # Build manual mappings from validation + any provided overrides
@@ -315,7 +286,6 @@ def bulk_import_devices(
     sync_options: dict = None,
     manual_mappings_per_device: dict = None,
     libre_devices_cache: dict = None,
-    vc_detection_enabled: bool = False,
     user=None,
 ) -> dict:
     """
@@ -332,7 +302,6 @@ def bulk_import_devices(
             Example: {1179: {'device_role_id': 5}, 1180: {'device_role_id': 3}}
         libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             to avoid redundant API calls. Example: {123: {...device_data...}}
-        vc_detection_enabled: Whether to enable virtual chassis detection during import.
         user: User performing the import (for permission checks)
 
     Returns:
@@ -354,7 +323,6 @@ def bulk_import_devices(
         sync_options=sync_options,
         manual_mappings_per_device=manual_mappings_per_device,
         libre_devices_cache=libre_devices_cache,
-        vc_detection_enabled=vc_detection_enabled,
         job=None,  # No job context for synchronous imports
         user=user,
     )
@@ -524,6 +492,9 @@ def process_device_filters(
     # Fetch devices from LibreNMS
     if job:
         job.logger.info(f"Fetching devices with filters: {filters}")
+        if _is_job_cancelled(job):
+            job.logger.warning("Job was stopped before fetching devices")
+            return _empty_return(return_cache_status)
     else:
         logger.info(f"Fetching devices with filters: {filters}")
 
@@ -546,6 +517,11 @@ def process_device_filters(
         job.logger.info(f"Found {len(libre_devices)} devices to process")
     else:
         logger.info(f"Found {len(libre_devices)} devices")
+
+    # Check for early cancellation before the expensive VC prefetch
+    if job and _is_job_cancelled(job):
+        job.logger.warning("Job was stopped before VC pre-fetch")
+        return _empty_return(return_cache_status)
 
     # Pre-warm VC cache if needed
     if vc_detection_enabled and libre_devices:
@@ -575,52 +551,17 @@ def process_device_filters(
 
     if job:
         job.logger.info(f"Starting validation of {total} devices")
-        # Initial check if job was already terminated before we even started
-        try:
-            from django_rq import get_queue
-            from rq.job import Job as RQJob
-
-            queue = get_queue("default")
-            rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
-
-            if rq_job.is_failed or rq_job.is_stopped:
-                job.logger.warning("Job was already stopped before validation started")
-                return _empty_return(return_cache_status)
-        except Exception:
-            # Fall back to DB check if RQ check fails
-            job.job.refresh_from_db()
-            if job.job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED):
-                job.logger.warning("Job was stopped before validation started")
-                return _empty_return(return_cache_status)
+        if _is_job_cancelled(job):
+            job.logger.warning("Job was already stopped before validation started")
+            return _empty_return(return_cache_status)
     else:
         logger.info(f"Validating {total} devices")
 
     for idx, device in enumerate(libre_devices, 1):
-        # Check for job termination or client disconnect periodically
-        if idx % 5 == 0 or idx == 1:  # Check more frequently (every 5 devices + first device)
-            if job:
-                # Check if job was terminated via stop API
-                # CRITICAL: Check the RQ job status in Redis, not just the DB model
-                # NetBox's stop endpoint marks the RQ job as failed in Redis
-                try:
-                    from django_rq import get_queue
-                    from rq.job import Job as RQJob
-
-                    queue = get_queue("default")
-                    rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
-
-                    # Check if RQ job is in a stopped state
-                    if rq_job.is_failed or rq_job.is_stopped:
-                        job.logger.info(
-                            f"Job stopped at device {idx}/{total} (RQ status: {rq_job.get_status()}). Exiting gracefully."
-                        )
-                        return _empty_return(return_cache_status)
-                except Exception:
-                    # If we can't check RQ status, fall back to DB status check
-                    job.job.refresh_from_db()
-                    if job.job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED):
-                        job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
-                        return _empty_return(return_cache_status)
+        # Check for job termination periodically
+        if (idx % 5 == 0 or idx == 1) and job and _is_job_cancelled(job):
+            job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
+            return _empty_return(return_cache_status)
 
         # Drop any cached validation/meta keys before recomputing
         device.pop("_validation", None)
