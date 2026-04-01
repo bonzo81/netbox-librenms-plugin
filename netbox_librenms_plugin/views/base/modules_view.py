@@ -211,7 +211,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 children_by_parent.setdefault(p, []).append(item)
 
         # Preload all ModuleBayMapping rows once to avoid N+1 queries in _match_module_bay.
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules, load_bay_mappings
+        from netbox_librenms_plugin.utils import (
+            get_enabled_ignore_rules,
+            load_bay_mappings,
+            preload_normalization_rules,
+        )
 
         self._exact_bay_mappings, self._regex_bay_mappings = load_bay_mappings()
 
@@ -224,6 +228,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Manufacturer for module-type normalization rules — passed explicitly to
         # _build_table_rows/_build_row instead of stored as an instance attribute.
         manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
+
+        # Preload NormalizationRule rows once to avoid N+1 queries inside the
+        # _match_module_bay and resolve_module_type loops.
+        self._norm_rules_bay = preload_normalization_rules("module_bay")
+        self._norm_rules_type = preload_normalization_rules("module_type", manufacturer=manufacturer)
 
         # Pre-compute ignore rule results once to avoid calling _check_ignore_rules
         # twice per item (once in _find_transparent_indices, once in _collect_top_items).
@@ -758,12 +767,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Build candidate names: parent, item name, item description
         candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
 
-        # Also try normalized variants so NormalizationRule(scope="module_bay") entries take effect.
         from netbox_librenms_plugin.utils import apply_normalization_rules
 
+        norm_rules_bay = getattr(self, "_norm_rules_bay", None)
         normalized_extras = []
         for name in candidate_names:
-            normalized = apply_normalization_rules(name, "module_bay")
+            normalized = apply_normalization_rules(name, "module_bay", preloaded_rules=norm_rules_bay)
             if normalized != name and normalized not in candidate_names and normalized not in normalized_extras:
                 normalized_extras.append(normalized)
         all_candidates = candidate_names + normalized_extras
@@ -966,7 +975,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
         # Match to NetBox module type (direct lookup, then normalization fallback)
-        matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
+        norm_rules_type = getattr(self, "_norm_rules_type", None)
+        matched_type = resolve_module_type(
+            model_name, module_types, manufacturer=manufacturer, norm_rules=norm_rules_type
+        )
 
         # Check for nested module naming conflicts
         name_conflict = (
