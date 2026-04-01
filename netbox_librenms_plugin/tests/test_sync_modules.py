@@ -140,10 +140,10 @@ class TestGetModuleTypesIndexed:
         mock_mapping.netbox_module_type = mt1
 
         mock_mt_cls = MagicMock()
-        mock_mt_cls.objects.all.return_value.select_related.return_value = [mt1, mt2]
+        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt1, mt2]
 
         mock_map_cls = MagicMock()
-        mock_map_cls.objects.select_related.return_value = [mock_mapping]
+        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
 
         with patch.dict(
             "sys.modules",

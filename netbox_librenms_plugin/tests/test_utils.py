@@ -229,6 +229,7 @@ class TestPlatformMatching:
         assert result["found"] is True
         assert result["platform"] == mock_platform
         assert result["match_type"] == "exact"
+        mock_platform_model.objects.get.assert_called_once_with(name__iexact="ios")
 
     @patch("netbox_librenms_plugin.models.PlatformMapping")
     @patch("dcim.models.Platform")
@@ -245,6 +246,7 @@ class TestPlatformMatching:
 
         assert result["found"] is False
         assert result["platform"] is None
+        mock_platform_model.objects.get.assert_called_once_with(name__iexact="unknown_os")
 
     def test_find_platform_for_os_empty(self):
         """Empty OS returns None."""
@@ -496,7 +498,7 @@ class TestVirtualChassisHelpers:
         member_with_ip.cf = {}
         member_with_ip.primary_ip = MagicMock()  # this member has IP
 
-        vc.master = None  # no designated master
+        vc.master = master  # designated master exists but has no primary_ip
         vc.members.all.return_value = [master, member_with_ip]
 
         result = get_librenms_sync_device(master, server_key="prod")
