@@ -1284,6 +1284,12 @@ class DeviceConflictActionView(
                     if err := _save_device(existing_device):
                         return err
                     logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
+                elif match_result.get("match_type") == "ambiguous":
+                    return HttpResponse(
+                        f"Multiple platform mappings match OS '{escape(librenms_os)}' — "
+                        "resolve the conflict in Platform Mappings",
+                        status=400,
+                    )
                 else:
                     return HttpResponse(f"Platform '{escape(librenms_os)}' not found in NetBox", status=400)
             else:

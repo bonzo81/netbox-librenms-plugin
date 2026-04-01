@@ -570,8 +570,8 @@ class TestBuildRowSerialMismatch:
         assert row.get("can_update_serial") is True
         assert row.get("installed_module_id") == 42
 
-    def test_empty_netbox_serial_does_not_set_mismatch(self):
-        """When NetBox serial is empty, status is Installed regardless of LibreNMS serial."""
+    def test_empty_netbox_serial_flags_mismatch(self):
+        """When NetBox serial is empty but LibreNMS has one, status is Serial Mismatch."""
         view = self._view()
         bay = self._make_bay(installed_serial="")
         matched_type = MagicMock()
@@ -591,8 +591,9 @@ class TestBuildRowSerialMismatch:
                 {"XCM-7s-b": matched_type},
             )
 
-        assert row["status"] == "Installed"
-        assert not row.get("can_update_serial")
+        assert row["status"] == "Serial Mismatch"
+        assert row.get("can_update_serial")
+        assert row.get("can_replace")
 
     def _common_patches(self, view, bay, matched_type_name):
         """Return a stack of common patches for _build_row helper calls."""
@@ -767,8 +768,9 @@ class TestDetectSerialConflicts:
         """When no rows have can_replace or can_install, the method returns without DB query."""
         view = self._view()
         table_data = [{"serial": "S1", "status": "Installed"}]
-        # Call real method directly to verify it doesn't error
-        view._detect_serial_conflicts(table_data)
+        with patch("dcim.models.Module") as mock_module_cls:
+            view._detect_serial_conflicts(table_data)
+            mock_module_cls.objects.filter.assert_not_called()
         assert "serial_conflict_module" not in table_data[0]
 
     def test_conflict_detected_for_can_replace_row(self):
@@ -837,7 +839,9 @@ class TestDetectSerialConflicts:
         """A can_install row with no serial is not checked for conflicts."""
         view = self._view()
         row = {"can_install": True, "serial": "-"}
-        view._detect_serial_conflicts([row])
+        with patch("dcim.models.Module") as mock_module_cls:
+            view._detect_serial_conflicts([row])
+            mock_module_cls.objects.filter.assert_not_called()
         assert "serial_conflict_module" not in row
 
 

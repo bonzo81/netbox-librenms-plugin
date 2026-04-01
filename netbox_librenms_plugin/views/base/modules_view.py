@@ -314,6 +314,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         top_items = []
         for item in inventory_data:
             if item.get("_from_transceiver_api"):
+                idx = item.get("entPhysicalIndex")
+                action = (
+                    ignore_cache.get(idx)
+                    if idx is not None
+                    else _check_ignore_rules(
+                        item,
+                        index_map.get(item.get("entPhysicalContainedIn")),
+                        ignore_rules,
+                        index_map,
+                        device_serial,
+                    )
+                )
+                if action == "skip":
+                    continue
                 top_items.append(item)
                 continue
             phys_class = item.get("entPhysicalClass")
@@ -1052,7 +1066,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if nb_serial == "-":
                 nb_serial = ""
             lnms_serial = serial if serial != "-" else ""
-            if lnms_serial and nb_serial and lnms_serial != nb_serial:
+            if lnms_serial and lnms_serial != nb_serial:
                 row["status"] = "Serial Mismatch"
                 row["row_class"] = "table-danger"
                 row["can_update_serial"] = True

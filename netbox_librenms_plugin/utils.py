@@ -284,11 +284,14 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
         hardware_name (str): Hardware string from LibreNMS API (e.g., 'C9200L-48P-4X')
 
     Returns:
-        dict: Dictionary containing:
+        dict | None: Dictionary containing:
             - matched (bool): Whether a match was found
             - device_type (DeviceType|None): The matched DeviceType object
             - match_type (str|None): 'mapping' if via DeviceTypeMapping, 'exact' if via
               part_number/model, None otherwise
+        Returns ``None`` when ``DeviceTypeMapping.MultipleObjectsReturned`` is raised
+        (i.e., multiple mapping rows share the same ``librenms_hardware`` key).
+        Callers must guard with ``if result is None:`` before inspecting the dict.
     """
     from dcim.models import DeviceType
 
@@ -946,8 +949,22 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     if preloaded_rules is not None:
         if manufacturer:
             mfg_pk = getattr(manufacturer, "pk", None)
-            value = _apply_rules(value, preloaded_rules.get((scope, mfg_pk), []))
-        value = _apply_rules(value, preloaded_rules.get((scope, None), []))
+            if (scope, mfg_pk) in preloaded_rules:
+                value = _apply_rules(value, preloaded_rules[(scope, mfg_pk)])
+            else:
+                # Manufacturer key missing from preloaded dict — fall back to DB
+                value = _apply_rules(
+                    value,
+                    NormalizationRule.objects.filter(scope=scope, manufacturer=manufacturer).order_by("priority", "pk"),
+                )
+        if (scope, None) in preloaded_rules:
+            value = _apply_rules(value, preloaded_rules[(scope, None)])
+        else:
+            # Unscoped rules not preloaded — fall back to DB
+            value = _apply_rules(
+                value,
+                NormalizationRule.objects.filter(scope=scope, manufacturer__isnull=True).order_by("priority", "pk"),
+            )
     elif manufacturer:
         # Manufacturer-specific rules first, then unscoped rules
         for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
