@@ -149,7 +149,7 @@
   description: "Juniper QSFP28 100G-LR4"
 
 - librenms_model: "740-079871"
-  netbox_module_type: "QSFP28-DD-2X100G-LR4"
+  netbox_module_type: "QSFP-DD-2X100G-LR4"
   description: "Juniper QSFP-DD 2x100G-LR4"
 
 - librenms_model: "740-082823"

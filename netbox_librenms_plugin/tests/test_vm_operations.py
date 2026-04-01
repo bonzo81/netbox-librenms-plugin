@@ -130,6 +130,7 @@ class TestCreateVmFromLibrenms:
             "can_import": True,
             "cluster": {"cluster": MagicMock()},
             "platform": {"platform": None},
+            "device_role": {"role": mock_role},
         }
         mock_vm = MagicMock()
         mock_vm.name = "vm06"
@@ -137,7 +138,7 @@ class TestCreateVmFromLibrenms:
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation, role=mock_role)
+            create_vm_from_librenms(libre_device, validation)
 
         call_kwargs = mock_vm_class.objects.create.call_args[1]
         assert call_kwargs["role"] == mock_role

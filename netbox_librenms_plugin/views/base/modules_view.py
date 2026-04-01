@@ -374,11 +374,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """Build table rows from top-level items and their sub-components."""
         # ChainMap preserves scope ordering — device-level bays take precedence.
         all_bays = ChainMap(device_bays, *module_scoped_bays.values())
+        # Precompute per-module sibling bay counts to avoid N+1 in has_nested_name_conflict.
+        sibling_counts = {mid: len(bays) for mid, bays in module_scoped_bays.items()}
         table_data = []
 
         for item in top_items:
             item_bays = all_bays if item.get("_from_transceiver_api") else device_bays
-            row = self._build_row(item, index_map, item_bays, module_types, depth=0, manufacturer=manufacturer)
+            row = self._build_row(
+                item,
+                index_map,
+                item_bays,
+                module_types,
+                depth=0,
+                manufacturer=manufacturer,
+                sibling_counts=sibling_counts,
+            )
             parent_row_idx = len(table_data)
             table_data.append(row)
 
@@ -410,7 +420,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             for depth, sub_item in sub_items:
                 scope_bays = bays_by_depth.get(depth, child_bays)
                 sub_row = self._build_row(
-                    sub_item, index_map, scope_bays, module_types, depth=depth, manufacturer=manufacturer
+                    sub_item,
+                    index_map,
+                    scope_bays,
+                    module_types,
+                    depth=depth,
+                    manufacturer=manufacturer,
+                    sibling_counts=sibling_counts,
                 )
                 table_data.append(sub_row)
 
@@ -901,7 +917,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 if i.get("entPhysicalContainedIn") == parent_with_model_idx
                 and i.get("entPhysicalClass") not in _NON_HARDWARE_CLASSES
             ],
-            key=lambda x: x.get("entPhysicalParentRelPos", 0),
+            key=lambda x: (
+                int(x.get("entPhysicalParentRelPos") or 0)
+                if str(x.get("entPhysicalParentRelPos", "0")).lstrip("-").isdigit()
+                else 0
+            ),
         )
         slot_num = None
         for i, sib in enumerate(siblings):
@@ -919,7 +939,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return None
 
-    def _build_row(self, item, index_map, module_bays, module_types, depth=0, manufacturer=None):
+    def _build_row(self, item, index_map, module_bays, module_types, depth=0, manufacturer=None, sibling_counts=None):
         """Build a single table row from a LibreNMS inventory item."""
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
@@ -939,7 +959,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
 
         # Check for nested module naming conflicts
-        name_conflict = matched_type and matched_bay and has_nested_name_conflict(matched_type, matched_bay)
+        name_conflict = (
+            matched_type and matched_bay and has_nested_name_conflict(matched_type, matched_bay, sibling_counts)
+        )
 
         # Determine status
         status = self._determine_status(matched_bay, matched_type, serial)

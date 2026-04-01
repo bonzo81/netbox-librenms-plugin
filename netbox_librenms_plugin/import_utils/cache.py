@@ -179,7 +179,7 @@ def get_validated_device_cache_key(
     Example:
         >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
         >>> key
-        'validated_device_default_e3b0c44298fc1c14_123_vc_sysname=True_strip=False'
+        'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False'
     """
     # Sort filters for a deterministic, cross-process stable hash; None values are excluded
     # (consistent with get_cache_metadata_key).

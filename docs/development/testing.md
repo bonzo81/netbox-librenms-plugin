@@ -66,6 +66,7 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_integration_virtual_chassis.py](../../netbox_librenms_plugin/tests/test_integration_virtual_chassis.py) | Integration tests—VC detection, negative cache, multi-server cache isolation |
 | [test_view_wiring.py](../../netbox_librenms_plugin/tests/test_view_wiring.py) | Smoke tests—view class MRO, mixin wiring, permission contracts, and template syntax |
 | [test_platform_mapping.py](../../netbox_librenms_plugin/tests/test_platform_mapping.py) | PlatformMapping model—clean validation, YAML serialization, table/form/filterset, and find_matching_platform integration |
+| [test_module_replace.py](../../netbox_librenms_plugin/tests/test_module_replace.py) | Module replacement—module swapping, bay reindexing, and replacement validation |
 
 Supporting files:
 

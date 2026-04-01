@@ -21,9 +21,9 @@ For the Interface object, the plugin will automatically populate the LibreNMS ID
 ## Manual Custom Field Setup
 
 !!! note
-    On 0.4.3+, rerun migrations first (`manage.py migrate`). If you need to recreate the field manually on current releases, use the JSON schema below. Pre-0.4.2 releases used an Integer field — do not use Integer for new entries.
+    On 0.4.3+, the `librenms_id` custom field is created automatically by the plugin's `post_migrate` hook. Run `manage.py migrate` to trigger this. Manual recreation below is only a fallback troubleshooting step if the field was not created automatically (e.g., due to a failed migration or an existing field of an incompatible type).
 
-Follow these steps to create the `librenms_id` custom field in NetBox:
+If the field was not created automatically (fallback): follow these steps to create the `librenms_id` custom field in NetBox:
 
 1. **Navigate to Custom Fields:**
 
