@@ -128,14 +128,12 @@ class TestFindByLibreNMSId:
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
-        # The combined Q should contain four children: JSON key (int), JSON key (str), bare-int, bare-string
-        assert len(q_arg.children) == 4
-        children_keys = {child[0] for child in q_arg.children}
-        children_values = {child[1] for child in q_arg.children}
-        assert "custom_field_data__librenms_id__default" in children_keys
-        assert "custom_field_data__librenms_id" in children_keys
-        assert 42 in children_values
-        assert "42" in children_values
+        assert set(q_arg.children) == {
+            ("custom_field_data__librenms_id__default", 42),
+            ("custom_field_data__librenms_id__default", "42"),
+            ("custom_field_data__librenms_id", 42),
+            ("custom_field_data__librenms_id", "42"),
+        }
 
     def test_returns_first_matching_object(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
@@ -167,9 +165,12 @@ class TestFindByLibreNMSId:
         call_args = mock_model.objects.filter.call_args
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
-        keys = [child[0] for child in q_arg.children]
-        assert "custom_field_data__librenms_id__production" in keys
-        assert "custom_field_data__librenms_id" in keys
+        assert set(q_arg.children) == {
+            ("custom_field_data__librenms_id__production", 999),
+            ("custom_field_data__librenms_id__production", "999"),
+            ("custom_field_data__librenms_id", 999),
+            ("custom_field_data__librenms_id", "999"),
+        }
 
     def test_default_server_key_is_default(self):
         """
@@ -194,14 +195,14 @@ class TestFindByLibreNMSId:
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
-        assert len(q_arg.children) == 4
-        children_keys = {child[0] for child in q_arg.children}
-        children_values = {child[1] for child in q_arg.children}
-        # The JSON-path branch must use "default" as the server key
-        assert "custom_field_data__librenms_id__default" in children_keys
-        assert "custom_field_data__librenms_id" in children_keys
-        assert 42 in children_values
-        assert "42" in children_values
+        # The JSON-path branch must use "default" as the server key; exact tuple check prevents
+        # duplicate or missing branches from going undetected.
+        assert set(q_arg.children) == {
+            ("custom_field_data__librenms_id__default", 42),
+            ("custom_field_data__librenms_id__default", "42"),
+            ("custom_field_data__librenms_id", 42),
+            ("custom_field_data__librenms_id", "42"),
+        }
 
 
 class TestMigrateLegacyLibreNMSId:

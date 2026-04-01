@@ -213,7 +213,7 @@ class TestSiteMatching:
 class TestPlatformMatching:
     """Test platform matching logic."""
 
-    @patch("netbox_librenms_plugin.utils.PlatformMapping")
+    @patch("netbox_librenms_plugin.models.PlatformMapping")
     @patch("dcim.models.Platform")
     def test_find_platform_for_os_exact_match(self, mock_platform_model, mock_platform_mapping):
         """OS string matched to platform."""
@@ -230,7 +230,7 @@ class TestPlatformMatching:
         assert result["platform"] == mock_platform
         assert result["match_type"] == "exact"
 
-    @patch("netbox_librenms_plugin.utils.PlatformMapping")
+    @patch("netbox_librenms_plugin.models.PlatformMapping")
     @patch("dcim.models.Platform")
     def test_find_platform_for_os_not_found(self, mock_platform_model, mock_platform_mapping):
         """Returns None when no match."""

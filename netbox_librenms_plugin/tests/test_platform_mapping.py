@@ -270,7 +270,7 @@ class TestFindMatchingPlatformWithMapping:
         mock_pm_class.objects = mock_pm_qs
         mock_pm_class.DoesNotExist = Exception
 
-        with patch("netbox_librenms_plugin.utils.PlatformMapping", mock_pm_class, create=True):
+        with patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class):
             result = find_matching_platform("ios")
 
         assert result["found"] is True
@@ -291,7 +291,7 @@ class TestFindMatchingPlatformWithMapping:
         mock_platform_model.objects.get.return_value = mock_platform
 
         with (
-            patch("netbox_librenms_plugin.utils.PlatformMapping", mock_pm_class, create=True),
+            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
             patch("dcim.models.Platform", mock_platform_model),
         ):
             result = find_matching_platform("ios")
@@ -315,7 +315,7 @@ class TestFindMatchingPlatformWithMapping:
         mock_platform_model.objects.get.side_effect = DoesNotExist
 
         with (
-            patch("netbox_librenms_plugin.utils.PlatformMapping", mock_pm_class, create=True),
+            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
             patch("dcim.models.Platform", mock_platform_model),
         ):
             result = find_matching_platform("unknown_os")
@@ -353,7 +353,7 @@ class TestBulkExportYAMLView:
         mock_qs.filter.return_value = [mock_mapping, mock_mapping]
         view.queryset = mock_qs
 
-        with patch.object(view, "require_write_permission", return_value=None):
+        with patch.object(view, "require_object_permissions", return_value=None):
             response = view.post(request)
 
         assert response.status_code == 200
@@ -373,7 +373,7 @@ class TestBulkExportYAMLView:
         mock_qs.filter.return_value = [mock_mapping]
         view.queryset = mock_qs
 
-        with patch.object(view, "require_write_permission", return_value=None):
+        with patch.object(view, "require_object_permissions", return_value=None):
             response = view.post(request)
 
         content = response.content.decode()
@@ -390,7 +390,7 @@ class TestBulkExportYAMLView:
         mock_qs.filter.return_value = []
         view.queryset = mock_qs
 
-        with patch.object(view, "require_write_permission", return_value=None):
+        with patch.object(view, "require_object_permissions", return_value=None):
             view.post(request)
 
         mock_qs.filter.assert_called_once_with(pk__in=[3, 7])
@@ -406,7 +406,7 @@ class TestBulkExportYAMLView:
         mock_qs.filter.return_value = []
         view.queryset = mock_qs
 
-        with patch.object(view, "require_write_permission", return_value=None):
+        with patch.object(view, "require_object_permissions", return_value=None):
             response = view.post(request)
 
         assert response.status_code == 200

@@ -53,7 +53,7 @@ from netbox_librenms_plugin.tables.mappings import (
     NormalizationRuleTable,
     PlatformMappingTable,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
 class InterfaceTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
@@ -433,13 +433,17 @@ class InventoryIgnoreRuleChangeLogView(LibreNMSPermissionMixin, generic.ObjectCh
 # --- BulkExportYAML views ---
 
 
-class BulkExportYAMLView(LibreNMSPermissionMixin, View):
+class BulkExportYAMLView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Base view that exports selected mapping objects as YAML."""
 
     queryset = None
 
+    @property
+    def required_object_permissions(self):
+        return {"POST": [("view", self.queryset.model)]}
+
     def post(self, request):
-        if error := self.require_write_permission():
+        if error := self.require_object_permissions("POST"):
             return error
         pks = request.POST.getlist("pk")
         try:

@@ -459,7 +459,7 @@ class TestFindMatchingPlatformMultipleReturned:
         Platform_MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
         PlatformMapping_DoesNotExist = type("DoesNotExist", (Exception,), {})
 
-        with patch("netbox_librenms_plugin.utils.PlatformMapping") as MockPlatformMapping:
+        with patch("netbox_librenms_plugin.models.PlatformMapping") as MockPlatformMapping:
             MockPlatformMapping.DoesNotExist = PlatformMapping_DoesNotExist
             MockPlatformMapping.objects.get.side_effect = PlatformMapping_DoesNotExist("no mapping")
 

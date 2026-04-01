@@ -758,6 +758,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Build candidate names: parent, item name, item description
         candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
 
+        # Also try normalized variants so NormalizationRule(scope="module_bay") entries take effect.
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+
+        normalized_extras = []
+        for name in candidate_names:
+            normalized = apply_normalization_rules(name, "module_bay")
+            if normalized != name and normalized not in candidate_names and normalized not in normalized_extras:
+                normalized_extras.append(normalized)
+        all_candidates = candidate_names + normalized_extras
+
         # Use preloaded exact mappings (set in _build_context to avoid N+1 queries).
         exact_mappings = getattr(self, "_exact_bay_mappings", None)
         if exact_mappings is None:
@@ -766,7 +776,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             exact_mappings = list(ModuleBayMapping.objects.filter(is_regex=False))
 
         # Check ModuleBayMapping table for each candidate (exact match)
-        for name in candidate_names:
+        for name in all_candidates:
             bay = self._lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings)
             if bay:
                 return bay
@@ -779,13 +789,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             regex_mappings = list(ModuleBayMapping.objects.filter(is_regex=True))
 
         # Regex pattern matching on all candidate names
-        for name in candidate_names:
+        for name in all_candidates:
             bay = self._lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings)
             if bay:
                 return bay
 
         # Fallback: exact match on candidate names against bay dict
-        for name in candidate_names:
+        for name in all_candidates:
             if name in module_bays:
                 return module_bays[name]
 

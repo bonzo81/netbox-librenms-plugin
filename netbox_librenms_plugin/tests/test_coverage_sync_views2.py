@@ -767,8 +767,12 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
 
         import pytest
 
-        with pytest.raises(Http404):
-            view.get_object(5)
+        with patch(
+            "netbox_librenms_plugin.views.sync.devices.get_object_or_404",
+            side_effect=Http404,
+        ):
+            with pytest.raises(Http404):
+                view.get_object(5)
 
     def test_form_valid_with_poller_group(self):
         """poller_group valid int is passed to API."""
