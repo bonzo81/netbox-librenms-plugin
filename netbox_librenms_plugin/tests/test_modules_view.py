@@ -44,25 +44,17 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
     view._get_module_bays = MagicMock(return_value=(device_bays, module_scoped_bays))
     view._get_module_types = MagicMock(return_value=module_types)
 
-    mock_ignore_qs = MagicMock()
-    mock_ignore_qs.__iter__ = lambda s: iter([])
-
     with (
         patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+        patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+        patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
         patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
         patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
         patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping,
-        patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore_rule,
         # _detect_serial_conflicts makes a real DB query; mock it out for unit tests
         patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
     ):
         mock_cache.ttl = MagicMock(return_value=None)
-        mock_qs = MagicMock()
-        mock_qs.__iter__ = lambda s: iter([])
-        mock_qs.first.return_value = None
-        mock_mapping.objects.filter.return_value = mock_qs
-        mock_ignore_rule.objects.filter.return_value = mock_ignore_qs
 
         # Inline import: patch ModuleBayMapping inside models module
         view._build_context(MagicMock(), MagicMock(), inventory_data)

@@ -830,14 +830,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         match = re.search(r"@\s+(\d+)/", candidate_name)
         if not match:
             return True
-        expected_fpc = match.group(1)
+        try:
+            expected_fpc = int(match.group(1))
+        except (ValueError, IndexError):
+            return True
         module = getattr(bay, "module", None)
         if not module:
             return True
         parent_bay = getattr(module, "module_bay", None)
         if not parent_bay:
             return True
-        return parent_bay.position == expected_fpc
+        try:
+            return int(parent_bay.position) == expected_fpc
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def _lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings):
