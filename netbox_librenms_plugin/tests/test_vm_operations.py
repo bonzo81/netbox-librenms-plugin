@@ -753,7 +753,7 @@ class TestMissingFKWarnings:
         assert "role" in error_msg, f"Expected 'role' in error message but got: {error_msg}"
 
     def test_no_warning_when_cluster_found(self):
-        """No failure when cluster exists."""
+        """No failure when cluster exists and VM creation is attempted."""
         mock_cluster = MagicMock()
         _mock_job, result = self._run_bulk_with_mappings(
             vm_mappings={"cluster_id": 99, "device_role_id": None},
@@ -761,3 +761,4 @@ class TestMissingFKWarnings:
             mock_role_result=None,
         )
         assert result["failed"] == [], f"Expected no failures but got: {result['failed']}"
+        assert len(result["success"]) == 1, f"Expected 1 success entry but got: {result['success']}"

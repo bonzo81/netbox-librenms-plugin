@@ -95,11 +95,12 @@
     {% endif %}
 
     {# Replace: delete current + install fresh from LibreNMS data #}
+    {% if installed_module %}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
           style="display:inline">
         {% csrf_token %}
-        <input type="hidden" name="module_id" value="{{ installed_module.pk|default:'' }}">
+        <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
         <input type="hidden" name="ent_index" value="{{ ent_index }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">
         {% if serial_conflict %}
@@ -109,4 +110,5 @@
             <i class="mdi mdi-swap-horizontal me-1"></i>Replace Module
         </button>
     </form>
+    {% endif %}
 </div>

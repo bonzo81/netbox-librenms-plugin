@@ -863,14 +863,19 @@ def get_module_types_indexed() -> dict:
                 del result[key]
             else:
                 result[key] = mt
+    # Mapping ambiguity is tracked separately so that a unique mapping always
+    # wins over a base ModuleType entry (explicit overrides take priority).
+    mapping_seen: set = set()
+    mapping_ambiguous: set = set()
     for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer"):
         key = mapping.librenms_model
-        if key in ambiguous:
+        if key in mapping_ambiguous:
             continue
-        if key in result:
-            ambiguous.add(key)
+        if key in mapping_seen:
+            mapping_ambiguous.add(key)
             del result[key]
         else:
+            mapping_seen.add(key)
             result[key] = mapping.netbox_module_type
     return result
 

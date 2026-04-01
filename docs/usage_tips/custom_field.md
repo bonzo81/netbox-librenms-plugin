@@ -5,7 +5,7 @@
 To enhance device identification and synchronization between NetBox and LibreNMS, this plugin supports using a custom field `librenms_id` on Device, Virtual Machine and Interface objects. While the plugin works without it, using this custom field is recommended for LibreNMS API lookups, and to assist with matching the remote device and remote interfaces for cable creation in Netbox. It can also be entered manually if no primary IP or FQDN is available.
 
 !!! info "Automatic Creation"
-    As of version 0.4.2, the plugin **automatically creates** the `librenms_id` custom field when migrations are run. You no longer need to create it manually. The field is created for Device, Virtual Machine, Interface, and VM Interface objects.
+    As of version 0.4.3, the plugin **automatically creates** the `librenms_id` custom field via a `post_migrate` hook when migrations are run. You no longer need to create it manually. The field is created for Device, Virtual Machine, Interface, and VM Interface objects.
 
 For the Device and Virtual Machine objects the plugin will automatically populate the LibreNMS ID custom field when opening the LibreNMS Sync page if the device has been found in LibreNMS.
 

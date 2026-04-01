@@ -313,10 +313,17 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             rack_id = selections["rack_id"]
             is_vm = bool(cluster_id)
 
+            # Parse vc_requested before validate_device_for_import so the call
+            # respects the same VC detection flag as the original filter form.
+            vc_requested = (
+                request.POST.get("enable_vc_detection") or request.GET.get("enable_vc_detection") or ""
+            ).lower() in ("on", "true", "1")
+
             validation = validate_device_for_import(
                 libre_device,
                 import_as_vm=is_vm,
                 api=self.librenms_api,
+                include_vc_detection=vc_requested,
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
                 server_key=self.librenms_api.server_key,
@@ -326,10 +333,6 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             is_vm = bool(validation.get("import_as_vm"))
 
             # Mark validation with VC detection flag for proper URL generation in table
-            # Bulk confirm should respect the initial filter's VC detection preference
-            vc_requested = (
-                request.POST.get("enable_vc_detection") or request.GET.get("enable_vc_detection") or ""
-            ).lower() in ("on", "true", "1")
             validation["_vc_detection_enabled"] = vc_requested
 
             device_name = validation.get("resolved_name") or f"device-{device_id}"

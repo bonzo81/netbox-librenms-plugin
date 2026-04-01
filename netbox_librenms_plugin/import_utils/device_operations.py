@@ -617,7 +617,12 @@ def validate_device_for_import(
         result["platform"] = platform_match
 
         if not platform_match["found"] and os:
-            result["warnings"].append(f"No matching platform found for OS: '{os}'")
+            if platform_match.get("match_type") == "ambiguous":
+                result["warnings"].append(
+                    f"Multiple platform mappings found for OS: '{os}' — resolve the conflict in Platform Mappings"
+                )
+            else:
+                result["warnings"].append(f"No matching platform found for OS: '{os}'")
 
         # 6. Additional validations
         if not hostname:
