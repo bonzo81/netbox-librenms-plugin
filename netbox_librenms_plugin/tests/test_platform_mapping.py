@@ -409,10 +409,6 @@ class TestBulkExportYAMLView:
             response = view.post(request)
 
         assert response.status_code == 200
-        """PlatformMappingBulkExportYAMLView class exists in mapping_views."""
-        from netbox_librenms_plugin.views.mapping_views import PlatformMappingBulkExportYAMLView
-
-        assert PlatformMappingBulkExportYAMLView is not None
 
     def test_all_mapping_bulk_export_yaml_views_exist(self):
         """All mapping model BulkExportYAML views exist."""

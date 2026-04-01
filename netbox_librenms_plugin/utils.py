@@ -924,7 +924,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
             rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
             value = _apply_rules(value, rules)
     else:
-        rules = NormalizationRule.objects.filter(scope=scope).order_by("priority", "pk")
+        rules = NormalizationRule.objects.filter(scope=scope, manufacturer__isnull=True).order_by("priority", "pk")
         value = _apply_rules(value, rules)
     return value
 
