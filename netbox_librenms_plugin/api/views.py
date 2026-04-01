@@ -154,8 +154,8 @@ def sync_job_status(request, job_pk):
         return JsonResponse({"error": "Job not found"}, status=404)
 
     # Get RQ job status
-    queue = get_queue("default")
     try:
+        queue = get_queue("default")
         rq_job = RQJob.fetch(str(job.job_id), connection=queue.connection)
         rq_status = rq_job.get_status()
 

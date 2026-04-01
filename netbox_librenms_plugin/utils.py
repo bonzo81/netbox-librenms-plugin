@@ -791,7 +791,7 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     return True
 
 
-def has_nested_name_conflict(module_type, module_bay):
+def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
     """
     Check if installing this module type in a nested bay would cause a name conflict.
 
@@ -803,6 +803,14 @@ def has_nested_name_conflict(module_type, module_bay):
     In this situation NetBox's ``resolve_name()`` replaces ``{module}`` with the
     root ancestor's bay position, producing the same interface name for every
     sibling at this nesting level.
+
+    Args:
+        module_type: The ModuleType to install.
+        module_bay: The ModuleBay target.
+        sibling_counts: Optional precomputed dict mapping module_id → bay count.
+            When provided, avoids a per-call DB query.  Pass
+            ``{mid: len(bays) for mid, bays in module_scoped_bays.items()}`` from
+            the caller that already has the bay maps loaded.
     """
     from dcim.constants import MODULE_TOKEN
 
@@ -816,14 +824,15 @@ def has_nested_name_conflict(module_type, module_bay):
     if not any(MODULE_TOKEN in t.name for t in templates):
         return False  # Template doesn't use {module}
 
-    # Count how many unique interface names this template would produce across siblings
-    # If all siblings resolve to the same name, there's a conflict
-    from dcim.models import ModuleBay as ModuleBayModel
+    if sibling_counts is not None:
+        sibling_count = sibling_counts.get(module_bay.module_id, 0)
+    else:
+        from dcim.models import ModuleBay as ModuleBayModel
 
-    sibling_count = ModuleBayModel.objects.filter(
-        device=module_bay.device,
-        module_id=module_bay.module_id,
-    ).count()
+        sibling_count = ModuleBayModel.objects.filter(
+            device=module_bay.device,
+            module_id=module_bay.module_id,
+        ).count()
 
     return sibling_count > 1
 
@@ -855,7 +864,14 @@ def get_module_types_indexed() -> dict:
             else:
                 result[key] = mt
     for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer"):
-        result[mapping.librenms_model] = mapping.netbox_module_type
+        key = mapping.librenms_model
+        if key in ambiguous:
+            continue
+        if key in result:
+            ambiguous.add(key)
+            del result[key]
+        else:
+            result[key] = mapping.netbox_module_type
     return result
 
 

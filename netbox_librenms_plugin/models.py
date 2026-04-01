@@ -262,6 +262,11 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
         self.librenms_name = librenms_name_stripped
         # Strip class too — whitespace-padded values form spurious distinct rows under unique_together.
         self.librenms_class = self.librenms_class.strip() if self.librenms_class else ""
+        # Strip netbox_bay_name — whitespace-padded values would fail regex substitution.
+        netbox_bay_name_stripped = self.netbox_bay_name.strip() if self.netbox_bay_name else ""
+        if not netbox_bay_name_stripped:
+            raise ValidationError({"netbox_bay_name": "NetBox bay name must not be empty or whitespace-only."})
+        self.netbox_bay_name = netbox_bay_name_stripped
         if self.is_regex:
             try:
                 pattern = re.compile(self.librenms_name)

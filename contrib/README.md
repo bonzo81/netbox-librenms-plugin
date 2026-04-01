@@ -22,6 +22,7 @@ feature in the NetBox UI.
 | `module_bay_mappings.yaml` | Maps LibreNMS inventory container names to NetBox module bay names |
 | `normalization_rules.yaml` | Regex-based string normalization applied before module type/bay lookups |
 | `inventory_ignore_rules.yaml` | Suppresses phantom ENTITY-MIB entries (e.g. Cisco IOS-XR IDPROM artefacts) |
+| `platform_mappings.yaml` | Maps LibreNMS platform strings to NetBox device platforms |
 
 ## Customisation
 

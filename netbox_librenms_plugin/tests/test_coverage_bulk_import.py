@@ -1549,7 +1549,7 @@ class TestProcessDeviceFilters:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import._is_job_cancelled",
-                side_effect=[False, True],  # pre-loop: running; in-loop: cancelled
+                side_effect=[False, False, True],  # pre-VC: running; pre-loop: running; in-loop (idx=1): cancelled
             ),
         ):
             from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters

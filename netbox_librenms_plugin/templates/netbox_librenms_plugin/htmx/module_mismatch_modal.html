@@ -63,7 +63,7 @@
 <div class="d-flex gap-2 justify-content-end flex-wrap mt-3">
     <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
 
-    {% if serial_mismatch and not type_mismatch %}
+    {% if serial_mismatch and not type_mismatch and not serial_conflict and installed_module %}
     {# Quick serial-only update — no delete/recreate needed #}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"

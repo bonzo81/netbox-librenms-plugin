@@ -955,7 +955,7 @@ class TestParentRowIdxVsEntityIndex:
 
         captured_table_data = []
 
-        def fake_build_row(item, index_map, bays, module_types, depth=0, manufacturer=None):
+        def fake_build_row(item, index_map, bays, module_types, depth=0, manufacturer=None, sibling_counts=None):
             if item.get("entPhysicalIndex") == LARGE_IDX:
                 return {"ent_physical_index": LARGE_IDX, "can_install": False, "depth": 0}
             # child returns can_install=True to trigger the has_installable_children path

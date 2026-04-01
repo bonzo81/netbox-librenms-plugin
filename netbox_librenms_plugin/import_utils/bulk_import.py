@@ -210,7 +210,7 @@ def bulk_import_devices_shared(
                             for m in vc_data.get("members", [])
                         )
                         if member_parts:
-                            fingerprint = hashlib.md5(",".join(member_parts).encode()).hexdigest()[:12]
+                            fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
                             vc_domain = f"librenms-stack-{fingerprint}"
                         else:
                             vc_domain = f"librenms-{device_id}"

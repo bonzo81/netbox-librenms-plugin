@@ -6,7 +6,7 @@
     <div class="btn-list">
         <form method="post">
             {% csrf_token %}
-            <input type="hidden" name="server_key" value="{{ module_sync.server_key|default:'' }}">
+            <input type="hidden" name="server_key" value="{{ server_info.server_key|default:'' }}">
             {% if has_librenms_id %}
                 {% with model_name=object|meta:"model_name" %}
                     {% if model_name == "device" %}
