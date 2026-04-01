@@ -851,7 +851,7 @@ def get_module_types_indexed() -> dict:
 
     result: dict = {}
     ambiguous: set = set()
-    for mt in ModuleType.objects.all().select_related("manufacturer"):
+    for mt in ModuleType.objects.all().select_related("manufacturer").prefetch_related("interfacetemplates"):
         seen_this_entry: set = set()
         for key in (mt.model, mt.part_number):
             if not key or key in seen_this_entry:
@@ -868,7 +868,9 @@ def get_module_types_indexed() -> dict:
     # wins over a base ModuleType entry (explicit overrides take priority).
     mapping_seen: set = set()
     mapping_ambiguous: set = set()
-    for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer"):
+    for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer").prefetch_related(
+        "netbox_module_type__interfacetemplates"
+    ):
         key = mapping.librenms_model
         if key in mapping_ambiguous:
             continue

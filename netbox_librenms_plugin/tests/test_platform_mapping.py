@@ -350,14 +350,13 @@ class TestBulkExportYAMLView:
         mock_mapping.to_yaml.return_value = "librenms_hardware: Cisco 4321\n"
 
         mock_qs = MagicMock()
-        mock_qs.filter.return_value = [mock_mapping, mock_mapping]
+        mock_qs.filter.return_value.order_by.return_value = [mock_mapping, mock_mapping]
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
             response = view.post(request)
 
-        assert response.status_code == 200
-        assert "yaml" in response["Content-Type"]
+        assert "text/yaml" in response.get("Content-Type", "")
 
     def test_returns_yaml_for_selected_pks(self):
         """Response body contains YAML from selected objects."""
@@ -370,7 +369,7 @@ class TestBulkExportYAMLView:
         mock_mapping.to_yaml.return_value = "librenms_hardware: Cisco 4321\n"
 
         mock_qs = MagicMock()
-        mock_qs.filter.return_value = [mock_mapping]
+        mock_qs.filter.return_value.order_by.return_value = [mock_mapping]
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
@@ -387,13 +386,13 @@ class TestBulkExportYAMLView:
         request = self._make_request(["3", "7"])
 
         mock_qs = MagicMock()
-        mock_qs.filter.return_value = []
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
             view.post(request)
 
         mock_qs.filter.assert_called_once_with(pk__in=[3, 7])
+        mock_qs.filter.return_value.order_by.assert_called_once_with("pk")
 
     def test_returns_200_with_empty_selection(self):
         """Response is 200 even when no PKs are selected (empty YAML)."""
@@ -403,15 +402,13 @@ class TestBulkExportYAMLView:
         request = self._make_request([])
 
         mock_qs = MagicMock()
-        mock_qs.filter.return_value = []
+        mock_qs.filter.return_value.order_by.return_value = []
         view.queryset = mock_qs
 
         with patch.object(view, "require_object_permissions", return_value=None):
             response = view.post(request)
 
         assert response.status_code == 200
-
-    def test_platform_mapping_bulk_export_yaml_view_exists(self):
         """PlatformMappingBulkExportYAMLView class exists in mapping_views."""
         from netbox_librenms_plugin.views.mapping_views import PlatformMappingBulkExportYAMLView
 

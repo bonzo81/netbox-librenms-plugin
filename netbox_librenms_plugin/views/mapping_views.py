@@ -450,7 +450,7 @@ class BulkExportYAMLView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             int_pks = [int(pk) for pk in pks]
         except (ValueError, TypeError):
             return HttpResponseBadRequest("Invalid pk value.")
-        objects = self.queryset.filter(pk__in=int_pks)
+        objects = self.queryset.filter(pk__in=int_pks).order_by("pk")
         yaml_parts = [obj.to_yaml() for obj in objects]
         content = "---\n".join(yaml_parts)
         response = HttpResponse(content, content_type="text/yaml; charset=utf-8")
@@ -463,11 +463,11 @@ class InterfaceTypeMappingBulkExportYAMLView(BulkExportYAMLView):
 
 
 class DeviceTypeMappingBulkExportYAMLView(BulkExportYAMLView):
-    queryset = DeviceTypeMapping.objects.all()
+    queryset = DeviceTypeMapping.objects.select_related("netbox_device_type")
 
 
 class ModuleTypeMappingBulkExportYAMLView(BulkExportYAMLView):
-    queryset = ModuleTypeMapping.objects.all()
+    queryset = ModuleTypeMapping.objects.select_related("netbox_module_type")
 
 
 class ModuleBayMappingBulkExportYAMLView(BulkExportYAMLView):
@@ -475,7 +475,7 @@ class ModuleBayMappingBulkExportYAMLView(BulkExportYAMLView):
 
 
 class NormalizationRuleBulkExportYAMLView(BulkExportYAMLView):
-    queryset = NormalizationRule.objects.all()
+    queryset = NormalizationRule.objects.select_related("manufacturer")
 
 
 class InventoryIgnoreRuleBulkExportYAMLView(BulkExportYAMLView):
@@ -483,7 +483,7 @@ class InventoryIgnoreRuleBulkExportYAMLView(BulkExportYAMLView):
 
 
 class PlatformMappingBulkExportYAMLView(BulkExportYAMLView):
-    queryset = PlatformMapping.objects.all()
+    queryset = PlatformMapping.objects.select_related("netbox_platform")
 
 
 # --- PlatformMapping views ---
