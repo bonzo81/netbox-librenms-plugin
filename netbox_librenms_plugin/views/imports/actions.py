@@ -481,7 +481,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
             "sync_cables": request.POST.get("sync_cables") == "on",
             "sync_ips": request.POST.get("sync_ips") == "on",
-            "vc_detection_enabled": request.POST.get("vc_detection_enabled") in ("on", "true", "1", "True"),
+            "vc_detection_enabled": (request.POST.get("vc_detection_enabled") or "").lower() in ("on", "true", "1"),
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
         }
