@@ -145,7 +145,7 @@ def bulk_import_devices_shared(
             validation = validate_device_for_import(
                 libre_device,
                 api=api,
-                include_vc_detection=(sync_options.get("vc_detection_enabled", True) if sync_options else True),
+                include_vc_detection=bool(sync_options and sync_options.get("vc_detection_enabled", False)),
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
