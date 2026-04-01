@@ -367,6 +367,12 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             rack_id = selections["rack_id"]
             is_vm = bool(cluster_id)
 
+            # Parse vc_requested before validate_device_for_import so the call
+            # respects the same VC detection flag as the original filter form.
+            vc_requested = (
+                request.POST.get("enable_vc_detection") or request.GET.get("enable_vc_detection") or ""
+            ).lower() in ("on", "true", "1")
+
             validation = validate_device_for_import(
                 libre_device,
                 import_as_vm=is_vm,

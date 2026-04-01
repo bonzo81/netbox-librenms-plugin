@@ -1071,6 +1071,9 @@ class LibreNMSAPI:
             result = response.json()
             if not isinstance(result, dict):
                 return False, "Unexpected response format"
+            if result.get("status") != "ok":
+                msg = result.get("message") or f"LibreNMS returned status={result.get('status')!r} for port"
+                return False, msg
             port_data = result.get("port")
             if not isinstance(port_data, list):
                 return False, result.get("message") or "Unexpected response format: missing 'port' list"

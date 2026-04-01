@@ -1516,8 +1516,14 @@ class TestProcessDeviceFilters:
             patch("rq.job.Job") as mock_rq_cls,
         ):
             mock_get_queue.return_value = MagicMock()
-            # Pre-loop check: running; loop check: stopped
-            mock_rq_cls.fetch.side_effect = [_make_rq_running(), _make_rq_stopped()]
+            # _is_job_cancelled is called at lines 507, 534, 566, 574 (idx=1).
+            # Each call fetches from RQ; needs 4 entries to reach the in-loop check.
+            mock_rq_cls.fetch.side_effect = [
+                _make_rq_running(),
+                _make_rq_running(),
+                _make_rq_running(),
+                _make_rq_stopped(),
+            ]
 
             from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
 
@@ -1549,7 +1555,7 @@ class TestProcessDeviceFilters:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import._is_job_cancelled",
-                side_effect=[False, False, True],  # pre-VC: running; pre-loop: running; in-loop (idx=1): cancelled
+                side_effect=[False, False, False, True],  # lines 507, 534, 566 running; 574 (idx=1) cancelled
             ),
         ):
             from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters

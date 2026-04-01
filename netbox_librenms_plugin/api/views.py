@@ -44,6 +44,8 @@ from .serializers import (
 
 logger = logging.getLogger(__name__)
 
+_LIBRENMS_JOB_NAMES = (FilterDevicesJob.Meta.name, ImportDevicesJob.Meta.name)
+
 
 class LibreNMSPluginPermission(BasePermission):
     """
@@ -147,7 +149,6 @@ def sync_job_status(request, job_pk):
     Returns:
         JsonResponse with updated status
     """
-    _LIBRENMS_JOB_NAMES = (FilterDevicesJob.Meta.name, ImportDevicesJob.Meta.name)
     try:
         job = Job.objects.get(pk=job_pk, user=request.user, name__in=_LIBRENMS_JOB_NAMES)
     except Job.DoesNotExist:

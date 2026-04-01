@@ -280,6 +280,8 @@ class TestSyncJobStatusRQJobNotInQueue:
         assert data["status"] == "updated"
         assert data["rq_status"] == "not_found"
         mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
+        assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
+        assert mock_db_job.completed == "2024-01-03"
 
     def test_no_change_when_not_running_and_not_in_rq(self):
         from core.choices import JobStatusChoices
