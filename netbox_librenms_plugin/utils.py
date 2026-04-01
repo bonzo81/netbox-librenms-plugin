@@ -914,8 +914,8 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     a pipeline.  If no rules match, the original value is returned unchanged.
 
     When *manufacturer* is given, manufacturer-scoped rules run first,
-    followed by unscoped (manufacturer=NULL) rules.  When *manufacturer*
-    is ``None``, all rules for the scope run in priority order.
+    followed by unscoped (``manufacturer__isnull=True``) rules.  When
+    *manufacturer* is ``None``, only unscoped rules are applied.
 
     Args:
         value:  The raw string to normalize (e.g. '3HE16474AARA01').
