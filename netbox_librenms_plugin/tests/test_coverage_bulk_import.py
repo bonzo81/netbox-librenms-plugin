@@ -166,17 +166,19 @@ class TestBulkImportDevicesShared:
         mock_logger.warning.assert_called()
         assert result["success"] == []
 
-    def test_db_fallback_logs_via_module_logger_when_job_logger_none(self):
-        """job.logger=None: module logger.warning fires on DB fallback cancel (line 140)."""
-        job = _make_job(logger=False)  # job.logger is None → else branch
-        job.job.status = "failed"
+    def test_rq_unavailable_does_not_cancel_import(self):
+        """When RQ/Redis is unavailable, _is_job_cancelled returns False → import continues."""
+        job = _make_job(logger=False)  # job.logger is None
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
 
         with (
             patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
             patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
             patch("netbox_librenms_plugin.import_utils.bulk_import.import_single_device") as mock_import,
-            patch("netbox_librenms_plugin.import_utils.bulk_import.logger") as mock_logger,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=_make_validation(),
+            ),
             patch("django_rq.get_queue", side_effect=Exception("RQ unavailable")),
         ):
             from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
@@ -187,9 +189,7 @@ class TestBulkImportDevicesShared:
                 libre_devices_cache=libre_cache,
             )
 
-        mock_import.assert_not_called()
-        mock_logger.warning.assert_called()
-        job.job.refresh_from_db.assert_called_once()
+        mock_import.assert_called()
 
     # ------------------------------------------------------------------
     # Lines 146-147 – libre_devices_cache hit path
@@ -1426,10 +1426,9 @@ class TestProcessDeviceFilters:
     # Lines 532-537: Job pre-loop RQ raises → DB fallback → stopped
     # ------------------------------------------------------------------
 
-    def test_job_db_fallback_stopped_before_validation_loop(self):
-        """RQ raises → DB status says failed → return empty (lines 532-537)."""
+    def test_job_cancelled_before_validation_loop_returns_empty(self):
+        """Job cancelled at pre-loop check → returns empty list (line 534)."""
         job = _make_job()
-        job.job.status = "failed"
         api = self._make_api()
         device = self._make_device()
 
@@ -1438,7 +1437,7 @@ class TestProcessDeviceFilters:
                 "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
                 return_value=([device], False),
             ),
-            patch("django_rq.get_queue", side_effect=Exception("RQ down")),
+            patch("netbox_librenms_plugin.import_utils.bulk_import._is_job_cancelled", return_value=True),
         ):
             from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
 
@@ -1452,12 +1451,10 @@ class TestProcessDeviceFilters:
             )
 
         assert result == []
-        job.job.refresh_from_db.assert_called()
 
-    def test_job_db_errored_before_validation_loop(self):
-        """RQ raises → DB status 'errored' → return empty (line 535-537)."""
+    def test_rq_unavailable_job_not_cancelled_in_preloop(self):
+        """RQ unavailable before loop → _is_job_cancelled returns False → processing continues."""
         job = _make_job()
-        job.job.status = "errored"
         api = self._make_api()
         device = self._make_device()
 
@@ -1467,7 +1464,26 @@ class TestProcessDeviceFilters:
                 return_value=([device], False),
             ),
             patch("django_rq.get_queue", side_effect=Exception("RQ down")),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=_make_validation(),
+            ),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.empty_virtual_chassis_data", return_value={}),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_validated_device_cache_key",
+                return_value="vkey",
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_import_device_cache_key",
+                return_value="ikey",
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_cache_metadata_key",
+                return_value="mkey",
+            ),
         ):
+            mock_cache.get.side_effect = lambda key, default=None: default
             from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
 
             result = process_device_filters(
@@ -1479,7 +1495,7 @@ class TestProcessDeviceFilters:
                 job=job,
             )
 
-        assert result == []
+        assert len(result) == 1
 
     # ------------------------------------------------------------------
     # Lines 548-560: Per-device loop RQ stop detected
@@ -1520,10 +1536,9 @@ class TestProcessDeviceFilters:
     # Lines 561-566: Per-device loop DB fallback stop
     # ------------------------------------------------------------------
 
-    def test_job_validation_loop_db_fallback_stop(self):
-        """RQ raises in loop → DB fallback detects failed status (lines 561-566)."""
+    def test_job_cancelled_in_validation_loop_returns_empty(self):
+        """Job cancellation detected during loop → returns empty list (line 574)."""
         job = _make_job()
-        job.job.status = "failed"
         api = self._make_api()
         device = self._make_device()
 
@@ -1532,13 +1547,11 @@ class TestProcessDeviceFilters:
                 "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
                 return_value=([device], False),
             ),
-            patch("django_rq.get_queue") as mock_get_queue,
-            patch("rq.job.Job") as mock_rq_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import._is_job_cancelled",
+                side_effect=[False, True],  # pre-loop: running; in-loop: cancelled
+            ),
         ):
-            mock_get_queue.return_value = MagicMock()
-            # Pre-loop check: running; loop check: raises
-            mock_rq_cls.fetch.side_effect = [_make_rq_running(), Exception("RQ error in loop")]
-
             from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
 
             result = process_device_filters(
@@ -2081,10 +2094,9 @@ class TestProcessDeviceFilters:
         assert len(devices) == 1
         assert from_cache is True
 
-    def test_job_rq_check_exception_uses_db_status_and_exits(self):
-        """RQ status read failure falls back to DB status check and exits early (lines 598-607)."""
+    def test_rq_fetch_exception_does_not_cancel_process_filters(self):
+        """RQ Job.fetch raises → _is_job_cancelled returns False → processing continues."""
         job = _make_job()
-        job.job.status = "failed"
         api = self._make_api()
         device = self._make_device()
 
@@ -2113,7 +2125,7 @@ class TestProcessDeviceFilters:
             ),
             patch("django_rq.get_queue") as mock_get_queue,
         ):
-            mock_cache.get.return_value = None
+            mock_cache.get.side_effect = lambda key, default=None: default
             mock_get_queue.return_value = MagicMock()
             with patch("rq.job.Job") as mock_rq_cls:
                 mock_rq_cls.fetch.side_effect = Exception("RQ unavailable")
@@ -2128,8 +2140,7 @@ class TestProcessDeviceFilters:
                     job=job,
                 )
 
-        assert result == []
-        job.job.refresh_from_db.assert_called()
+        assert len(result) == 1
 
 
 # ===========================================================================
