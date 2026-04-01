@@ -531,15 +531,16 @@ class TestMatchModuleBayExactFallback:
         bay = _bay("Slot 1")
         bays = {"Slot 1": bay}
 
-        with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
-            mock_mbm.objects.filter.return_value.first.return_value = None
-            mock_mbm.objects.filter.return_value = MagicMock()
-            mock_mbm.objects.filter.return_value.first.return_value = None
+        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope: name):
+            with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.filter.return_value.first.return_value = None
+                mock_mbm.objects.filter.return_value = MagicMock()
+                mock_mbm.objects.filter.return_value.first.return_value = None
 
-            # Also patch _lookup_regex_bay_mapping to return None
-            with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
-                with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
-                    result = view._match_module_bay(item, index_map, bays)
+                # Also patch _lookup_regex_bay_mapping to return None
+                with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
+                    with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
+                        result = view._match_module_bay(item, index_map, bays)
 
         assert result is bay
 
@@ -558,11 +559,12 @@ class TestMatchModuleBayExactFallback:
         bay = _bay("Module Bay 3")
         bays = {"Module Bay 3": bay}
 
-        with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
-            mock_mbm.objects.filter.return_value.first.return_value = None
-            with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
-                with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
-                    result = view._match_module_bay(item, index_map, bays)
+        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope: name):
+            with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.filter.return_value.first.return_value = None
+                with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
+                    with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
+                        result = view._match_module_bay(item, index_map, bays)
 
         assert result is bay
 
@@ -580,11 +582,12 @@ class TestMatchModuleBayExactFallback:
         index_map = {1: item}
         bays = {"Slot 1": _bay("Slot 1")}
 
-        with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
-            mock_mbm.objects.filter.return_value.first.return_value = None
-            with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
-                with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
-                    result = view._match_module_bay(item, index_map, bays)
+        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope: name):
+            with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
+                mock_mbm.objects.filter.return_value.first.return_value = None
+                with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
+                    with patch.object(BaseModuleTableView, "_match_bay_by_position", return_value=None):
+                        result = view._match_module_bay(item, index_map, bays)
 
         assert result is None
 

@@ -13,12 +13,6 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 logger = logging.getLogger(__name__)
 
 
-try:
-    from netbox_librenms_plugin.models import PlatformMapping
-except ImportError:
-    PlatformMapping = None  # type: ignore[assignment]
-
-
 def convert_speed_to_kbps(speed_bps: int) -> int | None:
     """
     Convert speed from bits per second to kilobits per second.
@@ -417,14 +411,21 @@ def find_matching_platform(librenms_os: str) -> dict:
     if not librenms_os or librenms_os == "-":
         return {"found": False, "platform": None, "match_type": None}
 
-    # Check PlatformMapping table first
-    if PlatformMapping is not None:
+    # Check PlatformMapping table first (lazy import to match pattern used by other optional models)
+    try:
+        from netbox_librenms_plugin.models import PlatformMapping as _PlatformMapping
+
+        _has_platform_mapping = True
+    except ImportError:
+        _has_platform_mapping = False
+
+    if _has_platform_mapping:
         try:
-            mapping = PlatformMapping.objects.get(librenms_os__iexact=librenms_os)
+            mapping = _PlatformMapping.objects.get(librenms_os__iexact=librenms_os)
             return {"found": True, "platform": mapping.netbox_platform, "match_type": "mapping"}
-        except PlatformMapping.DoesNotExist:
+        except _PlatformMapping.DoesNotExist:
             pass
-        except PlatformMapping.MultipleObjectsReturned:
+        except _PlatformMapping.MultipleObjectsReturned:
             return {"found": False, "platform": None, "match_type": "ambiguous"}
 
     # Try case-insensitive exact name match

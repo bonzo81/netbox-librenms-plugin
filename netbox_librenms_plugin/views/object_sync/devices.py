@@ -417,13 +417,14 @@ class DeviceModuleTableView(BaseModuleTableView):
     def get_table(self, data, obj):
         """Return the module sync table."""
         user = self.request.user
+        has_write_permission = self.has_write_permission()
         table = LibreNMSModuleTable(
             data,
             device=obj,
             server_key=self.librenms_api.server_key,
-            can_add_module=self.has_write_permission() and user.has_perm("dcim.add_module"),
-            can_change_module=self.has_write_permission() and user.has_perm("dcim.change_module"),
-            can_delete_module=self.has_write_permission() and user.has_perm("dcim.delete_module"),
+            can_add_module=has_write_permission and user.has_perm("dcim.add_module"),
+            can_change_module=has_write_permission and user.has_perm("dcim.change_module"),
+            can_delete_module=has_write_permission and user.has_perm("dcim.delete_module"),
         )
         server_key = self.librenms_api.server_key
         table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
