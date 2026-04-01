@@ -600,8 +600,8 @@ class TestBulkImportVms:
         mock_cluster_cls.objects.filter.assert_not_called()
         mock_apply_cluster.assert_not_called()
 
-    def test_job_status_value_attribute_used_when_present(self):
-        """Redis unavailable (exception in _is_job_cancelled) returns False so loop continues."""
+    def test_is_job_cancelled_false_processes_all_vms(self):
+        """_is_job_cancelled returning False lets loop process all VMs."""
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         mock_api = MagicMock()
