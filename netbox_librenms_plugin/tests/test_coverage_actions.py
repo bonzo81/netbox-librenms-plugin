@@ -88,7 +88,7 @@ class TestResolveNamingPreferences:
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"use-sysname-toggle": "on"})
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
                 use_sysname, strip_domain = resolve_naming_preferences(request)
@@ -98,7 +98,7 @@ class TestResolveNamingPreferences:
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"use_sysname-toggle": "on"})
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
                 use_sysname, _ = resolve_naming_preferences(request)
@@ -108,7 +108,7 @@ class TestResolveNamingPreferences:
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"use_sysname": "true"})
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
                 use_sysname, _ = resolve_naming_preferences(request)
@@ -119,7 +119,7 @@ class TestResolveNamingPreferences:
 
         request = _make_request(get={"use_sysname": "on"})
         request.POST = {}
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
                 use_sysname, _ = resolve_naming_preferences(request)
@@ -129,7 +129,7 @@ class TestResolveNamingPreferences:
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request()
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref") as mock_pref:
+        with patch("netbox_librenms_plugin.utils.get_user_pref") as mock_pref:
             mock_pref.return_value = False
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
@@ -140,7 +140,7 @@ class TestResolveNamingPreferences:
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request()
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 settings_obj = MagicMock()
                 settings_obj.use_sysname_default = False
@@ -154,7 +154,7 @@ class TestResolveNamingPreferences:
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request()
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
                 use_sysname, strip_domain = resolve_naming_preferences(request)
@@ -165,7 +165,7 @@ class TestResolveNamingPreferences:
         from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"strip-domain-toggle": "on"})
-        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
                 _, strip_domain = resolve_naming_preferences(request)
@@ -3506,7 +3506,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
