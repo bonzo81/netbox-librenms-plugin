@@ -50,6 +50,7 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
     with (
         patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
         patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
+        patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
         patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping,
         patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore_rule,

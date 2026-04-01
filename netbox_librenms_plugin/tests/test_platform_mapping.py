@@ -323,6 +323,28 @@ class TestFindMatchingPlatformWithMapping:
         assert result["found"] is False
         assert result["platform"] is None
 
+    def test_multiple_platform_mappings_returns_ambiguous(self):
+        """When PlatformMapping.MultipleObjectsReturned, returns ambiguous and skips Platform lookup."""
+        from netbox_librenms_plugin.utils import find_matching_platform
+
+        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+
+        mock_pm_class = MagicMock()
+        mock_pm_class.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_pm_class.MultipleObjectsReturned = MultipleObjectsReturned
+        mock_pm_class.objects.get.side_effect = MultipleObjectsReturned
+
+        mock_platform_model = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
+            patch("dcim.models.Platform", mock_platform_model),
+        ):
+            result = find_matching_platform("ios")
+
+        assert result == {"found": False, "platform": None, "match_type": "ambiguous"}
+        mock_platform_model.objects.get.assert_not_called()
+
 
 # =============================================================================
 # TestBulkExportYAMLView

@@ -883,7 +883,29 @@ def get_module_types_indexed() -> dict:
     return result
 
 
-def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
+def preload_normalization_rules(scope: str, manufacturer=None) -> dict:
+    """
+    Preload NormalizationRule rows for a (scope, manufacturer) combination.
+
+    Returns a dict mapping ``(scope, manufacturer_pk_or_None)`` → list of rules.
+    Pass this dict as ``preloaded_rules`` to :func:`apply_normalization_rules` and
+    :func:`resolve_module_type` to avoid repeated DB queries inside loops.
+    """
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    cache: dict = {}
+    if manufacturer:
+        mfg_pk = getattr(manufacturer, "pk", None)
+        cache[(scope, mfg_pk)] = list(
+            NormalizationRule.objects.filter(scope=scope, manufacturer=manufacturer).order_by("priority", "pk")
+        )
+    cache[(scope, None)] = list(
+        NormalizationRule.objects.filter(scope=scope, manufacturer__isnull=True).order_by("priority", "pk")
+    )
+    return cache
+
+
+def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, preloaded_rules: dict | None = None) -> str:
     """
     Apply NormalizationRule chain to transform a string before matching.
 
@@ -899,6 +921,9 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
         value:  The raw string to normalize (e.g. '3HE16474AARA01').
         scope:  One of NormalizationRule.SCOPE_* constants.
         manufacturer:  Optional Manufacturer instance to scope rules.
+        preloaded_rules:  Optional dict from :func:`preload_normalization_rules`.
+            When provided, DB queries are skipped and preloaded lists are used
+            instead, eliminating repeated queries inside loops.
 
     Returns:
         The normalized string after all matching rules have been applied.
@@ -918,7 +943,12 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
                 )
         return val
 
-    if manufacturer:
+    if preloaded_rules is not None:
+        if manufacturer:
+            mfg_pk = getattr(manufacturer, "pk", None)
+            value = _apply_rules(value, preloaded_rules.get((scope, mfg_pk), []))
+        value = _apply_rules(value, preloaded_rules.get((scope, None), []))
+    elif manufacturer:
         # Manufacturer-specific rules first, then unscoped rules
         for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
             rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
@@ -929,9 +959,12 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
     return value
 
 
-def resolve_module_type(model_name: str, module_types: dict, manufacturer=None):
+def resolve_module_type(model_name: str, module_types: dict, manufacturer=None, *, norm_rules: dict | None = None):
     """
     Resolve a LibreNMS model name to a NetBox ModuleType via direct lookup then normalization.
+
+    Pass ``norm_rules`` (from :func:`preload_normalization_rules`) to avoid
+    repeated DB queries when called in a loop.
 
     Returns the matched ModuleType or None.
     """
@@ -939,7 +972,9 @@ def resolve_module_type(model_name: str, module_types: dict, manufacturer=None):
         return None
     matched = module_types.get(model_name)
     if not matched:
-        normalized = apply_normalization_rules(model_name, "module_type", manufacturer=manufacturer)
+        normalized = apply_normalization_rules(
+            model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
+        )
         if normalized != model_name:
             matched = module_types.get(normalized)
     return matched

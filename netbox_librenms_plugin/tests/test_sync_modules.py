@@ -172,9 +172,9 @@ class TestGetModuleTypesIndexed:
         mt2.model = "SFP-1G-LX"  # same → ambiguous in base pass
         mt2.part_number = ""
 
-        # Explicit mapping for the same key → should win
+        # Explicit mapping for a distinct key → should be present despite base ambiguity
         mock_mapping = MagicMock()
-        mock_mapping.librenms_model = "SFP-1G-LX"
+        mock_mapping.librenms_model = "SFP-1G-LX-EXPLICIT"
         mock_mapping.netbox_module_type = mt1
 
         mock_mt_cls = MagicMock()
@@ -192,8 +192,9 @@ class TestGetModuleTypesIndexed:
             with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
                 result = get_module_types_indexed()
 
-        # Base key was ambiguous but mapping should override it
-        assert result["SFP-1G-LX"] is mt1
+        # Base key was ambiguous and must be absent; explicit mapping key must be present
+        assert "SFP-1G-LX" not in result
+        assert result["SFP-1G-LX-EXPLICIT"] is mt1
 
 
 class TestInstallModuleViewWiring:
@@ -567,7 +568,9 @@ class TestMatchModuleBayExactFallback:
         bay = _bay("Slot 1")
         bays = {"Slot 1": bay}
 
-        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope: name):
+        with patch(
+            "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
+        ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
                 mock_mbm.objects.filter.return_value.first.return_value = None
                 mock_mbm.objects.filter.return_value = MagicMock()
@@ -595,7 +598,9 @@ class TestMatchModuleBayExactFallback:
         bay = _bay("Module Bay 3")
         bays = {"Module Bay 3": bay}
 
-        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope: name):
+        with patch(
+            "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
+        ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
                 mock_mbm.objects.filter.return_value.first.return_value = None
                 with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
@@ -618,7 +623,9 @@ class TestMatchModuleBayExactFallback:
         index_map = {1: item}
         bays = {"Slot 1": _bay("Slot 1")}
 
-        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope: name):
+        with patch(
+            "netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda name, scope, **kw: name
+        ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
                 mock_mbm.objects.filter.return_value.first.return_value = None
                 with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
@@ -1012,15 +1019,18 @@ class TestParentRowIdxVsEntityIndex:
             mock_mapping.objects.all.return_value = []
             with patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore:
                 mock_ignore.objects.filter.return_value = []
-                with patch.object(view, "_get_module_bays", return_value=({}, {})):
-                    with patch.object(view, "_get_module_types", return_value={}):
-                        with patch.object(view, "_build_row", side_effect=fake_build_row):
-                            with patch.object(view, "get_table", side_effect=fake_get_table):
-                                with patch.object(view, "_sort_with_hierarchy", side_effect=lambda x: x):
-                                    with patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache:
-                                        mock_cache.ttl = lambda k: None
-                                        # Old bug: IndexError when large entity index used as list index
-                                        view._build_context(request, obj, inventory)
+                with patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}):
+                    with patch.object(view, "_get_module_bays", return_value=({}, {})):
+                        with patch.object(view, "_get_module_types", return_value={}):
+                            with patch.object(view, "_build_row", side_effect=fake_build_row):
+                                with patch.object(view, "get_table", side_effect=fake_get_table):
+                                    with patch.object(view, "_sort_with_hierarchy", side_effect=lambda x: x):
+                                        with patch(
+                                            "netbox_librenms_plugin.views.base.modules_view.cache"
+                                        ) as mock_cache:
+                                            mock_cache.ttl = lambda k: None
+                                            # Old bug: IndexError when large entity index used as list index
+                                            view._build_context(request, obj, inventory)
 
         assert len(captured_table_data) >= 1, "table_data must contain the parent row"
         assert captured_table_data[0].get("has_installable_children") is True, (
@@ -1495,21 +1505,28 @@ class TestFindParentModuleIdAncestorWalk:
         assert result is None
 
     def test_uninstalled_bay_is_skipped(self):
-        """Bay matches parent name but has no installed module — walk continues."""
+        """Bay matches parent name but has no installed module — walk continues to grandparent."""
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
+        grandparent = {
+            "entPhysicalIndex": 5,
+            "entPhysicalName": "Chassis",
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 0,
+        }
         parent = {
             "entPhysicalIndex": 10,
             "entPhysicalName": "Slot 1",
             "entPhysicalDescr": "",
-            "entPhysicalContainedIn": 0,
+            "entPhysicalContainedIn": 5,
         }
         child = {"entPhysicalIndex": 20, "entPhysicalContainedIn": 10}
-        index_map = {10: parent, 20: child}
+        index_map = {5: grandparent, 10: parent, 20: child}
         empty_bay = self._make_bay("Slot 1", installed_module_id=None)
+        grandparent_bay = self._make_bay("Chassis", installed_module_id=99)
 
-        result = InstallBranchView._find_parent_module_id(child, index_map, [empty_bay], [], [])
-        assert result is None
+        result = InstallBranchView._find_parent_module_id(child, index_map, [empty_bay, grandparent_bay], [], [])
+        assert result == 99
 
 
 # ---------------------------------------------------------------------------
@@ -1763,7 +1780,7 @@ class TestLookupRegexBayMappingStaleResolvedBay:
         module_bays = {"FanBay-3": fan_bay, "GenericBay-3": MagicMock()}
 
         with patch.object(BaseModuleTableView, "_fpc_slot_matches", return_value=True):
-            result = BaseModuleTableView._lookup_regex_bay_mapping("Fan-3", "fan", module_bays, [m_class, m_generic])
+            result = BaseModuleTableView._lookup_regex_bay_mapping("Fan-3", "fan", module_bays, [m_generic, m_class])
 
         assert result is fan_bay
 
