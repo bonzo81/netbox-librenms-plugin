@@ -1065,11 +1065,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             row["row_class"] = "table-warning"
             row["can_replace"] = True
         elif matched_type is not None:
-            # Normalize both serials: treat None, empty, whitespace, "-" as absent
+            # Normalize both serials: treat None, empty, whitespace, and placeholder values as absent
             nb_serial = (installed.serial or "").strip()
-            if nb_serial == "-":
+            if nb_serial.lower() in _PLACEHOLDER_VALUES:
                 nb_serial = ""
-            lnms_serial = serial if serial != "-" else ""
+            lnms_serial = serial if serial.lower() not in _PLACEHOLDER_VALUES else ""
             if lnms_serial and lnms_serial != nb_serial:
                 row["status"] = "Serial Mismatch"
                 row["row_class"] = "table-danger"
@@ -1111,7 +1111,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if not row.get("can_replace") and not row.get("can_install"):
                 continue
             serial = row.get("serial", "")
-            if serial and serial != "-":
+            if serial and serial.lower() not in _PLACEHOLDER_VALUES:
                 serial_rows.setdefault(serial, []).append(row)
 
         if not serial_rows:
