@@ -82,6 +82,10 @@ def _check_ignore_rules(
         positives deeper in the tree.
     """
     item_serial = (item.get("entPhysicalSerialNum") or "").strip()
+    if item_serial.lower() in _PLACEHOLDER_VALUES:
+        item_serial = ""
+    if device_serial.lower() in _PLACEHOLDER_VALUES:
+        device_serial = ""
     name = (item.get("entPhysicalName") or "").strip()
 
     for rule in rules:
@@ -111,6 +115,8 @@ def _check_ignore_rules(
                     break
                 visited.add(current_idx)
             ancestor_serial = (current.get("entPhysicalSerialNum") or "").strip()
+            if ancestor_serial.lower() in _PLACEHOLDER_VALUES:
+                ancestor_serial = ""
             if ancestor_serial:
                 if ancestor_serial == item_serial:
                     return rule.action
@@ -535,6 +541,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if serial.lower() in _PLACEHOLDER_VALUES:
                 serial = ""
             txr_type = (txr.get("type") or "").strip()
+            if txr_type.lower() in _PLACEHOLDER_VALUES:
+                txr_type = ""
 
             # Skip containers and entries with no useful data
             if txr_type in _SKIP_TRANSCEIVER_TYPES and not model and not serial:
