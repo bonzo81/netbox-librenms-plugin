@@ -149,9 +149,9 @@ class DeviceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     )
 
     def clean(self):
-        """Normalize librenms_hardware so whitespace-padded values don't create duplicate entries."""
+        """Normalize librenms_hardware to lowercase so case-variant duplicates are prevented at save time."""
         super().clean()
-        self.librenms_hardware = (self.librenms_hardware or "").strip()
+        self.librenms_hardware = (self.librenms_hardware or "").strip().lower()
         if not self.librenms_hardware:
             raise ValidationError({"librenms_hardware": "This field may not be blank after normalization."})
 
@@ -640,9 +640,9 @@ class PlatformMapping(FullCleanOnSaveMixin, NetBoxModel):
     )
 
     def clean(self):
-        """Normalize librenms_os so whitespace-padded values don't create duplicate entries."""
+        """Normalize librenms_os to lowercase so case-variant duplicates are prevented at save time."""
         super().clean()
-        self.librenms_os = (self.librenms_os or "").strip()
+        self.librenms_os = (self.librenms_os or "").strip().lower()
         if not self.librenms_os:
             raise ValidationError({"librenms_os": "This field may not be blank after normalization."})
 
