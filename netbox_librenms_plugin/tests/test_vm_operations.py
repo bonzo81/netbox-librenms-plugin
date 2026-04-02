@@ -685,7 +685,6 @@ class TestMissingFKWarnings:
 
         mock_job = MagicMock()
         mock_job.logger = MagicMock()
-        mock_job.job.status = "running"
 
         libre_device = {
             "device_id": 1,
@@ -699,6 +698,7 @@ class TestMissingFKWarnings:
 
         with (
             patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.vm_operations._is_job_cancelled", return_value=False),
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
                 return_value=libre_device,

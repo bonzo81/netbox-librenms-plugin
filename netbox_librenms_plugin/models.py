@@ -69,7 +69,7 @@ class LibreNMSSettings(models.Model):
         return f"LibreNMS Settings - Server: {self.selected_server}"
 
 
-class InterfaceTypeMapping(NetBoxModel):
+class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     """Map LibreNMS interface types and speeds to NetBox interface types."""
 
     librenms_type = models.CharField(max_length=100)
@@ -83,6 +83,23 @@ class InterfaceTypeMapping(NetBoxModel):
         blank=True,
         help_text="Optional description or notes about this interface type mapping",
     )
+
+    def clean(self):
+        """Enforce uniqueness for NULL-speed rows (SQL UNIQUE does not cover NULL = NULL)."""
+        from django.core.exceptions import ValidationError
+
+        super().clean()
+        if self.librenms_speed is None:
+            qs = InterfaceTypeMapping.objects.filter(
+                librenms_type=self.librenms_type,
+                librenms_speed__isnull=True,
+            )
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                raise ValidationError(
+                    {"librenms_type": ("A wildcard (speed = any) mapping for this interface type already exists.")}
+                )
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
