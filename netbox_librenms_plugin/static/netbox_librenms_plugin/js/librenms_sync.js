@@ -1579,6 +1579,7 @@ function initializeModuleReplaceButtons() {
                     if (modalBody) {
                         modalBody.innerHTML = html;
                         htmx.process(modalBody);
+                        updateHtmxModalLabel();
                     }
                 })
                 .catch(err => {
@@ -1657,16 +1658,22 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
 
 // Update HTMX modal accessible label after content loads so screen readers
 // announce the actual dialog title rather than the static "Loading" placeholder.
-document.addEventListener('DOMContentLoaded', function () {
+function updateHtmxModalLabel() {
     const htmxModal = document.getElementById('htmx-modal');
-    if (htmxModal) {
-        htmxModal.addEventListener('htmx:afterSettle', function () {
-            const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
-            const labelId = htmxModal.getAttribute('aria-labelledby');
-            const label = (labelId && document.getElementById(labelId)) || document.getElementById('htmx-modal-label');
-            if (header && label) {
-                label.textContent = header.textContent.trim();
-            }
-        });
+    if (!htmxModal) return;
+    const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
+    const labelId = htmxModal.getAttribute('aria-labelledby');
+    const label = (labelId && document.getElementById(labelId)) || document.getElementById('htmx-modal-label');
+    if (header && label) {
+        label.textContent = header.textContent.trim();
+    }
+}
+
+// Listen at document level so the handler fires regardless of which element
+// HTMX dispatches afterSettle on (swap target or ancestor).
+document.addEventListener('htmx:afterSettle', function (event) {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal && (htmxModal === event.target || htmxModal.contains(event.target))) {
+        updateHtmxModalLabel();
     }
 });
