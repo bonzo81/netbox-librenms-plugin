@@ -47,8 +47,7 @@ function hideModal(el) {
     el.style.display = 'none';
     el.setAttribute('aria-hidden', 'true');
     el.removeAttribute('aria-modal');
-    const backdrop = document.querySelector('.modal-backdrop');
-    if (backdrop) backdrop.remove();
+    document.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.remove());
     document.body.classList.remove('modal-open');
     document.body.style.removeProperty('padding-right');
     document.body.style.removeProperty('overflow');
@@ -706,7 +705,16 @@ function initializeVlanModalSave() {
                 })
             }).then(response => {
                 if (!response.ok) {
-                    return response.text().then(t => { throw new Error(`HTTP ${response.status}: ${t}`); });
+                    return response.text().then(t => {
+                        const ct = response.headers.get('Content-Type') || '';
+                        let msg = '';
+                        if (ct.includes('application/json')) {
+                            try { const d = JSON.parse(t); msg = d && (d.message || d.detail) || ''; } catch (_) {}
+                        }
+                        if (!msg) msg = t || 'Unknown error';
+                        if (msg.length > 300) msg = msg.slice(0, 300) + '…';
+                        throw new Error(`HTTP ${response.status}: ${msg}`);
+                    });
                 }
                 // Apply DOM mutations only after the server has persisted the overrides
                 applyButtonUpdates();
@@ -1651,7 +1659,8 @@ document.addEventListener('DOMContentLoaded', function () {
     if (htmxModal) {
         htmxModal.addEventListener('htmx:afterSettle', function () {
             const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
-            const label = document.getElementById('htmx-modal-label');
+            const labelId = htmxModal.getAttribute('aria-labelledby');
+            const label = (labelId && document.getElementById(labelId)) || document.getElementById('htmx-modal-label');
             if (header && label) {
                 label.textContent = header.textContent.trim();
             }
