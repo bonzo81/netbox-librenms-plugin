@@ -1390,6 +1390,9 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
         }
     })
         .then(response => {
+            if (!response.ok) {
+                return response.text().then(t => { throw new Error(`HTTP ${response.status} ${response.statusText}: ${t}`); });
+            }
             return response.json();
         })
         .then(data => {
@@ -1536,7 +1539,7 @@ function initializeModuleReplaceButtons() {
             if (modalContent) {
                 modalContent.innerHTML =
                     '<div class="modal-header">' +
-                    '<h5 class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
+                    '<h5 id="htmx-modal-label" class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
                     '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
                     '</div>' +
                     '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
