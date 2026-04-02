@@ -47,6 +47,28 @@ class TestPlatformMappingModel:
             mapping.clean()
         assert mapping.librenms_os == "ios"
 
+    def test_clean_normalizes_to_lowercase(self):
+        """clean() lowercases librenms_os to prevent case-variant duplicates."""
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        mapping = PlatformMapping.__new__(PlatformMapping)
+        mapping.librenms_os = "IOS"
+        mapping.description = ""
+        with patch("netbox.models.NetBoxModel.clean"):
+            mapping.clean()
+        assert mapping.librenms_os == "ios"
+
+    def test_clean_strips_and_lowercases(self):
+        """clean() strips and lowercases in one pass."""
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        mapping = PlatformMapping.__new__(PlatformMapping)
+        mapping.librenms_os = "  EOS  "
+        mapping.description = ""
+        with patch("netbox.models.NetBoxModel.clean"):
+            mapping.clean()
+        assert mapping.librenms_os == "eos"
+
     def test_clean_raises_on_blank(self):
         """clean() raises ValidationError when librenms_os is blank after strip."""
         from django.core.exceptions import ValidationError
@@ -85,8 +107,46 @@ class TestPlatformMappingModel:
 
 
 # =============================================================================
-# TestPlatformMappingToYaml
+# TestDeviceTypeMappingModel
 # =============================================================================
+
+
+class TestDeviceTypeMappingModel:
+    """Tests for DeviceTypeMapping.clean() normalization."""
+
+    def test_clean_strips_whitespace(self):
+        """clean() strips leading/trailing whitespace from librenms_hardware."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        mapping = DeviceTypeMapping.__new__(DeviceTypeMapping)
+        mapping.librenms_hardware = "  Cisco 4321  "
+        with patch("netbox.models.NetBoxModel.clean"):
+            mapping.clean()
+        assert mapping.librenms_hardware == "cisco 4321"
+
+    def test_clean_normalizes_to_lowercase(self):
+        """clean() lowercases librenms_hardware to prevent case-variant duplicates."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        mapping = DeviceTypeMapping.__new__(DeviceTypeMapping)
+        mapping.librenms_hardware = "Juniper MX480"
+        with patch("netbox.models.NetBoxModel.clean"):
+            mapping.clean()
+        assert mapping.librenms_hardware == "juniper mx480"
+
+    def test_clean_raises_on_blank(self):
+        """clean() raises ValidationError when librenms_hardware is blank after strip."""
+        import pytest
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        mapping = DeviceTypeMapping.__new__(DeviceTypeMapping)
+        mapping.librenms_hardware = "   "
+        with pytest.raises(ValidationError) as exc_info:
+            with patch("netbox.models.NetBoxModel.clean"):
+                mapping.clean()
+        assert "librenms_hardware" in str(exc_info.value)
 
 
 class TestPlatformMappingToYaml:
