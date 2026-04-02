@@ -451,10 +451,9 @@ class TestFindMatchingSiteMultipleReturned:
 class TestFindMatchingPlatformMultipleReturned:
     """Tests for find_matching_platform MultipleObjectsReturned (lines 358-360)."""
 
-    def test_multiple_objects_returned_uses_first(self):
+    def test_multiple_objects_returned_returns_ambiguous(self):
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        mock_platform = MagicMock()
         Platform_DoesNotExist = type("DoesNotExist", (Exception,), {})
         Platform_MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
         PlatformMapping_DoesNotExist = type("DoesNotExist", (Exception,), {})
@@ -467,11 +466,11 @@ class TestFindMatchingPlatformMultipleReturned:
                 MockPlatform.DoesNotExist = Platform_DoesNotExist
                 MockPlatform.MultipleObjectsReturned = Platform_MultipleObjectsReturned
                 MockPlatform.objects.get.side_effect = Platform_MultipleObjectsReturned("multiple")
-                MockPlatform.objects.filter.return_value.first.return_value = mock_platform
 
                 result = find_matching_platform("ios")
-                assert result["found"] is True
-                assert result["platform"] is mock_platform
+                assert result["found"] is False
+                assert result["platform"] is None
+                assert result["match_type"] == "ambiguous"
 
 
 class TestGetMissingVlanWarning:

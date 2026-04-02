@@ -441,8 +441,7 @@ def find_matching_platform(librenms_os: str) -> dict:
     except Platform.DoesNotExist:
         pass
     except Platform.MultipleObjectsReturned:
-        platform = Platform.objects.filter(name__iexact=librenms_os).first()
-        return {"found": True, "platform": platform, "match_type": "exact"}
+        return {"found": False, "platform": None, "match_type": "ambiguous"}
 
     return {"found": False, "platform": None, "match_type": None}
 
