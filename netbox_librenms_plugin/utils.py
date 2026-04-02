@@ -908,8 +908,8 @@ def preload_normalization_rules(scope: str, manufacturer=None) -> dict:
     from netbox_librenms_plugin.models import NormalizationRule
 
     cache: dict = {}
-    if manufacturer:
-        mfg_pk = getattr(manufacturer, "pk", None)
+    if manufacturer and manufacturer.pk is not None:
+        mfg_pk = manufacturer.pk
         cache[(scope, mfg_pk)] = list(
             NormalizationRule.objects.filter(scope=scope, manufacturer=manufacturer).order_by("priority", "pk")
         )
@@ -958,8 +958,8 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
         return val
 
     if preloaded_rules is not None:
-        if manufacturer:
-            mfg_pk = getattr(manufacturer, "pk", None)
+        if manufacturer and manufacturer.pk is not None:
+            mfg_pk = manufacturer.pk
             if (scope, mfg_pk) in preloaded_rules:
                 value = _apply_rules(value, preloaded_rules[(scope, mfg_pk)])
             else:
@@ -978,7 +978,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
             )
             preloaded_rules[(scope, None)] = unscoped_rules
             value = _apply_rules(value, unscoped_rules)
-    elif manufacturer:
+    elif manufacturer and manufacturer.pk is not None:
         # Manufacturer-specific rules first, then unscoped rules
         for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
             rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
