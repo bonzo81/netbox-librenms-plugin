@@ -122,13 +122,17 @@ function getDeviceIdFromUrl() {
     const pluginVMIndex = pathParts.indexOf('virtualmachine');
 
     if (deviceIndex !== -1 && deviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[deviceIndex + 1], type: 'device' };
+        const id = pathParts[deviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (vmIndex !== -1 && vmIndex + 1 < pathParts.length) {
-        return { id: pathParts[vmIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[vmIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     } else if (pluginDeviceIndex !== -1 && pluginDeviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginDeviceIndex + 1], type: 'device' };
+        const id = pathParts[pluginDeviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (pluginVMIndex !== -1 && pluginVMIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginVMIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[pluginVMIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     }
 
     return null;
@@ -569,7 +573,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             }
         })
         .catch(err => {
-            console.error('VLAN group verify failed:', err);
+            console.error('VLAN group verify failed:', err && err.message ? err.message : String(err));
         })
         .finally(() => {
             const saveBtn = document.getElementById('saveVlanGroups');
@@ -702,11 +706,7 @@ function initializeVlanModalSave() {
                 })
             }).then(response => {
                 if (!response.ok) {
-                    return response.text().then(t => {
-                        let msg = `HTTP ${response.status}`;
-                        try { const data = JSON.parse(t); if (data.message) msg = data.message; } catch (_) {}
-                        throw new Error(msg);
-                    });
+                    return response.text().then(t => { throw new Error(`HTTP ${response.status}: ${t}`); });
                 }
                 // Apply DOM mutations only after the server has persisted the overrides
                 applyButtonUpdates();
@@ -994,22 +994,7 @@ function initializeBulkEditApply() {
             });
 
             // Close the modal on 'Apply'
-            const bulkModal = document.getElementById('bulkVCMemberModal');
-            if (bulkModal) {
-                bulkModal.classList.remove('show');
-                bulkModal.style.display = 'none';
-                bulkModal.setAttribute('aria-hidden', 'true');
-                bulkModal.removeAttribute('aria-modal');
-
-                const backdrop = document.querySelector('.modal-backdrop');
-                if (backdrop) {
-                    backdrop.remove();
-                }
-
-                document.body.classList.remove('modal-open');
-                document.body.style.removeProperty('padding-right');
-                document.body.style.removeProperty('overflow');
-            }
+            hideModal(document.getElementById('bulkVCMemberModal'));
 
         });
     }
@@ -1261,20 +1246,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // Function to open the bulk VC modal
 function openBulkVCModal() {
-    const modal = document.getElementById('bulkVCMemberModal');
-    if (modal) {
-        modal.classList.add('show');
-        modal.style.display = 'block';
-        modal.setAttribute('aria-modal', 'true');
-        modal.removeAttribute('aria-hidden');
-
-        // Add backdrop
-        const backdrop = document.createElement('div');
-        backdrop.className = 'modal-backdrop fade show';
-        document.body.appendChild(backdrop);
-
-        document.body.classList.add('modal-open');
-    }
+    showModal(document.getElementById('bulkVCMemberModal'));
 }
 
 // Function to update the interface_name_field radio button
@@ -1316,6 +1288,7 @@ function setInterfaceNameFieldFromURL() {
     const urlParams = new URLSearchParams(window.location.search);
     const interfaceNameField = urlParams.get('interface_name_field');
     if (interfaceNameField) {
+        if (!['ifDescr', 'ifName'].includes(interfaceNameField)) return;
         const radio = document.querySelector(`input[name="interface_name_field"][value="${interfaceNameField}"]`);
         if (radio) {
             radio.checked = true;
@@ -1361,11 +1334,6 @@ function initializeNetBoxOnlyInterfaces() {
             if (selectedCheckboxes.length === 0) {
                 return;
             }
-
-            const interfaceNames = Array.from(selectedCheckboxes).map(cb => {
-                const row = cb.closest('tr');
-                return row.querySelector('td:nth-child(2) a').textContent;
-            });
 
             deleteSelectedInterfaces(selectedCheckboxes);
         });
@@ -1427,26 +1395,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
         })
         .then(data => {
             if (data.status === 'success') {
-                // Close modal using native DOM methods
-                const modalElement = document.getElementById('netboxOnlyInterfacesModal');
-                if (modalElement) {
-                    // Hide the modal
-                    modalElement.classList.remove('show');
-                    modalElement.style.display = 'none';
-                    modalElement.setAttribute('aria-hidden', 'true');
-                    modalElement.removeAttribute('aria-modal');
-
-                    // Remove backdrop
-                    const backdrop = document.querySelector('.modal-backdrop');
-                    if (backdrop) {
-                        backdrop.remove();
-                    }
-
-                    // Clean up body classes and styles
-                    document.body.classList.remove('modal-open');
-                    document.body.style.removeProperty('padding-right');
-                    document.body.style.removeProperty('overflow');
-                }
+                hideModal(document.getElementById('netboxOnlyInterfacesModal'));
 
                 // Refresh the interface data by triggering the refresh button
                 const refreshButton = document.querySelector('[hx-post*="interface-sync"]');
