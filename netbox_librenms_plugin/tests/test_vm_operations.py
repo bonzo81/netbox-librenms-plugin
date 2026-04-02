@@ -644,21 +644,10 @@ class TestBulkImportVms:
         mock_api = MagicMock()
         mock_api.server_key = "default"
 
-        # Status is "running" at first checkpoint (idx=5), "failed" at second (idx=10)
-        statuses = iter(["running", "running", "failed"])
         mock_job = MagicMock()
         mock_job.logger = MagicMock()
-        mock_job.job.status = "running"
 
-        def _refresh():
-            try:
-                mock_job.job.status = next(statuses)
-            except StopIteration:
-                mock_job.job.status = "failed"
-
-        mock_job.job.refresh_from_db.side_effect = _refresh
-
-        # 10 VMs: checkpoint at idx=5 (running → log.info) and idx=10 (failed → break)
+        # 10 VMs: not cancelled at idx=1 and idx=5 checkpoints, cancelled at idx=10
         vm_imports = {i: {} for i in range(1, 11)}
 
         with (
@@ -667,10 +656,14 @@ class TestBulkImportVms:
                 "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
                 return_value=None,
             ),
+            patch(
+                "netbox_librenms_plugin.import_utils.vm_operations._is_job_cancelled",
+                side_effect=[False, False, True],
+            ),
         ):
             bulk_import_vms(vm_imports, mock_api, job=mock_job)
 
-        # log.info called at idx=5 checkpoint
+        # log.info called at each non-cancelled iteration
         mock_job.logger.info.assert_called()
 
 

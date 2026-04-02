@@ -52,6 +52,7 @@ class LibreNMSModuleTable(tables.Table):
         *args,
         device=None,
         server_key="",
+        has_write_permission=False,
         can_add_module=False,
         can_change_module=False,
         can_delete_module=False,
@@ -61,11 +62,12 @@ class LibreNMSModuleTable(tables.Table):
         self.device = device
         self.csrf_token = ""
         self.server_key = server_key
+        self.has_write_permission = has_write_permission
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
         self.can_delete_module = can_delete_module
         super().__init__(*args, **kwargs)
-        if not can_add_module and hasattr(self, "columns"):
+        if not (has_write_permission and can_add_module) and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
         self.tab = "modules"
         self.htmx_url = None
@@ -169,6 +171,8 @@ class LibreNMSModuleTable(tables.Table):
     def render_actions(self, value, record):
         """Render install button for matched modules and install branch for parents."""
         if not self.device:
+            return ""
+        if not self.has_write_permission:
             return ""
         if not self.can_add_module and not self.can_change_module:
             return ""
