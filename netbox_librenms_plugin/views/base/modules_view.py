@@ -142,6 +142,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
         if not self.librenms_id:
+            cache.delete(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
             messages.error(request, "Device not found in LibreNMS.")
             return render(
                 request,
@@ -159,6 +160,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
 
         if not success:
+            cache.delete(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
             messages.error(request, f"Failed to fetch inventory from LibreNMS: {inventory_data}")
             return render(
                 request,
@@ -915,9 +917,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             except (re.error, IndexError):
                 continue
             if resolved_bay in module_bays:
-                bay = module_bays[resolved_bay]
-                if BaseModuleTableView._fpc_slot_matches(name, bay):
-                    return bay
+                maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
+                for scope_map in maps:
+                    if resolved_bay in scope_map:
+                        bay = scope_map[resolved_bay]
+                        if BaseModuleTableView._fpc_slot_matches(name, bay):
+                            return bay
         return None
 
     @staticmethod
