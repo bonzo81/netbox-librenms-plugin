@@ -409,8 +409,9 @@ def find_matching_platform(librenms_os: str) -> dict:
             - found (bool): Whether a match was found
             - platform (Platform|None): The matched Platform object
             - match_type (str|None): 'mapping', 'exact', 'ambiguous', or None.
-              'ambiguous' means multiple PlatformMapping entries matched and a
-              single Platform could not be determined.
+              'ambiguous' means multiple PlatformMapping entries matched, or
+              multiple Platform objects share the same name, and a single
+              Platform could not be determined.
     """
     from dcim.models import Platform
 
@@ -743,6 +744,13 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         return None
     if isinstance(librenms_id, (int, float)) and librenms_id <= 0:
         return None
+    if isinstance(librenms_id, str):
+        cleaned = librenms_id.strip()
+        try:
+            if int(cleaned) <= 0:
+                return None
+        except ValueError:
+            pass
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
     # Also match when the namespaced value was stored as a string (e.g. {"production": "42"}).
     q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
