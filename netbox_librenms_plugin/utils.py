@@ -18,7 +18,7 @@ def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
     Convert speed from bits per second to kilobits per second.
 
     Args:
-        speed_bps (int): Speed in bits per second.
+        speed_bps (int | None): Speed in bits per second, or None.
 
     Returns:
         int | None: Speed in kilobits per second, or None if input is None.
