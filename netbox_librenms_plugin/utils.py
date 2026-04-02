@@ -407,7 +407,9 @@ def find_matching_platform(librenms_os: str) -> dict:
         dict: Dictionary containing:
             - found (bool): Whether a match was found
             - platform (Platform|None): The matched Platform object
-            - match_type (str|None): 'mapping', 'exact', or None
+            - match_type (str|None): 'mapping', 'exact', 'ambiguous', or None.
+              'ambiguous' means multiple PlatformMapping entries matched and a
+              single Platform could not be determined.
     """
     from dcim.models import Platform
 
@@ -752,13 +754,15 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     # Strip whitespace and canonicalize leading-zero forms ("042", "42 ") → "42".
     if isinstance(librenms_id, str):
         cleaned = librenms_id.strip()
-        if cleaned.isdigit():
+        try:
             int_value = int(cleaned)
             canonical_str = str(int_value)
             q |= Q(**{f"custom_field_data__librenms_id__{server_key}": canonical_str})
             q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
             q |= Q(custom_field_data__librenms_id=canonical_str)
             q |= Q(custom_field_data__librenms_id=int_value)
+        except ValueError:
+            pass
     return model.objects.filter(q).first()
 
 
@@ -958,19 +962,21 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
             if (scope, mfg_pk) in preloaded_rules:
                 value = _apply_rules(value, preloaded_rules[(scope, mfg_pk)])
             else:
-                # Manufacturer key missing from preloaded dict — fall back to DB
-                value = _apply_rules(
-                    value,
-                    NormalizationRule.objects.filter(scope=scope, manufacturer=manufacturer).order_by("priority", "pk"),
+                # Manufacturer key missing from preloaded dict — fall back to DB and cache result
+                rules = list(
+                    NormalizationRule.objects.filter(scope=scope, manufacturer=manufacturer).order_by("priority", "pk")
                 )
+                preloaded_rules[(scope, mfg_pk)] = rules
+                value = _apply_rules(value, rules)
         if (scope, None) in preloaded_rules:
             value = _apply_rules(value, preloaded_rules[(scope, None)])
         else:
-            # Unscoped rules not preloaded — fall back to DB
-            value = _apply_rules(
-                value,
-                NormalizationRule.objects.filter(scope=scope, manufacturer__isnull=True).order_by("priority", "pk"),
+            # Unscoped rules not preloaded — fall back to DB and cache result
+            unscoped_rules = list(
+                NormalizationRule.objects.filter(scope=scope, manufacturer__isnull=True).order_by("priority", "pk")
             )
+            preloaded_rules[(scope, None)] = unscoped_rules
+            value = _apply_rules(value, unscoped_rules)
     elif manufacturer:
         # Manufacturer-specific rules first, then unscoped rules
         for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:

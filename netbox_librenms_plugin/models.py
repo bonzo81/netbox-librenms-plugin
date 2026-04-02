@@ -17,8 +17,7 @@ class FullCleanOnSaveMixin:
     """Mixin that calls full_clean() on every save() so custom clean() logic runs even on programmatic saves."""
 
     def save(self, *args, **kwargs):
-        if not kwargs.get("update_fields"):
-            self.full_clean()
+        self.full_clean()
         super().save(*args, **kwargs)
 
 

@@ -905,7 +905,13 @@ class TestDeviceModuleTableView:
             result = view.get_table([], obj)
 
         mock_table_cls.assert_called_once_with(
-            [], device=obj, server_key="default", can_add_module=True, can_change_module=True, can_delete_module=True
+            [],
+            device=obj,
+            server_key="default",
+            has_write_permission=True,
+            can_add_module=True,
+            can_change_module=True,
+            can_delete_module=True,
         )
         assert result is mock_table
 

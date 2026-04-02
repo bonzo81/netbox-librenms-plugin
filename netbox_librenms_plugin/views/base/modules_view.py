@@ -505,9 +505,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Build lookup of existing inventory items by index and serial
         inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
         inv_serials = {
-            (item.get("entPhysicalSerialNum") or "").strip()
+            s
             for item in inventory_data
-            if (item.get("entPhysicalSerialNum") or "").strip()
+            if (s := (item.get("entPhysicalSerialNum") or "").strip()) and s.lower() not in _PLACEHOLDER_VALUES
         }
 
         # Build port_id → ifName lookup for better synthetic item naming
@@ -522,7 +522,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 continue
 
             model = (txr.get("model") or "").strip()
+            if model.lower() in _PLACEHOLDER_VALUES:
+                model = ""
             serial = (txr.get("serial") or "").strip()
+            if serial.lower() in _PLACEHOLDER_VALUES:
+                serial = ""
             txr_type = (txr.get("type") or "").strip()
 
             # Skip containers and entries with no useful data

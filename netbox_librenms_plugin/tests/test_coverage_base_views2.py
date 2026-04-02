@@ -1581,8 +1581,8 @@ class TestSingleIPAddressVerifyViewPost:
         data = json_mod.loads(response.content)
         assert data["status"] == "error"
 
-    def test_interface_from_device_used_when_no_cache(self):
-        """When no cache entry (port_id=None), first device interface is used."""
+    def test_interface_from_device_used_when_cache_has_no_port_id(self):
+        """When cache contains an IP entry with no port_id, first device interface is used."""
         import json as json_mod
 
         view = self._make_view()

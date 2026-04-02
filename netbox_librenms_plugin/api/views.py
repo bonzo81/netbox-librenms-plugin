@@ -160,8 +160,15 @@ def sync_job_status(request, job_pk):
         rq_job = RQJob.fetch(str(job.job_id), connection=queue.connection)
         rq_status = rq_job.get_status()
 
-        # If RQ job is stopped or failed, update database
+        # If RQ job is stopped or failed, update database (but never overwrite terminal states)
         if rq_job.is_stopped or rq_job.is_failed:
+            terminal_states = {
+                JobStatusChoices.STATUS_COMPLETED,
+                JobStatusChoices.STATUS_FAILED,
+                JobStatusChoices.STATUS_ERRORED,
+            }
+            if job.status in terminal_states:
+                return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": rq_status})
             job.status = JobStatusChoices.STATUS_FAILED
             if not job.completed:
                 job.completed = timezone.now()

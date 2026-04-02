@@ -213,12 +213,12 @@ class TestInstallModuleViewWiring:
         assert NetBoxObjectPermissionMixin in InstallModuleView.__mro__
 
     def test_install_module_view_not_in_base(self):
-        """InstallModuleView must NOT be defined in views/base anymore."""
-        import importlib
+        """InstallModuleView is importable from the public sync module, not views/base."""
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        mod = importlib.import_module("netbox_librenms_plugin.views.base.modules_view")
-        assert not hasattr(mod, "InstallModuleView"), (
-            "InstallModuleView must have been moved out of views/base/modules_view.py"
+        assert callable(InstallModuleView), "InstallModuleView must be a callable class"
+        assert InstallModuleView.__module__ == "netbox_librenms_plugin.views.sync.modules", (
+            "InstallModuleView must be defined in views/sync/modules.py, not views/base/"
         )
 
 
@@ -843,9 +843,11 @@ class TestToggleColumnAccessor:
         table = LibreNMSModuleTable([record])
         rows = list(table.rows)
         assert len(rows) == 1
-        # The cell value for 'selection' should be 42 (ent_physical_index), not ''
+        # The cell value should render a checkbox HTML input element
         cell_val = rows[0].get_cell("selection")
-        assert str(cell_val) != "", "Checkbox cell must not be empty for a record with ent_physical_index"
+        assert "<input" in str(cell_val), (
+            "Checkbox cell must render an HTML input element for a record with ent_physical_index"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1625,6 +1627,10 @@ class TestMatchBayLogic:
 
         result = InstallBranchView._match_bay(child, index_map, module_bays, exact, [])
         assert result is bay_fan
+
+        # Order-independent: class-scoped mapping wins regardless of list order
+        result_reversed = InstallBranchView._match_bay(child, index_map, module_bays, list(reversed(exact)), [])
+        assert result_reversed is bay_fan
 
     def test_regex_mapping_with_backreference(self):
         """Regex mapping with capture group + backreference in netbox_bay_name."""

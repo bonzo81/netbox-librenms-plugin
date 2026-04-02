@@ -114,8 +114,8 @@ def bulk_import_devices_shared(
     api = LibreNMSAPI(server_key=server_key)
 
     for idx, device_id in enumerate(device_ids, start=1):
-        # Check for job cancellation on first iteration and every 5th thereafter.
-        if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
+        # Check for job cancellation on every iteration.
+        if job and _is_job_cancelled(job):
             if job.logger:
                 job.logger.warning(f"Import job stopped at device {idx} of {total}")
             else:
@@ -570,8 +570,8 @@ def process_device_filters(
         logger.info(f"Validating {total} devices")
 
     for idx, device in enumerate(libre_devices, 1):
-        # Check for job termination periodically
-        if (idx % 5 == 0 or idx == 1) and job and _is_job_cancelled(job):
+        # Check for job termination on every iteration.
+        if job and _is_job_cancelled(job):
             job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
             return _empty_return(return_cache_status)
 

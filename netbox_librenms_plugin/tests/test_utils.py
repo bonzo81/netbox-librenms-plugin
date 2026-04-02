@@ -87,6 +87,7 @@ class TestDeviceTypeMatching:
         assert result["matched"] is True
         assert result["device_type"] == mock_dt
         assert result["match_type"] == "mapping"
+        mock_dtm.objects.get.assert_called_once_with(librenms_hardware__iexact="Juniper MX480 Internet Backbone Router")
 
     def test_match_device_type_empty_hardware(self):
         """Empty string returns None."""
@@ -229,6 +230,7 @@ class TestPlatformMatching:
         assert result["found"] is True
         assert result["platform"] == mock_platform
         assert result["match_type"] == "exact"
+        mock_platform_mapping.objects.get.assert_called_once_with(librenms_os__iexact="ios")
         mock_platform_model.objects.get.assert_called_once_with(name__iexact="ios")
 
     @patch("netbox_librenms_plugin.models.PlatformMapping")
@@ -246,6 +248,7 @@ class TestPlatformMatching:
 
         assert result["found"] is False
         assert result["platform"] is None
+        mock_platform_mapping.objects.get.assert_called_once_with(librenms_os__iexact="unknown_os")
         mock_platform_model.objects.get.assert_called_once_with(name__iexact="unknown_os")
 
     def test_find_platform_for_os_empty(self):

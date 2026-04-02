@@ -19,6 +19,7 @@ class TestLibreNMSModuleTable:
         table.device = device
         table.csrf_token = "test-csrf-token"
         table.server_key = ""
+        table.has_write_permission = True
         table.can_add_module = can_add_module
         table.can_change_module = can_change_module
         table.can_delete_module = can_delete_module
@@ -328,6 +329,15 @@ class TestLibreNMSModuleTable:
         device = MagicMock()
         device.pk = 1
         table = self._make_table(device=device, can_add_module=False, can_change_module=False)
+        result = table.render_actions(None, {"can_install": True})
+        assert result == ""
+
+    def test_render_actions_no_write_permission_returns_empty_string(self):
+        """Returns empty string when plugin write permission is absent."""
+        device = MagicMock()
+        device.pk = 1
+        table = self._make_table(device=device, can_add_module=True, can_change_module=True)
+        table.has_write_permission = False
         result = table.render_actions(None, {"can_install": True})
         assert result == ""
 

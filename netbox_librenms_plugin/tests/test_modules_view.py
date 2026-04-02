@@ -465,20 +465,25 @@ class TestDetermineStatus:
         return object.__new__(BaseModuleTableView)
 
     def test_matched_bay_and_type(self):
+        import types
+
         view = self._view()
-        assert view._determine_status(MagicMock(), MagicMock(), "S1") == "Matched"
+        assert view._determine_status(types.SimpleNamespace(id=1), types.SimpleNamespace(id=1), "S1") == "Matched"
 
     def test_no_bay(self):
+        import types
+
         view = self._view()
-        assert view._determine_status(None, MagicMock(), "S1") == "No Bay"
+        assert view._determine_status(None, types.SimpleNamespace(id=1), "S1") == "No Bay"
 
     def test_no_type(self):
+        import types
+
         view = self._view()
-        assert view._determine_status(MagicMock(), None, "S1") == "No Type"
+        assert view._determine_status(types.SimpleNamespace(id=1), None, "S1") == "No Type"
 
     def test_unmatched_fallback(self):
         view = self._view()
-        # matched_bay but no matched_type handled by No Type branch first
         assert view._determine_status(None, None, "S1") == "No Bay"
 
 
