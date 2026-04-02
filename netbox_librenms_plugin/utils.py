@@ -13,7 +13,7 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 logger = logging.getLogger(__name__)
 
 
-def convert_speed_to_kbps(speed_bps: int) -> int | None:
+def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
     """
     Convert speed from bits per second to kilobits per second.
 
@@ -742,6 +742,8 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         return None
     if isinstance(librenms_id, bool):
         return None
+    if isinstance(librenms_id, (int, float)) and librenms_id <= 0:
+        return None
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
     # Also match when the namespaced value was stored as a string (e.g. {"production": "42"}).
     q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
@@ -757,11 +759,12 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         cleaned = librenms_id.strip()
         try:
             int_value = int(cleaned)
-            canonical_str = str(int_value)
-            q |= Q(**{f"custom_field_data__librenms_id__{server_key}": canonical_str})
-            q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
-            q |= Q(custom_field_data__librenms_id=canonical_str)
-            q |= Q(custom_field_data__librenms_id=int_value)
+            if int_value > 0:
+                canonical_str = str(int_value)
+                q |= Q(**{f"custom_field_data__librenms_id__{server_key}": canonical_str})
+                q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
+                q |= Q(custom_field_data__librenms_id=canonical_str)
+                q |= Q(custom_field_data__librenms_id=int_value)
         except ValueError:
             pass
     return model.objects.filter(q).first()
