@@ -289,9 +289,10 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
             - device_type (DeviceType|None): The matched DeviceType object
             - match_type (str|None): 'mapping' if via DeviceTypeMapping, 'exact' if via
               part_number/model, None otherwise
-        Returns ``None`` when ``DeviceTypeMapping.MultipleObjectsReturned`` is raised
-        (i.e., multiple mapping rows share the same ``librenms_hardware`` key).
-        Callers must guard with ``if result is None:`` before inspecting the dict.
+        Returns ``None`` when ``MultipleObjectsReturned`` is raised on any lookup
+        (DeviceTypeMapping, part_number, or model) — i.e., the function fails closed
+        on all ambiguity cases.  Callers must guard with ``if result is None:``
+        before inspecting the dict.
     """
     from dcim.models import DeviceType
 
