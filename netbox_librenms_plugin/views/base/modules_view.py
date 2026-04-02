@@ -37,6 +37,12 @@ _GENERIC_CONTAINER_MODELS = {"", "BUILTIN", "Default", "N/A"}
 # be replaced by richer transceiver API data.
 _PLACEHOLDER_VALUES = {"", "n/a", "na", "default", "-", "unknown"}
 
+# Transceiver entry types that are containers, not real modules.
+_SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
+
+# Physical classes filtered out when counting hardware siblings under a parent bay.
+_NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
+
 
 def _check_ignore_rules(
     item: dict,
@@ -516,7 +522,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         port_name_map = self._build_port_name_map(transceivers)
 
         # Types that are containers, not real transceiver modules
-        SKIP_TYPES = {"Port Container", "Port", ""}
 
         for txr in transceivers:
             ent_idx = txr.get("entity_physical_index")
@@ -532,11 +537,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             txr_type = (txr.get("type") or "").strip()
 
             # Skip containers and entries with no useful data
-            if txr_type in SKIP_TYPES and not model and not serial:
+            if txr_type in _SKIP_TRANSCEIVER_TYPES and not model and not serial:
                 continue
 
             # Use transceiver type as model fallback (e.g., "CFP2/QSFP28")
-            display_model = model or (txr_type if txr_type not in SKIP_TYPES else "")
+            display_model = model or (txr_type if txr_type not in _SKIP_TRANSCEIVER_TYPES else "")
 
             if ent_idx in inv_by_index:
                 # Supplement existing inventory item if model/serial is missing or a placeholder
@@ -956,7 +961,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Determine position: count siblings under the parent, filtering out
         # non-hardware items (sensors, LEDs) that would shift the bay index.
-        _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
         parent_with_model_idx = current_idx
         siblings = sorted(
             [
