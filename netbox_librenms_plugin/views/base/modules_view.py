@@ -1168,11 +1168,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         conflicts = Module.objects.filter(serial__in=serial_rows.keys()).select_related(
             "module_type", "module_bay", "device"
         )
+
+        # Group conflict modules by serial
+        conflicts_by_serial: dict = {}
         for conflict in conflicts:
-            for row in serial_rows.get(conflict.serial, []):
+            conflicts_by_serial.setdefault(conflict.serial, []).append(conflict)
+
+        for serial, rows in serial_rows.items():
+            modules = conflicts_by_serial.get(serial, [])
+            for row in rows:
                 installed_id = row.get("installed_module_id")
-                # Skip if this IS the module already in the current bay
-                if installed_id and conflict.pk == installed_id:
-                    continue
-                row["serial_conflict_module"] = conflict
-                row["can_move_from"] = True
+                # Exclude the module already in the current bay
+                candidates = [m for m in modules if not (installed_id and m.pk == installed_id)]
+                if len(candidates) == 1:
+                    row["serial_conflict_module"] = candidates[0]
+                    row["can_move_from"] = True
+                elif len(candidates) > 1:
+                    row["serial_conflict_ambiguous"] = True
