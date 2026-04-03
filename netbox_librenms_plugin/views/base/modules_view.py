@@ -30,7 +30,7 @@ INVENTORY_CLASSES = {
 }
 
 # Model name values that indicate a generic/empty container (not real hardware)
-_GENERIC_CONTAINER_MODELS = {"", "BUILTIN", "Default", "N/A"}
+_GENERIC_CONTAINER_MODELS = {"", "builtin", "default", "n/a"}
 
 # Lowercase placeholder values that LibreNMS returns for absent model/serial fields.
 # Used during transceiver backfill to decide whether existing ENTITY-MIB data should
@@ -192,10 +192,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Fetch transceiver data and merge with inventory
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data)
 
-        # Cache the merged inventory data, namespaced by server to avoid cross-server collisions
+        # Cache the merged inventory data, namespaced by server and librenms_id to detect remapping
         cache.set(
             self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key),
-            inventory_data,
+            {"inventory": inventory_data, "librenms_id": self.librenms_id},
             timeout=self.librenms_api.cache_timeout,
         )
 
@@ -212,15 +212,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def get_context_data(self, request, obj):
         """Get context from cache (used by the main sync view on initial page load)."""
-        cached_data = cache.get(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
-        if cached_data is None:
+        cache_key = self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key)
+        cached_payload = cache.get(cache_key)
+        if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
-        # Re-validate: if the device's LibreNMS ID has been removed since the cache was
-        # written, discard stale inventory rather than showing outdated install/replace actions.
-        if not self.librenms_api.get_librenms_id(obj):
-            cache.delete(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
+        # Validate that the cached inventory was built for the same LibreNMS device.
+        # If the object has been remapped to a different device, discard stale inventory.
+        current_librenms_id = self.librenms_api.get_librenms_id(obj)
+        if cached_payload.get("librenms_id") != current_librenms_id:
+            cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
-        return self._build_context(request, obj, cached_data)
+        return self._build_context(request, obj, cached_payload["inventory"])
 
     def _build_context(self, request, obj, inventory_data):
         """Build context with matched inventory items and table."""
@@ -377,7 +379,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if action == "transparent":
                 continue
             # Skip items with generic model names (not real hardware).
-            model = (item.get("entPhysicalModelName") or "").strip()
+            model = (item.get("entPhysicalModelName") or "").strip().lower()
             if phys_class == "container" and model in _GENERIC_CONTAINER_MODELS:
                 continue
             if model and model in _GENERIC_CONTAINER_MODELS:
@@ -395,7 +397,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     continue
                 anc_class = ancestor.get("entPhysicalClass")
                 if anc_class in INVENTORY_CLASSES:
-                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip()
+                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
                     if anc_class == "container" and anc_model in _GENERIC_CONTAINER_MODELS:
                         current_idx = ancestor.get("entPhysicalContainedIn", 0)
                         continue
@@ -692,7 +694,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     device_serial=device_serial,
                 )
                 continue
-            model = (child.get("entPhysicalModelName") or "").strip()
+            model = (child.get("entPhysicalModelName") or "").strip().lower()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))
                 # Continue looking for deeper components (e.g., SFPs inside converters)
@@ -984,7 +986,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         while current_idx and current_idx in index_map and current_idx not in visited:
             visited.add(current_idx)
             ancestor = index_map[current_idx]
-            model = (ancestor.get("entPhysicalModelName") or "").strip()
+            model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 # Found the parent with a real model; container_idx is the intermediate container
                 break
