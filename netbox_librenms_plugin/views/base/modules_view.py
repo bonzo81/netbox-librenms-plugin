@@ -165,7 +165,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         "table": None,
                         "cache_expiry": None,
                         "server_key": self.librenms_api.server_key,
-                    }
+                    },
+                    "has_write_permission": self.has_write_permission(),
                 },
             )
 
@@ -183,7 +184,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         "table": None,
                         "cache_expiry": None,
                         "server_key": self.librenms_api.server_key,
-                    }
+                    },
+                    "has_write_permission": self.has_write_permission(),
                 },
             )
 
@@ -202,7 +204,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             messages.warning(request, f"Inventory refreshed, but transceiver fetch failed: {txr_error}")
         else:
             messages.success(request, "Inventory data refreshed successfully.")
-        return render(request, self.partial_template_name, {"module_sync": context})
+        return render(
+            request,
+            self.partial_template_name,
+            {"module_sync": context, "has_write_permission": self.has_write_permission()},
+        )
 
     def get_context_data(self, request, obj):
         """Get context from cache (used by the main sync view on initial page load)."""
@@ -555,10 +561,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 # Supplement existing inventory item if model/serial is missing or a placeholder
                 existing = inv_by_index[ent_idx]
                 existing_model = (existing.get("entPhysicalModelName") or "").strip()
-                if existing_model.lower() in _PLACEHOLDER_VALUES and display_model:
+                if (
+                    existing_model.lower() in _PLACEHOLDER_VALUES or existing_model.lower() == "builtin"
+                ) and display_model:
                     existing["entPhysicalModelName"] = display_model
                 existing_serial = (existing.get("entPhysicalSerialNum") or "").strip()
-                if existing_serial.lower() in _PLACEHOLDER_VALUES and serial:
+                if (existing_serial.lower() in _PLACEHOLDER_VALUES or existing_serial.lower() == "builtin") and serial:
                     existing["entPhysicalSerialNum"] = serial
                     inv_serials.add(serial)
             else:
@@ -836,10 +844,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if bay:
                 return bay
 
-        # Fallback: exact match on candidate names against bay dict
+        # Fallback: exact match on candidate names against bay dict, with FPC-scope check
         for name in all_candidates:
             if name in module_bays:
-                return module_bays[name]
+                maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
+                for scope_map in maps:
+                    if name in scope_map:
+                        bay = scope_map[name]
+                        if BaseModuleTableView._fpc_slot_matches(name, bay):
+                            return bay
 
         # Positional fallback: determine slot number from container sibling order
         # Handles SFPs inside converters where containers are unnamed
