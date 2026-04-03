@@ -215,6 +215,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         cache_key = self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key)
         cached_payload = cache.get(cache_key)
         if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
+            cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
@@ -378,11 +379,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # top-level items — their children will appear instead.
             if action == "transparent":
                 continue
-            # Skip items with generic model names (not real hardware).
+            # Skip items with generic model names (not real hardware), regardless of class.
             model = (item.get("entPhysicalModelName") or "").strip().lower()
-            if phys_class == "container" and model in _GENERIC_CONTAINER_MODELS:
-                continue
-            if model and model in _GENERIC_CONTAINER_MODELS:
+            if model in _GENERIC_CONTAINER_MODELS:
                 continue
             # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
             # Transparent ancestors are treated as generic containers.
@@ -398,7 +397,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 anc_class = ancestor.get("entPhysicalClass")
                 if anc_class in INVENTORY_CLASSES:
                     anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
-                    if anc_class == "container" and anc_model in _GENERIC_CONTAINER_MODELS:
+                    if anc_model in _GENERIC_CONTAINER_MODELS:
                         current_idx = ancestor.get("entPhysicalContainedIn", 0)
                         continue
                     is_descendant = True
