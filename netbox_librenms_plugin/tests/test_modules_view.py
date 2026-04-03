@@ -840,6 +840,31 @@ class TestDetectSerialConflicts:
         assert row.get("serial_conflict_module") is conflict
         assert row.get("can_move_from") is True
 
+    def test_ambiguous_when_multiple_conflicts_for_same_serial(self):
+        """When multiple modules share the same serial, mark the row ambiguous instead of picking one."""
+        view = self._view()
+        conflict1 = MagicMock()
+        conflict1.serial = "DUP_SERIAL"
+        conflict1.pk = 100
+
+        conflict2 = MagicMock()
+        conflict2.serial = "DUP_SERIAL"
+        conflict2.pk = 200
+
+        row = {
+            "can_replace": True,
+            "serial": "DUP_SERIAL",
+            "installed_module_id": 42,
+        }
+
+        with patch("dcim.models.Module") as mock_module_cls:
+            mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict1, conflict2]
+            view._detect_serial_conflicts([row])
+
+        assert "serial_conflict_module" not in row
+        assert not row.get("can_move_from")
+        assert row.get("serial_conflict_ambiguous") is True
+
     def test_can_install_no_serial_not_flagged(self):
         """A can_install row with no serial is not checked for conflicts."""
         view = self._view()
