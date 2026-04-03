@@ -746,6 +746,8 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         return None
     if isinstance(librenms_id, str):
         cleaned = librenms_id.strip()
+        if cleaned == "":
+            return None
         try:
             if int(cleaned) <= 0:
                 return None
