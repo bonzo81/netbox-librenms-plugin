@@ -8,6 +8,7 @@ from django.utils import timezone
 from virtualization.models import Cluster
 
 from ..librenms_api import LibreNMSAPI
+from .bulk_import import _is_job_cancelled
 from .device_operations import _determine_device_name, fetch_device_with_cache, validate_device_for_import
 from .permissions import require_permissions
 
@@ -28,8 +29,11 @@ def create_vm_from_librenms(
     Args:
         libre_device: Device data from LibreNMS
         validation: Validation result from validate_device_for_import with import_as_vm=True
+        server_key: LibreNMS server key used to store the librenms_id custom field.
+            Defaults to "default" for backward compatibility. Always pass explicitly
+            when the calling context has a multi-server configuration so that the
+            librenms_id custom field is stored under the correct server key.
         use_sysname: If True, prefer sysName; if False, use hostname
-        server_key: LibreNMS server key used to store the librenms_id custom field
 
     Returns:
         Created VirtualMachine instance
@@ -152,26 +156,10 @@ def bulk_import_vms(
 
     for idx, vm_id in enumerate(vm_ids, start=1):
         # Check for job cancellation before first VM and every 5 thereafter
-        if job and (idx == 1 or idx % 5 == 0):
-            cancelled = False
-            try:
-                from django_rq import get_queue
-                from rq.job import Job as RQJob
-
-                queue = get_queue("default")
-                rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
-                if rq_job.is_failed or rq_job.is_stopped:
-                    cancelled = True
-            except Exception:
-                job.job.refresh_from_db()
-                job_status = job.job.status
-                status_value = job_status.value if hasattr(job_status, "value") else job_status
-                if status_value in ("failed", "errored", "stopped"):
-                    cancelled = True
-            if cancelled:
-                log.warning(f"Job cancelled at VM {idx} of {len(vm_ids)}")
-                break
-            log.info(f"Processing VM {idx} of {len(vm_ids)}")
+        if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
+            log.warning(f"Job cancelled at VM {idx} of {len(vm_ids)}")
+            break
+        log.info(f"Processing VM {idx} of {len(vm_ids)}")
 
         try:
             # Fetch device data (uses cache helper)

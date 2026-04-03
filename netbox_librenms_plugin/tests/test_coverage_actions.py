@@ -82,62 +82,62 @@ class TestSaveDevice:
 
 
 class TestResolveNamingPreferences:
-    """Tests for _resolve_naming_preferences (lines 60-106)."""
+    """Tests for resolve_naming_preferences (utils.resolve_naming_preferences)."""
 
     def test_post_use_sysname_toggle_truthy(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"use-sysname-toggle": "on"})
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
-                use_sysname, strip_domain = _resolve_naming_preferences(request)
+                use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is True
 
     def test_post_use_sysname_underscored_key(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"use_sysname-toggle": "on"})
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
-                use_sysname, _ = _resolve_naming_preferences(request)
+                use_sysname, _ = resolve_naming_preferences(request)
         assert use_sysname is True
 
     def test_post_use_sysname_plain_key(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"use_sysname": "true"})
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
-                use_sysname, _ = _resolve_naming_preferences(request)
+                use_sysname, _ = resolve_naming_preferences(request)
         assert use_sysname is True
 
     def test_get_fallback_when_no_post(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(get={"use_sysname": "on"})
         request.POST = {}
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
-                use_sysname, _ = _resolve_naming_preferences(request)
+                use_sysname, _ = resolve_naming_preferences(request)
         assert use_sysname is True
 
     def test_user_pref_used_when_no_post_get(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request()
         with patch("netbox_librenms_plugin.utils.get_user_pref") as mock_pref:
             mock_pref.return_value = False
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
-                use_sysname, _ = _resolve_naming_preferences(request)
+                use_sysname, _ = resolve_naming_preferences(request)
         assert use_sysname is False
 
     def test_settings_fallback_when_no_pref(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request()
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
@@ -146,29 +146,29 @@ class TestResolveNamingPreferences:
                 settings_obj.use_sysname_default = False
                 settings_obj.strip_domain_default = True
                 MockSettings.objects.first.return_value = settings_obj
-                use_sysname, strip_domain = _resolve_naming_preferences(request)
+                use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is False
         assert strip_domain is True
 
     def test_no_settings_defaults_to_true_false(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request()
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
-                use_sysname, strip_domain = _resolve_naming_preferences(request)
+                use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is True
         assert strip_domain is False
 
     def test_strip_domain_post_toggle(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"strip-domain-toggle": "on"})
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
             with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
                 MockSettings.objects.first.return_value = None
-                _, strip_domain = _resolve_naming_preferences(request)
+                _, strip_domain = resolve_naming_preferences(request)
         assert strip_domain is True
 
 
@@ -203,7 +203,7 @@ class TestBulkImportConfirmView:
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
                     request = _make_request(post={"select": ["not-an-int"]})
@@ -215,7 +215,7 @@ class TestBulkImportConfirmView:
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
                     request = _make_request(post={"select": ["1", "2"]})
@@ -237,7 +237,7 @@ class TestBulkImportConfirmView:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device
@@ -342,15 +342,19 @@ class TestDeviceImportHelperMixin:
                 return_value={"cluster_id": None, "role_id": None, "rack_id": None},
             ):
                 with patch(
-                    "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences",
+                    "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
                     return_value=(True, False),
                 ):
                     with patch(
                         "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
                         return_value={"status": "importable"},
                     ):
-                        request = _make_request()
-                        result_device, validation, selections = view.get_validated_device_with_selections(1, request)
+                        with patch("netbox_librenms_plugin.views.imports.actions.cache") as mock_cache:
+                            mock_cache.get.return_value = None
+                            request = _make_request()
+                            result_device, validation, selections = view.get_validated_device_with_selections(
+                                1, request
+                            )
         assert result_device is libre_device
         assert validation is not None
 
@@ -407,7 +411,7 @@ class TestDeviceValidationDetailsView:
 
         with patch.object(view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch.object(view, "_build_sync_info", return_value={"serial_synced": True}):
                     with patch.object(view, "_build_id_server_info", return_value=None):
@@ -872,7 +876,10 @@ class TestShouldEnableVCDetection:
     def test_enable_vc_detection_from_post(self):
         view = self._make_view()
         request = _make_request(post={"enable_vc_detection": "on"})
-        assert view._should_enable_vc_detection(1, request) is True
+        with patch("netbox_librenms_plugin.views.imports.actions.cache") as mock_cache:
+            mock_cache.get.return_value = None
+            result = view._should_enable_vc_detection(1, request)
+        assert result is True
 
 
 class TestBuildSyncInfoNoPlatform:
@@ -908,25 +915,25 @@ class TestBuildSyncInfoNoPlatform:
 
 
 class TestResolveTruthyPreferences:
-    """Tests for _resolve_naming_preferences truthy parsing via integration."""
+    """Tests for resolve_naming_preferences truthy parsing via integration."""
 
     def test_on_value_resolves_to_true(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"use_sysname": "on", "strip_domain": "on"})
         with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
             MockSettings.objects.first.return_value = None
-            use_sysname, strip_domain = _resolve_naming_preferences(request)
+            use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is True
         assert strip_domain is True
 
     def test_false_value_resolves_to_false(self):
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = _make_request(post={"use_sysname": "false", "strip_domain": "0"})
         with patch("netbox_librenms_plugin.models.LibreNMSSettings", create=True) as MockSettings:
             MockSettings.objects.first.return_value = None
-            use_sysname, strip_domain = _resolve_naming_preferences(request)
+            use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is False
         assert strip_domain is False
 
@@ -1318,7 +1325,7 @@ class TestBulkImportConfirmViewPost:
                         return_value=validation,
                     ):
                         with patch(
-                            "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences",
+                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
                             return_value=(True, False),
                         ):
                             with patch(
@@ -1343,7 +1350,7 @@ class TestBulkImportConfirmViewPost:
                 "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None
             ):  # Not in cache
                 with patch(
-                    "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences",
+                    "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
                     return_value=(True, False),
                 ):
                     with patch(
@@ -1386,7 +1393,7 @@ class TestBulkImportConfirmViewPost:
                         return_value=validation,
                     ):
                         with patch(
-                            "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences",
+                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
                             return_value=(True, False),
                         ):
                             with patch(
@@ -2182,7 +2189,7 @@ class TestBulkImportConfirmViewVMRole:
                         return_value=validation,
                     ):
                         with patch(
-                            "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences",
+                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
                             return_value=(True, False),
                         ):
                             with patch(
@@ -2234,7 +2241,7 @@ class TestBulkImportConfirmViewVMRole:
                         return_value=validation,
                     ):
                         with patch(
-                            "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences",
+                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
                             return_value=(True, False),
                         ):
                             with patch(
@@ -3297,7 +3304,7 @@ class TestBulkImportConfirmPartialExpiry:
                         return_value=validation,
                     ):
                         with patch(
-                            "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences",
+                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
                             return_value=(True, False),
                         ):
                             with patch(
@@ -3359,7 +3366,7 @@ class TestBulkImportDevicesViewBasicPaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
@@ -3430,7 +3437,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3469,7 +3476,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3491,6 +3498,37 @@ class TestBulkImportDevicesMorePaths:
 
         mock_redirect.assert_called()
 
+    def test_vc_detection_disabled_in_post_is_passed_to_device_import(self):
+        """vc_detection_enabled=off from POST must propagate to bulk import call."""
+        view = self._make_view()
+        request = self._make_base_request(["1"])
+        request.POST.get = MagicMock(side_effect=lambda k, d=None: "off" if k == "vc_detection_enabled" else None)
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
+                ) as mock_bulk_import:
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+                        return_value={"success": [], "failed": [], "skipped": []},
+                    ):
+                        with patch(
+                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                            return_value={"device_id": 1},
+                        ):
+                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
+                                with patch(
+                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
+                                ):
+                                    view.post(request)
+
+        call_kwargs = mock_bulk_import.call_args.kwargs
+        assert call_kwargs["sync_options"]["vc_detection_enabled"] is False
+
     def test_invalid_role_and_rack_values_log_warning(self):
         """Lines 534-535, 544-546: invalid role_id/rack_id → warning."""
         view = self._make_view()
@@ -3507,7 +3545,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3540,7 +3578,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3583,7 +3621,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3619,7 +3657,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3672,7 +3710,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3699,7 +3737,7 @@ class TestBulkImportDevicesMorePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3753,7 +3791,7 @@ class TestBulkImportEdgePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
@@ -3790,14 +3828,15 @@ class TestBulkImportEdgePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    side_effect=DjPD("No permission"),
-                ):
-                    with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                        response = view.post(request)
+                with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                        side_effect=DjPD("No permission"),
+                    ):
+                        with patch("netbox_librenms_plugin.views.imports.actions.messages"):
+                            response = view.post(request)
 
         assert response.headers.get("HX-Redirect") is not None
 
@@ -3823,7 +3862,7 @@ class TestBulkImportEdgePaths:
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
-                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch("utilities.rqworker.get_workers_for_queue", return_value=2):
                     with patch(

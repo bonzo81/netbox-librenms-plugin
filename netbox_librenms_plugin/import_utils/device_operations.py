@@ -519,7 +519,8 @@ def validate_device_for_import(
             result["site"] = site_match
 
             if not site_match["found"]:
-                result["issues"].append(f"No matching site found for location: '{location}'")
+                if not result.get("existing_device"):
+                    result["issues"].append(f"No matching site found for location: '{location}'")
                 # Get alternative suggestions
                 if location:
                     all_sites = Site.objects.all()[:10]  # Limit for performance
@@ -533,9 +534,10 @@ def validate_device_for_import(
                 result["device_type"]["found"] = False
                 result["device_type"]["device_type"] = None
                 result["device_type"]["match_type"] = "ambiguous"
-                result["issues"].append(
-                    f"Multiple device types match hardware '{hardware}' — resolve the ambiguity in NetBox."
-                )
+                if not result.get("existing_device"):
+                    result["issues"].append(
+                        f"Multiple device types match hardware '{hardware}' — resolve the ambiguity in NetBox."
+                    )
             else:
                 # Chassis inventory fallback: when hardware doesn't match,
                 # try the chassis entPhysicalModelName as an additional lookup source
@@ -553,7 +555,8 @@ def validate_device_for_import(
 
             if not result["device_type"]["found"] and result["device_type"].get("match_type") != "ambiguous":
                 result["device_type"]["found"] = False
-                result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
+                if not result.get("existing_device"):
+                    result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
                 # Get some device types for user to choose from
                 all_device_types = DeviceType.objects.all()[:10]
                 result["device_type"]["suggestions"] = [
@@ -614,7 +617,12 @@ def validate_device_for_import(
         result["platform"] = platform_match
 
         if not platform_match["found"] and os:
-            result["warnings"].append(f"No matching platform found for OS: '{os}'")
+            if platform_match.get("match_type") == "ambiguous":
+                result["warnings"].append(
+                    f"Multiple platform mappings found for OS: '{os}' — resolve the conflict in Platform Mappings"
+                )
+            else:
+                result["warnings"].append(f"No matching platform found for OS: '{os}'")
 
         # 6. Additional validations
         if not hostname:

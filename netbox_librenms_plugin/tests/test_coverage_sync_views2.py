@@ -117,7 +117,7 @@ class TestSyncCablesViewSuccessPath:
 
         view = object.__new__(SyncCablesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view.request = _make_request(post_data={"select": ["port1"]})
+        view.request = _make_request(post_data={"select": ["port1"], "device_selection_port1": "1"})
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
@@ -139,17 +139,18 @@ class TestSyncCablesViewSuccessPath:
             patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
             patch("netbox_librenms_plugin.views.sync.cables.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.cables.transaction"),
             patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
+            patch("netbox_librenms_plugin.views.sync.cables.transaction"),
             patch.object(
                 type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
             ),
         ):
-            mock_ct.objects.get_for_model.return_value = MagicMock()
             mock_cache.get.return_value = {"links": [link_data]}
-            local_iface.device_id = mock_device.id  # match device_id to skip VC re-lookup
+            local_iface = MagicMock(pk=10)
+            local_iface.device_id = 1  # match selected_device_id ("1") to skip VC re-lookup
             mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
             mock_cable_cls.objects.filter.return_value.exists.return_value = False
+            mock_ct.objects.get_for_model.return_value = MagicMock()
 
             view.post(view.request, pk=1)
 
@@ -168,6 +169,7 @@ class TestSyncCablesViewDuplicateCable:
         view._post_server_key = "default"
 
         mock_device = MagicMock(pk=1)
+        mock_device.id = 1  # ensure id matches device_id on iface to skip VC branch
         link_data = {
             "local_port_id": "port1",
             "local_port": "Gi0/1",
@@ -183,19 +185,19 @@ class TestSyncCablesViewDuplicateCable:
             patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
             patch("netbox_librenms_plugin.views.sync.cables.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.cables.transaction"),
             patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
+            patch("netbox_librenms_plugin.views.sync.cables.transaction"),
             patch.object(
                 type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
             ),
         ):
-            mock_ct.objects.get_for_model.return_value = MagicMock()
             mock_cache.get.return_value = {"links": [link_data]}
             local_iface = MagicMock(pk=10)
-            local_iface.device_id = mock_device.id  # match device_id to skip VC re-lookup
+            local_iface.device_id = 1  # match the device pk to skip VC branch
             remote_iface = MagicMock(pk=20)
             mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
             mock_cable_cls.objects.filter.return_value.exists.return_value = True
+            mock_ct.objects.get_for_model.return_value = MagicMock()
 
             view.post(view.request, pk=1)
 
@@ -431,8 +433,8 @@ class TestSyncCablesViewHelpers:
             patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
             patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
         ):
-            mock_ct.objects.get_for_model.return_value = MagicMock()
             mock_cable_cls.objects.filter.return_value.exists.return_value = True
+            mock_ct.objects.get_for_model.return_value = MagicMock()
             result = view.check_existing_cable(local, remote)
         assert result is True
 
@@ -490,6 +492,7 @@ class TestAddDeviceToLibreNMSViewFormInvalid:
             patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_device_cls,
             patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.devices.redirect"),
+            patch("netbox_librenms_plugin.forms._get_librenms_poller_group_choices", return_value=[]),
         ):
             mock_device_cls.objects.get.return_value = mock_device
             view.request = _make_request(post_data=post_data)
@@ -755,23 +758,21 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
             result = view.get_object(5, object_type="virtualmachine")
         assert result is mock_vm
 
-    def test_get_object_device_not_found_falls_back_to_vm(self):
+    def test_get_object_raises_http404_when_device_not_found(self):
+        from django.http import Http404
+
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        mock_vm = MagicMock()
 
-        class _DNE(Exception):
-            pass
+        import pytest
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_dev_cls,
-            patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_vm),
+        with patch(
+            "netbox_librenms_plugin.views.sync.devices.get_object_or_404",
+            side_effect=Http404,
         ):
-            mock_dev_cls.DoesNotExist = _DNE
-            mock_dev_cls.objects.get.side_effect = _DNE()
-            result = view.get_object(5)
-        assert result is mock_vm
+            with pytest.raises(Http404):
+                view.get_object(5)
 
     def test_form_valid_with_poller_group(self):
         """poller_group valid int is passed to API."""

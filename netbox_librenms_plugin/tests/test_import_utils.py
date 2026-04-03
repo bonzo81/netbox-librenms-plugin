@@ -2567,7 +2567,7 @@ class TestDeviceConflictActionView:
         """
         request = MagicMock()
         request.user.has_perm.return_value = True
-        # Always include both toggles so _resolve_naming_preferences never falls through
+        # Always include both toggles so resolve_naming_preferences never falls through
         # to the user-pref/settings DB path, which would hit the real database.
         post_data = {
             "action": action,
@@ -4724,19 +4724,13 @@ class TestBulkImportCancellation:
         assert count == 0
         assert result.get("cancelled") is True
 
-    def test_rq_unavailable_falls_back_to_db_check(self):
-        """When RQ is unavailable, DB status check is used as fallback."""
+    def test_rq_unavailable_treats_as_not_cancelled(self):
+        """When RQ is unavailable, _is_job_cancelled returns False so import continues."""
         # mock_rq_job=None triggers the side_effect=Exception path
-        count, result = self._run_bulk_import(mock_rq_job=None, db_status="failed", device_ids=[1])
-        # With DB status "failed", import should not run
-        assert count == 0
-        assert result.get("cancelled") is True
-
-    def test_db_errored_status_also_terminates_loop(self):
-        """When DB job status is 'errored', import loop should terminate early."""
-        count, result = self._run_bulk_import(mock_rq_job=None, db_status="errored", device_ids=[1, 2, 3])
-        assert count == 0
-        assert result.get("cancelled") is True
+        count, result = self._run_bulk_import(mock_rq_job=None, db_status="failed", device_ids=[1, 2, 3])
+        # Redis unavailable → not cancelled → all devices processed
+        assert count == 3
+        assert result.get("cancelled") is False
 
     def test_healthy_job_runs_all_devices(self):
         """When job is healthy, all devices should be imported."""
@@ -5055,7 +5049,7 @@ class TestGetHostnameForAction:
         validation = {}  # no resolved_name
         libre_device = {"hostname": "host.example.com", "sysName": "host"}
 
-        with patch("netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences") as mock_prefs:
+        with patch("netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences") as mock_prefs:
             mock_prefs.return_value = (False, False)  # use_sysname=False, strip_domain=False
             with patch("netbox_librenms_plugin.views.imports.actions._determine_device_name") as mock_name:
                 mock_name.return_value = "host.example.com"
@@ -5067,12 +5061,12 @@ class TestGetHostnameForAction:
 
 
 # ---------------------------------------------------------------------------
-# Tests for _resolve_naming_preferences underscore-variant key support
+# Tests for resolve_naming_preferences underscore-variant key support
 # ---------------------------------------------------------------------------
 
 
 class TestResolveNamingPreferencesKeys:
-    """Test that _resolve_naming_preferences handles both hyphenated and underscored keys."""
+    """Test that resolve_naming_preferences handles both hyphenated and underscored keys."""
 
     def _make_request(self, post=None, get=None):
         from unittest.mock import MagicMock
@@ -5086,11 +5080,11 @@ class TestResolveNamingPreferencesKeys:
     def test_hyphenated_post_key_use_sysname(self):
         from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = self._make_request(post={"use-sysname-toggle": "on", "strip-domain-toggle": "off"})
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            use_sysname, strip_domain = _resolve_naming_preferences(request)
+            use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is True
         assert strip_domain is False
 
@@ -5098,70 +5092,70 @@ class TestResolveNamingPreferencesKeys:
         """Underscore variant 'use_sysname-toggle' should also be recognised."""
         from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = self._make_request(post={"use_sysname-toggle": "on", "strip_domain-toggle": "on"})
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            use_sysname, strip_domain = _resolve_naming_preferences(request)
+            use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is True
         assert strip_domain is True
 
     def test_get_key_used_when_not_in_post(self):
         from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = self._make_request(get={"use-sysname-toggle": "off", "strip-domain-toggle": "on"})
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-            use_sysname, strip_domain = _resolve_naming_preferences(request)
+            use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is False
         assert strip_domain is True
 
     def test_user_pref_used_when_no_toggle_in_request(self):
         from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = self._make_request()
         with patch("netbox_librenms_plugin.utils.get_user_pref") as mock_pref:
             mock_pref.side_effect = lambda req, key: False if "use_sysname" in key else True
-            use_sysname, strip_domain = _resolve_naming_preferences(request)
+            use_sysname, strip_domain = resolve_naming_preferences(request)
         assert use_sysname is False
         assert strip_domain is True
 
     def test_post_takes_precedence_over_user_pref(self):
         from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         request = self._make_request(post={"use-sysname-toggle": "off"})
         # user_pref would say True — POST should win
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=True):
-            use_sysname, _ = _resolve_naming_preferences(request)
+            use_sysname, _ = resolve_naming_preferences(request)
         assert use_sysname is False
 
     def test_truthy_string_true_value(self):
         """'true' and '1' (in addition to 'on') should be treated as True."""
         from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         for truthy_val in ("true", "True", "TRUE", "1"):
             request = self._make_request(post={"use-sysname-toggle": truthy_val, "strip-domain-toggle": "off"})
             with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-                use_sysname, _ = _resolve_naming_preferences(request)
+                use_sysname, _ = resolve_naming_preferences(request)
             assert use_sysname is True, f"Expected True for value {truthy_val!r}"
 
     def test_falsy_string_false_value(self):
         """Unrecognised strings should be treated as False."""
         from unittest.mock import patch
 
-        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+        from netbox_librenms_plugin.utils import resolve_naming_preferences
 
         for falsy_val in ("off", "false", "0", "", "no"):
             request = self._make_request(post={"use-sysname-toggle": falsy_val, "strip-domain-toggle": "off"})
             with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
-                use_sysname, _ = _resolve_naming_preferences(request)
+                use_sysname, _ = resolve_naming_preferences(request)
             assert use_sysname is False, f"Expected False for value {falsy_val!r}"
 
 

@@ -501,8 +501,10 @@ class TestLibreNMSAPIDeviceLookup:
         device.cf = {"librenms_id": ""}
         device.primary_ip = None
 
-        with patch.object(api, "get_device_id_by_hostname", return_value=None):
-            result = api.get_librenms_id(device)
+        with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
+            mock_cache.get.return_value = None
+            with patch.object(api, "get_device_id_by_hostname", return_value=None):
+                result = api.get_librenms_id(device)
         assert result is None
 
     @patch("netbox_librenms_plugin.librenms_api.cache")

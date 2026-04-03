@@ -1,0 +1,20 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Platform Mappings</h4>
+        <p>Map LibreNMS OS strings to NetBox Platforms. During device import,
+           the plugin checks these mappings before falling back to exact Platform
+           name matching. This is useful when LibreNMS reports an OS name that
+           differs from the corresponding NetBox Platform name.</p>
+        <p>Example: LibreNMS OS <code>iosxe</code> → NetBox Platform <code>Cisco IOS-XE</code>.</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:platformmapping_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

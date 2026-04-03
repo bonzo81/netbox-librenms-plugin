@@ -13,15 +13,15 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 logger = logging.getLogger(__name__)
 
 
-def convert_speed_to_kbps(speed_bps: int) -> int:
+def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
     """
     Convert speed from bits per second to kilobits per second.
 
     Args:
-        speed_bps (int): Speed in bits per second.
+        speed_bps (int | None): Speed in bits per second, or None.
 
     Returns:
-        int: Speed in kilobits per second.
+        int | None: Speed in kilobits per second, or None if input is None.
     """
     if speed_bps is None:
         return None
@@ -277,16 +277,22 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
     """
     Match LibreNMS hardware string to a NetBox DeviceType.
 
-    Only performs exact matching on part_number and model fields (case-insensitive).
+    Checks DeviceTypeMapping table first, then falls back to exact matching
+    on part_number and model fields (case-insensitive).
 
     Args:
         hardware_name (str): Hardware string from LibreNMS API (e.g., 'C9200L-48P-4X')
 
     Returns:
-        dict: Dictionary containing:
+        dict | None: Dictionary containing:
             - matched (bool): Whether a match was found
             - device_type (DeviceType|None): The matched DeviceType object
-            - match_type (str|None): Always 'exact' if found, None otherwise
+            - match_type (str|None): 'mapping' if via DeviceTypeMapping, 'exact' if via
+              part_number/model, None otherwise
+        Returns ``None`` when ``MultipleObjectsReturned`` is raised on any lookup
+        (DeviceTypeMapping, part_number, or model) — i.e., the function fails closed
+        on all ambiguity cases.  Callers must guard with ``if result is None:``
+        before inspecting the dict.
     """
     from dcim.models import DeviceType
 
@@ -390,9 +396,10 @@ def find_matching_site(librenms_location: str) -> dict:
 
 def find_matching_platform(librenms_os: str) -> dict:
     """
-    Find exact matching NetBox platform for a LibreNMS OS.
+    Find matching NetBox platform for a LibreNMS OS.
 
-    Only performs exact name matching (case-insensitive).
+    Checks PlatformMapping table first (explicit user-defined mapping),
+    then falls back to exact case-insensitive name match.
 
     Args:
         librenms_os (str): OS string from LibreNMS (e.g., 'ios', 'linux', 'junos')
@@ -401,12 +408,32 @@ def find_matching_platform(librenms_os: str) -> dict:
         dict: Dictionary containing:
             - found (bool): Whether a match was found
             - platform (Platform|None): The matched Platform object
-            - match_type (str|None): Always 'exact' if found, None otherwise
+            - match_type (str|None): 'mapping', 'exact', 'ambiguous', or None.
+              'ambiguous' means multiple PlatformMapping entries matched, or
+              multiple Platform objects share the same name, and a single
+              Platform could not be determined.
     """
     from dcim.models import Platform
 
     if not librenms_os or librenms_os == "-":
         return {"found": False, "platform": None, "match_type": None}
+
+    # Check PlatformMapping table first (lazy import to match pattern used by other optional models)
+    try:
+        from netbox_librenms_plugin.models import PlatformMapping as _PlatformMapping
+
+        _has_platform_mapping = True
+    except ImportError:
+        _has_platform_mapping = False
+
+    if _has_platform_mapping:
+        try:
+            mapping = _PlatformMapping.objects.get(librenms_os__iexact=librenms_os)
+            return {"found": True, "platform": mapping.netbox_platform, "match_type": "mapping"}
+        except _PlatformMapping.DoesNotExist:
+            pass
+        except _PlatformMapping.MultipleObjectsReturned:
+            return {"found": False, "platform": None, "match_type": "ambiguous"}
 
     # Try case-insensitive exact name match
     try:
@@ -415,8 +442,7 @@ def find_matching_platform(librenms_os: str) -> dict:
     except Platform.DoesNotExist:
         pass
     except Platform.MultipleObjectsReturned:
-        platform = Platform.objects.filter(name__iexact=librenms_os).first()
-        return {"found": True, "platform": platform, "match_type": "exact"}
+        return {"found": False, "platform": None, "match_type": "ambiguous"}
 
     return {"found": False, "platform": None, "match_type": None}
 
@@ -569,8 +595,8 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
 
     Supports both the legacy integer format and the new multi-server JSON format::
 
-        Legacy:  librenms_id = 42              → returned as universal fallback for any server_key
-        New:     librenms_id = {"primary": 42} → returns 42 only for server_key="primary"
+        Legacy:  librenms_id = 42          → returns 42 for any server_key (universal fallback)
+        New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
 
     If the stored value (or the dict entry for server_key) is a string it is
     normalised to ``int``.  When *auto_save* is ``True`` (the default) the
@@ -596,7 +622,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
         return cf_value if cf_value > 0 else None
     if isinstance(cf_value, str):
         # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
-        # Treated as a legacy universal fallback for any server.
+        # Treat as a legacy universal fallback.
         try:
             int_id = int(cf_value)
         except (ValueError, TypeError):
@@ -616,6 +642,8 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             try:
                 value = int(value)
             except (ValueError, TypeError):
+                return None
+            if value <= 0:
                 return None
             if auto_save:
                 cf_value[server_key] = value
@@ -714,10 +742,17 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         return None
     if isinstance(librenms_id, bool):
         return None
-    try:
-        librenms_id = int(librenms_id)
-    except (ValueError, TypeError):
-        pass  # keep original; string queries will still match string-stored IDs
+    if isinstance(librenms_id, (int, float)) and librenms_id <= 0:
+        return None
+    if isinstance(librenms_id, str):
+        cleaned = librenms_id.strip()
+        if cleaned == "":
+            return None
+        try:
+            if int(cleaned) <= 0:
+                return None
+        except ValueError:
+            return None
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
     # Also match when the namespaced value was stored as a string (e.g. {"production": "42"}).
     q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
@@ -726,6 +761,21 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     # regardless of which server is currently active.
     q |= Q(custom_field_data__librenms_id=librenms_id)
     q |= Q(custom_field_data__librenms_id=str(librenms_id))
+    # When a string ID looks like an integer, also match the numeric JSON form so
+    # "42" matches records that store the value as the JSON number 42.
+    # Strip whitespace and canonicalize leading-zero forms ("042", "42 ") → "42".
+    if isinstance(librenms_id, str):
+        cleaned = librenms_id.strip()
+        try:
+            int_value = int(cleaned)
+            if int_value > 0:
+                canonical_str = str(int_value)
+                q |= Q(**{f"custom_field_data__librenms_id__{server_key}": canonical_str})
+                q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
+                q |= Q(custom_field_data__librenms_id=canonical_str)
+                q |= Q(custom_field_data__librenms_id=int_value)
+        except ValueError:
+            pass
     return model.objects.filter(q).first()
 
 
@@ -766,3 +816,229 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
         obj,
     )
     return True
+
+
+def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
+    """
+    Check if installing this module type in a nested bay would cause a name conflict.
+
+    Returns True when ALL of the following are true:
+    - The module type has interface templates using ``{module}``
+    - The bay is nested (its parent is owned by an installed module)
+    - There is at least one sibling bay under the same parent
+
+    In this situation NetBox's ``resolve_name()`` replaces ``{module}`` with the
+    root ancestor's bay position, producing the same interface name for every
+    sibling at this nesting level.
+
+    Args:
+        module_type: The ModuleType to install.
+        module_bay: The ModuleBay target.
+        sibling_counts: Optional precomputed dict mapping module_id → bay count.
+            When provided, avoids a per-call DB query.  Pass
+            ``{mid: len(bays) for mid, bays in module_scoped_bays.items()}`` from
+            the caller that already has the bay maps loaded.
+    """
+    from dcim.constants import MODULE_TOKEN
+
+    if not module_bay or not module_bay.module_id:
+        return False  # Top-level bay — no conflict
+
+    templates = list(module_type.interfacetemplates.all())
+    if not templates:
+        return False  # No interface templates
+
+    if not any(MODULE_TOKEN in t.name for t in templates):
+        return False  # Template doesn't use {module}
+
+    if sibling_counts is not None:
+        sibling_count = sibling_counts.get(module_bay.module_id, 0)
+    else:
+        from dcim.models import ModuleBay as ModuleBayModel
+
+        sibling_count = ModuleBayModel.objects.filter(
+            device=module_bay.device,
+            module_id=module_bay.module_id,
+        ).count()
+
+    return sibling_count > 1
+
+
+def get_module_types_indexed() -> dict:
+    """
+    Return all NetBox module types indexed by model (and part_number), with ModuleTypeMapping applied.
+
+    ModuleTypeMapping entries take priority over the base model/part_number keys so that
+    explicit overrides win when the same string appears in both.
+    """
+    from dcim.models import ModuleType
+
+    from netbox_librenms_plugin.models import ModuleTypeMapping
+
+    result: dict = {}
+    ambiguous: set = set()
+    for mt in ModuleType.objects.all().select_related("manufacturer").prefetch_related("interfacetemplates"):
+        seen_this_entry: set = set()
+        for key in (mt.model, mt.part_number):
+            if not key or key in seen_this_entry:
+                continue
+            seen_this_entry.add(key)
+            if key in ambiguous:
+                continue
+            if key in result:
+                ambiguous.add(key)
+                del result[key]
+            else:
+                result[key] = mt
+    # Mapping ambiguity is tracked separately so that a unique mapping always
+    # wins over a base ModuleType entry (explicit overrides take priority).
+    mapping_seen: set = set()
+    mapping_ambiguous: set = set()
+    for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer").prefetch_related(
+        "netbox_module_type__interfacetemplates"
+    ):
+        key = mapping.librenms_model
+        if key in mapping_ambiguous:
+            continue
+        if key in mapping_seen:
+            mapping_ambiguous.add(key)
+            del result[key]
+        else:
+            mapping_seen.add(key)
+            result[key] = mapping.netbox_module_type
+    return result
+
+
+def preload_normalization_rules(scope: str, manufacturer=None) -> dict:
+    """
+    Preload NormalizationRule rows for a (scope, manufacturer) combination.
+
+    Returns a dict mapping ``(scope, manufacturer_pk_or_None)`` → list of rules.
+    Pass this dict as ``preloaded_rules`` to :func:`apply_normalization_rules` and
+    :func:`resolve_module_type` to avoid repeated DB queries inside loops.
+    """
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    cache: dict = {}
+    if manufacturer and manufacturer.pk is not None:
+        mfg_pk = manufacturer.pk
+        cache[(scope, mfg_pk)] = list(
+            NormalizationRule.objects.filter(scope=scope, manufacturer=manufacturer).order_by("priority", "pk")
+        )
+    cache[(scope, None)] = list(
+        NormalizationRule.objects.filter(scope=scope, manufacturer__isnull=True).order_by("priority", "pk")
+    )
+    return cache
+
+
+def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, preloaded_rules: dict | None = None) -> str:
+    """
+    Apply NormalizationRule chain to transform a string before matching.
+
+    Rules for the given scope are applied in priority order.  Each rule's
+    regex substitution transforms the output of the previous rule, forming
+    a pipeline.  If no rules match, the original value is returned unchanged.
+
+    When *manufacturer* is given, manufacturer-scoped rules run first,
+    followed by unscoped (``manufacturer__isnull=True``) rules.  When
+    *manufacturer* is ``None``, only unscoped rules are applied.
+
+    Args:
+        value:  The raw string to normalize (e.g. '3HE16474AARA01').
+        scope:  One of NormalizationRule.SCOPE_* constants.
+        manufacturer:  Optional Manufacturer instance to scope rules.
+        preloaded_rules:  Optional dict from :func:`preload_normalization_rules`.
+            When provided, DB queries are skipped and preloaded lists are used
+            instead, eliminating repeated queries inside loops.
+
+    Returns:
+        The normalized string after all matching rules have been applied.
+    """
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    if not value:
+        return value
+
+    def _apply_rules(val, rules_qs):
+        for rule in rules_qs:
+            try:
+                val = re.sub(rule.match_pattern, rule.replacement, val)
+            except (re.error, IndexError):
+                logger.error(
+                    "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
+                )
+        return val
+
+    if preloaded_rules is not None:
+        if manufacturer and manufacturer.pk is not None:
+            mfg_pk = manufacturer.pk
+            if (scope, mfg_pk) in preloaded_rules:
+                value = _apply_rules(value, preloaded_rules[(scope, mfg_pk)])
+            else:
+                # Manufacturer key missing from preloaded dict — fall back to DB and cache result
+                rules = list(
+                    NormalizationRule.objects.filter(scope=scope, manufacturer=manufacturer).order_by("priority", "pk")
+                )
+                preloaded_rules[(scope, mfg_pk)] = rules
+                value = _apply_rules(value, rules)
+        if (scope, None) in preloaded_rules:
+            value = _apply_rules(value, preloaded_rules[(scope, None)])
+        else:
+            # Unscoped rules not preloaded — fall back to DB and cache result
+            unscoped_rules = list(
+                NormalizationRule.objects.filter(scope=scope, manufacturer__isnull=True).order_by("priority", "pk")
+            )
+            preloaded_rules[(scope, None)] = unscoped_rules
+            value = _apply_rules(value, unscoped_rules)
+    elif manufacturer and manufacturer.pk is not None:
+        # Manufacturer-specific rules first, then unscoped rules
+        for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
+            rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
+            value = _apply_rules(value, rules)
+    else:
+        rules = NormalizationRule.objects.filter(scope=scope, manufacturer__isnull=True).order_by("priority", "pk")
+        value = _apply_rules(value, rules)
+    return value
+
+
+def resolve_module_type(model_name: str, module_types: dict, manufacturer=None, *, norm_rules: dict | None = None):
+    """
+    Resolve a LibreNMS model name to a NetBox ModuleType via direct lookup then normalization.
+
+    Pass ``norm_rules`` (from :func:`preload_normalization_rules`) to avoid
+    repeated DB queries when called in a loop.
+
+    Returns the matched ModuleType or None.
+    """
+    if not model_name:
+        return None
+    matched = module_types.get(model_name)
+    if not matched:
+        normalized = apply_normalization_rules(
+            model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
+        )
+        if normalized != model_name:
+            matched = module_types.get(normalized)
+    return matched
+
+
+def get_enabled_ignore_rules() -> list:
+    """Return all enabled InventoryIgnoreRule instances as a list."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    return list(InventoryIgnoreRule.objects.filter(enabled=True))
+
+
+def load_bay_mappings() -> tuple:
+    """
+    Load all ModuleBayMapping rows, split into exact and regex lists.
+
+    Returns:
+        (exact_mappings, regex_mappings) tuple of lists.
+    """
+    from netbox_librenms_plugin.models import ModuleBayMapping
+
+    all_mappings = list(ModuleBayMapping.objects.all())
+    exact = [m for m in all_mappings if not m.is_regex]
+    regex = [m for m in all_mappings if m.is_regex]
+    return exact, regex

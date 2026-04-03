@@ -343,12 +343,11 @@ class LibreNMSAPI:
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
-            if response.status_code == 200:
-                device_data = response.json()["devices"][0]
-                if not isinstance(device_data, dict):
-                    return False, None
-                return True, device_data
-            return False, None
+            response.raise_for_status()
+            device_data = response.json()["devices"][0]
+            if not isinstance(device_data, dict):
+                return False, None
+            return True, device_data
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return False, None
 
@@ -711,6 +710,69 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
+    def get_device_transceivers(self, device_id):
+        """
+        Fetch all transceiver data for a device from LibreNMS.
+
+        Route: /api/v0/devices/{device_id}/transceivers
+
+        This is a separate data source from entity inventory. Some vendors
+        (e.g., Nokia/SROS) don't expose SFPs via ENTITY-MIB but do report
+        them through vendor-specific MIBs which LibreNMS surfaces here.
+
+        Args:
+            device_id: LibreNMS device ID
+
+        Returns:
+            tuple: (success: bool, data: list)
+
+        Example transceiver item:
+            {
+                "port_id": 519,
+                "entity_physical_index": 1610899520,
+                "type": "CFP2/QSFP28",
+                "model": "3HE10550AARA01",
+                "serial": "X42AU0D",
+                "channels": 4,
+                "connector": "LC",
+                "wavelength": 1301,
+                ...
+            }
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{device_id}/transceivers",
+                headers=self.headers,
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            try:
+                data = response.json()
+            except ValueError:
+                return False, f"Invalid JSON in transceivers response for device {device_id}"
+
+            if not isinstance(data, dict) or "transceivers" not in data:
+                msg = data.get("message") if isinstance(data, dict) else None
+                return False, msg or f"Unexpected transceivers response format for device {device_id}"
+
+            if data.get("status") != "ok":
+                msg = data.get("message") or f"LibreNMS returned status={data.get('status')!r} for device {device_id}"
+                return False, msg
+
+            transceivers = data["transceivers"]
+            if not isinstance(transceivers, list):
+                msg = data.get("message")
+                return False, msg or f"Unexpected transceivers response format for device {device_id}"
+
+            if any(item is None or not isinstance(item, dict) for item in transceivers):
+                return False, f"Malformed transceiver entry in response for device {device_id}"
+
+            return True, transceivers
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
+
     def get_poller_groups(self):
         """
         Fetch all poller groups from LibreNMS.
@@ -955,14 +1017,15 @@ class LibreNMSAPI:
                 if not isinstance(all_vlans, list):
                     msg = result.get("message")
                     return False, msg or "Unexpected response format: missing 'vlans' list"
+                if not all(isinstance(v, dict) for v in all_vlans):
+                    return False, "Unexpected response format: invalid item shape in 'vlans'"
                 # Filter VLANs by device_id since resources endpoint returns all VLANs
-                device_vlans = [
-                    v for v in all_vlans if isinstance(v, dict) and str(v.get("device_id")) == str(device_id)
-                ]
+                device_vlans = [v for v in all_vlans if str(v.get("device_id")) == str(device_id)]
                 return True, device_vlans
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
             return False, "Unexpected response format"
+
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "VLANs resource not found"
@@ -1005,20 +1068,21 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
 
-            if response.status_code == 200:
-                result = response.json()
-                if not isinstance(result, dict):
-                    return False, "Unexpected response format"
-                port_data = result.get("port")
-                if not isinstance(port_data, list):
-                    return False, result.get("message", "Unexpected response format: missing 'port' list")
-                if not port_data:
-                    return False, "Port not found"
-                if not isinstance(port_data[0], dict):
-                    return False, "Unexpected response format: invalid 'port' entry"
-                return True, port_data[0]
+            result = response.json()
+            if not isinstance(result, dict):
+                return False, "Unexpected response format"
+            if result.get("status") != "ok":
+                msg = result.get("message") or f"LibreNMS returned status={result.get('status')!r} for port"
+                return False, msg
+            port_data = result.get("port")
+            if not isinstance(port_data, list):
+                return False, result.get("message") or "Unexpected response format: missing 'port' list"
+            if not port_data:
+                return False, "Port not found"
+            if not isinstance(port_data[0], dict):
+                return False, "Unexpected response format: invalid 'port' entry"
+            return True, port_data[0]
 
-            return False, f"HTTP {response.status_code}"
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "Port not found in LibreNMS"

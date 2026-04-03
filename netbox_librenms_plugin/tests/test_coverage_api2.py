@@ -242,10 +242,11 @@ class TestSyncJobStatusRQJobStopped:
 
 
 class TestSyncJobStatusRQJobNotInQueue:
-    """Test sync_job_status when RQ.fetch raises an exception."""
+    """Test sync_job_status when RQ.fetch raises NoSuchJobError."""
 
     def test_updates_db_to_failed_when_running_and_not_in_rq(self):
         from core.choices import JobStatusChoices
+        from rq.exceptions import NoSuchJobError
 
         mock_db_job = MagicMock()
         mock_db_job.pk = 5
@@ -260,7 +261,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.objects.get.return_value = mock_db_job
 
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("not found in redis")
+        mock_rq_cls.fetch.side_effect = NoSuchJobError("not found in redis")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)
@@ -279,9 +280,12 @@ class TestSyncJobStatusRQJobNotInQueue:
         assert data["status"] == "updated"
         assert data["rq_status"] == "not_found"
         mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
+        assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
+        assert mock_db_job.completed == "2024-01-03"
 
     def test_no_change_when_not_running_and_not_in_rq(self):
         from core.choices import JobStatusChoices
+        from rq.exceptions import NoSuchJobError
 
         mock_db_job = MagicMock()
         mock_db_job.pk = 6
@@ -296,7 +300,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.objects.get.return_value = mock_db_job
 
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("not found in redis")
+        mock_rq_cls.fetch.side_effect = NoSuchJobError("not found in redis")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)
@@ -316,6 +320,7 @@ class TestSyncJobStatusRQJobNotInQueue:
 
     def test_does_not_overwrite_completed_when_not_in_rq(self):
         from core.choices import JobStatusChoices
+        from rq.exceptions import NoSuchJobError
 
         mock_db_job = MagicMock()
         mock_db_job.pk = 7
@@ -330,7 +335,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.objects.get.return_value = mock_db_job
 
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("gone")
+        mock_rq_cls.fetch.side_effect = NoSuchJobError("gone")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)
@@ -345,6 +350,14 @@ class TestSyncJobStatusRQJobNotInQueue:
 
         mock_tz.now.assert_not_called()
         assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["status"] == "updated"
+        assert data["rq_status"] == "not_found"
+        # Verify the DB job was marked failed and persisted
+        assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
+        mock_db_job.save.assert_called_once()
+        # completed must NOT be overwritten — it was already set
+        assert mock_db_job.completed == "2024-01-01T08:00:00"
 
 
 # ===========================================================================

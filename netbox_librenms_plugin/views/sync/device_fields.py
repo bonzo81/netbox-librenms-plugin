@@ -10,14 +10,10 @@ from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.utils import (
     find_by_librenms_id,
-    get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
     migrate_legacy_librenms_id,
-    resolve_naming_preferences,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
@@ -37,16 +33,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return error
 
         device = get_object_or_404(Device, pk=pk)
-
-        # For VC members without their own librenms_id, use the VC sync device
-        librenms_lookup_device = device
-        if hasattr(device, "virtual_chassis") and device.virtual_chassis:
-            if not device.cf.get("librenms_id"):
-                sync_device = get_librenms_sync_device(device)
-                if sync_device:
-                    librenms_lookup_device = sync_device
-
-        self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
+        self.librenms_id = self.librenms_api.get_librenms_id(device)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS")
@@ -58,50 +45,24 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Failed to retrieve device info from LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        # Bail out early when LibreNMS has no usable name – the fallback
-        # names that _determine_device_name generates (e.g. "device-42")
-        # are only useful during import, not for renaming an existing device.
-        if not (device_info.get("sysName") or device_info.get("hostname")):
-            messages.warning(request, "No name could be determined from LibreNMS")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        sys_name = device_info.get("sysName")
 
-        use_sysname, strip_domain = resolve_naming_preferences(request)
-
-        resolved_name = _determine_device_name(
-            device_info,
-            use_sysname=use_sysname,
-            strip_domain=strip_domain,
-        )
-
-        # For VC members, generate the expected VC member name
-        if (
-            resolved_name
-            and hasattr(device, "virtual_chassis")
-            and device.virtual_chassis is not None
-            and device.vc_position is not None
-        ):
-            resolved_name = _generate_vc_member_name(
-                resolved_name,
-                device.vc_position,
-                serial=getattr(device, "serial", None),
-            )
-
-        if not resolved_name:
-            messages.warning(request, "No name could be determined from LibreNMS")
+        if not sys_name:
+            messages.warning(request, "No sysName available in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         old_name = device.name
-        device.name = resolved_name
+        device.name = sys_name
         try:
             device.full_clean()
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.name = old_name
             error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to update device name to '{resolved_name}': {error_msg}")
+            messages.error(request, f"Failed to update device name to '{sys_name}': {error_msg}")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        messages.success(request, f"Device name updated from '{old_name}' to '{resolved_name}'")
+        messages.success(request, f"Device name updated from '{old_name}' to '{sys_name}'")
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
@@ -194,7 +155,14 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
         match_result = match_librenms_hardware_to_device_type(hardware)
 
-        if not match_result or not match_result["matched"]:
+        if match_result is None:
+            messages.error(
+                request,
+                f"Ambiguous hardware match for '{hardware}': multiple DeviceType entries found.",
+            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        if not match_result["matched"]:
             messages.error(
                 request,
                 f"No matching DeviceType found for hardware '{hardware}'",

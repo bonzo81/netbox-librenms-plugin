@@ -234,7 +234,7 @@ class TestValidateDeviceStateMachine:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": []},
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
             ),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
@@ -533,7 +533,7 @@ class TestValidateDeviceForImport:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": []},
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
             ),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_device_role),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
@@ -590,16 +590,22 @@ class TestValidateDeviceForImport:
         api = self._make_api()
 
         patches = self._patch_all_db()
+        mock_vm_cls = MagicMock()
+        mock_vm_cls.objects.filter.return_value.first.return_value = None
         try:
             for p in patches:
                 p.start()
-            result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
+            # Override with a controlled mock so we can assert the VM model was consulted
+            with patch("virtualization.models.VirtualMachine", mock_vm_cls):
+                result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
         finally:
             for p in patches:
                 p.stop()
 
         assert result is not None
         assert result.get("import_as_vm") is True
+        # Verify VirtualMachine model (not Device) was used for the hostname lookup
+        mock_vm_cls.objects.filter.assert_called()
 
     def test_existing_device_detected(self):
         """When device with same librenms_id exists, sets existing_device in result."""
@@ -779,7 +785,7 @@ class TestValidateDeviceForImportEdgeCases:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": []},
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
             ),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
@@ -896,6 +902,8 @@ class TestValidateDeviceForImportEdgeCases:
             self._stop_patches(patches)
 
         assert result["virtual_chassis"] is not None
+        assert result["virtual_chassis"]["is_stack"] is True
+        assert result["virtual_chassis"]["member_count"] == 2
         mock_get_vc.assert_called_once()
         mock_update_vc.assert_called_once()
 
@@ -1055,7 +1063,7 @@ class TestValidateDeviceMoreEdgeCases:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": []},
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
             ),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
@@ -1397,6 +1405,12 @@ class TestImportSingleDeviceEdgeCases:
         mock_new_device.full_clean.assert_called_once()
         mock_new_device.save.assert_called_once()
         mock_set_id.assert_called_once()
+        # Verify Device was constructed with the resolved site, device_type, and role
+        mock_device_cls.assert_called_once()
+        call_kwargs = mock_device_cls.call_args[1]
+        assert call_kwargs["site"] is mock_site
+        assert call_kwargs["device_type"] is mock_dt
+        assert call_kwargs["role"] is mock_role
 
 
 class TestImportSingleDeviceMoreEdgeCases:

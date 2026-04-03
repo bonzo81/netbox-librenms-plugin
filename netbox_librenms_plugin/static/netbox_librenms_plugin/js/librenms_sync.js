@@ -18,6 +18,41 @@
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 
+/**
+ * Show a Bootstrap-style modal using direct DOM manipulation.
+ * @param {HTMLElement} el - The modal element to show
+ */
+function showModal(el) {
+    if (!el) return;
+    el.classList.add('show');
+    el.style.display = 'block';
+    el.setAttribute('aria-modal', 'true');
+    el.removeAttribute('aria-hidden');
+    let backdrop = document.querySelector('.modal-backdrop');
+    if (!backdrop) {
+        backdrop = document.createElement('div');
+        backdrop.className = 'modal-backdrop fade show';
+        document.body.appendChild(backdrop);
+    }
+    document.body.classList.add('modal-open');
+}
+
+/**
+ * Hide a Bootstrap-style modal and clean up backdrop/body state.
+ * @param {HTMLElement} el - The modal element to hide
+ */
+function hideModal(el) {
+    if (!el) return;
+    el.classList.remove('show');
+    el.style.display = 'none';
+    el.setAttribute('aria-hidden', 'true');
+    el.removeAttribute('aria-modal');
+    document.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.remove());
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('padding-right');
+    document.body.style.removeProperty('overflow');
+}
+
 // Helper to read CSRF token from cookies
 function getCookie(name) {
     let cookieValue = null;
@@ -86,13 +121,17 @@ function getDeviceIdFromUrl() {
     const pluginVMIndex = pathParts.indexOf('virtualmachine');
 
     if (deviceIndex !== -1 && deviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[deviceIndex + 1], type: 'device' };
+        const id = pathParts[deviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (vmIndex !== -1 && vmIndex + 1 < pathParts.length) {
-        return { id: pathParts[vmIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[vmIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     } else if (pluginDeviceIndex !== -1 && pluginDeviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginDeviceIndex + 1], type: 'device' };
+        const id = pathParts[pluginDeviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (pluginVMIndex !== -1 && pluginVMIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginVMIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[pluginVMIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     }
 
     return null;
@@ -153,11 +192,15 @@ function initializeCountdowns() {
     if (window.vlanCountdownInterval) {
         clearInterval(window.vlanCountdownInterval);
     }
+    if (window.moduleCountdownInterval) {
+        clearInterval(window.moduleCountdownInterval);
+    }
 
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
     window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
     window.vlanCountdownInterval = initializeCountdown("vlan-countdown-timer");
+    window.moduleCountdownInterval = initializeCountdown("module-countdown-timer");
 }
 
 // ============================================
@@ -217,6 +260,7 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-ipaddress-table');
     initializeTableCheckboxes('librenms-vlan-table');
     initializeTableCheckboxes('librenms-port-vlan-table');
+    initializeTableCheckboxes('librenms-module-table');
 }
 
 // ============================================
@@ -528,7 +572,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             }
         })
         .catch(err => {
-            console.error('VLAN group verify failed:', err);
+            console.error('VLAN group verify failed:', err && err.message ? err.message : String(err));
         })
         .finally(() => {
             const saveBtn = document.getElementById('saveVlanGroups');
@@ -662,9 +706,14 @@ function initializeVlanModalSave() {
             }).then(response => {
                 if (!response.ok) {
                     return response.text().then(t => {
-                        let msg = `HTTP ${response.status}`;
-                        try { const data = JSON.parse(t); if (data.message) msg = data.message; } catch (_) {}
-                        throw new Error(msg);
+                        const ct = response.headers.get('Content-Type') || '';
+                        let msg = '';
+                        if (ct.includes('application/json')) {
+                            try { const d = JSON.parse(t); msg = d && (d.message || d.detail) || ''; } catch (_) {}
+                        }
+                        if (!msg) msg = t || 'Unknown error';
+                        if (msg.length > 300) msg = msg.slice(0, 300) + '…';
+                        throw new Error(`HTTP ${response.status}: ${msg}`);
                     });
                 }
                 // Apply DOM mutations only after the server has persisted the overrides
@@ -953,22 +1002,7 @@ function initializeBulkEditApply() {
             });
 
             // Close the modal on 'Apply'
-            const bulkModal = document.getElementById('bulkVCMemberModal');
-            if (bulkModal) {
-                bulkModal.classList.remove('show');
-                bulkModal.style.display = 'none';
-                bulkModal.setAttribute('aria-hidden', 'true');
-                bulkModal.removeAttribute('aria-modal');
-
-                const backdrop = document.querySelector('.modal-backdrop');
-                if (backdrop) {
-                    backdrop.remove();
-                }
-
-                document.body.classList.remove('modal-open');
-                document.body.style.removeProperty('padding-right');
-                document.body.style.removeProperty('overflow');
-            }
+            hideModal(document.getElementById('bulkVCMemberModal'));
 
         });
     }
@@ -1220,20 +1254,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // Function to open the bulk VC modal
 function openBulkVCModal() {
-    const modal = document.getElementById('bulkVCMemberModal');
-    if (modal) {
-        modal.classList.add('show');
-        modal.style.display = 'block';
-        modal.setAttribute('aria-modal', 'true');
-        modal.removeAttribute('aria-hidden');
-
-        // Add backdrop
-        const backdrop = document.createElement('div');
-        backdrop.className = 'modal-backdrop fade show';
-        document.body.appendChild(backdrop);
-
-        document.body.classList.add('modal-open');
-    }
+    showModal(document.getElementById('bulkVCMemberModal'));
 }
 
 // Function to update the interface_name_field radio button
@@ -1275,6 +1296,7 @@ function setInterfaceNameFieldFromURL() {
     const urlParams = new URLSearchParams(window.location.search);
     const interfaceNameField = urlParams.get('interface_name_field');
     if (interfaceNameField) {
+        if (!['ifDescr', 'ifName'].includes(interfaceNameField)) return;
         const radio = document.querySelector(`input[name="interface_name_field"][value="${interfaceNameField}"]`);
         if (radio) {
             radio.checked = true;
@@ -1320,11 +1342,6 @@ function initializeNetBoxOnlyInterfaces() {
             if (selectedCheckboxes.length === 0) {
                 return;
             }
-
-            const interfaceNames = Array.from(selectedCheckboxes).map(cb => {
-                const row = cb.closest('tr');
-                return row.querySelector('td:nth-child(2) a').textContent;
-            });
 
             deleteSelectedInterfaces(selectedCheckboxes);
         });
@@ -1382,30 +1399,14 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
         }
     })
         .then(response => {
+            if (!response.ok) {
+                return response.text().then(t => { throw new Error(`HTTP ${response.status} ${response.statusText}: ${t}`); });
+            }
             return response.json();
         })
         .then(data => {
             if (data.status === 'success') {
-                // Close modal using native DOM methods
-                const modalElement = document.getElementById('netboxOnlyInterfacesModal');
-                if (modalElement) {
-                    // Hide the modal
-                    modalElement.classList.remove('show');
-                    modalElement.style.display = 'none';
-                    modalElement.setAttribute('aria-hidden', 'true');
-                    modalElement.removeAttribute('aria-modal');
-
-                    // Remove backdrop
-                    const backdrop = document.querySelector('.modal-backdrop');
-                    if (backdrop) {
-                        backdrop.remove();
-                    }
-
-                    // Clean up body classes and styles
-                    document.body.classList.remove('modal-open');
-                    document.body.style.removeProperty('padding-right');
-                    document.body.style.removeProperty('overflow');
-                }
+                hideModal(document.getElementById('netboxOnlyInterfacesModal'));
 
                 // Refresh the interface data by triggering the refresh button
                 const refreshButton = document.querySelector('[hx-post*="interface-sync"]');
@@ -1547,7 +1548,7 @@ function initializeModuleReplaceButtons() {
             if (modalContent) {
                 modalContent.innerHTML =
                     '<div class="modal-header">' +
-                    '<h5 class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
+                    '<h5 id="htmx-modal-label" class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
                     '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
                     '</div>' +
                     '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
@@ -1557,20 +1558,7 @@ function initializeModuleReplaceButtons() {
             }
 
             // Show modal using direct class manipulation (consistent with openBulkVCModal)
-            const htmxModal = document.getElementById('htmx-modal');
-            if (htmxModal) {
-                htmxModal.classList.add('show');
-                htmxModal.style.display = 'block';
-                htmxModal.setAttribute('aria-modal', 'true');
-                htmxModal.removeAttribute('aria-hidden');
-                let backdrop = document.querySelector('.modal-backdrop');
-                if (!backdrop) {
-                    backdrop = document.createElement('div');
-                    backdrop.className = 'modal-backdrop fade show';
-                    document.body.appendChild(backdrop);
-                }
-                document.body.classList.add('modal-open');
-            }
+            showModal(document.getElementById('htmx-modal'));
 
             // Fetch preview content and inject into modal body
             const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
@@ -1591,6 +1579,7 @@ function initializeModuleReplaceButtons() {
                     if (modalBody) {
                         modalBody.innerHTML = html;
                         htmx.process(modalBody);
+                        updateHtmxModalLabel();
                     }
                 })
                 .catch(err => {
@@ -1617,16 +1606,7 @@ function closeHtmxModal() {
         _activeReplaceController.abort();
         _activeReplaceController = null;
     }
-    const htmxModal = document.getElementById('htmx-modal');
-    if (htmxModal) {
-        htmxModal.classList.remove('show');
-        htmxModal.style.display = 'none';
-        htmxModal.setAttribute('aria-hidden', 'true');
-        htmxModal.removeAttribute('aria-modal');
-        const backdrop = document.querySelector('.modal-backdrop');
-        if (backdrop) backdrop.remove();
-        document.body.classList.remove('modal-open');
-    }
+    hideModal(document.getElementById('htmx-modal'));
 }
 
 // ============================================
@@ -1674,4 +1654,26 @@ document.addEventListener('DOMContentLoaded', function () {
 // Initialize scripts after HTMX swaps content
 document.body.addEventListener('htmx:afterSwap', function (event) {
     initializeScripts();
+});
+
+// Update HTMX modal accessible label after content loads so screen readers
+// announce the actual dialog title rather than the static "Loading" placeholder.
+function updateHtmxModalLabel() {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (!htmxModal) return;
+    const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
+    const labelId = htmxModal.getAttribute('aria-labelledby');
+    const label = (labelId && document.getElementById(labelId)) || document.getElementById('htmx-modal-label');
+    if (header && label) {
+        label.textContent = header.textContent.trim();
+    }
+}
+
+// Listen at document level so the handler fires regardless of which element
+// HTMX dispatches afterSettle on (swap target or ancestor).
+document.addEventListener('htmx:afterSettle', function (event) {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal && (htmxModal === event.target || htmxModal.contains(event.target))) {
+        updateHtmxModalLabel();
+    }
 });

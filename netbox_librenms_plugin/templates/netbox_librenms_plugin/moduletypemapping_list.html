@@ -1,0 +1,19 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Module Type Mapping</h4>
+        <p>Map LibreNMS inventory model names (entPhysicalModelName) to NetBox module types.
+           When synchronizing modules from LibreNMS, these mappings are checked first before
+           falling back to exact model / part number matching.</p>
+        <p>Example: Map "710-017414" to module type "WS-X4908-10GE"</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:moduletypemapping_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

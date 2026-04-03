@@ -1,0 +1,32 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <table class="table table-hover attr-table">
+        <thead>
+          <tr>
+            <th>LibreNMS Name</th>
+            <th>LibreNMS Class</th>
+            <th>NetBox Bay Name</th>
+            <th>Regex?</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{{ object.librenms_name }}</td>
+            <td>{{ object.librenms_class|default:"—" }}</td>
+            <td>{{ object.netbox_bay_name }}</td>
+            <td>{{ object.is_regex|yesno:"Yes,No" }}</td>
+            <td>{{ object.description|default:"—" }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

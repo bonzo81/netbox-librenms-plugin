@@ -52,6 +52,7 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_coverage_sync_views3.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views3.py) | Further sync action view coverage—location sync, VLAN assignment edge cases |
 | [test_coverage_actions.py](../../netbox_librenms_plugin/tests/test_coverage_actions.py) | Import action views—bulk import, device role/cluster/rack update, validation details |
 | [test_coverage_filters.py](../../netbox_librenms_plugin/tests/test_coverage_filters.py) | Import filter logic—filter form processing and device count helpers |
+| [test_init.py](../../netbox_librenms_plugin/tests/test_init.py) | Plugin startup—`_ensure_librenms_id_custom_field` creation, type migration, and multi-DB alias handling |
 | [test_coverage_tables.py](../../netbox_librenms_plugin/tests/test_coverage_tables.py) | Sync tables—column rendering, row data, interface and cable table helpers |
 | [test_coverage_utils.py](../../netbox_librenms_plugin/tests/test_coverage_utils.py) | Utility function coverage—name matching, speed conversion, site/platform lookup |
 | [test_coverage_virtual_chassis.py](../../netbox_librenms_plugin/tests/test_coverage_virtual_chassis.py) | Virtual chassis coverage—VC creation, position conflict handling, member naming |
@@ -64,6 +65,8 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_integration_sync.py](../../netbox_librenms_plugin/tests/test_integration_sync.py) | Integration tests—API client against local mock HTTP server |
 | [test_integration_virtual_chassis.py](../../netbox_librenms_plugin/tests/test_integration_virtual_chassis.py) | Integration tests—VC detection, negative cache, multi-server cache isolation |
 | [test_view_wiring.py](../../netbox_librenms_plugin/tests/test_view_wiring.py) | Smoke tests—view class MRO, mixin wiring, permission contracts, and template syntax |
+| [test_platform_mapping.py](../../netbox_librenms_plugin/tests/test_platform_mapping.py) | PlatformMapping model—clean validation, YAML serialization, table/form/filterset, and find_matching_platform integration |
+| [test_module_replace.py](../../netbox_librenms_plugin/tests/test_module_replace.py) | Module replacement—module swapping, bay reindexing, and replacement validation |
 
 Supporting files:
 
