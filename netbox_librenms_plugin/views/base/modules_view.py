@@ -215,6 +215,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         cached_data = cache.get(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
         if cached_data is None:
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
+        # Re-validate: if the device's LibreNMS ID has been removed since the cache was
+        # written, discard stale inventory rather than showing outdated install/replace actions.
+        if not self.librenms_api.get_librenms_id(obj):
+            cache.delete(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
         return self._build_context(request, obj, cached_data)
 
     def _build_context(self, request, obj, inventory_data):
@@ -897,17 +902,28 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Try exact ModuleBayMapping entries against a candidate name.
 
         Checks class-scoped mappings first, then falls back to classless mappings.
+        When module_bays is a ChainMap, iterates the underlying scopes so that
+        the returned bay is from the correct scope (validated via _fpc_slot_matches).
         Returns the matched module bay or None.
         """
+        maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
         if phys_class:
             mapping = next(
                 (m for m in exact_mappings if m.librenms_name == name and m.librenms_class == phys_class), None
             )
             if mapping and mapping.netbox_bay_name in module_bays:
-                return module_bays[mapping.netbox_bay_name]
+                for scope_map in maps:
+                    if mapping.netbox_bay_name in scope_map:
+                        bay = scope_map[mapping.netbox_bay_name]
+                        if BaseModuleTableView._fpc_slot_matches(name, bay):
+                            return bay
         mapping = next((m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None)
         if mapping and mapping.netbox_bay_name in module_bays:
-            return module_bays[mapping.netbox_bay_name]
+            for scope_map in maps:
+                if mapping.netbox_bay_name in scope_map:
+                    bay = scope_map[mapping.netbox_bay_name]
+                    if BaseModuleTableView._fpc_slot_matches(name, bay):
+                        return bay
         return None
 
     @staticmethod
