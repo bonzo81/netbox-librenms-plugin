@@ -752,7 +752,7 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
             if int(cleaned) <= 0:
                 return None
         except ValueError:
-            pass
+            return None
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
     # Also match when the namespaced value was stored as a string (e.g. {"production": "42"}).
     q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
