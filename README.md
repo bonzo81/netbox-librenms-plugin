@@ -123,7 +123,7 @@ Install with pip:
 Add to your `local_requirements.txt` to ensure it is automatically reinstalled during future upgrades.
 
 ```bash
- "netbox-librenms-plugin" >> /opt/netbox/local_requirements.txt
+echo "netbox-librenms-plugin" >> /opt/netbox/local_requirements.txt
 ```
 
 ### Docker
