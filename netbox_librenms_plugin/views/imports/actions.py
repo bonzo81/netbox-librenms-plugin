@@ -400,9 +400,10 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     status=400,
                 )
 
-        # Derive VC detection flag from actual validation results — if any device
-        # was identified as a stack, the final import must have VC creation enabled.
-        vc_detection_enabled = any(entry["validation"].get("virtual_chassis", {}).get("is_stack") for entry in devices)
+        # Tie VC detection strictly to the user's original preference rather than
+        # inferring it from validation results. This ensures VC creation is only
+        # enabled when explicitly requested via the import UI.
+        vc_detection_enabled = request.GET.get("enable_vc_detection") == "true"
 
         context = {
             "devices": devices,
