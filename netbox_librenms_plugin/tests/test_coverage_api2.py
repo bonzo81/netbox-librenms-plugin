@@ -355,7 +355,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         assert data["rq_status"] == "not_found"
         # Verify the DB job was marked failed and persisted
         assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
-        mock_db_job.save.assert_called_once()
+        mock_db_job.save.assert_called_once_with(update_fields=["status", "completed"])
         # completed must NOT be overwritten — it was already set
         assert mock_db_job.completed == "2024-01-01T08:00:00"
 

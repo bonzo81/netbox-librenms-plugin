@@ -270,4 +270,35 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        # Move button for can_install rows where a single serial conflict exists (requires change+delete)
+        if (
+            self.can_change_module
+            and self.can_delete_module
+            and record.get("can_move_from")
+            and record.get("serial_conflict_module")
+            and record.get("module_bay_id")
+        ):
+            move_url = reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": self.device.pk})
+            conflict_module = record["serial_conflict_module"]
+            buttons.append(
+                format_html(
+                    '<form method="post" action="{}" style="display:inline">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="server_key" value="{}">'
+                    '<input type="hidden" name="conflict_module_id" value="{}">'
+                    '<input type="hidden" name="target_bay_id" value="{}">'
+                    '<button type="submit" class="btn btn-sm btn-info ms-1"'
+                    ' title="Move module from {} / {} to this bay">'
+                    '<i class="mdi mdi-arrow-right"></i> Move'
+                    "</button></form>",
+                    move_url,
+                    self.csrf_token,
+                    self.server_key,
+                    conflict_module.pk,
+                    record["module_bay_id"],
+                    conflict_module.device.name,
+                    conflict_module.module_bay.name,
+                )
+            )
+
         return mark_safe("".join(buttons)) if buttons else ""

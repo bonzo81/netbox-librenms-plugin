@@ -3943,7 +3943,10 @@ class TestBulkImportEdgePaths:
             with patch(
                 "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
-                with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                    return_value={"device_id": 1, "hostname": "test-device"},
+                ):
                     with patch(
                         "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
                         side_effect=DjPD("No permission"),

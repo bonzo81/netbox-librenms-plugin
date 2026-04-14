@@ -889,9 +889,11 @@ class TestDeviceModuleTableView:
         view.request = MagicMock()
         view.request.path = "/dcim/devices/1/librenms-sync/"
         view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
+        view._librenms_api.server_key = "prod-server"
         view.has_write_permission = MagicMock(return_value=True)
-        view.request.user.has_perm = MagicMock(return_value=True)
+        view.request.user.has_perm = MagicMock(
+            side_effect=lambda p: p in {"dcim.add_module", "dcim.change_module", "dcim.delete_module"}
+        )
         return view
 
     def test_get_table_returns_librenms_module_table(self):
@@ -907,7 +909,7 @@ class TestDeviceModuleTableView:
         mock_table_cls.assert_called_once_with(
             [],
             device=obj,
-            server_key="default",
+            server_key="prod-server",
             has_write_permission=True,
             can_add_module=True,
             can_change_module=True,
@@ -925,4 +927,4 @@ class TestDeviceModuleTableView:
             mock_table_cls.return_value = mock_table
             view.get_table([], obj)
 
-        assert mock_table.htmx_url == "/dcim/devices/1/librenms-sync/?tab=modules&server_key=default"
+        assert mock_table.htmx_url == "/dcim/devices/1/librenms-sync/?tab=modules&server_key=prod-server"

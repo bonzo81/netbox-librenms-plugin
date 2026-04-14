@@ -333,11 +333,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             regex_mappings: Pre-filtered list of regex ModuleBayMapping objects.
         """
         current = item
-        # Build bay name->bay dict from pre-fetched bays for fast lookup
-        bay_by_name = {}
+        # Build bay name → list of bays for duplicate-name disambiguation
+        bay_by_name: dict = {}
         for bay in device_bays:
-            if bay.name not in bay_by_name:
-                bay_by_name[bay.name] = bay
+            bay_by_name.setdefault(bay.name, []).append(bay)
 
         exact_mapping_by_name: dict = {}
         for m in exact_mappings:
@@ -369,14 +368,26 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 # Exact-name mapping
                 mapping = exact_mapping_by_name.get(name)
                 if mapping:
-                    bay = bay_by_name.get(mapping.netbox_bay_name)
+                    candidates = bay_by_name.get(mapping.netbox_bay_name, [])
+                    if len(candidates) == 1:
+                        bay = candidates[0]
+                    else:
+                        occupied = [b for b in candidates if hasattr(b, "installed_module") and b.installed_module]
+                        bay = occupied[0] if len(occupied) == 1 else None
                     if bay and hasattr(bay, "installed_module") and bay.installed_module:
                         return bay.installed_module.pk
                 # Regex mapping
                 for rm in regex_mappings:
                     try:
                         if re.search(rm.librenms_name, name):
-                            bay = bay_by_name.get(rm.netbox_bay_name)
+                            candidates = bay_by_name.get(rm.netbox_bay_name, [])
+                            if len(candidates) == 1:
+                                bay = candidates[0]
+                            else:
+                                occupied = [
+                                    b for b in candidates if hasattr(b, "installed_module") and b.installed_module
+                                ]
+                                bay = occupied[0] if len(occupied) == 1 else None
                             if bay and hasattr(bay, "installed_module") and bay.installed_module:
                                 return bay.installed_module.pk
                     except re.error:
