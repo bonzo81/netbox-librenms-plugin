@@ -177,7 +177,8 @@ class ImportDevicesJob(JobRunner):
             device_ids: List of LibreNMS device IDs to import as Devices
             vm_imports: Dict mapping device_id to cluster/role info for VM imports
             server_key: Optional LibreNMS server key for multi-server setups
-            sync_options: Dict with sync_interfaces, sync_cables, sync_ips, use_sysname, strip_domain
+            sync_options: Dict with sync_interfaces, sync_cables, sync_ips,
+                use_sysname, strip_domain, and vc_detection_enabled
             manual_mappings_per_device: Dict mapping device_id to manual_mappings dict
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             **kwargs: Additional job parameters

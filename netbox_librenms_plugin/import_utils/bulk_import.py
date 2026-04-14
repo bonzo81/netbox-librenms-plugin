@@ -27,18 +27,22 @@ def _is_job_cancelled(job) -> bool:
     Return True if a background job has been stopped or cancelled.
 
     Checks RQ/Redis state only (reflects stop API calls immediately).
-    On any Redis/redis-py exception (e.g., connection refused), returns False
-    immediately without any database fallback, to avoid false cancellation.
+    On Redis connectivity issues or a missing RQ job, returns False to avoid
+    false cancellation. Unexpected exceptions are logged and also return False.
     """
-    try:
-        from django_rq import get_queue
-        from rq.job import Job as RQJob
+    from django_rq import get_queue
+    from redis.exceptions import RedisError
+    from rq.exceptions import NoSuchJobError
+    from rq.job import Job as RQJob
 
+    try:
         queue = get_queue("default")
         rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
         return rq_job.is_failed or rq_job.is_stopped
+    except (RedisError, NoSuchJobError):
+        return False
     except Exception:
-        # Redis unavailable — treat as not cancelled to avoid false positives.
+        logger.warning("Unexpected error checking RQ job cancellation state", exc_info=True)
         return False
 
 
