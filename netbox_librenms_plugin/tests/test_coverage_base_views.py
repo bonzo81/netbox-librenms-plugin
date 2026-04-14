@@ -613,6 +613,45 @@ class TestBaseCableTableViewPrepareContext:
         assert result is not None
         assert result["object"] is obj
 
+    def test_non_default_server_key_forwarded_to_enrich(self):
+        """When librenms_api.server_key is non-default, _prepare_context passes it to enrich_links_data."""
+        view = self._make_view()
+        view._librenms_api.server_key = "non-default"
+        obj = _mock_obj()
+
+        links = [
+            {
+                "local_port": "Gi0/0",
+                "local_port_id": "1",
+                "remote_device": None,
+                "remote_port": None,
+                "remote_port_id": None,
+                "remote_device_id": None,
+            }
+        ]
+        mock_table = MagicMock()
+        mock_table.configure = MagicMock()
+
+        with (
+            patch.object(view, "get_links_data", return_value=links),
+            patch.object(view, "enrich_links_data", return_value=links) as mock_enrich,
+            patch.object(view, "get_cache_key", return_value="cable-key"),
+            patch.object(view, "get_table", return_value=mock_table),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.cables_view.timezone") as mock_tz,
+        ):
+            mock_cache.ttl.return_value = 300
+            mock_tz.now.return_value = MagicMock()
+            mock_tz.timedelta.return_value = MagicMock()
+            result = view._prepare_context(view.request, obj, fetch_fresh=True)
+
+        assert result is not None
+        # enrich_links_data must be called with the non-default server_key
+        mock_enrich.assert_called_once()
+        _, enrich_kwargs = mock_enrich.call_args
+        assert enrich_kwargs.get("server_key") == "non-default"
+
 
 class TestBaseCableTableViewGetContextData:
     """Tests for BaseCableTableView.get_context_data."""

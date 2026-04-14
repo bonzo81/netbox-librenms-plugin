@@ -75,7 +75,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         return data
 
     def get_links_data(self, obj):
-        """Fetch links data from LibreNMS, including local_port names for the current request."""
+        """Fetch links data from LibreNMS for the device and add local port names."""
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
         success, data = self.librenms_api.get_device_links(self.librenms_id)
         if not success or "error" in data:
@@ -95,17 +95,20 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             local_ports_map[port_id] = port_name
 
         links = data.get("links", [])
-        return [
-            {
-                "local_port": local_ports_map.get(str(link.get("local_port_id"))),
-                "local_port_id": link.get("local_port_id"),
-                "remote_port": link.get("remote_port"),
-                "remote_device": link.get("remote_hostname"),
-                "remote_port_id": link.get("remote_port_id"),
-                "remote_device_id": link.get("remote_device_id"),
-            }
-            for link in links
-        ]
+        links_data = []
+        for link in links:
+            local_port_name = local_ports_map.get(str(link.get("local_port_id")))
+            links_data.append(
+                {
+                    "local_port": local_port_name,
+                    "local_port_id": link.get("local_port_id"),
+                    "remote_port": link.get("remote_port"),
+                    "remote_device": link.get("remote_hostname"),
+                    "remote_port_id": link.get("remote_port_id"),
+                    "remote_device_id": link.get("remote_device_id"),
+                }
+            )
+        return links_data
 
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None):
         """Try to find device in NetBox first by librenms_id custom field, then by name"""
@@ -304,6 +307,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def _prepare_context(self, request, obj, fetch_fresh=False):
         """Helper method to prepare the context data for cable sync views."""
+        table = None
         cache_expiry = None
         server_key = self.librenms_api.server_key
         # For VC devices, cache under the sync device's key so SingleCableVerifyView reads the same entry.
@@ -357,10 +361,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         cache_ttl = cache.ttl(cache_key)
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
-
+        # Generate the table
         table = self.get_table(links_data, obj)
+
         table.configure(request)
 
+        # Prepare and return the context
         return {
             "table": table,
             "object": obj,
@@ -414,7 +420,9 @@ class SingleCableVerifyView(BaseCableTableView):
         selected_device_id = data.get("device_id")
         local_port_id = data.get("local_port_id")
         # Read server_key from POST so we use the exact server the user was viewing
-        server_key = data.get("server_key") or self.librenms_api.server_key
+        server_key = data.get("server_key")
+        if not server_key:
+            server_key = self.librenms_api.server_key
 
         formatted_row = {
             "local_port": "",

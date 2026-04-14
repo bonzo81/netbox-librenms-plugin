@@ -132,6 +132,7 @@
         hx-swap="none">
     {% csrf_token %}
     <input type="hidden" name="server_key" value="{{ server_key }}">
+    <input type="hidden" name="vc_detection_enabled" value="{{ vc_detection_enabled|yesno:'on,off' }}">
     {% for entry in devices %}
       <input type="hidden" name="select" value="{{ entry.device_id }}">
       {% if entry.role %}<input type="hidden" name="role_{{ entry.device_id }}" value="{{ entry.role.pk }}">{% endif %}
@@ -162,6 +163,8 @@
     window.__bulkConfirmHandlersAttached = true;
 
     const formId = 'bulk-import-confirm-form';
+    const checkboxId = 'use-background-job-checkbox';
+    const hiddenId = 'use-background-job-hidden';
 
     function toggleButtonState(isLoading) {
       const form = document.getElementById(formId);
@@ -183,14 +186,15 @@
       }
     }
 
-    // Sync checkbox with hidden input
-    const checkbox = document.getElementById('use-background-job-checkbox');
-    const hiddenInput = document.getElementById('use-background-job-hidden');
-    if (checkbox && hiddenInput) {
-      checkbox.addEventListener('change', function() {
-        hiddenInput.value = checkbox.checked ? 'on' : 'off';
-      });
-    }
+    // Delegated so it survives HTMX re-renders of the modal fragment.
+    document.addEventListener('change', function(event) {
+      if (event.target && event.target.id === checkboxId) {
+        const hiddenInput = document.getElementById(hiddenId);
+        if (hiddenInput) {
+          hiddenInput.value = event.target.checked ? 'on' : 'off';
+        }
+      }
+    });
 
     document.addEventListener('htmx:beforeRequest', function(event) {
       if (event.target && event.target.id === formId) {

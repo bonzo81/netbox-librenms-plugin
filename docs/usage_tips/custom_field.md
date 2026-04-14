@@ -18,10 +18,10 @@ For the Interface object, the plugin will automatically populate the LibreNMS ID
 - **Efficient Synchronization:** Enhances the reliability of API lookups.
 - **Cable creation:** Allows better device identification for the creation of cables between NetBox devices.
 
-## Manual Custom Field Setup (Legacy)
+## Manual Custom Field Setup
 
 !!! note
-    This section is only needed if you are running an older version of the plugin that does not auto-create the field, or if you need to recreate it after deletion.
+    On 0.4.3+, rerun migrations first (`manage.py migrate`). If you need to recreate the field manually on current releases, use the JSON schema below. Pre-0.4.2 releases used an Integer field — do not use Integer for new entries.
 
 Follow these steps to create the `librenms_id` custom field in NetBox:
 
