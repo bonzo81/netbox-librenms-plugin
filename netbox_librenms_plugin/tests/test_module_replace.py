@@ -155,6 +155,7 @@ class TestModuleMismatchPreviewView:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
             mock_cache.get.return_value = cached
+            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 0
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
             resp = view.get(request, pk=24)
 
@@ -195,6 +196,7 @@ class TestModuleMismatchPreviewView:
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
             mock_cache.get.return_value = cached
+            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 1
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = conflict_module
             view.get(request, pk=24)
 
@@ -294,7 +296,8 @@ class TestReplaceModuleView:
             sfu_qs = MagicMock()
             sfu_qs.filter.return_value.select_related.return_value.first.return_value = installed
             mock_module_cls.objects.select_for_update.return_value = sfu_qs
-            # Re-derived conflict uses serial-based lookup (.filter().exclude().select_related().first())
+            # Re-derived conflict uses serial-based lookup (.filter().exclude().select_related().count()/.first())
+            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 0
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
 
             view.post(request, pk=24)
@@ -346,6 +349,7 @@ class TestReplaceModuleView:
             sfu_qs = MagicMock()
             sfu_qs.filter.return_value.select_related.return_value.first.side_effect = [installed, conflict]
             mock_module_cls.objects.select_for_update.return_value = sfu_qs
+            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 1
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = conflict
 
             view.post(request, pk=24)

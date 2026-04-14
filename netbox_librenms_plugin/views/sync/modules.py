@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.views import View
 
 from netbox_librenms_plugin.utils import get_module_types_indexed
+from netbox_librenms_plugin.views.base.modules_view import _PLACEHOLDER_VALUES
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -42,6 +43,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
         device = get_object_or_404(Device, pk=pk)
         serial = request.POST.get("serial", "").strip()
+        if serial.lower() in _PLACEHOLDER_VALUES:
+            serial = ""
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         try:
@@ -251,7 +254,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
         serial = (item.get("entPhysicalSerialNum") or "").strip()
-        if serial == "-":
+        if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
         name = item.get("entPhysicalName", "") or model_name
 
@@ -617,7 +620,7 @@ class ModuleMismatchPreviewView(
 
         librenms_model = (librenms_item.get("entPhysicalModelName") or "").strip() or "-"
         librenms_serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
-        if librenms_serial == "-":
+        if librenms_serial.lower() in _PLACEHOLDER_VALUES:
             librenms_serial = ""
 
         # Detect type mismatch
@@ -631,7 +634,7 @@ class ModuleMismatchPreviewView(
 
         type_mismatch = matched_type is not None and installed_module.module_type_id != matched_type.pk
         installed_serial = (installed_module.serial or "").strip()
-        if installed_serial == "-":
+        if installed_serial.lower() in _PLACEHOLDER_VALUES:
             installed_serial = ""
         serial_mismatch = bool(
             not type_mismatch and librenms_serial != installed_serial and (librenms_serial or installed_serial)
@@ -639,13 +642,18 @@ class ModuleMismatchPreviewView(
 
         # Check whether the LibreNMS serial already exists at a different location
         serial_conflict = None
+        serial_conflict_ambiguous = False
         if librenms_serial:
-            serial_conflict = (
+            conflict_qs = (
                 Module.objects.filter(serial=librenms_serial)
                 .exclude(pk=installed_module.pk)
                 .select_related("module_type", "module_bay", "device")
-                .first()
             )
+            conflict_count = conflict_qs.count()
+            if conflict_count == 1:
+                serial_conflict = conflict_qs.first()
+            elif conflict_count > 1:
+                serial_conflict_ambiguous = True
 
         return render(
             request,
@@ -661,6 +669,7 @@ class ModuleMismatchPreviewView(
                 "type_mismatch": type_mismatch,
                 "serial_mismatch": serial_mismatch,
                 "serial_conflict": serial_conflict,
+                "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "ent_index": ent_index_int,
                 "server_key": server_key or "",
             },
@@ -716,19 +725,28 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         model_name = (librenms_item.get("entPhysicalModelName") or "").strip()
         serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
-        if serial == "-":
+        if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
 
         # Re-derive any serial conflict from the database rather than trusting
         # a client-submitted conflict_module_id POST parameter.
         conflict_module = None
         if serial:
-            conflict_module = (
+            conflict_qs = (
                 Module.objects.filter(serial=serial)
                 .exclude(pk=installed_module.pk)
                 .select_related("module_type", "module_bay", "device")
-                .first()
             )
+            conflict_count = conflict_qs.count()
+            if conflict_count > 1:
+                messages.error(
+                    request,
+                    f"Serial '{serial}' is assigned to multiple modules; cannot determine which to remove. "
+                    "Please resolve the conflict manually.",
+                )
+                return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            if conflict_count == 1:
+                conflict_module = conflict_qs.first()
 
         module_types = get_module_types_indexed()
         from netbox_librenms_plugin.utils import resolve_module_type

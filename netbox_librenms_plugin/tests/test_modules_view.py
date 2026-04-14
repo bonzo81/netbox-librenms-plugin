@@ -861,7 +861,7 @@ class TestDetectSerialConflicts:
             mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict1, conflict2]
             view._detect_serial_conflicts([row])
 
-        assert "serial_conflict_module" not in row
+        assert row.get("serial_conflict_module") is None
         assert not row.get("can_move_from")
         assert row.get("serial_conflict_ambiguous") is True
 

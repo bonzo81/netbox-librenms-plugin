@@ -1334,7 +1334,6 @@ class TestProcessDeviceFilters:
 
     def test_vc_prefetch_client_disconnect_no_request_reraises(self):
         """BrokenPipeError during prefetch with request=None → exception re-raised (line 511)."""
-        import pytest
 
         api = self._make_api()
         device = self._make_device()
@@ -1810,7 +1809,6 @@ class TestProcessDeviceFilters:
 
     def test_validate_path_client_disconnect_no_request_reraises(self):
         """validate raises BrokenPipeError, request=None → re-raised (line 618)."""
-        import pytest
 
         api = self._make_api()
         device = self._make_device()
@@ -2249,9 +2247,6 @@ class TestCacheIndexTTLRefresh:
             process_device_filters(api, filters={}, vc_detection_enabled=False, clear_cache=False, show_disabled=False)
             return mock_cache
 
-    @pytest.mark.xfail(
-        reason="TTL refresh on existing cache key not yet implemented in process_device_filters", strict=False
-    )
     def test_cache_index_refreshed_when_key_already_present(self):
         """cache.set is called for the index even when the metadata key is already present."""
         existing_key = "mkey"

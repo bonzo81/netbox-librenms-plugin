@@ -58,12 +58,18 @@
         <em>Move</em> will update its location to this bay instead of creating a new entry.
     </small>
 </div>
+{% elif serial_conflict_ambiguous %}
+<div class="alert alert-warning py-2 mb-3">
+    <i class="mdi mdi-alert me-1"></i>
+    <strong>Ambiguous serial conflict:</strong> Serial <code>{{ librenms_serial }}</code> is assigned to multiple
+    modules. Please resolve the conflict manually before proceeding.
+</div>
 {% endif %}
 
 <div class="d-flex gap-2 justify-content-end flex-wrap mt-3">
     <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
 
-    {% if serial_mismatch and not type_mismatch and not serial_conflict and installed_module %}
+    {% if serial_mismatch and not type_mismatch and not serial_conflict and not serial_conflict_ambiguous and installed_module %}
     {# Quick serial-only update — no delete/recreate needed #}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"
@@ -95,7 +101,7 @@
     {% endif %}
 
     {# Replace: delete current + install fresh from LibreNMS data #}
-    {% if installed_module %}
+    {% if installed_module and not serial_conflict_ambiguous %}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
           style="display:inline">

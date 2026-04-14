@@ -471,6 +471,8 @@ class TestFindMatchingPlatformMultipleReturned:
                 assert result["found"] is False
                 assert result["platform"] is None
                 assert result["match_type"] == "ambiguous"
+                # Verify PlatformMapping lookup ran before the Platform fallback
+                MockPlatformMapping.objects.get.assert_called_once_with(librenms_os__iexact="ios")
 
 
 class TestGetMissingVlanWarning:

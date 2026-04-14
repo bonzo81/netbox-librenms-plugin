@@ -70,7 +70,7 @@ def _netbox_shell(code):
         ],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": "/root"},
+        env={**os.environ, "PATH": "/usr/bin:/bin", "HOME": "/root"},
     )
     # Filter out config loading lines
     lines = [line for line in result.stdout.strip().split("\n") if not line.startswith(("🧬", "156 objects"))]
