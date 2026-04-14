@@ -3722,7 +3722,7 @@ class TestProcessDeviceFilters:
         with (
             patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI") as mock_api_cls,
             patch("netbox_librenms_plugin.import_utils.bulk_import.import_single_device") as mock_import,
-            patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import") as mock_validate,
             patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
         ):
             mock_api = MagicMock()
@@ -3739,6 +3739,9 @@ class TestProcessDeviceFilters:
         # The resolved api.server_key ("resolved-key") must be passed, not None
         assert mock_import.call_args is not None
         assert mock_import.call_args.kwargs.get("server_key") == "resolved-key"
+        assert mock_validate.call_args is not None
+        # Import-time VC detection is always enabled (restored pre-regression behavior).
+        assert mock_validate.call_args.kwargs.get("include_vc_detection") is True
 
 
 class TestVCPositionHandling:
@@ -4750,7 +4753,7 @@ class TestBulkImportCancellation:
 
 
 class TestBulkImportVCPermission:
-    """Test that dcim.add_virtualchassis is checked before creating a VirtualChassis."""
+    """Test VC creation behavior during bulk import."""
 
     def _make_stack_validation(self):
         from unittest.mock import MagicMock
@@ -4770,8 +4773,23 @@ class TestBulkImportVCPermission:
         }.get(k, d)
         return v
 
-    def test_vc_creation_skipped_without_vc_permission(self):
-        """User lacks dcim.add_virtualchassis → VC skipped, device import still succeeds (closes #31)."""
+    def _make_non_stack_validation(self):
+        from unittest.mock import MagicMock
+
+        v = MagicMock()
+        v.get.side_effect = lambda k, d=None: {
+            "is_ready": True,
+            "import_as_vm": False,
+            "existing_device": None,
+            "virtual_chassis": {
+                "is_stack": False,
+                "members": [],
+            },
+        }.get(k, d)
+        return v
+
+    def test_stack_device_not_imported_without_vc_permission(self):
+        """Missing dcim.add_virtualchassis permission should block stack device import."""
         from unittest.mock import MagicMock, patch
 
         mock_device = MagicMock()
@@ -4788,9 +4806,10 @@ class TestBulkImportVCPermission:
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
                 return_value={"success": True, "device": mock_device, "message": "ok", "is_vm": False},
-            ),
+            ) as mock_import_single,
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+                return_value=MagicMock(name="vc"),
             ) as mock_create_vc,
         ):
             from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
@@ -4801,8 +4820,12 @@ class TestBulkImportVCPermission:
                 libre_devices_cache={1: {"device_id": 1, "hostname": "sw"}},
             )
 
+        mock_import_single.assert_not_called()
         mock_create_vc.assert_not_called()
-        assert len(result["success"]) == 1
+        user.has_perm.assert_called_with("dcim.add_virtualchassis")
+        assert len(result["success"]) == 0
+        assert len(result["failed"]) == 1
+        assert "missing permission dcim.add_virtualchassis" in result["failed"][0]["error"]
         assert result["virtual_chassis_created"] == 0
 
     def test_vc_creation_proceeds_with_vc_permission(self):
@@ -4840,7 +4863,88 @@ class TestBulkImportVCPermission:
             )
 
         mock_create_vc.assert_called_once()
+        user.has_perm.assert_called_with("dcim.add_virtualchassis")
         assert result["virtual_chassis_created"] == 1
+
+    def test_non_stack_import_works_without_vc_permission(self):
+        """Non-stack devices should still import when add_device permissions are present."""
+        from unittest.mock import MagicMock, patch
+
+        mock_device = MagicMock()
+        user = MagicMock()
+        user.has_perm.side_effect = lambda p: p != "dcim.add_virtualchassis"
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=self._make_non_stack_validation(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value={"success": True, "device": mock_device, "message": "ok", "is_vm": False},
+            ) as mock_import_single,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+                return_value=MagicMock(name="vc"),
+            ) as mock_create_vc,
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=user,
+                libre_devices_cache={1: {"device_id": 1, "hostname": "sw"}},
+            )
+
+        mock_import_single.assert_called_once()
+        mock_create_vc.assert_not_called()
+        assert len(result["success"]) == 1
+        assert len(result["failed"]) == 0
+
+    def test_mixed_stack_and_non_stack_without_vc_permission(self):
+        """Stack device fails, but non-stack device still imports when VC permission is missing."""
+        from unittest.mock import MagicMock, patch
+
+        mock_device = MagicMock()
+        user = MagicMock()
+        user.has_perm.side_effect = lambda p: p != "dcim.add_virtualchassis"
+
+        validations = [self._make_stack_validation(), self._make_non_stack_validation()]
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                side_effect=validations,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value={"success": True, "device": mock_device, "message": "ok", "is_vm": False},
+            ) as mock_import_single,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+                return_value=MagicMock(name="vc"),
+            ) as mock_create_vc,
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1, 2],
+                user=user,
+                libre_devices_cache={
+                    1: {"device_id": 1, "hostname": "stack-sw"},
+                    2: {"device_id": 2, "hostname": "edge-sw"},
+                },
+            )
+
+        mock_import_single.assert_called_once()
+        mock_create_vc.assert_not_called()
+        assert len(result["success"]) == 1
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["device_id"] == 1
 
 
 # ---------------------------------------------------------------------------

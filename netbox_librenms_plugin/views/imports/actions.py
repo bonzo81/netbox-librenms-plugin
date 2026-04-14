@@ -2,6 +2,7 @@
 
 import json
 import logging
+from urllib.parse import parse_qs, urlparse
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -42,6 +43,58 @@ _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_
 
 # Actions that operate on Device-only fields and cannot be applied to VMs.
 _DEVICE_ONLY_ACTIONS = frozenset({"link", "update", "update_serial", "update_type", "sync_serial", "sync_device_type"})
+
+
+_TRUTHY_VALUES = {"1", "true", "on", "yes"}
+_FALSY_VALUES = {"0", "false", "off", "no", ""}
+
+
+def _parse_boolish(value) -> bool | None:
+    """Parse common form/query boolean values. Return None when value is unset/unknown."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+    if normalized in _TRUTHY_VALUES:
+        return True
+    if normalized in _FALSY_VALUES:
+        return False
+    return None
+
+
+def _resolve_vc_detection_enabled(request) -> bool:
+    """
+    Resolve VC detection preference from request payloads.
+
+    Resolution order:
+    1. Explicit POST enable_vc_detection
+    2. Explicit GET enable_vc_detection
+    3. return_url query param fallback (POST, then GET)
+    4. Default False
+    """
+    for source in (request.POST, request.GET):
+        parsed = _parse_boolish(source.get("enable_vc_detection"))
+        if parsed is not None:
+            return parsed
+
+    for source in (request.POST, request.GET):
+        return_url = source.get("return_url")
+        if not return_url:
+            continue
+        query = parse_qs(urlparse(return_url).query)
+
+        parsed = _parse_boolish((query.get("enable_vc_detection") or [None])[-1])
+        if parsed is not None:
+            return parsed
+
+        # Backward compatibility for legacy URLs that used skip_vc_detection.
+        skip_vc = _parse_boolish((query.get("skip_vc_detection") or [None])[-1])
+        if skip_vc is not None:
+            return not skip_vc
+
+    return False
 
 
 def _save_device(device) -> HttpResponse | None:
@@ -104,7 +157,7 @@ class DeviceImportHelperMixin:
             bool: Always returns True to enable VC detection with smart caching
         """
         # Check if user originally requested VC detection
-        vc_requested = request.GET.get("enable_vc_detection") == "true"
+        vc_requested = _resolve_vc_detection_enabled(request)
 
         if vc_requested:
             # User explicitly enabled it - use it (will use cache if available)
@@ -279,9 +332,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             )
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
-        vc_detection_enabled = (
-            request.POST.get("enable_vc_detection") or request.GET.get("enable_vc_detection") or ""
-        ).lower() in ("on", "true", "1")
+        vc_detection_enabled = _resolve_vc_detection_enabled(request)
 
         devices = []
         errors = []
@@ -323,13 +374,16 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
                 server_key=self.librenms_api.server_key,
-                include_vc_detection=vc_detection_enabled,
+                # Keep confirm modal aligned with import-time behavior: always
+                # detect VC membership so stack members are visible before import.
+                include_vc_detection=True,
             )
             # Recompute is_vm from validation result — the function may have
             # detected an existing VM via hostname/IP lookup
             is_vm = bool(validation.get("import_as_vm"))
 
             # Mark validation with VC detection flag for proper URL generation in table
+            # Bulk confirm should respect the initial filter's VC detection preference
             validation["_vc_detection_enabled"] = vc_detection_enabled
 
             device_name = validation.get("resolved_name") or f"device-{device_id}"
@@ -471,11 +525,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return HttpResponse("Invalid device identifier", status=400)
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
+        vc_detection_enabled = _resolve_vc_detection_enabled(request)
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
             "sync_cables": request.POST.get("sync_cables") == "on",
             "sync_ips": request.POST.get("sync_ips") == "on",
-            "vc_detection_enabled": request.POST.get("vc_detection_enabled") in ("on", "true", "1", "True"),
+            "vc_detection_enabled": vc_detection_enabled,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
         }

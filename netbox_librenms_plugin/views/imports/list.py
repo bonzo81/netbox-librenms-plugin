@@ -98,6 +98,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         # Extract cache metadata for frontend warnings
         self._cache_timestamp = job_data.get("cached_at")
         self._cache_timeout = job_data.get("cache_timeout", 300)
+        # Preserve VC detection intent for follow-up actions (confirm/import)
+        self._vc_detection_enabled = vc_enabled
 
         if not device_ids:
             logger.warning(f"Job {job_id} missing device_ids")
@@ -210,7 +212,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             legacy_skip = legacy_skip_flag in truthy_values
             self._vc_detection_enabled = not legacy_skip
         else:
-            self._vc_detection_enabled = False
+            self._vc_detection_enabled = getattr(self, "_vc_detection_enabled", False)
 
         filter_form = self.filterset_form(request.GET) if self.filterset_form else None
         form_valid = False  # Track form validity

@@ -149,11 +149,26 @@ def bulk_import_devices_shared(
             validation = validate_device_for_import(
                 libre_device,
                 api=api,
-                include_vc_detection=bool(sync_options and sync_options.get("vc_detection_enabled", False)),
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
+                # Import-time behavior: always evaluate VC state from live/cached
+                # LibreNMS inventory so stack members are created even when preview
+                # flags are stale or omitted.
+                include_vc_detection=True,
             )
+
+            vc_data = validation.get("virtual_chassis", {})
+            if vc_data.get("is_stack", False):
+                has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
+                if not has_vc_perm:
+                    error_msg = f"Cannot import stack device {device_id}: missing permission dcim.add_virtualchassis"
+                    failed_list.append({"device_id": device_id, "error": error_msg})
+                    if job and job.logger:
+                        job.logger.error(error_msg)
+                    else:
+                        logger.error(error_msg)
+                    continue
 
             # Build manual mappings from validation + any provided overrides
             device_mappings = {}
@@ -192,7 +207,6 @@ def bulk_import_devices_shared(
                     job.logger.info(f"Imported device {idx} of {total}")
 
                 # Handle virtual chassis creation for stacks
-                vc_data = validation.get("virtual_chassis", {})
                 if vc_data.get("is_stack", False):
                     # Derive a stack-level dedup key from member serials so that all
                     # LibreNMS devices belonging to the same physical stack (e.g. each
@@ -219,45 +233,33 @@ def bulk_import_devices_shared(
                         else:
                             vc_domain = f"librenms-{device_id}"
 
-                    # Only create VC if we haven't processed this stack yet
+                    # Only create VC if we haven't processed this stack yet.
+                    # Permission was already validated before device import.
                     if vc_domain not in processed_vc_domains:
-                        # Guard VC creation with its own permission check — the upfront check
-                        # only covers add_device/change_device; VirtualChassis needs a separate perm.
-                        has_vc_perm, missing_vc_perms = check_user_permissions(user, ["dcim.add_virtualchassis"])
-                        if not has_vc_perm:
-                            warn_msg = (
-                                f"Skipping VC creation for device {device_id}: "
-                                f"missing permissions: {', '.join(missing_vc_perms)}"
+                        # Add to set BEFORE attempting creation to prevent race condition
+                        processed_vc_domains.add(vc_domain)
+                        try:
+                            vc = create_virtual_chassis_with_members(
+                                result["device"],
+                                vc_data["members"],
+                                libre_device,
+                                server_key=api.server_key,
                             )
+                            vc_created_count += 1
+                            log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
+                            if job and job.logger:
+                                job.logger.info(log_msg)
+                            else:
+                                logger.info(log_msg)
+                        except Exception as vc_error:
+                            # Remove from set on failure so retry is possible
+                            processed_vc_domains.discard(vc_domain)
+                            warn_msg = f"Failed to create VC for device {device_id}: {vc_error}"
                             if job and job.logger:
                                 job.logger.warning(warn_msg)
                             else:
                                 logger.warning(warn_msg)
-                        else:
-                            # Add to set BEFORE attempting creation to prevent race condition
-                            processed_vc_domains.add(vc_domain)
-                            try:
-                                vc = create_virtual_chassis_with_members(
-                                    result["device"],
-                                    vc_data["members"],
-                                    libre_device,
-                                    server_key=api.server_key,
-                                )
-                                vc_created_count += 1
-                                log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
-                                if job and job.logger:
-                                    job.logger.info(log_msg)
-                                else:
-                                    logger.info(log_msg)
-                            except Exception as vc_error:
-                                # Remove from set on failure so retry is possible
-                                processed_vc_domains.discard(vc_domain)
-                                warn_msg = f"Failed to create VC for device {device_id}: {vc_error}"
-                                if job and job.logger:
-                                    job.logger.warning(warn_msg)
-                                else:
-                                    logger.warning(warn_msg)
-                                # Don't fail the import, just log the warning
+                            # Don't fail the import, just log the warning
 
             elif result.get("device"):  # Device exists
                 skipped_list.append({"device_id": device_id, "reason": result["error"]})

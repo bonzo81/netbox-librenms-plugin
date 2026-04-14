@@ -382,6 +382,7 @@
     <form method="post" class="form form-horizontal" id="import-selection-form">
     {% csrf_token %}
     <input type="hidden" name="return_url" value="{% if return_url %}{{ return_url }}{% else %}{{ request.path }}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}{% endif %}" />
+      <input type="hidden" name="enable_vc_detection" value="{{ vc_detection_enabled|yesno:'true,false' }}" />
 
     {# Objects table #}
     <div class="card">

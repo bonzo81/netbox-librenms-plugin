@@ -169,6 +169,37 @@ class TestLoadJobResults:
                         assert mock_device_a in result
                         assert mock_device_b in result
 
+    def test_load_job_results_sets_vc_detection_enabled_from_job_data(self):
+        """vc_detection_enabled from job data is preserved on the view instance."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        view = object.__new__(LibreNMSImportView)
+
+        with patch("netbox_librenms_plugin.views.imports.list.logger"):
+            mock_job = MagicMock()
+            mock_job.status = "completed"
+            mock_job.data = {
+                "device_ids": [1],
+                "filters": {},
+                "server_key": "default",
+                "vc_detection_enabled": True,
+                "use_sysname": True,
+                "strip_domain": False,
+            }
+
+            with patch("core.models.Job") as mock_job_cls:
+                mock_job_cls.objects.get.return_value = mock_job
+
+                with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
+                    with patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key") as mock_key:
+                        mock_key.return_value = "key_1"
+                        mock_cache.get.return_value = {"device_id": 1}
+
+                        result = view._load_job_results(42)
+
+        assert len(result) == 1
+        assert view._vc_detection_enabled is True
+
     def test_cache_miss_skips_device(self):
         """Devices missing from cache are silently skipped."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
@@ -447,6 +478,47 @@ class TestGetView:
                                     with patch.object(view, "get_server_info", return_value={}):
                                         view.get(request)
                                         mock_load.assert_called_once_with(42)
+
+    def test_get_job_id_preserves_vc_flag_when_query_flag_missing(self):
+        """job_id pages keep vc_detection_enabled from loaded job results."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        view, request = self._make_view_with_request(query_params={"job_id": "42"})
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+
+        def _load_job_side_effect(_job_id):
+            view._vc_detection_enabled = True
+            return [{"device_id": 1, "hostname": "router1"}]
+
+        with patch.object(view, "_load_job_results", side_effect=_load_job_side_effect) as mock_load:
+            with patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)):
+                with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
+                    mock_settings.objects.first.return_value = None
+                    mock_settings.objects.get_or_create.return_value = (None, False)
+
+                    with patch("netbox_librenms_plugin.views.imports.list.get_user_pref", return_value=None):
+                        mock_form_cls = MagicMock()
+                        mock_form = MagicMock()
+                        mock_form.is_valid.return_value = False
+                        mock_form_cls.return_value = mock_form
+                        view.filterset_form = mock_form_cls
+
+                        with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                            mock_render.return_value = MagicMock()
+
+                            with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                                with patch(
+                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches",
+                                    return_value=[],
+                                ):
+                                    with patch.object(view, "get_server_info", return_value={}):
+                                        view.get(request)
+
+        mock_load.assert_called_once_with(42)
+        context = mock_render.call_args[0][2]
+        assert context["vc_detection_enabled"] is True
 
     def test_get_invalid_job_id_logs_warning(self):
         """Invalid (non-integer) job_id is caught and logged."""
