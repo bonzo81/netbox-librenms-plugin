@@ -172,6 +172,36 @@ class TestResolveNamingPreferences:
         assert strip_domain is True
 
 
+class TestResolveVCDetectionEnabled:
+    """Tests for shared VC detection resolver across confirm/import steps."""
+
+    def test_prefers_post_value_over_get(self):
+        from netbox_librenms_plugin.views.imports.actions import _resolve_vc_detection_enabled
+
+        request = _make_request(post={"enable_vc_detection": "false"}, get={"enable_vc_detection": "true"})
+        assert _resolve_vc_detection_enabled(request) is False
+
+    def test_reads_get_when_post_missing(self):
+        from netbox_librenms_plugin.views.imports.actions import _resolve_vc_detection_enabled
+
+        request = _make_request(get={"enable_vc_detection": "true"})
+        assert _resolve_vc_detection_enabled(request) is True
+
+    def test_falls_back_to_return_url(self):
+        from netbox_librenms_plugin.views.imports.actions import _resolve_vc_detection_enabled
+
+        request = _make_request(
+            post={"return_url": "/plugins/librenms_plugin/librenms-import/?enable_vc_detection=true"}
+        )
+        assert _resolve_vc_detection_enabled(request) is True
+
+    def test_legacy_skip_vc_detection_in_return_url(self):
+        from netbox_librenms_plugin.views.imports.actions import _resolve_vc_detection_enabled
+
+        request = _make_request(post={"return_url": "/plugins/librenms_plugin/librenms-import/?skip_vc_detection=true"})
+        assert _resolve_vc_detection_enabled(request) is False
+
+
 class TestBulkImportConfirmView:
     """Tests for BulkImportConfirmView.post (lines 235-300)."""
 
@@ -256,6 +286,46 @@ class TestBulkImportConfirmView:
         mock_render.assert_called_once()
         call_args = mock_render.call_args
         assert "bulk_import_confirm.html" in call_args[0][1]
+
+    @patch("netbox_librenms_plugin.views.imports.actions.render")
+    def test_uses_return_url_vc_flag_for_context_and_validation(self, mock_render):
+        view = self._make_view()
+        mock_render.return_value = MagicMock(status_code=200)
+
+        libre_device = {"device_id": 1, "hostname": "router01"}
+        validation = {
+            "resolved_name": "router01",
+            "virtual_chassis": {"is_stack": False},
+            "_vc_detection_enabled": False,
+        }
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch(
+                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device
+                ):
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
+                        return_value={"cluster_id": None, "role_id": None, "rack_id": None},
+                    ):
+                        with patch(
+                            "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                            return_value=validation,
+                        ):
+                            request = _make_request(
+                                post={
+                                    "select": ["1"],
+                                    "return_url": "/plugins/librenms_plugin/librenms-import/?enable_vc_detection=true",
+                                }
+                            )
+                            view.post(request)
+
+        call_args = mock_render.call_args
+        context = call_args[0][2]
+        assert context["vc_detection_enabled"] is True
+        assert context["devices"][0]["validation"]["_vc_detection_enabled"] is True
 
 
 class TestBulkImportDevicesViewPost:
@@ -3399,6 +3469,48 @@ class TestBulkImportDevicesViewBasicPaths:
         request.user.is_superuser = True
         result = view.should_use_background_job_for_import(request)
         assert result is True
+
+    def test_sync_import_uses_return_url_vc_flag(self):
+        """VC detection flag from return_url is propagated to sync bulk import."""
+        view = self._make_view()
+        request = _make_request(
+            post={
+                "select": ["1"],
+                "return_url": "/plugins/librenms_plugin/librenms-import/?enable_vc_detection=true",
+            }
+        )
+        request.POST.getlist = MagicMock(return_value=["1"])
+        request.user = MagicMock()
+        request.user.is_superuser = False
+        request.headers = {}
+
+        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch(
+                "netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences", return_value=(True, False)
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                    return_value={"device_id": 1, "hostname": "r01"},
+                ):
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                        return_value=import_result,
+                    ) as mock_bulk_import:
+                        with patch(
+                            "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+                            return_value={"success": [], "failed": [], "skipped": []},
+                        ):
+                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
+                                with patch(
+                                    "netbox_librenms_plugin.views.imports.actions.redirect",
+                                    return_value=MagicMock(status_code=302),
+                                ):
+                                    view.post(request)
+
+        assert mock_bulk_import.called
+        assert mock_bulk_import.call_args.kwargs["vc_detection_enabled"] is True
 
 
 class TestBulkImportDevicesMorePaths:
