@@ -4,6 +4,9 @@
 
 To enhance device identification and synchronization between NetBox and LibreNMS, this plugin supports using a custom field `librenms_id` on Device, Virtual Machine and Interface objects. While the plugin works without it, using this custom field is recommended for LibreNMS API lookups, and to assist with matching the remote device and remote interfaces for cable creation in Netbox. It can also be entered manually if no primary IP or FQDN is available.
 
+!!! info "Automatic Creation"
+    As of version 0.4.2, the plugin **automatically creates** the `librenms_id` custom field when migrations are run. You no longer need to create it manually. The field is created for Device, Virtual Machine, Interface, and VM Interface objects.
+
 For the Device and Virtual Machine objects the plugin will automatically populate the LibreNMS ID custom field when opening the LibreNMS Sync page if the device has been found in LibreNMS.
 
 For the Interface object, the plugin will automatically populate the LibreNMS ID custom field when the interface data is synced from LibreNMS.
@@ -15,7 +18,10 @@ For the Interface object, the plugin will automatically populate the LibreNMS ID
 - **Efficient Synchronization:** Enhances the reliability of API lookups.
 - **Cable creation:** Allows better device identification for the creation of cables between NetBox devices.
 
-## Suggested Custom Field Setup
+## Manual Custom Field Setup
+
+!!! note
+    On 0.4.3+, rerun migrations first (`manage.py migrate`). If you need to recreate the field manually on current releases, use the JSON schema below. Pre-0.4.2 releases used an Integer field — do not use Integer for new entries.
 
 Follow these steps to create the `librenms_id` custom field in NetBox:
 
@@ -38,7 +44,16 @@ Follow these steps to create the `librenms_id` custom field in NetBox:
     - **Name:** `librenms_id`
     - **Label:** `LibreNMS ID`
     - **Description:** (Optional) Add a description like "LibreNMS Device ID for synchronization".
-    - **Type:** Integer
+    - **Type:** JSON (object) — stores a per-server mapping.
+      - Multi-server example:
+        ```json
+        {"production": 42, "staging": 17}
+        ```
+      - Legacy single-server example (integer) — read-only/deprecated; do not use for new entries:
+        ```
+        42
+        ```
+        > Note: to create new entries manually use the JSON format shown above.
     - **Required:** Leave unchecked (optional).
     - **Default Value:** Leave blank.
 
@@ -61,7 +76,11 @@ You can manually assign a value to the `librenms_id` custom field for a device u
 2. **Set the LibreNMS ID:**
 
     - Scroll to the **Custom Fields** section.
-    - Enter the LibreNMS device ID in the `librenms_id` field.
+    - Enter the `librenms_id` value as a JSON object with your server key(s):
+      ```json
+      {"production": 42}
+      ```
+      For multiple servers: `{"production": 42, "staging": 17}`
 
 3. **Save Changes:**
 

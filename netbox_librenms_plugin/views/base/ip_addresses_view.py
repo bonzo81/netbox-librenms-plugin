@@ -11,7 +11,7 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.utils import get_interface_name_field
+from netbox_librenms_plugin.utils import get_interface_name_field, get_librenms_device_id
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
@@ -104,11 +104,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         all_interfaces = list(obj.interfaces.all())
 
         # Create maps for efficient lookups
-        interfaces_by_librenms_id = {
-            interface.custom_field_data.get("librenms_id"): interface
-            for interface in all_interfaces
-            if interface.custom_field_data.get("librenms_id")
-        }
+        server_key = self.librenms_api.server_key
+        interfaces_by_librenms_id = {}
+        for interface in all_interfaces:
+            lib_id = get_librenms_device_id(interface, server_key, auto_save=False)
+            if lib_id is not None:
+                interfaces_by_librenms_id[str(lib_id)] = interface
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
 
@@ -191,8 +192,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         assigned_interface = ip_address.assigned_object
 
         # Check if interface matches by LibreNMS ID
-        if port_id in prefetched_data["interfaces_by_librenms_id"]:
-            interface = prefetched_data["interfaces_by_librenms_id"][port_id]
+        if str(port_id) in prefetched_data["interfaces_by_librenms_id"]:
+            interface = prefetched_data["interfaces_by_librenms_id"][str(port_id)]
             if assigned_interface == interface:
                 enriched_ip["status"] = "matched"
                 return
@@ -207,8 +208,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
         """Add interface information to the IP entry regardless of IP status"""
         # First try to match by LibreNMS ID (highest priority)
-        if port_id in prefetched_data["interfaces_by_librenms_id"]:
-            interface = prefetched_data["interfaces_by_librenms_id"][port_id]
+        if str(port_id) in prefetched_data["interfaces_by_librenms_id"]:
+            interface = prefetched_data["interfaces_by_librenms_id"][str(port_id)]
             enriched_ip["interface_name"] = interface.name
             enriched_ip["interface_url"] = interface.get_absolute_url()
             return
@@ -222,13 +223,15 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def get_table(self, data, obj, request):
         """Get the table instance for the view."""
         table = IPAddressTable(data)
-        table.htmx_url = f"{request.path}?tab=ipaddresses"
+        server_key = self.librenms_api.server_key
+        table.htmx_url = f"{request.path}?tab=ipaddresses" + (f"&server_key={server_key}" if server_key else "")
         return table
 
     def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False):
         """Helper method to prepare the context data for IP address sync views."""
         table = None
         cache_expiry = None
+        server_key = self.librenms_api.server_key
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request)
@@ -236,7 +239,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         if fetch_fresh:
             success, ip_data = self.get_ip_addresses(obj)
         else:
-            cached_ip_data = cache.get(self.get_cache_key(obj, "ip_addresses"))
+            cached_ip_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
             if cached_ip_data:
                 ip_data = cached_ip_data.get("ip_addresses", [])
             else:
@@ -248,14 +251,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         if fetch_fresh:
             # Cache the fresh data after enrichment
             cache.set(
-                self.get_cache_key(obj, "ip_addresses"),
+                self.get_cache_key(obj, "ip_addresses", server_key),
                 {"ip_addresses": ip_data},
                 timeout=self.librenms_api.cache_timeout,
             )
 
         # Calculate cache expiry
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses"))
-        if cache_ttl is not None:
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses", server_key))
+        if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
         # Generate the table
@@ -268,6 +271,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             "table": table,
             "object": obj,
             "cache_expiry": cache_expiry,
+            "server_key": server_key,
         }
 
     def get_context_data(self, request, obj):
@@ -276,7 +280,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None}
+            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
         return context
 
     def post(self, request, pk):
@@ -290,7 +294,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             return render(
                 request,
                 self.partial_template_name,
-                {"ip_sync": {"object": obj, "table": None, "cache_expiry": None}},
+                {
+                    "ip_sync": {
+                        "object": obj,
+                        "table": None,
+                        "cache_expiry": None,
+                        "server_key": self.librenms_api.server_key,
+                    }
+                },
             )
 
         messages.success(request, "IP address data refreshed successfully.")
@@ -392,22 +403,20 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             else:
                 return "sync"
 
-    def _get_cache_key(self, obj, data_type):
-        """
-        Generate a cache key for the specified object and data type.
-        """
-        return f"librenms_plugin:{obj.__class__.__name__}:{obj.pk}:{data_type}"
-
     def post(self, request):
         """
         POST request to return json response with formatted IP address status.
         """
         try:
-            data = json.loads(request.body)
+            try:
+                data = json.loads(request.body)
+            except json.JSONDecodeError as e:
+                return JsonResponse({"status": "error", "message": f"Invalid JSON: {e}"}, status=400)
             ip_address = data.get("ip_address")
             vrf_id = data.get("vrf_id")
             object_id = data.get("device_id")
             object_type = data.get("object_type")
+            server_key = data.get("server_key") or "default"
 
             if not ip_address:
                 return JsonResponse({"status": "error", "message": "No IP address provided"}, status=400)
@@ -427,7 +436,7 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             except ValueError as e:
                 return JsonResponse({"status": "error", "message": str(e)}, status=400)
 
-            cache_key = self._get_cache_key(obj, "ip_addresses")
+            cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
             cached_data = cache.get(cache_key)
 
             # Basic record with default values

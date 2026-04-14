@@ -111,8 +111,10 @@ class FilterDevicesJob(JobRunner):
             "device_ids": device_ids,
             "total_processed": len(validated_devices),
             "filters": filters,
-            "server_key": server_key,
+            "server_key": api.server_key,
             "vc_detection_enabled": vc_detection_enabled,
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
             "cache_timeout": api.cache_timeout,
             "cached_at": cached_at,
             "completed": True,
@@ -175,7 +177,8 @@ class ImportDevicesJob(JobRunner):
             device_ids: List of LibreNMS device IDs to import as Devices
             vm_imports: Dict mapping device_id to cluster/role info for VM imports
             server_key: Optional LibreNMS server key for multi-server setups
-            sync_options: Dict with sync_interfaces, sync_cables, sync_ips, use_sysname, strip_domain
+            sync_options: Dict with sync_interfaces, sync_cables, sync_ips,
+                use_sysname, strip_domain, and vc_detection_enabled
             manual_mappings_per_device: Dict mapping device_id to manual_mappings dict
             libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             **kwargs: Additional job parameters
@@ -206,7 +209,7 @@ class ImportDevicesJob(JobRunner):
             self.logger.info(f"Importing {len(device_ids)} devices...")
             device_result = bulk_import_devices_shared(
                 device_ids=device_ids,
-                server_key=server_key,
+                server_key=api.server_key,
                 sync_options=sync_options,
                 manual_mappings_per_device=manual_mappings_per_device,
                 libre_devices_cache=libre_devices_cache,
@@ -224,13 +227,25 @@ class ImportDevicesJob(JobRunner):
                 vm_imports, api, sync_options, libre_devices_cache, job=self, user=self.job.user
             )
 
-        # Combine results
-        imported_device_pks = [item["device"].pk for item in device_result.get("success", []) if item.get("device")]
-        imported_vm_pks = [item["device"].pk for item in vm_result.get("success", []) if item.get("device")]
+        # Combine results — partition device_result successes by model type since
+        # bulk_import_devices_shared() may return VirtualMachine objects when import_as_vm=True.
+        device_successes = []
+        vm_successes = list(vm_result.get("success", []))
+        for item in device_result.get("success", []):
+            obj = item.get("device")
+            if not obj:
+                continue
+            if obj._meta.model_name == "virtualmachine":
+                vm_successes.append(item)
+            else:
+                device_successes.append(item)
+
+        imported_device_pks = [item["device"].pk for item in device_successes]
+        imported_vm_pks = [item["device"].pk for item in vm_successes]
 
         # Also store LibreNMS device IDs for re-rendering table rows
-        imported_libre_device_ids = [item["device_id"] for item in device_result.get("success", [])]
-        imported_libre_vm_ids = [item["device_id"] for item in vm_result.get("success", [])]
+        imported_libre_device_ids = [item["device_id"] for item in device_successes]
+        imported_libre_vm_ids = [item["device_id"] for item in vm_successes]
 
         success_count = len(device_result.get("success", [])) + len(vm_result.get("success", []))
         failed_count = len(device_result.get("failed", [])) + len(vm_result.get("failed", []))
@@ -244,7 +259,7 @@ class ImportDevicesJob(JobRunner):
             "imported_vm_pks": imported_vm_pks,
             "imported_libre_device_ids": imported_libre_device_ids,
             "imported_libre_vm_ids": imported_libre_vm_ids,
-            "server_key": server_key,
+            "server_key": api.server_key,
             "total": total_count,
             "success_count": success_count,
             "failed_count": failed_count,

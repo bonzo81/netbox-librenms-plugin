@@ -455,7 +455,7 @@ class DeviceImportTable(tables.Table):
             device_url = reverse(url_name, kwargs={"pk": existing.pk})
             buttons.append(
                 f'<a href="{device_url}" class="btn btn-sm btn-secondary" '
-                f'title="{title}"><i class="mdi mdi-open-in-new"></i></a>'
+                f'title="{title}" aria-label="{title}"><i class="mdi mdi-open-in-new"></i></a>'
             )
 
             # Add details/conflict button for conflict resolution actions
@@ -471,23 +471,32 @@ class DeviceImportTable(tables.Table):
                 btn_class = "btn-outline-danger"
                 btn_icon = "mdi-alert-circle"
                 btn_label = " Conflict"
+                btn_title = "View conflict details"
             elif has_actions:
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-alert"
                 btn_label = " Conflict"
+                btn_title = "View conflict details"
             elif has_name_sync or has_sync_needed:
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-information-outline"
                 btn_label = " Details"
+                btn_title = "View details"
+            elif match_type == "librenms_id" and validation.get("librenms_id_needs_migration"):
+                btn_class = "btn-outline-warning"
+                btn_icon = "mdi-database-alert"
+                btn_label = " Legacy ID"
+                btn_title = "View legacy ID migration details"
             else:
                 btn_class = "btn-outline-success"
                 btn_icon = "mdi-check-circle"
                 btn_label = ""
-
-            btn_title = "Resolve conflict" if (has_actions or has_mismatch) else "View details"
+                btn_title = "View details"
+            aria_attr = f'aria-label="{btn_title}" '
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm {btn_class}" '
+                f"{aria_attr}"
                 f'hx-get="{details_url}" '
                 f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
                 f'hx-target="#htmx-modal-content" '
@@ -510,6 +519,7 @@ class DeviceImportTable(tables.Table):
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm btn-outline-primary" '
+                f'aria-label="View details" '
                 f'hx-get="{details_url}" '
                 f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
                 f'hx-target="#htmx-modal-content" '

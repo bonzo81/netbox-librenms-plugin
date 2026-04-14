@@ -472,6 +472,39 @@ class TestLibreNMSAPIDeviceLookup:
         result = api.get_librenms_id(device)
         assert result == 42
 
+    def test_get_librenms_id_normalizes_string_to_int(self, mock_librenms_config):
+        """Returns int for string-stored librenms_id; read path uses auto_save=False so no write-back."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        device = MagicMock()
+        device.name = "test-device"
+        device.cf = {"librenms_id": "42"}
+        device.custom_field_data = {"librenms_id": "42"}
+
+        result = api.get_librenms_id(device)
+        assert result == 42
+        # auto_save=False in this read path — normalization is NOT written back
+        device.save.assert_not_called()
+
+    def test_get_librenms_id_empty_string_falls_through_to_discovery(self, mock_librenms_config):
+        """An empty-string librenms_id is treated as not set (falls through to API discovery)."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        device = MagicMock()
+        device.name = "test-device"
+        device.cf = {"librenms_id": ""}
+        device.primary_ip = None
+
+        with patch.object(api, "get_device_id_by_hostname", return_value=None):
+            result = api.get_librenms_id(device)
+        assert result is None
+
     @patch("netbox_librenms_plugin.librenms_api.cache")
     def test_get_librenms_id_from_cache(self, mock_cache, mock_librenms_config):
         """Returns ID from Django cache when not in custom field."""
@@ -740,7 +773,7 @@ class TestLibreNMSAPIDeviceOperations:
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_device_info_not_found(self, mock_get, mock_librenms_config):
-        """Verify handling of getting non-existent device."""
+        """Empty devices list returns (False, None) without raising."""
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"status": "ok", "devices": []}
 
@@ -748,9 +781,9 @@ class TestLibreNMSAPIDeviceOperations:
 
         api = LibreNMSAPI(server_key="default")
 
-        # Should raise IndexError when devices list is empty
-        with pytest.raises(IndexError):
-            api.get_device_info(device_id=999)
+        success, result = api.get_device_info(1)
+        assert success is False
+        assert result is None
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_list_devices_with_filters(self, mock_get, mock_librenms_config):
@@ -1137,7 +1170,7 @@ class TestLibreNMSAPIErrorHandling:
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_invalid_json_response(self, mock_get, mock_librenms_config):
-        """Verify handling of invalid JSON responses."""
+        """Verify handling of invalid JSON responses — ValueError is now caught gracefully."""
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.side_effect = ValueError("Invalid JSON")
 
@@ -1145,9 +1178,10 @@ class TestLibreNMSAPIErrorHandling:
 
         api = LibreNMSAPI(server_key="default")
 
-        # ValueError should be raised, not caught
-        with pytest.raises(ValueError):
-            api.get_device_info(device_id=123)
+        # ValueError is now caught, returning (False, None) instead of propagating
+        success, result = api.get_device_info(device_id=123)
+        assert success is False
+        assert result is None
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_http_500_error_handling(self, mock_get, mock_librenms_config):
@@ -1203,3 +1237,111 @@ class TestLibreNMSAPIErrorHandling:
 # Test Class 5-9 continuing in next part due to length...
 # Run `make unittest` to execute all tests
 # ====================================================================================
+
+
+# ====================================================================================
+# Guard tests: int conversion guard and VLAN dict guard
+# ====================================================================================
+
+
+class TestGetLibreNMSIdIntGuard:
+    """Tests for the int conversion guard in get_librenms_id."""
+
+    def test_non_integer_string_from_ip_returns_none(self, mock_librenms_config):
+        """When get_device_id_by_ip returns a non-int string, _store_librenms_id must not be called."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        obj = MagicMock()
+        obj.primary_ip.address.ip = "192.168.1.1"
+        obj.primary_ip.dns_name = ""
+        obj.name = "test-device"
+        obj._meta.model_name = "device"
+        obj.pk = 1
+
+        with (
+            patch.object(api, "_get_cache_key", return_value="test_cache_key"),
+            patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache,
+            patch.object(api, "get_device_id_by_ip", return_value="not-an-int"),
+            patch.object(api, "get_device_id_by_hostname", return_value=None),
+            patch.object(api, "_store_librenms_id") as mock_store,
+        ):
+            mock_cache.get.return_value = None
+            result = api.get_librenms_id(obj)
+
+        assert result is None
+        mock_store.assert_not_called()
+
+    def test_valid_integer_string_stores_and_returns(self, mock_librenms_config):
+        """When get_device_id_by_ip returns a valid int string, it should be stored and returned."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        obj = MagicMock()
+        obj.primary_ip.address.ip = "192.168.1.1"
+        obj.primary_ip.dns_name = ""
+        obj.name = "test-device"
+        obj._meta.model_name = "device"
+        obj.pk = 1
+
+        with (
+            patch.object(api, "_get_cache_key", return_value="test_cache_key"),
+            patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache,
+            patch.object(api, "get_device_id_by_ip", return_value="42"),
+            patch.object(api, "_store_librenms_id") as mock_store,
+        ):
+            mock_cache.get.return_value = None
+            result = api.get_librenms_id(obj)
+
+        assert result == 42
+        mock_store.assert_called_once_with(obj, 42)
+
+
+class TestVlanEntryDictGuard:
+    """Tests for the isinstance(vlan_entry, dict) guard in _parse_port_vlan_info."""
+
+    def test_non_dict_entry_is_skipped(self, mock_librenms_config):
+        """Non-dict entries in vlans_data should be skipped without error."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        port_data = {
+            "ifName": "eth0",
+            "ifDescr": "eth0",
+            "port_id": 1,
+            "ifTrunk": "dot1Q",
+            "ifVlan": None,
+            "vlans": [{"vlan": 10, "untagged": 1}, "bad_entry", {"vlan": 20}],
+        }
+        result = api.parse_port_vlan_data(port_data)
+
+        # Only VIDs 10 and 20 should be parsed; string entry is skipped
+        assert result["untagged_vlan"] == 10
+        assert 20 in result["tagged_vlans"]
+        assert len(result["tagged_vlans"]) == 1
+
+    def test_mixed_bad_entries_no_exception(self, mock_librenms_config):
+        """Multiple non-dict entries mixed with valid dicts should not raise."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        port_data = {
+            "ifName": "eth0",
+            "ifDescr": "eth0",
+            "port_id": 2,
+            "ifTrunk": "dot1Q",
+            "ifVlan": None,
+            "vlans": [None, 123, "unexpected", {"vlan": 30}],
+        }
+        result = api.parse_port_vlan_data(port_data)
+
+        assert result["tagged_vlans"] == [30]
+        assert result["untagged_vlan"] is None

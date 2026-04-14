@@ -1,3 +1,5 @@
+from urllib.parse import quote_plus
+
 from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
@@ -8,10 +10,15 @@ from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
 
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 
-class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Handle POST requests to create/update VLANs in NetBox from LibreNMS data.
     """
@@ -36,6 +43,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheM
         if error := self.require_all_permissions("POST"):
             return error
 
+        # Read server_key from POST so we use the exact server the user was viewing
+        self._post_server_key = request.POST.get("server_key") or self.librenms_api.server_key
+
         obj = self.get_object(object_type, object_id)
         action = request.POST.get("action", "")
 
@@ -58,7 +68,11 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheM
             if object_type == "device"
             else "plugins:netbox_librenms_plugin:vm_librenms_sync"
         )
-        return redirect(reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans")
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        url = reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans"
+        if server_key:
+            url += f"&server_key={quote_plus(server_key)}"
+        return redirect(url)
 
     def _handle_create_vlans(self, request, obj, object_type, object_id):
         """
@@ -73,7 +87,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheM
             return self._redirect(object_type, object_id)
 
         # Get cached VLAN data
-        cached_vlans = cache.get(self.get_cache_key(obj, "vlans"))
+        cached_vlans = cache.get(self.get_cache_key(obj, "vlans", self._post_server_key))
         if not cached_vlans:
             messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
             return self._redirect(object_type, object_id)

@@ -76,15 +76,15 @@
                   {% for member in vc.members %}
                     <li class="d-flex flex-wrap align-items-center py-2 {% if not forloop.last %}border-bottom{% endif %}">
                       <span class="text-muted me-2">
-                        {% if member.position or member.position == 0 %}
-                          Pos {{ member.position|add:'1' }}
+                        {% if member.position %}
+                          Pos {{ member.position }}
                         {% else %}
                           Pos —
                         {% endif %}
                       </span>
                       <div class="flex-grow-1 d-flex align-items-center gap-2">
                         <code class="flex-grow-1 mb-0">{{ member.suggested_name }}
-                        {% if forloop.first %}
+                        {% if member.is_master %}
                           <span class="badge bg-success text-white">Master</span>
                         {% endif %}
                         </code>
@@ -131,6 +131,8 @@
         hx-target="body"
         hx-swap="none">
     {% csrf_token %}
+    <input type="hidden" name="server_key" value="{{ server_key }}">
+    <input type="hidden" name="vc_detection_enabled" value="{{ vc_detection_enabled|yesno:'on,off' }}">
     {% for entry in devices %}
       <input type="hidden" name="select" value="{{ entry.device_id }}">
       {% if entry.role %}<input type="hidden" name="role_{{ entry.device_id }}" value="{{ entry.role.pk }}">{% endif %}
@@ -139,6 +141,7 @@
     {% endfor %}
     <input type="hidden" name="use_sysname" value="{{ use_sysname|yesno:'true,false' }}">
     <input type="hidden" name="strip_domain" value="{{ strip_domain|yesno:'true,false' }}">
+    <input type="hidden" name="enable_vc_detection" value="{{ vc_detection_enabled|yesno:'true,false' }}">
     <input type="hidden" name="use_background_job" id="use-background-job-hidden" value="on">
     <button type="submit" class="btn btn-success d-inline-flex align-items-center gap-1" data-bulk-confirm-submit>
       <span data-state="idle" class="d-inline-flex align-items-center gap-1">
@@ -161,6 +164,8 @@
     window.__bulkConfirmHandlersAttached = true;
 
     const formId = 'bulk-import-confirm-form';
+    const checkboxId = 'use-background-job-checkbox';
+    const hiddenId = 'use-background-job-hidden';
 
     function toggleButtonState(isLoading) {
       const form = document.getElementById(formId);
@@ -182,14 +187,15 @@
       }
     }
 
-    // Sync checkbox with hidden input
-    const checkbox = document.getElementById('use-background-job-checkbox');
-    const hiddenInput = document.getElementById('use-background-job-hidden');
-    if (checkbox && hiddenInput) {
-      checkbox.addEventListener('change', function() {
-        hiddenInput.value = checkbox.checked ? 'on' : 'off';
-      });
-    }
+    // Delegated so it survives HTMX re-renders of the modal fragment.
+    document.addEventListener('change', function(event) {
+      if (event.target && event.target.id === checkboxId) {
+        const hiddenInput = document.getElementById(hiddenId);
+        if (hiddenInput) {
+          hiddenInput.value = event.target.checked ? 'on' : 'off';
+        }
+      }
+    });
 
     document.addEventListener('htmx:beforeRequest', function(event) {
       if (event.target && event.target.id === formId) {

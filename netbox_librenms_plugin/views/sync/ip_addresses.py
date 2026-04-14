@@ -1,3 +1,5 @@
+from urllib.parse import quote_plus
+
 from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
@@ -9,10 +11,15 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 
-class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Synchronize IP addresses from LibreNMS cache into NetBox."""
 
     required_object_permissions = {
@@ -40,7 +47,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     def get_cached_ip_data(self, request, obj):
         """Return cached LibreNMS IP address data for the given object."""
-        cached_data = cache.get(self.get_cache_key(obj, "ip_addresses"))
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        cached_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
         if not cached_data:
             return None
         return cached_data.get("ip_addresses", [])
@@ -59,13 +67,20 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
         else:
             url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
-        return f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        url = f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
+        if server_key:
+            url += f"&server_key={quote_plus(server_key)}"
+        return url
 
     def post(self, request, object_type, pk):
         """Sync selected IP addresses from LibreNMS into NetBox."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
+
+        # Read server_key from POST so we use the exact server the user was viewing
+        self._post_server_key = request.POST.get("server_key") or self.librenms_api.server_key
 
         obj = self.get_object(object_type, pk)
 

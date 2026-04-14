@@ -18,6 +18,42 @@
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 
+/**
+ * Show a Bootstrap-style modal using direct DOM manipulation.
+ * @param {HTMLElement} el - The modal element to show
+ */
+function showModal(el) {
+    if (!el) return;
+    el.classList.add('show');
+    el.style.display = 'block';
+    el.setAttribute('aria-modal', 'true');
+    el.removeAttribute('aria-hidden');
+    let backdrop = document.querySelector('.modal-backdrop');
+    if (!backdrop) {
+        backdrop = document.createElement('div');
+        backdrop.className = 'modal-backdrop fade show';
+        document.body.appendChild(backdrop);
+    }
+    document.body.classList.add('modal-open');
+}
+
+/**
+ * Hide a Bootstrap-style modal and clean up backdrop/body state.
+ * @param {HTMLElement} el - The modal element to hide
+ */
+function hideModal(el) {
+    if (!el) return;
+    el.classList.remove('show');
+    el.style.display = 'none';
+    el.setAttribute('aria-hidden', 'true');
+    el.removeAttribute('aria-modal');
+    const backdrop = document.querySelector('.modal-backdrop');
+    if (backdrop) backdrop.remove();
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('padding-right');
+    document.body.style.removeProperty('overflow');
+}
+
 // Helper to read CSRF token from cookies
 function getCookie(name) {
     let cookieValue = null;
@@ -86,13 +122,17 @@ function getDeviceIdFromUrl() {
     const pluginVMIndex = pathParts.indexOf('virtualmachine');
 
     if (deviceIndex !== -1 && deviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[deviceIndex + 1], type: 'device' };
+        const id = pathParts[deviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (vmIndex !== -1 && vmIndex + 1 < pathParts.length) {
-        return { id: pathParts[vmIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[vmIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     } else if (pluginDeviceIndex !== -1 && pluginDeviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginDeviceIndex + 1], type: 'device' };
+        const id = pathParts[pluginDeviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (pluginVMIndex !== -1 && pluginVMIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginVMIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[pluginVMIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     }
 
     return null;
@@ -153,7 +193,6 @@ function initializeCountdowns() {
     if (window.vlanCountdownInterval) {
         clearInterval(window.vlanCountdownInterval);
     }
-
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
     window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
@@ -333,6 +372,10 @@ function openVlanDetailModal(btn) {
     modal.dataset.currentSafeName = safeName;
     modal.dataset.currentDeviceId = deviceId;
 
+    // Clear any stale error from a previous save attempt
+    const staleAlert = modal.querySelector('.vlan-override-error');
+    if (staleAlert) { staleAlert.remove(); }
+
     // Build table rows
     const tbody = document.getElementById('vlanDetailTableBody');
     tbody.innerHTML = '';
@@ -397,17 +440,7 @@ function openVlanDetailModal(btn) {
         applyAllCheckbox.checked = false;
     }
 
-    // Show modal via hidden trigger (bootstrap not globally available in NetBox/Tabler)
-    let trigger = document.getElementById('vlanModalTrigger');
-    if (!trigger) {
-        trigger = document.createElement('button');
-        trigger.id = 'vlanModalTrigger';
-        trigger.setAttribute('data-bs-toggle', 'modal');
-        trigger.setAttribute('data-bs-target', '#vlanDetailModal');
-        trigger.style.display = 'none';
-        document.body.appendChild(trigger);
-    }
-    trigger.click();
+    showModal(document.getElementById('vlanDetailModal'));
 }
 
 /**
@@ -437,8 +470,27 @@ function updateHiddenVlanGroupInput(safeName, vid, groupId) {
  * @param {string} vlanType - "U" for untagged, "T" for tagged
  * @param {string} groupId - Selected group ID
  */
+let pendingVlanVerifications = 0;
+
+function _vlanVerifyStart(saveBtn) {
+    pendingVlanVerifications++;
+    if (saveBtn) saveBtn.disabled = true;
+}
+
+function _vlanVerifyEnd(saveBtn) {
+    pendingVlanVerifications = Math.max(0, pendingVlanVerifications - 1);
+    if (saveBtn && pendingVlanVerifications === 0) saveBtn.disabled = false;
+}
+
 function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
-    if (!deviceId) return;
+
+    const saveBtn = document.getElementById('saveVlanGroups');
+    _vlanVerifyStart(saveBtn);
+
+    // Capture safeName before the async fetch to avoid stale closure if the modal
+    // is opened for a different interface while this request is in flight.
+    const modal = document.getElementById('vlanDetailModal');
+    const capturedSafeName = modal?.dataset.currentSafeName;
 
     fetch('/plugins/librenms_plugin/verify-vlan-group/', {
         method: 'POST',
@@ -454,7 +506,12 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             vlan_type: vlanType
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(t => { throw new Error(t || `HTTP ${response.status}`); });
+            }
+            return response.json();
+        })
         .then(data => {
             if (data.status === 'success') {
                 const newCss = data.css_class || 'text-danger';
@@ -483,10 +540,8 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
                 }
 
                 // Update the css in the source edit button's data-vlans
-                const modal = document.getElementById('vlanDetailModal');
-                const safeName = modal?.dataset.currentSafeName;
-                if (safeName) {
-                    const btn = document.querySelector(`.vlan-edit-btn[data-safe-name="${safeName}"]`);
+                if (capturedSafeName) {
+                    const btn = document.querySelector(`.vlan-edit-btn[data-safe-name="${capturedSafeName}"]`);
                     if (btn) {
                         try {
                             const btnVlans = JSON.parse(btn.dataset.vlans);
@@ -501,8 +556,12 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
                 }
             }
         })
-        .catch(error => {
-            console.error('VLAN verification error:', error);
+        .catch(err => {
+            console.error('VLAN group verify failed:', err && err.message ? err.message : String(err));
+        })
+        .finally(() => {
+            const saveBtn = document.getElementById('saveVlanGroups');
+            _vlanVerifyEnd(saveBtn);
         });
 }
 
@@ -540,74 +599,80 @@ function initializeVlanModalSave() {
             ? document.querySelectorAll('.vlan-edit-btn')
             : document.querySelectorAll(`.vlan-edit-btn[data-safe-name="${currentSafeName}"]`);
 
-        buttonsToUpdate.forEach(btn => {
-            try {
-                const btnVlans = JSON.parse(btn.dataset.vlans);
-                const groups = JSON.parse(btn.dataset.vlanGroups);
-                const btnSafeName = btn.dataset.safeName;
-                let changed = false;
+        // Apply DOM mutations (btn.dataset.vlans, hidden inputs, summary spans)
+        // Called only after a successful server response when persisting, or immediately otherwise.
+        function applyButtonUpdates() {
+            buttonsToUpdate.forEach(btn => {
+                try {
+                    const btnVlans = JSON.parse(btn.dataset.vlans);
+                    const groups = JSON.parse(btn.dataset.vlanGroups);
+                    const btnSafeName = btn.dataset.safeName;
+                    let changed = false;
 
-                btnVlans.forEach(v => {
-                    if (vidGroupMap.hasOwnProperty(String(v.vid))) {
-                        const newGroupId = vidGroupMap[String(v.vid)];
-                        v.group_id = newGroupId;
-                        if (v.missing) {
-                            v.group_name = 'Not in NetBox';
-                        } else {
-                            const matchedGroup = groups.find(g => String(g.id) === String(newGroupId));
-                            v.group_name = matchedGroup ? matchedGroup.name : '-- No Group (Global) --';
+                    btnVlans.forEach(v => {
+                        if (vidGroupMap.hasOwnProperty(String(v.vid))) {
+                            const newGroupId = vidGroupMap[String(v.vid)];
+                            v.group_id = newGroupId;
+
+                            // Apply resolved missing/css state BEFORE computing group_name
+                            // so group_name reflects the verified state from the server.
+                            if (vidCssMap.hasOwnProperty(String(v.vid))) {
+                                v.css = vidCssMap[String(v.vid)];
+                                v.missing = vidMissingMap[String(v.vid)] || false;
+                            }
+
+                            if (v.missing) {
+                                v.group_name = 'Not in NetBox';
+                            } else {
+                                const matchedGroup = groups.find(g => String(g.id) === String(newGroupId));
+                                v.group_name = matchedGroup ? matchedGroup.name : '-- No Group (Global) --';
+                            }
+
+                            changed = true;
+
+                            // Update the hidden input for this VID on this interface
+                            const input = document.querySelector(
+                                `input.vlan-group-hidden[name="vlan_group_${btnSafeName}_${v.vid}"]`
+                            );
+                            if (input) {
+                                input.value = newGroupId;
+                            }
                         }
+                    });
 
-                        // Apply resolved CSS from verify endpoint if available
-                        if (vidCssMap.hasOwnProperty(String(v.vid))) {
-                            v.css = vidCssMap[String(v.vid)];
-                            v.missing = vidMissingMap[String(v.vid)] || false;
-                        }
+                    if (changed) {
+                        btn.dataset.vlans = JSON.stringify(btnVlans);
+                        // Update the tooltip and re-render inline summary colors
+                        const summarySpan = btn.previousElementSibling;
+                        if (summarySpan && summarySpan.tagName === 'SPAN') {
+                            const tooltipLines = btnVlans.map(v =>
+                                v.missing
+                                    ? `VLAN ${v.vid}(${v.type}) \u2192 \u26A0 Not in NetBox`
+                                    : `VLAN ${v.vid}(${v.type}) \u2192 ${v.group_name}`
+                            );
+                            summarySpan.title = tooltipLines.join('\n');
 
-                        changed = true;
-
-                        // Update the hidden input for this VID on this interface
-                        const input = document.querySelector(
-                            `input.vlan-group-hidden[name="vlan_group_${btnSafeName}_${v.vid}"]`
-                        );
-                        if (input) {
-                            input.value = newGroupId;
+                            // Re-render inline VLAN summary with correct colors
+                            const MAX_INLINE = 3;
+                            const inlineParts = btnVlans.slice(0, MAX_INLINE).map(v => {
+                                const warning = v.missing
+                                    ? ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>'
+                                    : '';
+                                return `<span class="${v.css}">${v.vid}(${v.type})${warning}</span>`;
+                            });
+                            let html = inlineParts.join(', ');
+                            if (btnVlans.length > MAX_INLINE) {
+                                const extra = btnVlans.length - MAX_INLINE;
+                                html += ` <span class="text-muted">+${extra} more</span>`;
+                            }
+                            summarySpan.innerHTML = html;
                         }
                     }
-                });
-
-                if (changed) {
-                    btn.dataset.vlans = JSON.stringify(btnVlans);
-                    // Update the tooltip and re-render inline summary colors
-                    const summarySpan = btn.previousElementSibling;
-                    if (summarySpan && summarySpan.tagName === 'SPAN') {
-                        const tooltipLines = btnVlans.map(v =>
-                            v.missing
-                                ? `VLAN ${v.vid}(${v.type}) \u2192 \u26A0 Not in NetBox`
-                                : `VLAN ${v.vid}(${v.type}) \u2192 ${v.group_name}`
-                        );
-                        summarySpan.title = tooltipLines.join('\n');
-
-                        // Re-render inline VLAN summary with correct colors
-                        const MAX_INLINE = 3;
-                        const inlineParts = btnVlans.slice(0, MAX_INLINE).map(v => {
-                            const warning = v.missing
-                                ? ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>'
-                                : '';
-                            return `<span class="${v.css}">${v.vid}(${v.type})${warning}</span>`;
-                        });
-                        let html = inlineParts.join(', ');
-                        if (btnVlans.length > MAX_INLINE) {
-                            const extra = btnVlans.length - MAX_INLINE;
-                            html += ` <span class="text-muted">+${extra} more</span>`;
-                        }
-                        summarySpan.innerHTML = html;
-                    }
+                } catch (e) {
+                    // Skip buttons with invalid data
                 }
-            } catch (e) {
-                // Skip buttons with invalid data
-            }
-        });
+            });
+        }
 
         // Persist overrides in server cache so other table pages pick them up
         if (applyToAll && Object.keys(vidGroupMap).length > 0) {
@@ -620,21 +685,37 @@ function initializeVlanModalSave() {
                 },
                 body: JSON.stringify({
                     device_id: deviceId,
-                    vid_group_map: vidGroupMap
+                    vid_group_map: vidGroupMap,
+                    server_key: document.querySelector('input[name="server_key"]')?.value || null
                 })
             }).then(response => {
                 if (!response.ok) {
-                    console.error('Failed to persist VLAN group overrides: HTTP', response.status);
+                    return response.text().then(t => { throw new Error(`HTTP ${response.status}: ${t}`); });
+                }
+                // Apply DOM mutations only after the server has persisted the overrides
+                applyButtonUpdates();
+                // Close modal only on success
+                const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
+                if (closeBtn) {
+                    closeBtn.click();
                 }
             }).catch(error => {
-                console.error('Failed to persist VLAN group overrides:', error);
+                console.error('Failed to persist VLAN group overrides:', error.message);
+                let alertEl = modalEl.querySelector('.vlan-override-error');
+                if (!alertEl) {
+                    alertEl = document.createElement('div');
+                    alertEl.className = 'vlan-override-error alert alert-danger mt-2';
+                    modalEl.querySelector('.modal-body')?.appendChild(alertEl);
+                }
+                alertEl.textContent = 'Failed to save VLAN group overrides: ' + error.message;
             });
-        }
-
-        // Close the modal
-        const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
-        if (closeBtn) {
-            closeBtn.click();
+        } else {
+            // No server persist needed — apply DOM mutations and close immediately
+            applyButtonUpdates();
+            const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
+            if (closeBtn) {
+                closeBtn.click();
+            }
         }
     });
 }
@@ -753,10 +834,16 @@ function handleVRFChange(select, value) {
         body: JSON.stringify({
             device_id: deviceId,
             ip_address: fullIpAddress,  // Use full IP address with prefix
-            vrf_id: value
+            vrf_id: value,
+            server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(t => { throw new Error(t); });
+            }
+            return response.json();
+        })
         .then(data => {
             const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
 
@@ -768,7 +855,7 @@ function handleVRFChange(select, value) {
             }
         })
         .catch(error => {
-            console.error('VRF verification failed:', error);
+            console.error('VRF verification failed:', error.message);
         });
 }
 
@@ -789,10 +876,18 @@ function handleInterfaceChange(select, value) {
         body: JSON.stringify({
             device_id: value,
             interface_name: select.dataset.interface,
-            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value
+            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
+            server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(text => {
+                    throw new Error(`Server error ${response.status}: ${text}`);
+                });
+            }
+            return response.json();
+        })
         .then(data => {
             const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
             if (data.status === 'success' && row) {
@@ -806,6 +901,9 @@ function handleInterfaceChange(select, value) {
                 row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
                 initializeFilters();
             }
+        })
+        .catch(error => {
+            console.error('Error verifying interface:', error.message);
         });
 }
 
@@ -825,23 +923,32 @@ function handleCableChange(select, value) {
         },
         body: JSON.stringify({
             device_id: value,
-            local_port: select.dataset.interface
+            local_port_id: select.dataset.interface,
+            server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(text => {
+                    throw new Error(`Server error ${response.status}: ${text}`);
+                });
+            }
+            return response.json();
+        })
         .then(data => {
             const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
 
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
-                const actionsCell = row.querySelector('td[data-col="actions"]');
                 row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
                 row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
                 row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
                 row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
                 row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
-
             }
+        })
+        .catch(error => {
+            console.error('Error verifying cable:', error.message);
         });
 }
 
@@ -872,22 +979,7 @@ function initializeBulkEditApply() {
             });
 
             // Close the modal on 'Apply'
-            const bulkModal = document.getElementById('bulkVCMemberModal');
-            if (bulkModal) {
-                bulkModal.classList.remove('show');
-                bulkModal.style.display = 'none';
-                bulkModal.setAttribute('aria-hidden', 'true');
-                bulkModal.removeAttribute('aria-modal');
-
-                const backdrop = document.querySelector('.modal-backdrop');
-                if (backdrop) {
-                    backdrop.remove();
-                }
-
-                document.body.classList.remove('modal-open');
-                document.body.style.removeProperty('padding-right');
-                document.body.style.removeProperty('overflow');
-            }
+            hideModal(document.getElementById('bulkVCMemberModal'));
 
         });
     }
@@ -1139,20 +1231,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // Function to open the bulk VC modal
 function openBulkVCModal() {
-    const modal = document.getElementById('bulkVCMemberModal');
-    if (modal) {
-        modal.classList.add('show');
-        modal.style.display = 'block';
-        modal.setAttribute('aria-modal', 'true');
-        modal.removeAttribute('aria-hidden');
-
-        // Add backdrop
-        const backdrop = document.createElement('div');
-        backdrop.className = 'modal-backdrop fade show';
-        document.body.appendChild(backdrop);
-
-        document.body.classList.add('modal-open');
-    }
+    showModal(document.getElementById('bulkVCMemberModal'));
 }
 
 // Function to update the interface_name_field radio button
@@ -1194,6 +1273,7 @@ function setInterfaceNameFieldFromURL() {
     const urlParams = new URLSearchParams(window.location.search);
     const interfaceNameField = urlParams.get('interface_name_field');
     if (interfaceNameField) {
+        if (!['ifDescr', 'ifName'].includes(interfaceNameField)) return;
         const radio = document.querySelector(`input[name="interface_name_field"][value="${interfaceNameField}"]`);
         if (radio) {
             radio.checked = true;
@@ -1239,11 +1319,6 @@ function initializeNetBoxOnlyInterfaces() {
             if (selectedCheckboxes.length === 0) {
                 return;
             }
-
-            const interfaceNames = Array.from(selectedCheckboxes).map(cb => {
-                const row = cb.closest('tr');
-                return row.querySelector('td:nth-child(2) a').textContent;
-            });
 
             deleteSelectedInterfaces(selectedCheckboxes);
         });
@@ -1305,26 +1380,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
         })
         .then(data => {
             if (data.status === 'success') {
-                // Close modal using native DOM methods
-                const modalElement = document.getElementById('netboxOnlyInterfacesModal');
-                if (modalElement) {
-                    // Hide the modal
-                    modalElement.classList.remove('show');
-                    modalElement.style.display = 'none';
-                    modalElement.setAttribute('aria-hidden', 'true');
-                    modalElement.removeAttribute('aria-modal');
-
-                    // Remove backdrop
-                    const backdrop = document.querySelector('.modal-backdrop');
-                    if (backdrop) {
-                        backdrop.remove();
-                    }
-
-                    // Clean up body classes and styles
-                    document.body.classList.remove('modal-open');
-                    document.body.style.removeProperty('padding-right');
-                    document.body.style.removeProperty('overflow');
-                }
+                hideModal(document.getElementById('netboxOnlyInterfacesModal'));
 
                 // Refresh the interface data by triggering the refresh button
                 const refreshButton = document.querySelector('[hx-post*="interface-sync"]');
@@ -1392,6 +1448,139 @@ function initializeSyncFormSpinners() {
     });
 }
 
+
+/**
+ * Wire the "Install Selected" form to collect checked module-table rows before submit.
+ * The form is separate from the table (to avoid nested forms), so we copy the
+ * selected checkbox values into hidden inputs just before the form is submitted.
+ * Guard against duplicate listeners on repeated HTMX swaps via a data attribute.
+ */
+function handleInstallSelectedSubmit() {
+    // Remove any previously-injected hidden inputs to avoid duplicates
+    const form = document.getElementById('install-selected-form');
+    if (!form) return;
+    form.querySelectorAll('input[data-injected-select]').forEach(el => { el.remove(); });
+
+    const table = document.getElementById('librenms-module-table');
+    if (!table) return;
+
+    table.querySelectorAll('input[name="select"]:checked').forEach(cb => {
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'select';
+        hidden.value = cb.value;
+        hidden.dataset.injectedSelect = '1';
+        form.appendChild(hidden);
+    });
+}
+
+function initializeInstallSelectedForm() {
+    const form = document.getElementById('install-selected-form');
+    if (!form) return;
+    if (form.dataset.installInit) return;
+    form.dataset.installInit = 'true';
+    form.addEventListener('submit', handleInstallSelectedSubmit);
+}
+
+/**
+ * Tracks the in-flight AbortController for the module replace preview fetch.
+ * Cancelled when a new Replace button is clicked before the previous fetch completes.
+ */
+let _activeReplaceController = null;
+
+/**
+ * Initialize Replace buttons on the module sync table.
+ * Each button carries module/ent_index/server_key as data attributes and opens
+ * the mismatch comparison modal by fetching the preview fragment from the server.
+ */
+function initializeModuleReplaceButtons() {
+    document.querySelectorAll('.module-replace-btn').forEach(btn => {
+        if (btn.dataset.replaceInitialized) return;
+        btn.dataset.replaceInitialized = 'true';
+
+        btn.addEventListener('click', function () {
+            // Cancel any in-flight preview request before starting a new one
+            if (_activeReplaceController) {
+                _activeReplaceController.abort();
+            }
+            _activeReplaceController = new AbortController();
+            const signal = _activeReplaceController.signal;
+
+            const previewUrl = this.dataset.previewUrl;
+            const moduleId = this.dataset.moduleId;
+            const entIndex = this.dataset.entIndex;
+            const serverKey = this.dataset.serverKey;
+
+            const params = new URLSearchParams({
+                module_id: moduleId,
+                ent_index: entIndex,
+                server_key: serverKey,
+            });
+
+            // Show shared HTMX modal with loading state
+            const modalContent = document.getElementById('htmx-modal-content');
+            if (modalContent) {
+                modalContent.innerHTML =
+                    '<div class="modal-header">' +
+                    '<h5 class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
+                    '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
+                    '</div>' +
+                    '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
+                    '<i class="mdi mdi-loading mdi-spin mdi-36px"></i>' +
+                    '<p class="mt-2">Loading\u2026</p>' +
+                    '</div>';
+            }
+
+            showModal(document.getElementById('htmx-modal'));
+
+            // Fetch preview content and inject into modal body
+            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+            const fetchHeaders = {};
+            if (csrfToken) {
+                fetchHeaders['X-CSRFToken'] = csrfToken;
+            }
+            fetch(`${previewUrl}?${params.toString()}`, {
+                signal,
+                headers: fetchHeaders,
+            })
+                .then(response => {
+                    if (!response.ok) return response.text().then(t => { throw new Error(t); });
+                    return response.text();
+                })
+                .then(html => {
+                    const modalBody = document.getElementById('htmx-modal-body');
+                    if (modalBody) {
+                        modalBody.innerHTML = html;
+                        htmx.process(modalBody);
+                    }
+                })
+                .catch(err => {
+                    if (err.name === 'AbortError') return; // Superseded by a newer click — ignore
+                    const modalBody = document.getElementById('htmx-modal-body');
+                    if (modalBody) {
+                        const alert = document.createElement('div');
+                        alert.className = 'alert alert-danger';
+                        const icon = document.createElement('i');
+                        icon.className = 'mdi mdi-alert me-1';
+                        alert.appendChild(icon);
+                        alert.appendChild(document.createTextNode(err.message || 'Failed to load preview.'));
+                        modalBody.textContent = '';
+                        modalBody.appendChild(alert);
+                    }
+                });
+        });
+    });
+}
+
+function closeHtmxModal() {
+    // Abort any in-flight module-replace preview request
+    if (typeof _activeReplaceController !== 'undefined' && _activeReplaceController) {
+        _activeReplaceController.abort();
+        _activeReplaceController = null;
+    }
+    hideModal(document.getElementById('htmx-modal'));
+}
+
 // ============================================
 // INITIALIZATION
 // ============================================
@@ -1400,6 +1589,7 @@ function initializeSyncFormSpinners() {
  * Initialize all sync page functionality.
  * Called on DOMContentLoaded and after HTMX content swaps.
  */
+
 function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
@@ -1416,6 +1606,8 @@ function initializeScripts() {
     initializeNetBoxOnlyInterfaces();
     initializeSyncFormSpinners();
     initializeVlanSyncGroupSelects();
+    initializeInstallSelectedForm();
+    initializeModuleReplaceButtons();
 }
 
 
@@ -1435,4 +1627,19 @@ document.addEventListener('DOMContentLoaded', function () {
 // Initialize scripts after HTMX swaps content
 document.body.addEventListener('htmx:afterSwap', function (event) {
     initializeScripts();
+});
+
+// Update HTMX modal accessible label after content loads so screen readers
+// announce the actual dialog title rather than the static "Loading" placeholder.
+document.addEventListener('DOMContentLoaded', function () {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal) {
+        htmxModal.addEventListener('htmx:afterSettle', function () {
+            const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
+            const label = document.getElementById('htmx-modal-label');
+            if (header && label) {
+                label.textContent = header.textContent.trim();
+            }
+        });
+    }
 });

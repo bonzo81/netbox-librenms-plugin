@@ -633,8 +633,8 @@ class TestNetBoxObjectPermissionMixin:
 class TestBulkImportPermissions:
     """Tests for permission checks in bulk import functions."""
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
     def test_bulk_import_devices_checks_permissions(self, mock_api_class, mock_require):
         """bulk_import_devices_shared calls require_permissions."""
         from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
@@ -656,10 +656,11 @@ class TestBulkImportPermissions:
         call_args = mock_require.call_args
         assert user == call_args[0][0]
         assert "dcim.add_device" in call_args[0][1]
-        assert "dcim.add_interface" in call_args[0][1]
+        assert "dcim.change_device" in call_args[0][1]
+        assert "dcim.add_interface" not in call_args[0][1]
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
     def test_bulk_import_devices_extracts_user_from_job(self, mock_api_class, mock_require):
         """bulk_import_devices_shared extracts user from job if not provided."""
         from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
@@ -682,7 +683,7 @@ class TestBulkImportPermissions:
         call_args = mock_require.call_args
         assert job_user == call_args[0][0]
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions")
     def test_bulk_import_vms_checks_permissions(self, mock_require):
         """bulk_import_vms calls require_permissions."""
         from netbox_librenms_plugin.import_utils import bulk_import_vms
@@ -703,7 +704,7 @@ class TestBulkImportPermissions:
         assert user == call_args[0][0]
         assert "virtualization.add_virtualmachine" in call_args[0][1]
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions")
     def test_bulk_import_vms_extracts_user_from_job(self, mock_require):
         """bulk_import_vms extracts user from job if not provided."""
         from netbox_librenms_plugin.import_utils import bulk_import_vms
@@ -729,7 +730,7 @@ class TestBulkImportPermissions:
 class TestBulkImportPermissionDenied:
     """Tests for permission denied behavior in bulk import."""
 
-    @patch("netbox_librenms_plugin.import_utils.check_user_permissions")
+    @patch("netbox_librenms_plugin.import_utils.permissions.check_user_permissions")
     def test_bulk_import_devices_raises_on_missing_permissions(self, mock_check):
         """bulk_import_devices_shared raises PermissionDenied when permissions missing."""
         import pytest
@@ -748,7 +749,7 @@ class TestBulkImportPermissionDenied:
                 server_key="default",
             )
 
-    @patch("netbox_librenms_plugin.import_utils.check_user_permissions")
+    @patch("netbox_librenms_plugin.import_utils.permissions.check_user_permissions")
     def test_bulk_import_vms_raises_on_missing_permissions(self, mock_check):
         """bulk_import_vms raises PermissionDenied when permissions missing."""
         import pytest
@@ -873,8 +874,8 @@ class TestSafeRedirectUrl:
 class TestBulkImportVCPermission:
     """Tests that bulk import checks virtualchassis permission."""
 
-    @patch("netbox_librenms_plugin.import_utils.require_permissions")
-    @patch("netbox_librenms_plugin.import_utils.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
     def test_bulk_import_devices_checks_vc_permission(self, mock_api_class, mock_require):
         """bulk_import_devices_shared includes dcim.add_virtualchassis in required perms."""
         from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
@@ -892,7 +893,9 @@ class TestBulkImportVCPermission:
 
         mock_require.assert_called_once()
         call_args = mock_require.call_args
-        assert "dcim.add_virtualchassis" in call_args[0][1]
+        # After Fix 6: interface/VC permissions removed from initial check
+        assert "dcim.add_virtualchassis" not in call_args[0][1]
+        assert "dcim.add_device" in call_args[0][1]
 
 
 class TestObjectTypeValidation:
@@ -951,3 +954,130 @@ class TestObjectTypeValidation:
         view = DeleteNetBoxInterfacesView()
         with pytest.raises(Http404):
             view.get_required_permissions_for_object_type("invalid")
+
+
+# ---------------------------------------------------------------------------
+# Tests for RemoveServerMappingView error handling (device_fields.py)
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveServerMappingViewErrorHandling:
+    """Test RemoveServerMappingView handles full_clean/save failures gracefully."""
+
+    def _make_view(self, server_key, post_extra=None):
+        """Return a (view, request) pair with permissions satisfied."""
+        from unittest.mock import MagicMock
+
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+
+        request = MagicMock()
+        request.POST = {"server_key": server_key, **(post_extra or {})}
+        request.user = MagicMock()
+        request.user.has_perm.return_value = True
+
+        view = RemoveServerMappingView()
+        view.request = request  # required by mixin's has_write_permission
+        return view, request
+
+    def test_validation_error_returns_error_message(self):
+        """ValidationError from full_clean leads to error message, not 500."""
+        from unittest.mock import MagicMock, patch
+
+        from django.core.exceptions import ValidationError
+
+        view, request = self._make_view(server_key="orphan-server")
+
+        mock_device = MagicMock()
+        mock_device.custom_field_data = {"librenms_id": {"orphan-server": 99}}
+
+        mock_locked = MagicMock()
+        mock_locked.custom_field_data = {"librenms_id": {"orphan-server": 99}}
+        mock_locked.full_clean.side_effect = ValidationError("CF validation failed")
+
+        plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}  # orphan-server NOT configured
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device") as mock_Device_cls,
+            patch("django.conf.settings") as mock_settings,
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction") as mock_tx,
+        ):
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            mock_Device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+            # Make transaction.atomic() a no-op context manager
+            mock_tx.atomic.return_value.__enter__ = lambda s: None
+            mock_tx.atomic.return_value.__exit__ = lambda s, *a: None
+            mock_tx.set_rollback = MagicMock()
+
+            view.post(request, pk=1)
+
+        mock_messages.error.assert_called_once()
+        error_args = mock_messages.error.call_args[0]
+        assert "Validation error" in str(error_args[1]) or "CF validation failed" in str(error_args[1])
+
+    def test_configured_server_refused(self):
+        """Configured server mapping cannot be removed — error message shown."""
+        from unittest.mock import MagicMock, patch
+
+        view, request = self._make_view(server_key="active-server")
+        mock_device = MagicMock()
+        mock_device.custom_field_data = {"librenms_id": {"active-server": 5}}
+
+        plugins_cfg = {"netbox_librenms_plugin": {"servers": {"active-server": {"librenms_url": "http://x"}}}}
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch("django.conf.settings") as mock_settings,
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            view.post(request, pk=1)
+
+        mock_messages.error.assert_called_once()
+        assert "Cannot remove" in mock_messages.error.call_args[0][1]
+
+    def test_successful_removal_mutates_and_saves(self):
+        """Successful removal deletes the key from custom_field_data and saves the device."""
+        from unittest.mock import MagicMock, patch
+
+        view, request = self._make_view(server_key="orphan-server")
+
+        mock_device = MagicMock()
+        mock_device.custom_field_data = {"librenms_id": {"orphan-server": 42, "other-server": 7}}
+
+        mock_locked = MagicMock()
+        mock_locked.custom_field_data = {"librenms_id": {"orphan-server": 42, "other-server": 7}}
+        mock_locked.full_clean = MagicMock()
+        mock_locked.save = MagicMock()
+
+        plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}  # orphan-server NOT configured
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device") as mock_Device_cls,
+            patch("django.conf.settings") as mock_settings,
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction") as mock_tx,
+        ):
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            mock_Device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+            mock_tx.atomic.return_value.__enter__ = lambda s: None
+            mock_tx.atomic.return_value.__exit__ = lambda s, *a: None
+            mock_tx.set_rollback = MagicMock()
+
+            view.post(request, pk=1)
+
+        # The "orphan-server" key should have been removed and the device saved.
+        # Assert the exact shape of custom_field_data so misspelled keys are caught.
+        assert mock_locked.custom_field_data == {"librenms_id": {"other-server": 7}}
+        remaining = mock_locked.custom_field_data["librenms_id"]
+        assert "orphan-server" not in remaining
+        assert remaining.get("other-server") == 7  # sibling key preserved
+        mock_locked.save.assert_called_once()
+        mock_messages.success.assert_called_once()

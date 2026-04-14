@@ -59,7 +59,7 @@ jobs:
         working-directory: netbox-librenms-plugin
         run: |
           pip install -e .
-          pip install pytest pytest-django
+          pip install pytest pytest-django pytest-cov
 
       - name: Set up configuration
         working-directory: netbox
@@ -75,4 +75,14 @@ jobs:
         env:
           NETBOX_CONFIGURATION: netbox.configuration
         run: |
-          python -m pytest ../../netbox-librenms-plugin/netbox_librenms_plugin/tests/ -v
+          python -m pytest ../../netbox-librenms-plugin/netbox_librenms_plugin/tests/ -v \
+            --cov=netbox_librenms_plugin \
+            --cov-report=html:../../netbox-librenms-plugin/coverage_html \
+            --cov-report=term-missing
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-report
+          path: netbox-librenms-plugin/coverage_html/

@@ -1,4 +1,5 @@
-"""Tests for netbox_librenms_plugin.utils module.
+"""
+Tests for netbox_librenms_plugin.utils module.
 
 Phase 2 tests covering device type matching, site matching,
 platform matching, and conversion helper functions.
@@ -15,9 +16,12 @@ from unittest.mock import MagicMock, patch
 class TestDeviceTypeMatching:
     """Test device type matching logic."""
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_exact_match_by_part_number(self, mock_device_type):
+    def test_match_device_type_exact_match_by_part_number(self, mock_device_type, mock_dtm):
         """Exact part_number string should match."""
+        mock_dtm.DoesNotExist = Exception
+        mock_dtm.objects.get.side_effect = Exception
         mock_dt = MagicMock(id=1, model="C9300-48P")
         mock_device_type.objects.get.return_value = mock_dt
 
@@ -29,9 +33,12 @@ class TestDeviceTypeMatching:
         assert result["device_type"] == mock_dt
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_exact_match_by_model(self, mock_device_type):
+    def test_match_device_type_exact_match_by_model(self, mock_device_type, mock_dtm):
         """Exact model string should match when part_number fails."""
+        mock_dtm.DoesNotExist = Exception
+        mock_dtm.objects.get.side_effect = Exception
         mock_dt = MagicMock(id=1, model="WS-C3750X-48P")
         # Part number lookup fails, model lookup succeeds
         mock_device_type.DoesNotExist = Exception
@@ -48,9 +55,12 @@ class TestDeviceTypeMatching:
         assert result["device_type"] == mock_dt
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_not_found(self, mock_device_type):
-        """Returns None when no match found."""
+    def test_match_device_type_not_found(self, mock_device_type, mock_dtm):
+        """Returns not-found dict when no match found."""
+        mock_dtm.DoesNotExist = Exception
+        mock_dtm.objects.get.side_effect = Exception
         mock_device_type.DoesNotExist = Exception
         mock_device_type.objects.get.side_effect = mock_device_type.DoesNotExist
 
@@ -79,6 +89,48 @@ class TestDeviceTypeMatching:
 
         assert result["matched"] is False
         assert result["device_type"] is None
+
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
+    @patch("dcim.models.DeviceType")
+    def test_match_device_type_ambiguous_part_number_returns_none(self, mock_device_type, mock_dtm):
+        """MultipleObjectsReturned on part_number should return None, not pick .first()."""
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
+        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        mock_dtm.DoesNotExist = DoesNotExist
+        mock_dtm.MultipleObjectsReturned = type("DTMMult", (Exception,), {})
+        mock_dtm.objects.get.side_effect = DoesNotExist  # DTM not found
+        mock_device_type.DoesNotExist = DoesNotExist
+        mock_device_type.MultipleObjectsReturned = MultipleObjectsReturned
+        mock_device_type.objects.get.side_effect = MultipleObjectsReturned
+
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        result = match_librenms_hardware_to_device_type("DUPLICATE-PARTNUM")
+
+        assert result is None
+
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
+    @patch("dcim.models.DeviceType")
+    def test_match_device_type_ambiguous_model_returns_none(self, mock_device_type, mock_dtm):
+        """MultipleObjectsReturned on model should return None, not pick .first()."""
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
+        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        mock_dtm.DoesNotExist = DoesNotExist
+        mock_dtm.MultipleObjectsReturned = type("DTMMult", (Exception,), {})
+        mock_dtm.objects.get.side_effect = DoesNotExist  # DTM not found
+        mock_device_type.DoesNotExist = DoesNotExist
+        mock_device_type.MultipleObjectsReturned = MultipleObjectsReturned
+        # part_number raises DoesNotExist, model raises MultipleObjectsReturned
+        mock_device_type.objects.get.side_effect = [
+            DoesNotExist("not found"),
+            MultipleObjectsReturned("ambiguous"),
+        ]
+
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        result = match_librenms_hardware_to_device_type("DUPLICATE-MODEL")
+
+        assert result is None
 
 
 # =============================================================================
@@ -346,10 +398,209 @@ class TestVirtualChassisHelpers:
 
         assert result == mock_member_with_id
 
+    def test_get_librenms_sync_device_dict_preferred_over_legacy_bare_int(self):
+        """
+        In a partially migrated VC, a member with per-server dict format
+        is preferred over a member with legacy bare-int format."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        # Member A: legacy bare-int librenms_id (not yet migrated)
+        member_a = MagicMock()
+        member_a.cf = {"librenms_id": 42}
+
+        # Member B: migrated per-server dict format
+        member_b = MagicMock()
+        member_b.cf = {"librenms_id": {"default": 42}}
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        # member_a listed first — the function should still prefer member_b
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device, server_key="default")
+
+        assert result == member_b
+
+    def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
+        """When no member has a per-server dict, fall back to legacy bare-int."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        member_a = MagicMock()
+        member_a.cf = {"librenms_id": 42}
+        member_b = MagicMock()
+        member_b.cf = {}
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.members.all.return_value = [member_b, member_a]
+
+        result = get_librenms_sync_device(mock_device, server_key="default")
+
+        assert result == member_a
+
+    def test_get_librenms_sync_device_dict_for_different_server_falls_through(self):
+        """Per-server dict with a different key does not match; legacy bare-int resolves instead."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        # Member A: legacy bare-int (universal fallback)
+        member_a = MagicMock()
+        member_a.cf = {"librenms_id": 42}
+
+        # Member B: dict but only for "production", not "default"
+        member_b = MagicMock()
+        member_b.cf = {"librenms_id": {"production": 99}}
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device, server_key="default")
+
+        assert result == member_a
+
+    def test_zero_id_is_not_a_valid_librenms_id(self):
+        """LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
+        A member whose resolved ID is 0 must be skipped so a real ID is preferred."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        device = MagicMock()
+        vc = MagicMock()
+        device.virtual_chassis = vc
+        vc.master = None
+
+        member_zero = MagicMock()
+        member_zero.primary_ip = None
+        member_real = MagicMock()
+        member_real.primary_ip = None
+
+        def _id_side_effect(obj, server_key, **kwargs):
+            if obj is member_zero:
+                return 0
+            if obj is member_real:
+                return 5
+            return None
+
+        # member_zero comes first but has id=0; member_real has id=5 — real ID wins
+        with patch("netbox_librenms_plugin.utils.get_librenms_device_id") as mock_get_id:
+            mock_get_id.side_effect = _id_side_effect
+            vc.members.all.return_value = [member_zero, member_real]
+            result = get_librenms_sync_device(device, server_key="default")
+
+        assert result is member_real
+
 
 # =============================================================================
-# TestPaginationHelpers - 2 tests
+# TestSafeDisabled - tests for _safe_disabled in bulk_import.py and filters.py
 # =============================================================================
+
+
+class TestSafeDisabledBulkImport:
+    """Tests for _safe_disabled in import_utils/bulk_import.py."""
+
+    def _call(self, val):
+        from netbox_librenms_plugin.import_utils.bulk_import import _safe_disabled
+
+        return _safe_disabled({"disabled": val})
+
+    def test_bool_true(self):
+        assert self._call(True) == 1
+
+    def test_bool_false(self):
+        assert self._call(False) == 0
+
+    def test_string_true_lowercase(self):
+        assert self._call("true") == 1
+
+    def test_string_yes(self):
+        assert self._call("yes") == 1
+
+    def test_string_on(self):
+        assert self._call("on") == 1
+
+    def test_string_false_lowercase(self):
+        assert self._call("false") == 0
+
+    def test_string_no(self):
+        assert self._call("no") == 0
+
+    def test_string_off(self):
+        assert self._call("off") == 0
+
+    def test_numeric_one(self):
+        assert self._call(1) == 1
+
+    def test_numeric_zero(self):
+        assert self._call(0) == 0
+
+    def test_none_defaults_to_zero(self):
+        assert self._call(None) == 0
+
+    def test_missing_key_defaults_to_zero(self):
+        from netbox_librenms_plugin.import_utils.bulk_import import _safe_disabled
+
+        assert _safe_disabled({}) == 0
+
+    def test_string_true_uppercase(self):
+        assert self._call("TRUE") == 1
+
+    def test_non_zero_int_is_disabled(self):
+        assert self._call(2) == 1
+
+    def test_negative_int_is_disabled(self):
+        assert self._call(-1) == 1
+
+
+class TestSafeDisabledFilters:
+    """Tests for _safe_disabled in import_utils/filters.py (same contract)."""
+
+    def _call(self, val):
+        from netbox_librenms_plugin.import_utils.filters import _safe_disabled
+
+        return _safe_disabled({"disabled": val})
+
+    def test_bool_true(self):
+        assert self._call(True) == 1
+
+    def test_bool_false(self):
+        assert self._call(False) == 0
+
+    def test_string_true(self):
+        assert self._call("true") == 1
+
+    def test_string_yes(self):
+        assert self._call("yes") == 1
+
+    def test_string_on(self):
+        assert self._call("on") == 1
+
+    def test_string_false(self):
+        assert self._call("false") == 0
+
+    def test_string_off(self):
+        assert self._call("off") == 0
+
+    def test_string_uppercase_true(self):
+        assert self._call("TRUE") == 1
+
+    def test_string_no(self):
+        assert self._call("no") == 0
+
+    def test_numeric_one(self):
+        assert self._call(1) == 1
+
+    def test_none_defaults_to_zero(self):
+        assert self._call(None) == 0
+
+    def test_non_zero_int_is_disabled(self):
+        assert self._call(2) == 1
+
+    def test_negative_int_is_disabled(self):
+        assert self._call(-1) == 1
+
+    def test_missing_key_defaults_to_zero(self):
+        from netbox_librenms_plugin.import_utils.filters import _safe_disabled
+
+        assert _safe_disabled({}) == 0
 
 
 class TestPaginationHelpers:
