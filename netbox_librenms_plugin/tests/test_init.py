@@ -191,8 +191,10 @@ class TestEnsureLibreNMSIdCustomField:
     def test_integer_field_migrated_to_json(
         self, MockCustomField, MockContentType, mock_vm, mock_vmif, mock_device, mock_iface
     ):
-        """When existing field has type='integer', it is migrated to 'json' and saved."""
+        """When existing field has type='integer', it is migrated to 'json' and saved on the given alias."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+        db_alias = "other"
 
         mock_cf = MagicMock()
         mock_cf.type = "integer"
@@ -203,7 +205,12 @@ class TestEnsureLibreNMSIdCustomField:
         mock_ct.pk = 1
         self._setup_ct_mock(MockContentType, mock_ct)
 
-        _ensure_librenms_id_custom_field(sender=None)
+        _ensure_librenms_id_custom_field(sender=None, using=db_alias)
 
         assert mock_cf.type == "json"
-        mock_cf.save.assert_called_once_with(using="default", update_fields=["type"])
+        # Alias must flow through both the CustomField lookup and the ContentType lookup,
+        # exercising the per-alias guard path (_executed_aliases).
+        MockCustomField.objects.using.assert_called_with(db_alias)
+        MockContentType.objects.db_manager.assert_called_with(db_alias)
+        mock_cf.save.assert_called_once_with(using=db_alias, update_fields=["type"])
+        assert db_alias in _ensure_librenms_id_custom_field._executed_aliases

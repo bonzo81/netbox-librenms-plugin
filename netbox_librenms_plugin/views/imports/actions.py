@@ -279,6 +279,9 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             )
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
+        vc_detection_enabled = (
+            request.POST.get("enable_vc_detection") or request.GET.get("enable_vc_detection") or ""
+        ).lower() in ("on", "true", "1")
 
         devices = []
         errors = []
@@ -320,15 +323,14 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
                 server_key=self.librenms_api.server_key,
+                include_vc_detection=vc_detection_enabled,
             )
             # Recompute is_vm from validation result — the function may have
             # detected an existing VM via hostname/IP lookup
             is_vm = bool(validation.get("import_as_vm"))
 
             # Mark validation with VC detection flag for proper URL generation in table
-            # Bulk confirm should respect the initial filter's VC detection preference
-            vc_requested = request.GET.get("enable_vc_detection") == "true"
-            validation["_vc_detection_enabled"] = vc_requested
+            validation["_vc_detection_enabled"] = vc_detection_enabled
 
             device_name = validation.get("resolved_name") or f"device-{device_id}"
 
@@ -411,10 +413,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
             "server_key": self.librenms_api.server_key,
-            "vc_detection_enabled": (
-                request.POST.get("enable_vc_detection") or request.GET.get("enable_vc_detection") or ""
-            ).lower()
-            in ("on", "true", "1"),
+            "vc_detection_enabled": vc_detection_enabled,
         }
 
         return render(

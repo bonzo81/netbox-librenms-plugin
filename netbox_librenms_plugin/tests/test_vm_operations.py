@@ -618,7 +618,7 @@ class TestBulkImportVms:
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations._is_job_cancelled",
                 return_value=False,
-            ),
+            ) as mock_is_job_cancelled,
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
                 return_value=None,
@@ -626,6 +626,9 @@ class TestBulkImportVms:
         ):
             result = bulk_import_vms(vm_imports, mock_api, job=mock_job)
 
+        # The cancellation helper must be consulted at least once (idx==1 checkpoint);
+        # protects against accidental removal of the check.
+        mock_is_job_cancelled.assert_called_once_with(mock_job)
         # Both VMs should be attempted (not cancelled) → both failed (fetch returned None)
         assert len(result["failed"]) == 2
 
