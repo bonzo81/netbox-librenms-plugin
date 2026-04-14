@@ -374,7 +374,9 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
                 server_key=self.librenms_api.server_key,
-                include_vc_detection=vc_detection_enabled,
+                # Keep confirm modal aligned with import-time behavior: always
+                # detect VC membership so stack members are visible before import.
+                include_vc_detection=True,
             )
             # Recompute is_vm from validation result — the function may have
             # detected an existing VM via hostname/IP lookup

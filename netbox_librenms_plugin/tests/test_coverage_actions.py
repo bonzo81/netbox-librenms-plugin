@@ -279,11 +279,12 @@ class TestBulkImportConfirmView:
                         with patch(
                             "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
                             return_value=validation,
-                        ):
+                        ) as mock_validate:
                             request = _make_request(post={"select": ["1"]}, get={"enable_vc_detection": "false"})
                             view.post(request)
 
         mock_render.assert_called_once()
+        assert mock_validate.call_args.kwargs["include_vc_detection"] is True
         call_args = mock_render.call_args
         assert "bulk_import_confirm.html" in call_args[0][1]
 
