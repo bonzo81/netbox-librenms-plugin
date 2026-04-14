@@ -21,6 +21,17 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 
+def _extract_inventory_list(cached_payload):
+    """Extract the inventory row list from a cached payload.
+
+    The cache stores ``{"inventory": [...], "librenms_id": ...}`` but also
+    tolerates legacy list payloads from older cache entries.
+    """
+    if isinstance(cached_payload, dict):
+        return cached_payload.get("inventory") or []
+    return cached_payload or []
+
+
 def _report_install_results(request, installed, skipped, failed):
     """Emit Django messages summarising an install run."""
     if installed:
@@ -109,7 +120,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Get cached inventory data
-        cached_data = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
@@ -179,6 +191,24 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         items = []
         parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
         if parent:
+            if ignore_rules:
+                from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
+
+                ancestor = index_map.get(parent.get("entPhysicalContainedIn")) if index_map else None
+                action = _check_ignore_rules(parent, ancestor, ignore_rules, index_map, device_serial)
+                if action == "skip":
+                    return []
+                if action == "transparent":
+                    self._collect_children(
+                        parent_index,
+                        inventory_data,
+                        items,
+                        visited={parent_index},
+                        ignore_rules=ignore_rules,
+                        device_serial=device_serial,
+                        index_map=index_map,
+                    )
+                    return items
             model = (parent.get("entPhysicalModelName") or "").strip()
             if model:
                 items.append(parent)
@@ -471,7 +501,8 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.warning(request, "No modules selected.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        cached_data = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
@@ -507,14 +538,13 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     index_map,
                     device_serial,
                 )
-                != "skip"
+                not in {"skip", "transparent"}
             ]
-
-        module_types = get_module_types_indexed()
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries
         from netbox_librenms_plugin.utils import load_bay_mappings
 
+        module_types = get_module_types_indexed()
         exact_mappings, regex_mappings = load_bay_mappings()
 
         installed, skipped, failed = [], [], []
@@ -618,7 +648,8 @@ class ModuleMismatchPreviewView(
             device=device,
         )
 
-        cached_data = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             return HttpResponse("No cached inventory data. Please refresh modules first.", status=400)
 
@@ -721,7 +752,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         )
         target_bay = installed_module.module_bay
 
-        cached_data = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")

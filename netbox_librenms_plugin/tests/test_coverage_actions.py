@@ -3615,7 +3615,7 @@ class TestBulkImportDevicesMorePaths:
         """vc_detection_enabled=off from POST must propagate to bulk import call."""
         view = self._make_view()
         request = self._make_base_request(["1"])
-        request.POST.get = MagicMock(side_effect=lambda k, d=None: "off" if k == "vc_detection_enabled" else None)
+        request.POST.get = MagicMock(side_effect=lambda k, d=None: "off" if k == "enable_vc_detection" else None)
 
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
