@@ -135,7 +135,6 @@
 
               {# Show only for non-VM contexts: true when no existing device (new import, not VM) OR when existing device is not a VM. #}
               {% if not validation.existing_device and not validation.import_as_vm or validation.existing_device and existing_device_model_name != "virtualmachine" %}
-              {# Site row #}
               <tr>
                 <td style="padding-left: 0.75rem;">Site</td>
                 <td>
@@ -279,7 +278,6 @@
                     {{ validation.existing_device.platform }}
                     {% if sync_info and not sync_info.platform_synced %}
                       {% if sync_info.platform_info.platform_exists %}
-                        {% if not validation.import_as_vm and not validation.existing_device.cluster %}
                         <form style="display:inline" class="ms-1"
                               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                               hx-swap="none">
@@ -291,7 +289,6 @@
                             <i class="mdi mdi-sync"></i>
                           </button>
                         </form>
-                        {% endif %}
                       {% else %}
                         <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
                           <i class="mdi mdi-alert-outline"></i>
@@ -305,7 +302,7 @@
                     <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% elif sync_info and sync_info.platform_info.platform_exists %}
                     <span class="text-muted">Not set</span>
-                    {% if validation.existing_device and not validation.import_as_vm and not validation.existing_device.cluster %}
+                    {% if validation.existing_device %}
                     <form style="display:inline" class="ms-1"
                           hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                           hx-swap="none">
@@ -464,7 +461,7 @@
           Import blocked: The incoming serial number is already assigned to another device in NetBox.
           Resolve the duplicate serial before linking.
         </div>
-      {% elif validation.import_as_vm %}
+      {% elif validation.import_as_vm or existing_device_model_name == "virtualmachine" %}
         <div class="alert alert-info py-2 mb-3">
           <i class="mdi mdi-information-outline"></i>
           Hostname match found for a VM — use the import action to proceed.

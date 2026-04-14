@@ -242,10 +242,11 @@ class TestSyncJobStatusRQJobStopped:
 
 
 class TestSyncJobStatusRQJobNotInQueue:
-    """Test sync_job_status when RQ.fetch raises an exception."""
+    """Test sync_job_status when RQ.fetch raises NoSuchJobError."""
 
     def test_updates_db_to_failed_when_running_and_not_in_rq(self):
         from core.choices import JobStatusChoices
+        from rq.exceptions import NoSuchJobError
 
         mock_db_job = MagicMock()
         mock_db_job.pk = 5
@@ -260,7 +261,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.objects.get.return_value = mock_db_job
 
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("not found in redis")
+        mock_rq_cls.fetch.side_effect = NoSuchJobError("not found in redis")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)
@@ -282,6 +283,7 @@ class TestSyncJobStatusRQJobNotInQueue:
 
     def test_no_change_when_not_running_and_not_in_rq(self):
         from core.choices import JobStatusChoices
+        from rq.exceptions import NoSuchJobError
 
         mock_db_job = MagicMock()
         mock_db_job.pk = 6
@@ -296,7 +298,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.objects.get.return_value = mock_db_job
 
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("not found in redis")
+        mock_rq_cls.fetch.side_effect = NoSuchJobError("not found in redis")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)
@@ -316,6 +318,7 @@ class TestSyncJobStatusRQJobNotInQueue:
 
     def test_does_not_overwrite_completed_when_not_in_rq(self):
         from core.choices import JobStatusChoices
+        from rq.exceptions import NoSuchJobError
 
         mock_db_job = MagicMock()
         mock_db_job.pk = 7
@@ -330,7 +333,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.objects.get.return_value = mock_db_job
 
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("gone")
+        mock_rq_cls.fetch.side_effect = NoSuchJobError("gone")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)
