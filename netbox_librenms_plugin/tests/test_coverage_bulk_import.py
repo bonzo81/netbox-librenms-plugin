@@ -450,7 +450,7 @@ class TestBulkImportDevicesShared:
         mock_create_vc.assert_called_once()
 
     def test_vc_creation_skipped_without_vc_permission(self):
-        """User lacks dcim.add_virtualchassis → VC skipped, device import still succeeds (closes #31)."""
+        """User lacks dcim.add_virtualchassis → stack device import fails fast (PR #257)."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         validation = _make_validation()
         validation["virtual_chassis"] = {
@@ -471,7 +471,7 @@ class TestBulkImportDevicesShared:
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
                 return_value=_make_import_result(),
-            ),
+            ) as mock_import,
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
             ) as mock_create_vc,
@@ -485,11 +485,14 @@ class TestBulkImportDevicesShared:
             )
 
         mock_create_vc.assert_not_called()
-        assert len(result["success"]) == 1
+        mock_import.assert_not_called()
+        assert len(result["success"]) == 0
+        assert len(result["failed"]) == 1
+        assert "dcim.add_virtualchassis" in result["failed"][0]["error"]
         assert result["virtual_chassis_created"] == 0
 
     def test_vc_creation_skipped_without_permission_logs_job_warning(self):
-        """Missing VC permission with job context logs warning via job.logger (line 244)."""
+        """Missing VC permission with job context logs error via job.logger (PR #257)."""
         job = _make_job()
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         validation = _make_validation()
@@ -531,8 +534,10 @@ class TestBulkImportDevicesShared:
             )
 
         mock_create_vc.assert_not_called()
-        job.logger.warning.assert_called()
-        assert len(result["success"]) == 1
+        job.logger.error.assert_called()
+        assert len(result["success"]) == 0
+        assert len(result["failed"]) == 1
+        assert "dcim.add_virtualchassis" in result["failed"][0]["error"]
 
     def test_vc_with_no_members_falls_back_to_device_id_domain(self):
         """No serials and no member fingerprint triggers device-id vc_domain fallback (line 233)."""
