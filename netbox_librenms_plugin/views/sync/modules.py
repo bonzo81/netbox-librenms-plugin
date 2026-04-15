@@ -413,10 +413,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         bay = occupied[0] if len(occupied) == 1 else None
                     if bay and hasattr(bay, "installed_module") and bay.installed_module:
                         return bay.installed_module.pk
-                # Regex mapping: prefer class-specific, fall back to class-empty
+                # Regex mapping: class-specific first, then empty-class fallback
+                # (concatenate, don't use ``or``, so fallback is tried even when
+                # class-specific rules exist but none match — mirrors base view)
                 class_matches = [rm for rm in regex_mappings if rm.librenms_class == parent_class]
                 fallback_matches = [rm for rm in regex_mappings if rm.librenms_class == ""]
-                for rm in class_matches or fallback_matches:
+                for rm in class_matches + fallback_matches:
                     try:
                         if re.search(rm.librenms_name, name):
                             candidates = bay_by_name.get(rm.netbox_bay_name, [])
@@ -598,6 +600,8 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         device = get_object_or_404(Device, pk=pk)
         serial = request.POST.get("serial", "").strip()
+        if serial.lower() in _PLACEHOLDER_VALUES:
+            serial = ""
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         try:
