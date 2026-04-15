@@ -419,20 +419,27 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 class_matches = [rm for rm in regex_mappings if rm.librenms_class == parent_class]
                 fallback_matches = [rm for rm in regex_mappings if rm.librenms_class == ""]
                 for rm in class_matches + fallback_matches:
+                    compiled = rm._compiled_pattern
+                    if compiled is None:
+                        continue
                     try:
-                        if re.search(rm.librenms_name, name):
-                            candidates = bay_by_name.get(rm.netbox_bay_name, [])
-                            if len(candidates) == 1:
-                                bay = candidates[0]
-                            else:
-                                occupied = [
-                                    b for b in candidates if hasattr(b, "installed_module") and b.installed_module
-                                ]
-                                bay = occupied[0] if len(occupied) == 1 else None
-                            if bay and hasattr(bay, "installed_module") and bay.installed_module:
-                                return bay.installed_module.pk
+                        match = compiled.fullmatch(name)
                     except re.error:
                         continue
+                    if not match:
+                        continue
+                    try:
+                        bay_name = match.expand(rm.netbox_bay_name)
+                    except (re.error, IndexError):
+                        continue
+                    candidates = bay_by_name.get(bay_name, [])
+                    if len(candidates) == 1:
+                        bay = candidates[0]
+                    else:
+                        occupied = [b for b in candidates if hasattr(b, "installed_module") and b.installed_module]
+                        bay = occupied[0] if len(occupied) == 1 else None
+                    if bay and hasattr(bay, "installed_module") and bay.installed_module:
+                        return bay.installed_module.pk
 
             current = parent
 

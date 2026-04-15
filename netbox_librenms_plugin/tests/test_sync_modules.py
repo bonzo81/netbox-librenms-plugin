@@ -6,6 +6,7 @@ bay matching by name/mapping/position, serial comparison, status determination,
 and depth tracking.  inventory-rebased branch only.
 """
 
+import re
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -1347,6 +1348,7 @@ class TestFindParentModuleIdRegex:
         m.librenms_name = pattern
         m.netbox_bay_name = netbox_bay_name
         m.librenms_class = ""
+        m._compiled_pattern = re.compile(pattern)
         return m
 
     def _make_exact_mapping(self, librenms_name, netbox_bay_name):
