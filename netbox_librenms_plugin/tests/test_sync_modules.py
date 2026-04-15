@@ -2110,6 +2110,8 @@ class TestUpdateModuleSerialViewBehavior:
         """POST with valid module_id and new serial updates the module and shows success."""
         from contextlib import contextmanager
 
+        from dcim.models import Module
+
         view = self._view()
         device = _make_device()
 
@@ -2133,18 +2135,23 @@ class TestUpdateModuleSerialViewBehavior:
         def noop_atomic():
             yield
 
+        mock_qs = MagicMock()
+        mock_qs.select_related.return_value.filter.return_value.first.return_value = module
+
         with (
             patch.object(view, "require_all_permissions", return_value=None),
             patch(
                 "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
-                side_effect=[device, module],
+                return_value=device,
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+            patch.object(Module, "objects") as mock_objects,
         ):
             mock_tx.atomic = noop_atomic
+            mock_objects.select_for_update.return_value = mock_qs
             view.post(request, pk=24)
 
         assert module.serial == "NEW-SN"

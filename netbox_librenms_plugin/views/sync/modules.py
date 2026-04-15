@@ -610,10 +610,17 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, "Missing or invalid module ID.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        module = get_object_or_404(Module, pk=module_id, device=device)
-
         try:
             with transaction.atomic():
+                module = (
+                    Module.objects.select_for_update()
+                    .select_related("module_type", "module_bay")
+                    .filter(pk=module_id, device=device)
+                    .first()
+                )
+                if not module:
+                    messages.error(request, "Module no longer exists.")
+                    return redirect(f"{sync_url}?tab=modules#librenms-module-table")
                 module.serial = serial
                 module.full_clean()
                 module.save()
