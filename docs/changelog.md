@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.4.4 (2026-04-15)
+
+### New Features
+* **Multi-Server Support**: JSON-based `librenms_id` custom field with per-server device tracking, server management, and migration from legacy integer format
+* **Auto-Create Custom Field**: Automatically create the `librenms_id` custom field via `post_migrate` signal
+* **Sync Page Naming Preferences**: Apply `use_sysname` and `strip_domain` naming preferences to device name matching on sync pages
+* **VC Import Enhancements**: Show virtual chassis members in import confirm modal, enforce stack VC permissions before import, and fix VC flag propagation across the import flow
+
+### Improvements
+* Refactor `import_utils.py` into a package with aligned module boundaries
+* Security hardening — URL-encode `server_key` in redirects, reject `librenms_id` <= 0, CSRF safety, XSS label escaping in cable verify
+* JS hardening — extract `showModal`/`hideModal` helpers, harden `getDeviceIdFromUrl`, guard `interfaceNameField`, remove dead code
+* Server-key propagation, UI polish, and view hardening across multi-server import pipeline
+* Cable sync matching by `local_port_id` instead of display name; strip stale fields on cable verify POST
+* Simplify migration — always revert to integer, handle non-integer custom field types gracefully
+* Skip `device_type` check for VMs; add `sync_platform` to VM supported actions
+* Update supported NetBox versions in README
+
+### Fixes
+* Fix VC master detection, 0-based position correction, and import propagation
+* Fix VC verify view crash by using `get_librenms_sync_device()` in verify views
+* Fix cables view caching, `interface_name_field` per-request, and `LibreNMSAPIMixin`
+* Fix operator precedence in message fallback expressions
+* Fix import validation, template bugs, and pagination
+* Correct `vc_detection_enabled` default in `validate_device_for_import` call
+* Fix stale docstrings, test names, and duplicate functions
+* Guard `dt_match` None on ambiguous hardware match in `validate_device_for_import`
+* Write enriched links data back to cache on non-fresh path
+* Restore multi-key naming preferences and early-exit on missing name
+
+### Development
+* Expanded test coverage with new test files and reorganized existing tests
+* Smoke tests, integration tests, and mock LibreNMS server
+* Add `pytest-cov` coverage report (no gating)
+* Updated pre-commit hooks, ruff config, and uv Dependabot
+* Bump GitHub Actions dependencies (upload-artifact, download-artifact, pypi-publish)
+* Update pull request template for contributions
+
+### Documentation
+* Update documentation for 0.4.4 release
+* Testing docs updates with new test files and philosophy
+
 ## 0.4.3 (2026-03-03)
 
 ### New Features

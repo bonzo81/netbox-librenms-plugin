@@ -63,7 +63,7 @@
 ### Location
 
 * NetBox Site to LibreNMS location synchronization
-* Sync location latitude and longitude values from NetBoxx to LibreNMS
+* Sync location latitude and longitude values from NetBox to LibreNMS
 
 ### [Interface Mapping](usage_tips/interface_mappings.md)
 

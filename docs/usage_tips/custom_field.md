@@ -5,7 +5,7 @@
 To enhance device identification and synchronization between NetBox and LibreNMS, this plugin supports using a custom field `librenms_id` on Device, Virtual Machine and Interface objects. While the plugin works without it, using this custom field is recommended for LibreNMS API lookups, and to assist with matching the remote device and remote interfaces for cable creation in Netbox. It can also be entered manually if no primary IP or FQDN is available.
 
 !!! info "Automatic Creation"
-    As of version 0.4.3, the plugin **automatically creates** the `librenms_id` custom field via a `post_migrate` hook when migrations are run. You no longer need to create it manually. The field is created for Device, Virtual Machine, Interface, and VM Interface objects.
+    As of version 0.4.4, the plugin **automatically creates** the `librenms_id` custom field when migrations are run. You no longer need to create it manually. The field is created for Device, Virtual Machine, Interface, and VM Interface objects with JSON type for per-server device tracking.
 
 For the Device and Virtual Machine objects the plugin will automatically populate the LibreNMS ID custom field when opening the LibreNMS Sync page if the device has been found in LibreNMS.
 
@@ -21,7 +21,7 @@ For the Interface object, the plugin will automatically populate the LibreNMS ID
 ## Manual Custom Field Setup
 
 !!! note
-    On 0.4.3+, the `librenms_id` custom field is created automatically by the plugin's `post_migrate` hook. Run `manage.py migrate` to trigger this. Manual recreation below is only a fallback troubleshooting step if the field was not created automatically (e.g., due to a failed migration or an existing field of an incompatible type).
+    On 0.4.4+, rerun migrations first (`manage.py migrate`). If you need to recreate the field manually on current releases, use the JSON schema below. Pre-0.4.4 releases used an Integer field — do not use Integer for new entries.
 
 If the field was not created automatically (fallback): follow these steps to create the `librenms_id` custom field in NetBox:
 
