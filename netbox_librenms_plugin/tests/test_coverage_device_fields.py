@@ -424,8 +424,8 @@ class TestUpdateDeviceTypeView:
             view.post(_make_request(), pk=1)
         mock_msg.error.assert_called_once()
 
-    def test_match_none_returns_not_found(self):
-        """match_librenms_hardware_to_device_type returns None → treated same as no match."""
+    def test_match_none_returns_ambiguous_error(self):
+        """match_librenms_hardware_to_device_type returns None → ambiguous-match error path."""
         view = self._view()
         view._librenms_api.get_librenms_id.return_value = 7
         view._librenms_api.get_device_info.return_value = (True, {"hardware": "Cisco 3750"})
@@ -440,8 +440,8 @@ class TestUpdateDeviceTypeView:
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
             view.post(_make_request(), pk=1)
-        # None result triggers the `not match_result` guard → error message, no update
         mock_msg.error.assert_called_once()
+        assert "Ambiguous" in mock_msg.error.call_args[0][1]
         mock_device.full_clean.assert_not_called()
         mock_device.save.assert_not_called()
 

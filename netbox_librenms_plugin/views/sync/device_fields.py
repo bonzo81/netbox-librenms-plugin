@@ -197,7 +197,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if match_result is None:
             messages.error(
                 request,
-                f"Ambiguous hardware match for '{hardware}': multiple DeviceType entries found.",
+                f"Ambiguous hardware match for '{hardware}': multiple matching mappings/device types found.",
             )
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
