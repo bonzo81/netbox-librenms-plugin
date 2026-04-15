@@ -41,15 +41,23 @@ def _get_container():
     global CONTAINER_NAME
     if CONTAINER_NAME:
         return CONTAINER_NAME
+    override = os.environ.get("NETBOX_CONTAINER")
+    if override:
+        CONTAINER_NAME = override
+        return override
     result = subprocess.run(
         ["docker", "ps", "--format", "{{.Names}}"],
         capture_output=True,
         text=True,
     )
-    for name in result.stdout.strip().split("\n"):
-        if "devcontainer-devcontainer" in name:
-            CONTAINER_NAME = name
-            return name
+    if result.returncode != 0:
+        raise RuntimeError(f"docker ps failed (rc={result.returncode}): {result.stderr}")
+    matches = [name for name in result.stdout.strip().split("\n") if "devcontainer-devcontainer" in name]
+    if len(matches) == 1:
+        CONTAINER_NAME = matches[0]
+        return CONTAINER_NAME
+    if len(matches) > 1:
+        raise RuntimeError(f"Multiple candidate devcontainers found: {matches}. Set NETBOX_CONTAINER.")
     pytest.skip("No devcontainer found")
 
 
@@ -73,7 +81,11 @@ def _netbox_shell(code):
         env={**os.environ, "PATH": "/usr/bin:/bin", "HOME": "/root"},
     )
     # Filter out config loading lines
-    lines = [line for line in result.stdout.strip().split("\n") if not line.startswith(("🧬", "156 objects"))]
+    lines = [
+        line
+        for line in result.stdout.strip().split("\n")
+        if not line.startswith("🧬") and "objects imported automatically" not in line
+    ]
     if result.returncode != 0:
         raise RuntimeError(f"netbox shell command failed (rc={result.returncode}): {result.stderr}")
     return "\n".join(lines).strip()

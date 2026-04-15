@@ -20,11 +20,11 @@
 # suffixes (e.g. 3HE16474AARA01).  NetBox module types use the base part
 # number (3HE16474AA).  This rule strips the suffix before matching.
 #
-# Captures the 10-char base (3HE + 5 alnum + 2 quality-tier letters),
+# Captures the 10-char base (3HE + 5 digits + 2 quality-tier letters),
 # discards the 2-letter revision code + 2-digit build number.
 - scope: module_type
   manufacturer: Nokia
-  match_pattern: "^(3HE\\w{5}[A-Z]{2})[A-Z]{2}\\d{2}$"
+  match_pattern: "^(3HE[0-9]{5}[A-Z]{2})[A-Z]{2}\\d{2}$"
   replacement: "\\1"
   priority: 100
   description: "Strip Nokia revision suffixes (e.g. RA01, RB01, RG01) from ENTITY-MIB model strings"
@@ -55,7 +55,7 @@
 # info: "3HE10550AARA01  NOK  IPU3BFUEAA" — extract just the part number.
 - scope: module_type
   manufacturer: Nokia
-  match_pattern: "^(3HE\\w+)\\s+.*$"
+  match_pattern: "^(3HE[A-Z0-9]+)\\s+.*$"
   replacement: "\\1"
   priority: 50
   description: "Extract Nokia part number from transceiver model field (strip trailing vendor/oui info)"

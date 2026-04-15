@@ -987,9 +987,7 @@ class TestGracefulFallback:
         request = MagicMock()
         request.user.is_superuser = superuser
         request.user.username = "testuser"
-        params = query_params or {}
-        request.GET.get = lambda key, default=None: params.get(key, default)
-        request.GET.__contains__ = lambda self_inner, key: key in params
+        request.GET = dict(query_params or {})
         view.request = request
         return view, request
 
