@@ -12,11 +12,11 @@ Navigate to **Plugins → LibreNMS Plugin → Settings** and configure:
 
 **Why first**: These defaults apply to all imports and save time by reducing per-import configuration.
 
-## 2. Create Custom Field
+## 2. Verify Custom Field
 
-Create the `librenms_id` custom field in NetBox following the [Custom Field Setup](custom_field.md) guide.
+As of version 0.4.4, the plugin **automatically creates** the `librenms_id` custom field when migrations are run. No manual setup is required. See the [Custom Field Setup](custom_field.md) guide for details on how the field works and optional manual configuration.
 
-**Why early**: This field enables the most reliable device matching and is required for interface, cable, and IP address synchronization features. Creating it before importing prevents issues with duplicate device detection.
+**Why early**: This field enables the most reliable device matching and is required for interface, cable, and IP address synchronization features. It is created automatically during `manage.py migrate`, so just verify it exists before importing.
 
 ## 3. Prepare NetBox Data
 

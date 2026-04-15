@@ -23,5 +23,6 @@
   * [Views & Inheritance](development/views.md)
   * [Mixins](development/mixins.md)
   * [Templates](development/templates.md)
+  * [Testing](development/testing.md)
 * [Changelog](changelog.md)
 * [Contributing](contributing.md)

@@ -16,6 +16,15 @@ This document provides an overview of the NetBox LibreNMS Plugin's codebase orga
     - `netbox_librenms_plugin/` — Main template directory
       - `inc/` — Shared template fragments (e.g., paginator)
   - `api/` — API serializers, views, and URLs
+  - `import_utils/` — Import pipeline logic, split into focused modules
+    - `device_operations.py` — Device validation, single-device import, filtered fetch
+    - `vm_operations.py` — VM creation and import logic
+    - `bulk_import.py` — Multi-device / bulk import orchestration
+    - `filters.py` — LibreNMS device filtering and retrieval
+    - `permissions.py` — User permission checking helpers
+    - `cache.py` — Cache key generation
+    - `virtual_chassis.py` — Virtual chassis data helpers
+  - `import_validation_helpers.py` — Validation state mutation during import (role/cluster/rack assignment, issue removal, status recalculation)
   - `migrations/` — Django migrations
   - `utils.py` — Utility functions
   - `navigation.py` — Menu/navigation integration
