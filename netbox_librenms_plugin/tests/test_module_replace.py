@@ -120,7 +120,7 @@ class TestModuleMismatchPreviewView:
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
         ):
-            mock_cache.get.return_value = cached
+            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
             resp = view.get(request, pk=24)
 
         assert resp.status_code == 400
@@ -154,7 +154,7 @@ class TestModuleMismatchPreviewView:
             patch("dcim.models.Module") as mock_module_cls,
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
-            mock_cache.get.return_value = cached
+            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 0
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
             resp = view.get(request, pk=24)
@@ -195,7 +195,7 @@ class TestModuleMismatchPreviewView:
             patch("dcim.models.Module") as mock_module_cls,
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
         ):
-            mock_cache.get.return_value = cached
+            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 1
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = conflict_module
             view.get(request, pk=24)
@@ -288,7 +288,7 @@ class TestReplaceModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
             patch("dcim.models.Module") as mock_module_cls,
         ):
-            mock_cache.get.return_value = cached
+            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module
@@ -341,7 +341,7 @@ class TestReplaceModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
             patch("dcim.models.Module") as mock_module_cls,
         ):
-            mock_cache.get.return_value = cached
+            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module

@@ -1149,7 +1149,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
         ):
-            mock_cache.get.return_value = cached_inventory
+            mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
             view.post(request, pk=24)
 
@@ -1196,7 +1196,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
         ):
-            mock_cache.get.return_value = cached_inventory
+            mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
             view.post(request, pk=24)
 
@@ -1936,7 +1936,7 @@ class TestPKValidationErrorPaths:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
-            mock_cache.get.return_value = cached
+            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
             view.post(request, pk=24)
 
         mock_msg.error.assert_called_once()

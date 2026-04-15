@@ -24,12 +24,12 @@ from netbox_librenms_plugin.views.mixins import (
 def _extract_inventory_list(cached_payload):
     """Extract the inventory row list from a cached payload.
 
-    The cache stores ``{"inventory": [...], "librenms_id": ...}`` but also
-    tolerates legacy list payloads from older cache entries.
+    The cache stores ``{"inventory": [...], "librenms_id": ...}``; anything
+    else is treated as a cache miss to match BaseModuleTableView.get_context_data.
     """
     if isinstance(cached_payload, dict):
         return cached_payload.get("inventory") or []
-    return cached_payload or []
+    return []
 
 
 def _report_install_results(request, installed, skipped, failed):
