@@ -214,10 +214,11 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         # Step 5: Extract member info
         # First pass: collect raw entPhysicalParentRelPos values to detect 0-based
         # indexing.  Some vendors use 0-based positions (0,1,2,3,4) instead of the
-        # RFC 2737 standard 1-based (1,2,3,4,5).  Only treat the stack as 0-based
-        # when positions span 0 and a positive value — if *every* position is 0
-        # the data is invalid (all members would collide on the same slot) and
-        # we fall through to the per-member idx+1 fallback below.
+        # RFC 2737 standard 1-based (1,2,3,4,5).  If any raw position is 0, shift
+        # all valid positions up by 1 so the resulting set is always 1-based.
+        # Exception: if *every* position is 0 the data is invalid (all members
+        # would collide on the same slot) — skip the shift and fall through to
+        # the per-member idx+1 fallback below.
         raw_positions = []
         for chassis in chassis_items:
             raw = chassis.get("entPhysicalParentRelPos")
