@@ -24,6 +24,7 @@ See the [Device Import Guide](docs/librenms_import/overview.md) for detailed usa
 ### Device Field Sync
 Synchronize device information from LibreNMS to NetBox. The following device fields can be synchronized:
 
+- Device Name (with naming preference support)
 - Serial Number (including virtual chassis members)
 - Device Type
 - Platform
@@ -85,7 +86,7 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 
 
 ## Contributing
-There's more to do! Coding is not my day job. Bugs will exist and imporvements will be needed. Contributions are very welcome!  I've got more ideas for new features and imporvements but please [contribute](docs/contributing.md) if you can!
+There's more to do! Coding is not my day job. Bugs will exist and improvements will be needed. Contributions are very welcome!  I've got more ideas for new features and improvements but please [contribute](docs/contributing.md) if you can!
 
 ### Development Environment
 An easy way to get started with development is to use the included **development container**:
@@ -96,7 +97,7 @@ An easy way to get started with development is to use the included **development
 
 📖 **[See the Dev Container README](.devcontainer/README.md)** for detailed setup instructions, available commands, and troubleshooting.
 
-Alternatively, share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions ).
+Alternatively, share your ideas for the plugin over in [discussions](https://github.com/bonzo81/netbox-librenms-plugin/discussions).
 
 ## Compatibility
 
@@ -123,7 +124,7 @@ Install with pip:
 Add to your `local_requirements.txt` to ensure it is automatically reinstalled during future upgrades.
 
 ```bash
- "netbox-librenms-plugin" >> /opt/netbox/local_requirements.txt
+echo "netbox-librenms-plugin" >> /opt/netbox/local_requirements.txt #Check your NetBox install location
 ```
 
 ### Docker
@@ -226,19 +227,9 @@ sudo systemctl restart netbox
 
 ### 6. Custom Field
 
-It is recommended (but not essential) to add a custom field `librenms_id` to the Device, Virtual Machine and Interface models in NetBox. Use the following settings:
+As of version 0.4.4, the plugin **automatically creates** the `librenms_id` custom field (JSON type) when migrations are run. No manual setup is required.
 
-* **Object Types:**
-  * Check **dcim > device**
-  * Check **virtualization > virtual machine**
-  * Check **dcim > interface**
-  * Check **virtualization > interfaces (optional)**
-* **Name:** `librenms_id`
-* **Label:** `LibreNMS ID`
-* **Description:** (Optional) Add a description like "LibreNMS ID for LibreNMS Plugin".
-* **Type:** Integer
-* **Required:** Leave unchecked.
-* **Default Value:** Leave blank.
+The field is created for Device, Virtual Machine, Interface, and VM Interface objects and stores a per-server mapping (e.g., `{"production": 42}`).
 
 For more info check out [custom field docs](docs/usage_tips/custom_field.md)
 
