@@ -50,6 +50,7 @@ class TestUpdateDeviceNameView:
         view._librenms_api.get_librenms_id.return_value = None
 
         mock_device = MagicMock()
+        mock_device.virtual_chassis = None
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
@@ -66,6 +67,7 @@ class TestUpdateDeviceNameView:
         view._librenms_api.get_device_info.return_value = (False, None)
 
         mock_device = MagicMock()
+        mock_device.virtual_chassis = None
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
@@ -82,6 +84,7 @@ class TestUpdateDeviceNameView:
         view._librenms_api.get_device_info.return_value = (True, {})
 
         mock_device = MagicMock()
+        mock_device.virtual_chassis = None
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
@@ -95,11 +98,15 @@ class TestUpdateDeviceNameView:
     def test_no_sysname_returns_warning(self):
         view = self._view()
         view._librenms_api.get_librenms_id.return_value = 42
-        view._librenms_api.get_device_info.return_value = (True, {"sysName": None})
+        view._librenms_api.get_device_info.return_value = (True, {"sysName": None, "hostname": None})
 
         mock_device = MagicMock()
+        mock_device.virtual_chassis = None
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.resolve_naming_preferences", return_value=(True, False)
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
@@ -114,8 +121,17 @@ class TestUpdateDeviceNameView:
 
         mock_device = MagicMock()
         mock_device.name = "old-name"
+        mock_device.virtual_chassis = None
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.resolve_naming_preferences",
+                return_value=(True, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields._determine_device_name",
+                return_value="router1",
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
         ):
@@ -136,11 +152,20 @@ class TestUpdateDeviceNameView:
 
         mock_device = MagicMock()
         mock_device.name = "old-name"
+        mock_device.virtual_chassis = None
         exc = ValidationError({"name": ["duplicate"]})
         mock_device.full_clean.side_effect = exc
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.resolve_naming_preferences",
+                return_value=(True, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields._determine_device_name",
+                return_value="router1",
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
@@ -159,10 +184,19 @@ class TestUpdateDeviceNameView:
 
         mock_device = MagicMock()
         mock_device.name = "old-name"
+        mock_device.virtual_chassis = None
         mock_device.full_clean.side_effect = IntegrityError("duplicate key")
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.resolve_naming_preferences",
+                return_value=(True, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields._determine_device_name",
+                return_value="router1",
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
