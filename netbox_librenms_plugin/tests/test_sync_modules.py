@@ -668,6 +668,11 @@ class TestInstallSingleStatus:
 
         ModuleBay = MagicMock()
         ModuleBay.objects.filter.return_value.select_related.return_value = [bay]
+        # Support select_for_update chain used in _install_single
+        locked_bay = _bay("Slot 1")
+        locked_bay.installed_module = None
+        locked_bay.pk = bay.pk
+        ModuleBay.objects.select_for_update.return_value.select_related.return_value.get.return_value = locked_bay
         ModuleType = MagicMock()
         Module = MagicMock()
 
@@ -735,19 +740,32 @@ class TestInstallSingleStatus:
         assert "no matching bay" in result["reason"]
 
     def test_returns_skipped_when_bay_already_occupied(self):
+        from contextlib import contextmanager
+
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         view = _make_install_branch_view()
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
-        bay.installed_module = _module()  # occupied!
+        occupied_module = _module()
+        bay.installed_module = occupied_module
+        # Update the locked bay to also appear occupied
+        locked_bay = MagicMock()
+        locked_bay.installed_module = occupied_module
+        locked_bay.pk = bay.pk
+        ModuleBay.objects.select_for_update.return_value.select_related.return_value.get.return_value = locked_bay
 
-        with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
-            with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
-                with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
-                    with patch.object(InstallBranchView, "_match_bay", return_value=bay):
-                        result = view._install_single(
-                            device, item, index_map, module_types, ModuleBay, ModuleType, Module
-                        )
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        with patch("netbox_librenms_plugin.views.sync.modules.transaction.atomic", noop_atomic):
+            with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
+                with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
+                    with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
+                        with patch.object(InstallBranchView, "_match_bay", return_value=bay):
+                            result = view._install_single(
+                                device, item, index_map, module_types, ModuleBay, ModuleType, Module
+                            )
 
         assert result["status"] == "skipped"
         assert "already occupied" in result["reason"]
@@ -1328,6 +1346,7 @@ class TestFindParentModuleIdRegex:
         m.is_regex = True
         m.librenms_name = pattern
         m.netbox_bay_name = netbox_bay_name
+        m.librenms_class = ""
         return m
 
     def _make_exact_mapping(self, librenms_name, netbox_bay_name):
@@ -1335,6 +1354,7 @@ class TestFindParentModuleIdRegex:
         m.is_regex = False
         m.librenms_name = librenms_name
         m.netbox_bay_name = netbox_bay_name
+        m.librenms_class = ""
         return m
 
     def test_regex_mapping_matches_ancestor_name(self):

@@ -319,16 +319,18 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
 
-        # Check if already installed
-        if hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
-            return {"status": "skipped", "name": name, "reason": "bay already occupied"}
-
-        # Install
+        # Install (lock bay to prevent concurrent installs)
         try:
             with transaction.atomic():  # savepoint: failure here won't abort parent tx
+                locked_bay = (
+                    ModuleBay.objects.select_for_update().select_related("installed_module").get(pk=matched_bay.pk)
+                )
+                if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
+                    return {"status": "skipped", "name": name, "reason": "bay already occupied"}
+
                 module = Module(
                     device=device,
-                    module_bay=matched_bay,
+                    module_bay=locked_bay,
                     module_type=matched_type,
                     serial=serial,
                     status="active",
@@ -368,10 +370,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         for bay in device_bays:
             bay_by_name.setdefault(bay.name, []).append(bay)
 
-        exact_mapping_by_name: dict = {}
+        # Build exact_mapping index: prefer class-specific over class-empty
+        exact_mapping_by_key: dict = {}
         for m in exact_mappings:
-            if m.librenms_name not in exact_mapping_by_name:
-                exact_mapping_by_name[m.librenms_name] = m
+            key = (m.librenms_name, m.librenms_class)
+            if key not in exact_mapping_by_key:
+                exact_mapping_by_key[key] = m
 
         visited = set()
         while True:
@@ -384,6 +388,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             parent = index_map[parent_idx]
             parent_name = parent.get("entPhysicalName", "")
             parent_descr = parent.get("entPhysicalDescr", "")
+            parent_class = parent.get("entPhysicalClass", "")
 
             # Check if this parent matches an installed module bay on the device
             for bay in device_bays:
@@ -395,8 +400,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             for name in [parent_name, parent_descr]:
                 if not name:
                     continue
-                # Exact-name mapping
-                mapping = exact_mapping_by_name.get(name)
+                # Exact-name mapping: prefer class-specific, fall back to class-empty
+                mapping = exact_mapping_by_key.get((name, parent_class))
+                if not mapping:
+                    mapping = exact_mapping_by_key.get((name, ""))
                 if mapping:
                     candidates = bay_by_name.get(mapping.netbox_bay_name, [])
                     if len(candidates) == 1:
@@ -406,8 +413,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         bay = occupied[0] if len(occupied) == 1 else None
                     if bay and hasattr(bay, "installed_module") and bay.installed_module:
                         return bay.installed_module.pk
-                # Regex mapping
-                for rm in regex_mappings:
+                # Regex mapping: prefer class-specific, fall back to class-empty
+                class_matches = [rm for rm in regex_mappings if rm.librenms_class == parent_class]
+                fallback_matches = [rm for rm in regex_mappings if rm.librenms_class == ""]
+                for rm in class_matches or fallback_matches:
                     try:
                         if re.search(rm.librenms_name, name):
                             candidates = bay_by_name.get(rm.netbox_bay_name, [])
@@ -750,7 +759,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             pk=module_id,
             device=device,
         )
-        target_bay = installed_module.module_bay
 
         cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
         cached_data = _extract_inventory_list(cached_payload)
@@ -801,9 +809,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             messages.error(request, f"No matching module type found for '{model_name}'.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        old_type_name = installed_module.module_type.model
-        old_bay_name = target_bay.name
-
         try:
             conflict_removed_msg = None
             with transaction.atomic():
@@ -817,6 +822,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 if not installed_module:
                     messages.error(request, "Module no longer exists.")
                     return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+                # Read bay/type from locked row to avoid stale snapshot
+                target_bay = installed_module.module_bay
+                old_type_name = installed_module.module_type.model
+                old_bay_name = target_bay.name
 
                 # Remove the serial-conflicting module from its current location (re-derived,
                 # not trusted from a client-submitted conflict_module_id field).
@@ -896,11 +906,14 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         except (TypeError, ValueError):
             module_id = None
 
-        target_bay = get_object_or_404(ModuleBay, pk=target_bay_id, device=device)
+        get_object_or_404(ModuleBay, pk=target_bay_id, device=device)
 
         try:
             occupant_removed_msg = None
             with transaction.atomic():
+                # Lock target bay to prevent concurrent modifications
+                target_bay = ModuleBay.objects.select_for_update().get(pk=target_bay_id, device=device)
+
                 # Re-fetch with row lock to prevent concurrent modifications
                 conflict_module = (
                     Module.objects.select_for_update()

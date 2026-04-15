@@ -432,9 +432,12 @@ class TestMoveModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
             patch("dcim.models.Module") as mock_module_cls,
+            patch("dcim.models.ModuleBay") as mock_bay_cls,
         ):
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            # select_for_update on ModuleBay returns locked target_bay
+            mock_bay_cls.objects.select_for_update.return_value.get.return_value = target_bay
             # select_for_update chain returns conflict_module
             sfu_qs = MagicMock()
             sfu_qs.filter.return_value.select_related.return_value.first.return_value = conflict_module
