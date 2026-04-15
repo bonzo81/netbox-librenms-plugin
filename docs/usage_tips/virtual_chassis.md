@@ -18,13 +18,13 @@ The plugin automatically detects Virtual Chassis configurations and displays all
 
 When viewing a device that is part of a virtual chassis, the plugin will:
 
-1. Detect whether the device is part of a virtual chassis and display the 'Virtual Chassis Member' column.
+1. Detects if the device is part of a virtual chassis and dispalys 'Virtual Chassis Member' column.
 2. Automatically select the VC member by matching the device VC position to the first number in the interface name.
-3. Allow selection of specific members if the auto-select is not correct.
+3. Allows selection of specific members if the auto select is not correct.
 
-> Selecting a new member triggers a fresh interface-details comparison against the selected NetBox VC member.
+> Selecting a new member will trigger a new interface details comparison against the newly selected NEtbox VC member.
 
-Interface data is then synced to the selected VC member in NetBox.
+Interfaces data is then synced to the selected VC member in Netbox.
 
 #### Virtual Chassis Member Select
 
