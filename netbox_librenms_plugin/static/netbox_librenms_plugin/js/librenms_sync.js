@@ -67,10 +67,17 @@ function showModal(el) {
     }
     document.body.classList.add('modal-open');
 
-    // Backdrop element click → close (only needed in manual fallback)
-    backdrop.addEventListener('click', function () {
-        hideModal(el);
-    });
+    // Backdrop element click → close (only needed in manual fallback).
+    // Bind once per backdrop so repeated showModal() calls do not stack handlers.
+    if (!backdrop._syncBackdropClickBound) {
+        backdrop.addEventListener('click', function () {
+            const activeModal = document.querySelector('.modal.show');
+            if (activeModal) {
+                hideModal(activeModal);
+            }
+        });
+        backdrop._syncBackdropClickBound = true;
+    }
 }
 
 /**
