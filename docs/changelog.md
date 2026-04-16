@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.5 (2026-04-16)
+
+### Fixes
+* Fix VLAN group modal not closing on dismiss button, cancel button, save button, or backdrop click on the interface sync page
+* Align `showModal()`/`hideModal()` with `ModalManager` pattern — try Bootstrap 5 native first, fall back to manual DOM manipulation
+* Prevent stacking backdrop click handlers on repeated `showModal()` calls
+
 ## 0.4.4 (2026-04-15)
 
 ### New Features
