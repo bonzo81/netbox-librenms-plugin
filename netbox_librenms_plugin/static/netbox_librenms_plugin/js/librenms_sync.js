@@ -19,11 +19,42 @@ const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 
 /**
- * Show a Bootstrap-style modal using direct DOM manipulation.
+ * Show a Bootstrap modal, using native Bootstrap Modal when available,
+ * falling back to manual DOM manipulation otherwise.
+ * Matches the ModalManager pattern in librenms_import.js.
  * @param {HTMLElement} el - The modal element to show
  */
 function showModal(el) {
     if (!el) return;
+
+    // Register click-outside (backdrop) and dismiss-button handlers once per element.
+    // These are needed regardless of whether Bootstrap is available — Tabler/NetBox
+    // may not always wire up native Bootstrap backdrop-click behaviour for modals
+    // opened programmatically.  Matches the safety-net pattern in librenms_import.js.
+    if (!el._syncDismissHandlersBound) {
+        // Click on the modal overlay (outside .modal-dialog) → close
+        el.addEventListener('click', function (e) {
+            if (e.target === el) {
+                hideModal(el);
+            }
+        });
+        // data-bs-dismiss="modal" buttons → close
+        el.addEventListener('click', function (e) {
+            if (e.target.closest('[data-bs-dismiss="modal"]')) {
+                hideModal(el);
+            }
+        });
+        el._syncDismissHandlersBound = true;
+    }
+
+    // Try Bootstrap 5 native (preferred — handles dismiss, backdrop, keyboard)
+    if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+        const instance = bootstrap.Modal.getInstance(el) || new bootstrap.Modal(el);
+        instance.show();
+        return;
+    }
+
+    // Fallback: manual DOM manipulation
     el.classList.add('show');
     el.style.display = 'block';
     el.setAttribute('aria-modal', 'true');
@@ -35,14 +66,38 @@ function showModal(el) {
         document.body.appendChild(backdrop);
     }
     document.body.classList.add('modal-open');
+
+    // Backdrop element click → close (only needed in manual fallback).
+    // Bind once per backdrop so repeated showModal() calls do not stack handlers.
+    if (!backdrop._syncBackdropClickBound) {
+        backdrop.addEventListener('click', function () {
+            const activeModal = document.querySelector('.modal.show');
+            if (activeModal) {
+                hideModal(activeModal);
+            }
+        });
+        backdrop._syncBackdropClickBound = true;
+    }
 }
 
 /**
- * Hide a Bootstrap-style modal and clean up backdrop/body state.
+ * Hide a Bootstrap modal, using native Bootstrap Modal when available,
+ * falling back to manual DOM cleanup otherwise.
  * @param {HTMLElement} el - The modal element to hide
  */
 function hideModal(el) {
     if (!el) return;
+
+    // Try Bootstrap 5 native (preferred)
+    if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+        const instance = bootstrap.Modal.getInstance(el);
+        if (instance) {
+            instance.hide();
+            return;
+        }
+    }
+
+    // Fallback: manual DOM cleanup
     el.classList.remove('show');
     el.style.display = 'none';
     el.setAttribute('aria-hidden', 'true');
