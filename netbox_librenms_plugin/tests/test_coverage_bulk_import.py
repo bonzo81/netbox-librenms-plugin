@@ -1,10 +1,8 @@
 """
-Comprehensive coverage tests for import_utils/bulk_import.py.
+Coverage tests for import_utils/bulk_import.py.
 
-Targets the following uncovered lines (from coverage report):
-  129, 140, 146-147, 183, 203-254, 310, 336-365, 373,
-  393-395, 400-402, 420-421, 469, 489, 495-511, 520-537,
-  548-566, 596-598, 604-641, 665, 687-694
+Exercises error paths, cancellation flows, cache behaviour,
+and edge cases in bulk_import_devices_shared and process_device_filters.
 """
 
 from unittest.mock import MagicMock, patch
@@ -81,12 +79,11 @@ def _make_import_result(success=True, device=None, message="Imported", error=Non
 
 
 # ===========================================================================
-# 1. TestBulkImportDevices – covers line 310
-# ===========================================================================
+# 1. TestBulkImportDevices# ===========================================================================
 
 
 class TestBulkImportDevices:
-    """Tests for the thin ``bulk_import_devices`` wrapper (line 310)."""
+    """Tests for the thin ``bulk_import_devices`` wrapper."""
 
     def test_delegates_to_shared_with_job_none(self):
         """bulk_import_devices must call bulk_import_devices_shared with job=None."""
@@ -125,8 +122,7 @@ class TestBulkImportDevices:
 
 
 # ===========================================================================
-# 2. TestBulkImportDevicesShared – covers lines 129, 140, 146-147,
-#    183, 203-254
+# 2. TestBulkImportDevicesShared#    183, 203-254
 # ===========================================================================
 
 
@@ -138,7 +134,7 @@ class TestBulkImportDevicesShared:
     # ------------------------------------------------------------------
 
     def test_rq_stopped_logs_via_module_logger_when_job_logger_none(self):
-        """job.logger=None: module logger.warning fires on RQ stop (line 129)."""
+        """job.logger=None: module logger.warning fires on RQ stop."""
         job = _make_job(logger=False)  # job.logger is None → else branch
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
 
@@ -196,7 +192,7 @@ class TestBulkImportDevicesShared:
     # ------------------------------------------------------------------
 
     def test_libre_devices_cache_hit_skips_api_call(self):
-        """Devices in libre_devices_cache skip the API call (lines 146-147)."""
+        """Devices in libre_devices_cache skip the API call."""
         libre_cache = {
             1: {"device_id": 1, "hostname": "cached-host"},
         }
@@ -234,7 +230,7 @@ class TestBulkImportDevicesShared:
     # ------------------------------------------------------------------
 
     def test_successful_import_emits_job_progress_log(self):
-        """job.logger.info('Imported device X of Y') on success (line 183)."""
+        """job.logger.info('Imported device X of Y') on success."""
         job = _make_job()
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
 
@@ -272,7 +268,7 @@ class TestBulkImportDevicesShared:
     # ------------------------------------------------------------------
 
     def test_vc_creation_triggered_for_stack(self):
-        """is_stack=True → create_virtual_chassis_with_members called (lines 203-238)."""
+        """is_stack=True → create_virtual_chassis_with_members called."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         mock_device = MagicMock()
         mock_vc = MagicMock()
@@ -316,7 +312,7 @@ class TestBulkImportDevicesShared:
         assert len(result["success"]) == 1
 
     def test_vc_creation_with_job_logger(self):
-        """VC creation with job → job.logger.info logged (lines 234-237)."""
+        """VC creation with job → job.logger.info logged."""
         job = _make_job()
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         mock_vc = MagicMock()
@@ -363,7 +359,7 @@ class TestBulkImportDevicesShared:
         assert any("VC" in c.args[0] for c in job.logger.info.call_args_list if c.args)
 
     def test_vc_creation_deduplicates_by_member_serials(self):
-        """Two devices with identical member serials → VC created only once (lines 217-226)."""
+        """Two devices with identical member serials → VC created only once."""
         libre_cache = {
             1: {"device_id": 1, "hostname": "stack-1"},
             2: {"device_id": 2, "hostname": "stack-2"},
@@ -412,7 +408,7 @@ class TestBulkImportDevicesShared:
         assert result["virtual_chassis_created"] == 1
 
     def test_vc_creation_failure_continues_import(self):
-        """VC creation exception → import device still succeeds (lines 239-247)."""
+        """VC creation exception → import device still succeeds."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         validation = _make_validation()
         validation["virtual_chassis"] = {
@@ -540,7 +536,7 @@ class TestBulkImportDevicesShared:
         assert "dcim.add_virtualchassis" in result["failed"][0]["error"]
 
     def test_vc_with_no_members_falls_back_to_device_id_domain(self):
-        """No serials and no member fingerprint triggers device-id vc_domain fallback (line 233)."""
+        """No serials and no member fingerprint triggers device-id vc_domain fallback."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         validation = _make_validation()
         validation["virtual_chassis"] = {"is_stack": True, "members": []}
@@ -614,7 +610,7 @@ class TestBulkImportDevicesShared:
         assert result["virtual_chassis_created"] == 1
 
     def test_vc_no_member_serials_uses_device_id_domain(self):
-        """Members with no valid serials → vc_domain falls back to device_id (lines 219-221)."""
+        """Members with no valid serials → vc_domain falls back to device_id."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         mock_vc = MagicMock()
         mock_vc.name = "VC-1"
@@ -656,7 +652,7 @@ class TestBulkImportDevicesShared:
         assert result["virtual_chassis_created"] == 1
 
     def test_failed_import_with_job_logs_error(self):
-        """result.success=False, device=None → job.logger.error called (lines 252-254)."""
+        """result.success=False, device=None → job.logger.error called."""
         job = _make_job()
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
 
@@ -690,7 +686,7 @@ class TestBulkImportDevicesShared:
         job.logger.error.assert_called()
 
     def test_manual_mappings_applied_to_device(self):
-        """manual_mappings_per_device overrides are applied for the matching device (line 183)."""
+        """manual_mappings_per_device overrides are applied for the matching device."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         captured_mappings = {}
 
@@ -723,7 +719,7 @@ class TestBulkImportDevicesShared:
         assert captured_mappings.get("device_role_id") == 42
 
     def test_device_skipped_when_already_exists(self):
-        """result.success=False, result.device is truthy → device skipped (line 250)."""
+        """result.success=False, result.device is truthy → device skipped."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         existing_device = MagicMock()
 
@@ -752,7 +748,7 @@ class TestBulkImportDevicesShared:
         assert result["failed"] == []
 
     def test_vc_creation_failure_with_job_logs_warning(self):
-        """VC failure with job.logger set → job.logger.warning fired (line 244)."""
+        """VC failure with job.logger set → job.logger.warning fired."""
         job = _make_job()
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
         validation = _make_validation()
@@ -796,8 +792,7 @@ class TestBulkImportDevicesShared:
 
 
 # ===========================================================================
-# 3. TestRefreshExistingDevice – covers lines 336-365, 373, 393-395,
-#    400-402, 420-421
+# 3. TestRefreshExistingDevice#    400-402, 420-421
 # ===========================================================================
 
 
@@ -809,7 +804,7 @@ class TestRefreshExistingDevice:
     # ------------------------------------------------------------------
 
     def test_device_path_refreshes_role(self):
-        """Non-VM existing device refreshed; role updated on result (lines 336-341)."""
+        """Non-VM existing device refreshed; role updated on result."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         existing = MagicMock()
@@ -836,7 +831,7 @@ class TestRefreshExistingDevice:
     # ------------------------------------------------------------------
 
     def test_device_path_refreshes_no_role(self):
-        """Refreshed device has no role → device_role = {'found': False} (lines 342-345)."""
+        """Refreshed device has no role → device_role = {'found': False}."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         existing = MagicMock()
@@ -862,7 +857,7 @@ class TestRefreshExistingDevice:
     # ------------------------------------------------------------------
 
     def test_deleted_device_clears_existing_and_recomputes_readiness(self):
-        """Device deleted → existing_device=None, readiness recomputed (lines 346-365)."""
+        """Device deleted → existing_device=None, readiness recomputed."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         existing = MagicMock()
@@ -887,7 +882,7 @@ class TestRefreshExistingDevice:
         assert validation["is_ready"] is False  # device_role.found is now missing
 
     def test_deleted_vm_recomputes_readiness_from_cluster(self):
-        """VM deleted → is_ready reflects cluster.found (lines 354-356)."""
+        """VM deleted → is_ready reflects cluster.found."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         existing = MagicMock()
@@ -932,7 +927,7 @@ class TestRefreshExistingDevice:
     # ------------------------------------------------------------------
 
     def test_exception_during_refresh_logs_error(self):
-        """DB error during refresh is caught and logged (lines 366-368)."""
+        """DB error during refresh is caught and logged."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         existing = MagicMock()
@@ -954,7 +949,7 @@ class TestRefreshExistingDevice:
     # ------------------------------------------------------------------
 
     def test_no_existing_device_no_libre_device_returns_early(self):
-        """existing=None + libre_device=None → immediate return (line 373)."""
+        """existing=None + libre_device=None → immediate return."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         validation = {"existing_device": None}
@@ -967,7 +962,7 @@ class TestRefreshExistingDevice:
     # ------------------------------------------------------------------
 
     def test_no_existing_device_found_by_librenms_id(self):
-        """existing=None: device found by librenms_id custom field (lines 393-395)."""
+        """existing=None: device found by librenms_id custom field."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         new_device = MagicMock()
@@ -1008,7 +1003,7 @@ class TestRefreshExistingDevice:
     # ------------------------------------------------------------------
 
     def test_no_existing_device_found_by_resolved_name(self):
-        """existing=None: not found by librenms_id, but found by resolved_name (lines 400-402)."""
+        """existing=None: not found by librenms_id, but found by resolved_name."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         new_device = MagicMock()
@@ -1041,7 +1036,7 @@ class TestRefreshExistingDevice:
     # ------------------------------------------------------------------
 
     def test_exception_during_new_device_lookup_logs_error(self):
-        """Exception in the newly-imported-device check is caught and logged (lines 420-421)."""
+        """Exception in the newly-imported-device check is caught and logged."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         libre_device = {"device_id": 44, "hostname": "sw03", "sysName": "sw03"}
@@ -1060,7 +1055,7 @@ class TestRefreshExistingDevice:
         mock_logger.error.assert_called()
 
     def test_no_existing_device_non_numeric_librenms_id_skips_id_lookup(self):
-        """Non-numeric device_id raises ValueError → except pass (line 395), falls back to name."""
+        """Non-numeric device_id raises ValueError → except pass, falls back to name."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         new_device = MagicMock()
@@ -1127,8 +1122,7 @@ class TestRefreshExistingDevice:
 
 
 # ===========================================================================
-# 4. TestProcessDeviceFilters – covers lines 469, 489, 495-511, 520-537,
-#    548-566, 596-598, 604-641, 665, 687-694
+# 4. TestProcessDeviceFilters#    548-566, 596-598, 604-641, 665, 687-694
 # ===========================================================================
 
 
@@ -1161,7 +1155,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_job_logs_fetch_and_count_messages(self):
-        """With job set, info logs for 'Fetching' and 'Found N devices' fire (lines 469, 489)."""
+        """With job set, info logs for 'Fetching' and 'Found N devices' fire."""
         job = _make_job()
         device = self._make_device()
         api = self._make_api()
@@ -1218,7 +1212,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_vc_prefetch_with_job_logs_prefetch_messages(self):
-        """With vc_detection_enabled+job, prefetch job-log messages fire (lines 496-506)."""
+        """With vc_detection_enabled+job, prefetch job-log messages fire."""
         job = _make_job()
         device = self._make_device()
         api = self._make_api()
@@ -1274,7 +1268,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_vc_prefetch_client_disconnect_with_request_returns_empty(self):
-        """BrokenPipeError during prefetch + request set → _empty_return (lines 507-510)."""
+        """BrokenPipeError during prefetch + request set → _empty_return."""
         api = self._make_api()
         request = MagicMock()
         device = self._make_device()
@@ -1333,7 +1327,7 @@ class TestProcessDeviceFilters:
         assert result == ([], False)
 
     def test_vc_prefetch_client_disconnect_no_request_reraises(self):
-        """BrokenPipeError during prefetch with request=None → exception re-raised (line 511)."""
+        """BrokenPipeError during prefetch with request=None → exception re-raised."""
 
         api = self._make_api()
         device = self._make_device()
@@ -1365,7 +1359,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_job_rq_stopped_before_validation_loop_returns_empty(self):
-        """RQ job stopped before loop → empty result returned (lines 529-531)."""
+        """RQ job stopped before loop → empty result returned."""
         job = _make_job()
         api = self._make_api()
         device = self._make_device()
@@ -1396,7 +1390,7 @@ class TestProcessDeviceFilters:
         job.logger.warning.assert_called()
 
     def test_job_rq_stopped_before_loop_with_cache_status(self):
-        """RQ job stopped + return_cache_status=True → ([], False) (line 531)."""
+        """RQ job stopped + return_cache_status=True → ([], False)."""
         job = _make_job()
         api = self._make_api()
         device = self._make_device()
@@ -1431,7 +1425,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_job_cancelled_before_validation_loop_returns_empty(self):
-        """Job cancelled at pre-loop check → returns empty list (line 534)."""
+        """Job cancelled at pre-loop check → returns empty list."""
         job = _make_job()
         api = self._make_api()
         device = self._make_device()
@@ -1506,7 +1500,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_job_validation_loop_rq_stop_returns_empty(self):
-        """RQ stop detected during loop at idx=1 → return empty (lines 548-560)."""
+        """RQ stop detected during loop at idx=1 → return empty."""
         job = _make_job()
         api = self._make_api()
         device = self._make_device()
@@ -1520,8 +1514,8 @@ class TestProcessDeviceFilters:
             patch("rq.job.Job") as mock_rq_cls,
         ):
             mock_get_queue.return_value = MagicMock()
-            # _is_job_cancelled is called at lines 507, 534, 566, 574 (idx=1).
-            # Each call fetches from RQ; needs 4 entries to reach the in-loop check.
+            # _is_job_cancelled is called 4 times before the in-loop check:
+            # pre-fetch, pre-VC, pre-validation-loop, then once per device.
             mock_rq_cls.fetch.side_effect = [
                 _make_rq_running(),
                 _make_rq_running(),
@@ -1547,7 +1541,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_job_cancelled_in_validation_loop_returns_empty(self):
-        """Job cancellation detected during loop → returns empty list (line 574)."""
+        """Job cancellation detected during loop → returns empty list."""
         job = _make_job()
         api = self._make_api()
         device = self._make_device()
@@ -1559,7 +1553,7 @@ class TestProcessDeviceFilters:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import._is_job_cancelled",
-                side_effect=[False, False, False, True],  # lines 507, 534, 566 running; 574 (idx=1) cancelled
+                side_effect=[False, False, False, True],  # 3 pre-loop checks pass, in-loop check cancels
             ),
         ):
             from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
@@ -1581,7 +1575,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_cache_hit_uses_cached_validation(self):
-        """Cache hit → device validation taken from cache (lines 585-601)."""
+        """Cache hit → device validation taken from cache."""
         api = self._make_api()
         device = self._make_device()
 
@@ -1630,7 +1624,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_cache_hit_with_exclude_existing_skips_device(self):
-        """Cache hit + exclude_existing + existing_device → device skipped (lines 596-598)."""
+        """Cache hit + exclude_existing + existing_device → device skipped."""
         api = self._make_api()
         device = self._make_device()
 
@@ -1680,7 +1674,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_validate_and_cache_path_no_vc_detection(self):
-        """clear_cache=True → validate + set empty VC data + cache stored (lines 604-641)."""
+        """clear_cache=True → validate + set empty VC data + cache stored."""
         api = self._make_api()
         device = self._make_device()
 
@@ -1730,7 +1724,7 @@ class TestProcessDeviceFilters:
         assert mock_cache.set.call_count >= 2
 
     def test_validate_path_exclude_existing_skips_device(self):
-        """validate path + exclude_existing + existing_device → device skipped (lines 624-626)."""
+        """validate path + exclude_existing + existing_device → device skipped."""
         api = self._make_api()
         device = self._make_device()
 
@@ -1772,7 +1766,7 @@ class TestProcessDeviceFilters:
         assert result == []
 
     def test_validate_path_client_disconnect_with_request_returns_empty(self):
-        """validate raises BrokenPipeError + request set → _empty_return (lines 614-617)."""
+        """validate raises BrokenPipeError + request set → _empty_return."""
         api = self._make_api()
         request = MagicMock()
         device = self._make_device()
@@ -1808,7 +1802,7 @@ class TestProcessDeviceFilters:
         assert result == []
 
     def test_validate_path_client_disconnect_no_request_reraises(self):
-        """validate raises BrokenPipeError, request=None → re-raised (line 618)."""
+        """validate raises BrokenPipeError, request=None → re-raised."""
 
         api = self._make_api()
         device = self._make_device()
@@ -1847,7 +1841,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_cache_metadata_not_updated_when_from_cache_and_existing(self):
-        """from_cache=True + existing metadata → metadata preserved (line 665 pass branch)."""
+        """from_cache=True + existing metadata → metadata preserved (pass branch)."""
         api = self._make_api()
         device = self._make_device()
 
@@ -1900,7 +1894,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_cache_metadata_stored_when_fresh_data(self):
-        """Fresh data (from_cache=False) → metadata and index stored (lines 666-684)."""
+        """Fresh data (from_cache=False) → metadata and index stored."""
         api = self._make_api()
         device = self._make_device()
 
@@ -1949,7 +1943,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_job_final_log_without_exclude_existing(self):
-        """With job + validated devices (no exclude_existing) → final log (lines 693-694)."""
+        """With job + validated devices (no exclude_existing) → final log."""
         job = _make_job()
         api = self._make_api()
         device = self._make_device()
@@ -2001,7 +1995,7 @@ class TestProcessDeviceFilters:
         assert any("Validation complete" in s for s in final_calls)
 
     def test_job_final_log_with_exclude_existing(self):
-        """With job + exclude_existing + some devices filtered → extended final log (lines 688-692)."""
+        """With job + exclude_existing + some devices filtered → extended final log."""
         job = _make_job()
         api = self._make_api()
         device = self._make_device()
@@ -2057,7 +2051,7 @@ class TestProcessDeviceFilters:
     # ------------------------------------------------------------------
 
     def test_return_cache_status_true_returns_tuple(self):
-        """return_cache_status=True → (devices, from_cache) tuple (lines 698-699)."""
+        """return_cache_status=True → (devices, from_cache) tuple."""
         api = self._make_api()
         device = self._make_device()
 

@@ -30,7 +30,7 @@ def _make_interface_view():
 
 
 class TestDeviceLibreNMSSyncViewContextMethods:
-    """Tests for DeviceLibreNMSSyncView context delegation (lines 47-73)."""
+    """Tests for DeviceLibreNMSSyncView context delegation."""
 
     def test_get_interface_context_delegates_to_interface_view(self):
         """get_interface_context() creates DeviceInterfaceTableView, copies request, and calls get_context_data."""
@@ -142,7 +142,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
 
 
 class TestDeviceInterfaceTableView:
-    """Tests for DeviceInterfaceTableView (lines 76-109)."""
+    """Tests for DeviceInterfaceTableView."""
 
     def test_get_interfaces_returns_all_interfaces(self):
         """get_interfaces() returns obj.interfaces.all()."""
@@ -218,7 +218,7 @@ class TestDeviceInterfaceTableView:
 
 
 class TestSingleInterfaceVerifyView:
-    """Tests for SingleInterfaceVerifyView (lines 112-152)."""
+    """Tests for SingleInterfaceVerifyView."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
@@ -334,7 +334,7 @@ class TestSingleInterfaceVerifyView:
         assert "formatted_row" in data
 
     def test_non_vc_device_skips_sync_device_lookup(self):
-        """For non-VC devices, get_librenms_sync_device is not called; selected_device used directly (line 123)."""
+        """For non-VC devices, get_librenms_sync_device is not called; selected_device used directly."""
         import json
 
         from django.http import JsonResponse
@@ -372,7 +372,7 @@ class TestSingleInterfaceVerifyView:
 
 
 class TestSingleVlanGroupVerifyView:
-    """Tests for SingleVlanGroupVerifyView (lines 155-278)."""
+    """Tests for SingleVlanGroupVerifyView."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.object_sync.devices import SingleVlanGroupVerifyView
@@ -540,7 +540,7 @@ class TestSingleVlanGroupVerifyView:
         assert data["is_missing"] is True  # vid=100 not in empty group VID list
 
     def test_existing_interface_with_untagged_and_tagged_vlans(self):
-        """Covers NetBox VLAN extraction branches for untagged and tagged VLANs (lines 211-215)."""
+        """Covers NetBox VLAN extraction branches for untagged and tagged VLANs."""
         import json
 
         from django.http import JsonResponse
@@ -597,13 +597,13 @@ class TestSingleVlanGroupVerifyView:
         assert response.status_code == 200
 
     def test_render_vlans_cell_returns_dash_for_empty_values(self):
-        """Empty VLAN inputs render em dash placeholder (line 276)."""
+        """Empty VLAN inputs render em dash placeholder."""
         view = self._make_view()
         assert view._render_vlans_cell(None, [], [], False, None, set()) == "—"
 
 
 class TestVerifyVlanSyncGroupView:
-    """Tests for VerifyVlanSyncGroupView (lines 281-326)."""
+    """Tests for VerifyVlanSyncGroupView."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.object_sync.devices import VerifyVlanSyncGroupView
@@ -707,7 +707,7 @@ class TestVerifyVlanSyncGroupView:
 
 
 class TestSaveVlanGroupOverridesView:
-    """Tests for SaveVlanGroupOverridesView (lines 329-374)."""
+    """Tests for SaveVlanGroupOverridesView."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
@@ -811,7 +811,7 @@ class TestSaveVlanGroupOverridesView:
         mock_cache.set.assert_called_once()
 
     def test_save_overrides_uses_device_when_sync_device_none(self):
-        """If VC sync-device resolution fails, fallback uses original device (line 358)."""
+        """If VC sync-device resolution fails, fallback uses original device."""
         import json
 
         from django.http import JsonResponse
@@ -841,7 +841,7 @@ class TestSaveVlanGroupOverridesView:
 
 
 class TestDeviceCableTableView:
-    """Tests for DeviceCableTableView (lines 377-386)."""
+    """Tests for DeviceCableTableView."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
@@ -880,7 +880,7 @@ class TestDeviceCableTableView:
 
 
 class TestDeviceModuleTableView:
-    """Tests for DeviceModuleTableView (lines 401-411)."""
+    """Tests for DeviceModuleTableView."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView

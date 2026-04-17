@@ -1171,7 +1171,7 @@ class TestGetViewFilterFields:
                                                 mock_render.assert_called_once()
 
     def test_get_settings_exception_in_inline_load(self):
-        """LibreNMSSettings exception inside filter block is caught (lines 263-264)."""
+        """LibreNMSSettings exception inside filter block is caught."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view, request = self._make_view(query_params={"apply_filters": "1", "librenms_location": "DC1"})
@@ -1233,7 +1233,7 @@ class TestGetViewFilterFields:
                                                 mock_render.assert_called_once()
 
     def test_get_device_count_exception_defaults_zero(self):
-        """Device count exception falls back to 0 (lines 304-306)."""
+        """Device count exception falls back to 0."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view, request = self._make_view(query_params={"apply_filters": "1", "librenms_location": "DC1"})
@@ -1291,7 +1291,7 @@ class TestGetViewFilterFields:
                                                     assert context["device_count"] == 0
 
     def test_get_cache_check_exception_continues(self):
-        """Cache check exception is logged and processing continues (lines 293-294)."""
+        """Cache check exception is logged and processing continues."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view, request = self._make_view(query_params={"apply_filters": "1", "librenms_location": "DC1"})
@@ -1429,7 +1429,7 @@ class TestGetImportQuerysetFilterFields:
                     assert result == []
 
     def test_settings_exception_in_get_import_queryset(self):
-        """LibreNMSSettings exception in _get_import_queryset is caught (lines 475-477)."""
+        """LibreNMSSettings exception in _get_import_queryset is caught."""
         view = self._make_view(
             filter_data={
                 "librenms_location": "DC1",
@@ -1454,7 +1454,7 @@ class TestGetImportQuerysetFilterFields:
                         assert result == []
 
     def test_cache_metadata_found_sets_timestamps(self):
-        """When cache metadata is found, timestamps are set (lines 523-527)."""
+        """When cache metadata is found, timestamps are set."""
         mock_device = {"device_id": 1, "_validation": {}}
         view = self._make_view(
             filter_data={

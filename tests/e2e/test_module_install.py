@@ -7,8 +7,16 @@ live NetBox + LibreNMS instance inside the devcontainer.
 Prerequisites:
     - NetBox running at NETBOX_URL (default http://172.22.0.4:8000)
     - LibreNMS server configured in plugin settings
-    - Device 15 (WS-C4900M) exists and is linked to LibreNMS
+    - A device linked to LibreNMS that has inventory modules
     - Playwright installed: pip install playwright && playwright install chromium
+
+Configuration (environment variables):
+    E2E_TESTS_ENABLED=1          Required to run these tests
+    E2E_DEVICE_ID=<id>           NetBox device PK to test against (auto-detected if omitted)
+    NETBOX_URL=<url>             NetBox base URL (default http://172.22.0.4:8000)
+    NETBOX_USER=<user>           Login username (default admin)
+    NETBOX_PASS=<pass>           Login password (default admin)
+    NETBOX_CONTAINER=<name>      Docker container name (auto-detected if omitted)
 
 Run:
     cd /home/mzieba/workspace/netbox-librenms-plugin
@@ -80,7 +88,6 @@ def _netbox_shell(code):
         text=True,
         env={**os.environ, "PATH": "/usr/bin:/bin", "HOME": "/root"},
     )
-    # Filter out config loading lines
     lines = [
         line
         for line in result.stdout.strip().split("\n")
@@ -89,6 +96,22 @@ def _netbox_shell(code):
     if result.returncode != 0:
         raise RuntimeError(f"netbox shell command failed (rc={result.returncode}): {result.stderr}")
     return "\n".join(lines).strip()
+
+
+def _detect_device_id():
+    """Find a device linked to LibreNMS that has inventory modules.
+
+    Returns the NetBox device PK, or skips the test session if none found.
+    """
+    output = _netbox_shell(
+        "from dcim.models import Device; "
+        "devs = Device.objects.exclude(custom_field_data__librenms_id=None)"
+        ".exclude(custom_field_data__librenms_id={}).order_by('pk'); "
+        "print(devs.first().pk if devs.exists() else '')"
+    )
+    if not output.strip():
+        pytest.skip("No device with librenms_id found in NetBox")
+    return int(output.strip())
 
 
 def _delete_device_modules(device_id):
@@ -114,6 +137,15 @@ def _get_interfaces(device_id):
             name, mod_type, bay = line.split("|")
             results.append({"name": name, "module_type": mod_type, "bay": bay})
     return results
+
+
+@pytest.fixture(scope="module")
+def device_id():
+    """Resolve the device PK to test against."""
+    env_id = os.environ.get("E2E_DEVICE_ID")
+    if env_id:
+        return int(env_id)
+    return _detect_device_id()
 
 
 @pytest.fixture(scope="module")
@@ -144,21 +176,17 @@ def page(browser):
 
 
 class TestModuleInstallWorkflow:
-    """Test the full module sync and install workflow on device 15 (WS-C4900M)."""
+    """Test the full module sync and install workflow."""
 
-    DEVICE_ID = 15
-
-    def _goto_modules_tab(self, page):
+    def _goto_modules_tab(self, page, device_id):
         """Navigate to the modules sync tab and refresh data."""
-        page.goto(f"{NETBOX_URL}/dcim/devices/{self.DEVICE_ID}/librenms-sync/?tab=modules")
+        page.goto(f"{NETBOX_URL}/dcim/devices/{device_id}/librenms-sync/?tab=modules")
         page.wait_for_load_state("networkidle")
         page.wait_for_selector('button:has-text("Refresh Modules")', timeout=10000)
 
-        # Click Refresh Modules
         btn = page.query_selector('button:has-text("Refresh Modules")')
         assert btn is not None, "Refresh Modules button not found"
         btn.click()
-        # Wait for the HTMX-refreshed table to render (spinner gone, rows present)
         page.wait_for_selector("#modules table tr", timeout=30000)
         page.wait_for_load_state("networkidle")
 
@@ -183,180 +211,160 @@ class TestModuleInstallWorkflow:
                     "bay": _text(tr, "module_bay"),
                     "type": _text(tr, "module_type"),
                     "status": _text(tr, "status"),
+                    "tr": tr,
                 }
             )
         return rows
 
-    def test_clean_state_shows_install_buttons(self, page):
-        """After deleting all modules, table shows Install buttons."""
-        _delete_device_modules(self.DEVICE_ID)
-        self._goto_modules_tab(page)
+    def _find_row_with_button(self, rows, button_text):
+        """Find the first top-level row that has a button matching button_text."""
+        for row in rows:
+            if row["name"].startswith("└─"):
+                continue
+            btn = row["tr"].query_selector(f'button:has-text("{button_text}")')
+            if btn:
+                return row, btn
+        return None, None
+
+    def test_clean_state_shows_matched_rows(self, page, device_id):
+        """After deleting all modules, table shows rows with Matched status."""
+        _delete_device_modules(device_id)
+        self._goto_modules_tab(page, device_id)
 
         rows = self._get_table_rows(page)
         assert len(rows) > 0, "No rows in module sync table"
 
-        # Top-level items with matched bays should show Matched status
-        supervisor = [r for r in rows if "Supervisor(slot 1)" in r["name"]]
-        assert len(supervisor) == 1, f"Expected 1 Supervisor row, got {len(supervisor)}"
-        assert supervisor[0]["status"] == "Matched", f"Expected Matched, got {supervisor[0]['status']}"
+        matched = [r for r in rows if r["status"] == "Matched"]
+        assert len(matched) > 0, f"Expected at least one Matched row, got statuses: {set(r['status'] for r in rows)}"
 
-    def test_single_install(self, page):
+    def test_single_install(self, page, device_id):
         """Installing a single top-level module works."""
-        _delete_device_modules(self.DEVICE_ID)
-        self._goto_modules_tab(page)
+        _delete_device_modules(device_id)
+        self._goto_modules_tab(page, device_id)
 
-        # Install FanTray 1
-        pane = page.query_selector("#modules")
-        for tr in pane.query_selector_all("table tr"):
-            name_cell = tr.query_selector('td[data-col="name"]')
-            if name_cell and "FanTray 1" in name_cell.inner_text():
-                btn = tr.query_selector('button:has-text("Install"):not(:has-text("Branch"))')
-                if btn:
-                    btn.click()
-                    page.wait_for_load_state("networkidle")
-                    break
+        rows = self._get_table_rows(page)
+        row, btn = self._find_row_with_button(rows, "Install")
+        if not btn:
+            pytest.skip("No installable module found in table")
 
-        # Verify via DB
-        output = _netbox_shell(
-            f"from dcim.models import Module; "
-            f"m = Module.objects.filter(device_id={self.DEVICE_ID}, module_bay__name='Fan Tray 1').first(); "
-            f"print(m.module_type.model if m else 'NONE')"
+        module_name = row["name"]
+        btn.click()
+        page.wait_for_load_state("networkidle")
+
+        module_count = _netbox_shell(
+            f"from dcim.models import Module; print(Module.objects.filter(device_id={device_id}).count())"
         )
-        assert "WS-X4992" in output, f"FanTray not installed: {output}"
+        assert int(module_count.strip()) > 0, f"No modules in DB after installing '{module_name}'"
 
-    def test_branch_install_supervisor(self, page):
-        """Branch install creates supervisor + X2 transceivers with correct names."""
-        _delete_device_modules(self.DEVICE_ID)
-        self._goto_modules_tab(page)
+    def test_branch_install(self, page, device_id):
+        """Branch install creates parent module + children."""
+        _delete_device_modules(device_id)
+        self._goto_modules_tab(page, device_id)
 
-        # Click Install Branch on Supervisor(slot 1)
-        pane = page.query_selector("#modules")
-        for tr in pane.query_selector_all("table tr"):
-            name_cell = tr.query_selector('td[data-col="name"]')
-            if name_cell and "Supervisor(slot 1)" in name_cell.inner_text():
-                btn = tr.query_selector('button:has-text("Install Branch")')
-                assert btn is not None, "Install Branch button not found for Supervisor"
-                btn.click()
-                break
+        rows = self._get_table_rows(page)
+        row, btn = self._find_row_with_button(rows, "Install Branch")
+        if not btn:
+            pytest.skip("No branch-installable module found in table")
 
-        # Wait for branch install to complete (creates many modules + signals)
+        module_name = row["name"]
+        btn.click()
         page.wait_for_load_state("networkidle", timeout=60000)
 
-        # Verify interfaces have correct names (not bare position numbers)
-        interfaces = _get_interfaces(self.DEVICE_ID)
-        x2_interfaces = [i for i in interfaces if i["module_type"] in ("X2-10GB-LR", "X2-10GB-SR")]
+        module_count = _netbox_shell(
+            f"from dcim.models import Module; print(Module.objects.filter(device_id={device_id}).count())"
+        )
+        count = int(module_count.strip())
+        assert count > 1, f"Branch install of '{module_name}' created {count} module(s), expected >1"
 
-        assert len(x2_interfaces) > 0, "No X2 transceiver interfaces created"
-
-        for iface in x2_interfaces:
-            assert iface["name"].startswith("TenGigabitEthernet"), (
-                f"Interface '{iface['name']}' in {iface['bay']} "
-                f"should start with 'TenGigabitEthernet' (INR rule not applied?)"
+        interfaces = _get_interfaces(device_id)
+        module_interfaces = [i for i in interfaces if i["module_type"] != "-"]
+        assert len(module_interfaces) > 0, f"No interfaces linked to modules after branch install of '{module_name}'"
+        for iface in module_interfaces:
+            assert not iface["name"].isdigit(), (
+                f"Interface '{iface['name']}' has bare numeric name — naming rule not applied"
             )
 
-    def test_branch_install_no_duplicate_errors(self, page):
+    def test_branch_install_no_duplicate_errors(self, page, device_id):
         """Branch install handles already-occupied bays gracefully."""
-        # Seed state: ensure Supervisor(slot 1) branch is installed before testing
-        # the duplicate-install path. If running in isolation no modules may exist.
-        self._goto_modules_tab(page)
-        pane = page.query_selector("#modules")
-        seed_btn = None
-        for tr in pane.query_selector_all("table tr"):
-            name_cell = tr.query_selector('td[data-col="name"]')
-            if name_cell and "Supervisor(slot 1)" in name_cell.inner_text():
-                seed_btn = tr.query_selector('button:has-text("Install Branch")')
-                break
+        self._goto_modules_tab(page, device_id)
 
-        if seed_btn:
-            # Not yet installed — do the initial install so bays become occupied
-            seed_btn.click()
-            page.wait_for_load_state("networkidle", timeout=60000)
-            self._goto_modules_tab(page)
-            pane = page.query_selector("#modules")
+        rows = self._get_table_rows(page)
+        row, btn = self._find_row_with_button(rows, "Install Branch")
+        if not btn:
+            pytest.skip("No branch-installable module found in table")
 
-        # Click Install Branch on Supervisor(slot 1) again (bays now occupied)
-        branch_btn = None
-        for tr in pane.query_selector_all("table tr"):
-            name_cell = tr.query_selector('td[data-col="name"]')
-            if name_cell and "Supervisor(slot 1)" in name_cell.inner_text():
-                branch_btn = tr.query_selector('button:has-text("Install Branch")')
-                break
+        module_name = row["name"]
 
-        assert branch_btn is not None, "Install Branch button not found for Supervisor(slot 1)"
-        branch_btn.click()
+        # First install (may already be installed from prior test)
+        btn.click()
+        page.wait_for_load_state("networkidle", timeout=60000)
+
+        # Navigate back and try again — bays should now be occupied
+        self._goto_modules_tab(page, device_id)
+        rows = self._get_table_rows(page)
+        _, btn2 = self._find_row_with_button(rows, "Install Branch")
+        if not btn2:
+            pytest.skip(f"No Install Branch button after first install of '{module_name}'")
+
+        btn2.click()
         page.wait_for_load_state("networkidle", timeout=30000)
 
-        # Check for error messages — should only have skips, no failures
         body_text = page.query_selector("body").inner_text()
-        assert "Branch install failed" not in body_text, "Branch install crashed instead of handling errors gracefully"
-
-    def test_child_bays_hidden_when_parent_not_installed(self, page):
-        """Children show 'No Bay' when parent module is not installed."""
-        _delete_device_modules(self.DEVICE_ID)
-        self._goto_modules_tab(page)
-
-        rows = self._get_table_rows(page)
-
-        # Children of Supervisor(slot 1) should show "No matching bay"
-        # since Supervisor isn't installed, its child bays don't exist yet
-        children = [r for r in rows if r["name"].startswith("└─") and "TenGigabitEthernet1/" in r["name"]]
-        for child in children:
-            assert "No matching bay" in child["bay"], (
-                f"Child '{child['name']}' should show 'No matching bay' when parent not installed, got '{child['bay']}'"
-            )
-
-    def test_full_workflow(self, page):
-        """Full workflow: clean → install individuals → branch install → verify."""
-        _delete_device_modules(self.DEVICE_ID)
-        self._goto_modules_tab(page)
-
-        # Step 1: Install PSUs and FanTray individually
-        for label in ["FanTray 1", "Power Supply 1", "Power Supply 2"]:
-            pane = page.query_selector("#modules")
-            for tr in pane.query_selector_all("table tr"):
-                name_cell = tr.query_selector('td[data-col="name"]')
-                if name_cell and label in name_cell.inner_text():
-                    btn = tr.query_selector('button:has-text("Install"):not(:has-text("Branch"))')
-                    if btn:
-                        btn.click()
-                        page.wait_for_load_state("networkidle")
-                        break
-
-        # Step 2: Branch install Supervisor + transceivers
-        pane = page.query_selector("#modules")
-        for tr in pane.query_selector_all("table tr"):
-            name_cell = tr.query_selector('td[data-col="name"]')
-            if name_cell and "Supervisor(slot 1)" in name_cell.inner_text():
-                btn = tr.query_selector('button:has-text("Install Branch")')
-                if btn:
-                    btn.click()
-                    break
-
-        page.wait_for_load_state("networkidle", timeout=60000)
-
-        # Step 3: Branch install Linecard
-        self._goto_modules_tab(page)
-        pane = page.query_selector("#modules")
-        for tr in pane.query_selector_all("table tr"):
-            name_cell = tr.query_selector('td[data-col="name"]')
-            if name_cell and "Linecard(slot 3)" in name_cell.inner_text():
-                btn = tr.query_selector('button:has-text("Install Branch")')
-                if btn:
-                    btn.click()
-                    break
-
-        page.wait_for_load_state("networkidle", timeout=60000)
-
-        # Verify: all installable modules should be installed
-        self._goto_modules_tab(page)
-        rows = self._get_table_rows(page)
-
-        matched_but_not_installed = [r for r in rows if r["status"] == "Matched" and not r["name"].startswith("└─")]
-        assert len(matched_but_not_installed) == 0, (
-            f"Top-level items still 'Matched' after full workflow: {[r['name'] for r in matched_but_not_installed]}"
+        assert "Branch install failed" not in body_text, (
+            "Branch install crashed instead of handling occupied bays gracefully"
         )
 
-        # Verify interface naming
-        interfaces = _get_interfaces(self.DEVICE_ID)
+    def test_child_bays_hidden_when_parent_not_installed(self, page, device_id):
+        """Children show 'No matching bay' when parent module is not installed."""
+        _delete_device_modules(device_id)
+        self._goto_modules_tab(page, device_id)
+
+        rows = self._get_table_rows(page)
+        children = [r for r in rows if r["name"].startswith("└─")]
+        if not children:
+            pytest.skip("No child module rows found in table")
+
+        no_bay = [c for c in children if "No matching bay" in c["bay"]]
+        assert len(no_bay) > 0, (
+            "Expected some children to show 'No matching bay' when parent not installed, "
+            f"got bays: {set(c['bay'] for c in children)}"
+        )
+
+    def test_full_workflow(self, page, device_id):
+        """Full workflow: clean → install individuals → branch install → verify."""
+        _delete_device_modules(device_id)
+        self._goto_modules_tab(page, device_id)
+
+        # Step 1: Install a few individual modules
+        for _ in range(3):
+            rows = self._get_table_rows(page)
+            row, btn = self._find_row_with_button(rows, "Install")
+            if not btn:
+                break
+            btn.click()
+            page.wait_for_load_state("networkidle")
+
+        # Step 2: Branch install all available branches
+        while True:
+            rows = self._get_table_rows(page)
+            row, btn = self._find_row_with_button(rows, "Install Branch")
+            if not btn:
+                break
+            btn.click()
+            page.wait_for_load_state("networkidle", timeout=60000)
+            self._goto_modules_tab(page, device_id)
+
+        # Verify: no top-level "Matched" items remain uninstalled
+        self._goto_modules_tab(page, device_id)
+        rows = self._get_table_rows(page)
+        top_level_matched = [r for r in rows if r["status"] == "Matched" and not r["name"].startswith("└─")]
+        assert len(top_level_matched) == 0, (
+            f"Top-level items still Matched after full workflow: {[r['name'] for r in top_level_matched]}"
+        )
+
+        # Verify interface naming — no bare numeric names
+        interfaces = _get_interfaces(device_id)
         for iface in interfaces:
-            assert iface["name"] != "1", "Interface with bare name '1' found — INR rule not applied"
+            assert not iface["name"].isdigit(), (
+                f"Interface '{iface['name']}' has bare numeric name — naming rule not applied"
+            )

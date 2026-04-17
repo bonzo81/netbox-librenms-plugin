@@ -708,11 +708,8 @@ function initializeVlanModalSave() {
                 }
                 // Apply DOM mutations only after the server has persisted the overrides
                 applyButtonUpdates();
-                // Close modal only on success
-                const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
-                if (closeBtn) {
-                    closeBtn.click();
-                }
+                // Close modal on success
+                hideModal(modalEl);
             }).catch(error => {
                 console.error('Failed to persist VLAN group overrides:', error.message);
                 let alertEl = modalEl.querySelector('.vlan-override-error');
@@ -726,10 +723,7 @@ function initializeVlanModalSave() {
         } else {
             // No server persist needed — apply DOM mutations and close immediately
             applyButtonUpdates();
-            const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
-            if (closeBtn) {
-                closeBtn.click();
-            }
+            hideModal(modalEl);
         }
     });
 }
