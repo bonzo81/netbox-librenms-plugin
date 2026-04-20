@@ -1,5 +1,5 @@
 ---
-applyTo: "**/jobs.py,**/views/imports/**,**/import_utils.py,**/import_validation_helpers.py"
+applyTo: "**/jobs.py,**/views/imports/**,**/import_utils/**,**/import_validation_helpers.py"
 description: Background job architecture, import workflow, and task management patterns
 ---
 
@@ -69,13 +69,15 @@ Filter fields: `librenms_location`, `librenms_type`, `librenms_os`, `librenms_ho
 - **`DeviceVCDetailsView`** (GET) — renders VC member details via `htmx/device_vc_details.html`.
 - **`DeviceRoleUpdateView`**, **`DeviceClusterUpdateView`**, **`DeviceRackUpdateView`** (POST) — per-device dropdown updates. Apply selection to validation state and return re-rendered row via `render_device_row()`.
 
-## Key Import Utilities (`import_utils.py`)
-- `process_device_filters(filters, ...)` — fetches and validates devices from LibreNMS, returns list.
-- `validate_device_for_import(device, ...)` — core validation function, produces validation state dict.
-- `bulk_import_devices_shared(devices, user, ...)` — shared implementation between sync and background import.
-- `bulk_import_vms(vm_imports, user, ...)` — VM import implementation.
-- `fetch_device_with_cache(device_id, ...)` — retrieves/caches individual device data.
-- Cache key functions: `get_validated_device_cache_key()`, `get_cache_metadata_key()`, `get_active_cached_searches()`, `get_import_device_cache_key()`.
+## Key Import Utilities (`import_utils/` package)
+`import_utils/` is a package; the `__init__.py` re-exports key functions so callers can still use `from import_utils import ...`.
+
+- `filters.py` — `process_device_filters(filters, ...)`, `fetch_device_with_cache(device_id, ...)`.
+- `device_operations.py` — `validate_device_for_import(device, ...)`, `bulk_import_devices_shared(devices, user, ...)`.
+- `vm_operations.py` — `bulk_import_vms(vm_imports, user, ...)`.
+- `cache.py` — `get_validated_device_cache_key()`, `get_cache_metadata_key()`, `get_active_cached_searches()`, `get_import_device_cache_key()`.
+- `permissions.py` — `check_user_permissions(user, permissions)`, `require_permissions(user, permissions, action_description)`.
+- `virtual_chassis.py` — `create_virtual_chassis_with_members()`, `_sync_module_bay_counter()`.
 
 ## Validation Helpers (`import_validation_helpers.py`)
 Centralizes validation state mutation used by the role/cluster/rack update views:
