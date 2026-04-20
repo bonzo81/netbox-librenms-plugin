@@ -406,6 +406,21 @@ def _norm_serial(s) -> str:
     return "" if s == "-" else s
 
 
+def _sync_module_bay_counter(device: Device) -> None:
+    """Reconcile device module_bay_count with actual ModuleBay rows in the DB."""
+    try:
+        actual_count = device.modulebays.count()
+        if getattr(device, "module_bay_count", None) != actual_count:
+            Device.objects.filter(pk=device.pk).update(module_bay_count=actual_count)
+            device.module_bay_count = actual_count
+    except Exception as e:
+        logger.warning(
+            "Could not sync module_bay_count for device '%s': %s",
+            getattr(device, "name", "unknown"),
+            e,
+        )
+
+
 def create_virtual_chassis_with_members(
     master_device: Device, members_info: list, libre_device: dict, server_key: str | None = None
 ) -> VirtualChassis:
@@ -473,9 +488,11 @@ def create_virtual_chassis_with_members(
                     f"Keeping original name '{original_master_name}'"
                 )
                 master_base_name = original_master_name
+                rename_master = False
             else:
                 master_device.name = master_device_new_name
                 master_base_name = original_master_name
+                rename_master = True
 
             # Create VC using original base name
             vc_name = master_base_name
@@ -483,14 +500,16 @@ def create_virtual_chassis_with_members(
             _domain_prefix = f"librenms-{server_key}" if server_key else "librenms"
             vc = VirtualChassis.objects.create(
                 name=vc_name,
-                master=master_device,
                 domain=f"{_domain_prefix}-{_device_id}",
             )
 
             # Update master device
             master_device.virtual_chassis = vc
             master_device.vc_position = _master_pos
-            master_device.save()
+            save_fields = ["virtual_chassis", "vc_position"]
+            if rename_master:
+                save_fields.append("name")
+            master_device.save(update_fields=save_fields)
 
             # Create member devices for remaining positions
             position = _master_pos + 1  # Start after master position
@@ -596,6 +615,12 @@ def create_virtual_chassis_with_members(
                     f"Created {members_created} members but expected {expected_members}. "
                     "Some members may have been skipped due to duplicates."
                 )
+
+            # Assign VC master only after all members are attached to avoid
+            # NetBox's create-time auto-master signal changing order/state.
+            vc.master = master_device
+            vc.save(update_fields=["master"])
+            _sync_module_bay_counter(master_device)
 
             logger.info(
                 f"Created Virtual Chassis '{vc.name}' with {vc.members.count()} total members "

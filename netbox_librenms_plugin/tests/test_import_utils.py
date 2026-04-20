@@ -4655,6 +4655,130 @@ class TestCreateVirtualChassisWithMembers:
         assert result == mock_vc
         mock_vc_cls.objects.create.assert_called_once()
 
+    def test_calls_module_bay_counter_sync(self):
+        """VC creation calls counter sync helper after assigning master."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 1
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M1",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis._sync_module_bay_counter") as mock_sync,
+        ):
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            create_virtual_chassis_with_members(master_device, [], {"device_id": 1})
+
+        mock_sync.assert_called_once_with(master_device)
+
+    def test_master_save_uses_update_fields(self):
+        """Master save should update only VC/name fields, not stale counter fields."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 1
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M1",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis._sync_module_bay_counter"),
+        ):
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            create_virtual_chassis_with_members(master_device, [], {"device_id": 1})
+
+        master_device.save.assert_called_once_with(update_fields=["virtual_chassis", "vc_position", "name"])
+
+
+class TestSyncModuleBayCounter:
+    """Tests for module_bay_count synchronization helper."""
+
+    def test_syncs_counter_when_actual_differs(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _sync_module_bay_counter
+
+        device = MagicMock()
+        device.pk = 42
+        device.name = "sw1"
+        device.module_bay_count = 0
+        device.modulebays.count.return_value = 2
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls:
+            _sync_module_bay_counter(device)
+
+        mock_device_cls.objects.filter.assert_called_once_with(pk=42)
+        mock_device_cls.objects.filter.return_value.update.assert_called_once_with(module_bay_count=2)
+        assert device.module_bay_count == 2
+
+    def test_no_op_when_counter_matches(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _sync_module_bay_counter
+
+        device = MagicMock()
+        device.pk = 42
+        device.name = "sw1"
+        device.module_bay_count = 3
+        device.modulebays.count.return_value = 3
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls:
+            _sync_module_bay_counter(device)
+
+        mock_device_cls.objects.filter.assert_not_called()
+
 
 class TestBulkImportCancellation:
     """Test that bulk_import_devices_shared respects RQ and DB cancellation."""
