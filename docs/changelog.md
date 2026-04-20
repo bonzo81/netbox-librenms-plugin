@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6 (2026-04-20)
+
+### Fixes
+* Fix VC master device showing 0 module bays after import by preventing stale counter overwrites during virtual chassis creation (#275)
+* Defer VC master assignment until after all members are attached
+* Add `_sync_module_bay_counter()` safety net to reconcile counter after master assignment
+
 ## 0.4.5 (2026-04-16)
 
 ### Fixes
