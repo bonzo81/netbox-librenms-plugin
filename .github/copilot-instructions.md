@@ -5,6 +5,7 @@
 > - [frontend.instructions.md](instructions/frontend.instructions.md) – applies to templates and static files
 > - [background-jobs.instructions.md](instructions/background-jobs.instructions.md) – applies to `jobs.py`, import views, and import utilities
 > - [sync.instructions.md](instructions/sync.instructions.md) – applies to sync views, base views, tables, and sync JS
+> - [release.instructions.md](instructions/release.instructions.md) – applies to changelog, pyproject.toml, and `__init__.py` version bumps
 
 ## Architecture & Key Modules
 - Plugin hooks into NetBox (Django 5) under `netbox_librenms_plugin/`; respect NetBox plugin APIs (`navigation.py`, `urls.py`, `api/`).
@@ -62,7 +63,7 @@
 - `_get_safe_redirect_url(request)` validates referrer URLs to prevent open-redirect attacks.
 
 ### Permission Helpers for Background Jobs
-- Background jobs run outside view context and cannot use view mixins. Use standalone helpers from `import_utils.py` (`check_user_permissions`, `require_permissions`). See `background-jobs.instructions.md` for details.
+- Background jobs run outside view context and cannot use view mixins. Use standalone helpers from `import_utils/permissions.py` (`check_user_permissions`, `require_permissions`). See `background-jobs.instructions.md` for details.
 
 ### API & Navigation Permissions
 - API endpoints use `LibreNMSPluginPermission` class in `api/views.py` (GET=view, others=change).
