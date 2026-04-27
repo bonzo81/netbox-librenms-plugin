@@ -14,6 +14,11 @@ menu = PluginMenu(
                     link_text="Plugin Settings",
                     permissions=[PERM_VIEW_PLUGIN],
                 ),
+            ),
+        ),
+        (
+            "Mappings",
+            (
                 PluginMenuItem(
                     link="plugins:netbox_librenms_plugin:interfacetypemapping_list",
                     link_text="Interface Mappings",
