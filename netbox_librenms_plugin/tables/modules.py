@@ -147,16 +147,16 @@ class LibreNMSModuleTable(tables.Table):
     def render_status(self, value, record):
         """Render sync status with badge."""
         badge_classes = {
-            "Installed": "bg-success",
-            "Matched": "bg-info",
-            "No Bay": "bg-warning",
-            "No Type": "bg-warning",
-            "Unmatched": "bg-secondary",
-            "Serial Mismatch": "bg-danger",
-            "Name Conflict": "bg-warning",
-            "Type Mismatch": "bg-warning",
+            "Installed": "bg-success text-white",
+            "Matched": "bg-info text-white",
+            "No Bay": "bg-warning text-dark",
+            "No Type": "bg-warning text-dark",
+            "Unmatched": "bg-secondary text-white",
+            "Serial Mismatch": "bg-danger text-white",
+            "Name Conflict": "bg-warning text-dark",
+            "Type Mismatch": "bg-warning text-dark",
         }
-        badge_class = badge_classes.get(value, "bg-secondary")
+        badge_class = badge_classes.get(value, "bg-secondary text-white")
         if warning := record.get("name_conflict_warning"):
             return format_html(
                 '<span class="badge {}" title="{}">{}</span>'

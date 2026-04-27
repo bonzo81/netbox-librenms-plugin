@@ -1124,10 +1124,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 row["can_replace"] = True
             else:
                 row["status"] = "Installed"
-                row["row_class"] = "table-success"
         else:
             row["status"] = "Installed"
-            row["row_class"] = "table-success"
 
     def _determine_status(self, matched_bay, matched_type, serial):
         """Determine the sync status for an inventory item."""
