@@ -320,7 +320,7 @@ class TestBuildRowSerialComparison:
             row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["status"] == "Installed"
-        assert row["row_class"] == "table-success"
+        assert "row_class" not in row
 
     def test_serial_mismatch_gives_danger_status(self):
         view = _make_base_view()
@@ -333,7 +333,7 @@ class TestBuildRowSerialComparison:
             row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["status"] == "Serial Mismatch"
-        assert row["row_class"] == "table-danger"
+        assert "row_class" not in row
 
     def test_no_bay_gives_no_bay_status(self):
         view = _make_base_view()
@@ -392,7 +392,7 @@ class TestBuildRowSerialComparison:
             row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["status"] == "Installed"
-        assert row["row_class"] == "table-success"
+        assert "row_class" not in row
 
     def test_librenms_dash_serial_with_real_installed_gives_installed(self):
         """LibreNMS serial '-' normalizes to empty; only NetBox has serial -> no mismatch."""
@@ -406,7 +406,7 @@ class TestBuildRowSerialComparison:
             row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["status"] == "Installed"
-        assert row["row_class"] == "table-success"
+        assert "row_class" not in row
 
 
 # ---------------------------------------------------------------------------

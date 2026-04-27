@@ -546,7 +546,7 @@ class TestBuildRowSerialMismatch:
             )
 
         assert row["status"] == "Installed"
-        assert row["row_class"] == "table-success"
+        assert "row_class" not in row
         assert not row.get("can_update_serial")
 
     def test_serial_mismatch_sets_can_update_serial(self):
@@ -571,7 +571,7 @@ class TestBuildRowSerialMismatch:
             )
 
         assert row["status"] == "Serial Mismatch"
-        assert row["row_class"] == "table-danger"
+        assert "row_class" not in row
         assert row.get("can_update_serial") is True
         assert row.get("installed_module_id") == 42
 
@@ -639,7 +639,7 @@ class TestBuildRowSerialMismatch:
             )
 
         assert row["status"] == "Type Mismatch"
-        assert row["row_class"] == "table-warning"
+        assert "row_class" not in row
 
     def test_type_mismatch_sets_can_replace(self):
         """Type Mismatch row has can_replace=True and installed_module_id set."""
@@ -733,7 +733,7 @@ class TestBuildRowSerialMismatch:
             )
 
         assert row["status"] == "Installed"
-        assert row["row_class"] == "table-success"
+        assert "row_class" not in row
         assert not row.get("can_update_serial")
 
     def test_librenms_dash_serial_with_real_installed_gives_installed(self):
@@ -757,7 +757,7 @@ class TestBuildRowSerialMismatch:
             )
 
         assert row["status"] == "Installed"
-        assert row["row_class"] == "table-success"
+        assert "row_class" not in row
         assert not row.get("can_update_serial")
 
 
