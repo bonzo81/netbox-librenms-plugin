@@ -19,17 +19,17 @@
         </tr>
         <tr>
             <td><strong>Module Type</strong></td>
-            <td class="{% if type_mismatch %}table-danger{% endif %}">
+            <td{% if type_mismatch %} class="text-danger fw-semibold"{% endif %}>
                 {% if installed_module %}
                     <a href="{{ installed_module.module_type.get_absolute_url }}">{{ installed_module.module_type.model }}</a>
                 {% else %}-{% endif %}
             </td>
-            <td class="{% if type_mismatch %}table-danger{% endif %}">{{ librenms_model }}</td>
+            <td{% if type_mismatch %} class="text-danger fw-semibold"{% endif %}>{{ librenms_model }}</td>
         </tr>
         <tr>
             <td><strong>Serial</strong></td>
-            <td class="{% if serial_mismatch %}table-warning{% endif %}">{{ installed_serial|default:"-" }}</td>
-            <td class="{% if serial_mismatch %}table-warning{% endif %}">{{ librenms_serial|default:"-" }}</td>
+            <td{% if serial_mismatch %} class="text-warning fw-semibold"{% endif %}>{{ installed_serial|default:"-" }}</td>
+            <td{% if serial_mismatch %} class="text-warning fw-semibold"{% endif %}>{{ librenms_serial|default:"-" }}</td>
         </tr>
     </tbody>
 </table>
