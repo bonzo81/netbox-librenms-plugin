@@ -1068,7 +1068,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "module_bay": matched_bay.name if matched_bay else "-",
             "module_type": matched_type.model if matched_type else "-",
             "status": status,
-            "row_class": "",
             "can_install": False,
             "module_bay_id": matched_bay.pk if matched_bay else None,
             "module_type_id": matched_type.pk if matched_type else None,
@@ -1078,7 +1077,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         }
 
         if name_conflict:
-            row["row_class"] = "table-warning"
             row["name_conflict_warning"] = (
                 "This module type uses {module} in its interface template. "
                 "Installing multiple siblings will create duplicate interface names. "
@@ -1106,10 +1104,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     @staticmethod
     def _apply_installed_status(row, installed, matched_type, serial):
-        """Set status, row_class, and action flags when a module is already installed."""
+        """Set status and action flags when a module is already installed."""
         if matched_type is not None and installed.module_type_id != matched_type.pk:
             row["status"] = "Type Mismatch"
-            row["row_class"] = "table-warning"
             row["can_replace"] = True
         elif matched_type is not None:
             # Normalize both serials: treat None, empty, whitespace, and placeholder values as absent
@@ -1119,7 +1116,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             lnms_serial = serial if serial.lower() not in _PLACEHOLDER_VALUES else ""
             if lnms_serial and lnms_serial != nb_serial:
                 row["status"] = "Serial Mismatch"
-                row["row_class"] = "table-danger"
                 row["can_update_serial"] = True
                 row["can_replace"] = True
             else:
