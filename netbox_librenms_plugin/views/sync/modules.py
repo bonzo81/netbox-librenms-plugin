@@ -323,7 +323,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with transaction.atomic():  # savepoint: failure here won't abort parent tx
                 locked_bay = (
-                    ModuleBay.objects.select_for_update().select_related("installed_module").get(pk=matched_bay.pk)
+                    ModuleBay.objects.select_for_update(of=("self",))
+                    .select_related("installed_module")
+                    .get(pk=matched_bay.pk)
                 )
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     return {"status": "skipped", "name": name, "reason": "bay already occupied"}

@@ -131,6 +131,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "ip_sync": ip_context,
                 "vlan_sync": vlan_context,
                 "module_sync": module_context,
+                "has_write_permission": self.has_write_permission(),
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
