@@ -116,18 +116,18 @@ menu = PluginMenu(
                     ),
                 ),
                 PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:normalizationrule_list",
-                    link_text="Normalization Rules",
+                    link="plugins:netbox_librenms_plugin:platformmapping_list",
+                    link_text="Platform Mappings",
                     permissions=[PERM_VIEW_PLUGIN],
                     buttons=(
                         PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:normalizationrule_add",
+                            link="plugins:netbox_librenms_plugin:platformmapping_add",
                             title="Add",
                             icon_class="mdi mdi-plus-thick",
                             permissions=[PERM_CHANGE_PLUGIN],
                         ),
                         PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:normalizationrule_bulk_import",
+                            link="plugins:netbox_librenms_plugin:platformmapping_bulk_import",
                             title="Import",
                             icon_class="mdi mdi-upload",
                             permissions=[PERM_CHANGE_PLUGIN],
@@ -154,18 +154,18 @@ menu = PluginMenu(
                     ),
                 ),
                 PluginMenuItem(
-                    link="plugins:netbox_librenms_plugin:platformmapping_list",
-                    link_text="Platform Mappings",
+                    link="plugins:netbox_librenms_plugin:normalizationrule_list",
+                    link_text="Normalization Rules",
                     permissions=[PERM_VIEW_PLUGIN],
                     buttons=(
                         PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:platformmapping_add",
+                            link="plugins:netbox_librenms_plugin:normalizationrule_add",
                             title="Add",
                             icon_class="mdi mdi-plus-thick",
                             permissions=[PERM_CHANGE_PLUGIN],
                         ),
                         PluginMenuButton(
-                            link="plugins:netbox_librenms_plugin:platformmapping_bulk_import",
+                            link="plugins:netbox_librenms_plugin:normalizationrule_bulk_import",
                             title="Import",
                             icon_class="mdi mdi-upload",
                             permissions=[PERM_CHANGE_PLUGIN],
