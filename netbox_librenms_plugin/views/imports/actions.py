@@ -1398,6 +1398,92 @@ class DeviceConflictActionView(
         return response
 
 
+class AddDeviceTypeMappingView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+    """HTMX view to create a DeviceTypeMapping from the import validation modal."""
+
+    def post(self, request, device_id):
+        """Create a DeviceTypeMapping linking the LibreNMS hardware string to a NetBox DeviceType."""
+        from dcim.models import DeviceType
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        libre_device = fetch_device_with_cache(device_id, self.librenms_api)
+        if not libre_device:
+            return HttpResponse(
+                '<span class="text-danger small">Device not found in LibreNMS.</span>',
+                status=404,
+            )
+
+        hardware = (libre_device.get("hardware") or "").strip()
+        if not hardware or hardware == "-":
+            return HttpResponse(
+                '<span class="text-danger small">Device has no hardware string — cannot create mapping.</span>',
+                status=400,
+            )
+
+        device_type_id = request.POST.get("device_type_id", "").strip()
+        if not device_type_id:
+            return HttpResponse(
+                '<span class="text-danger small">Please select a device type before submitting.</span>',
+            )
+
+        try:
+            device_type_id = int(device_type_id)
+        except (ValueError, TypeError):
+            return HttpResponse(
+                '<span class="text-danger small">Invalid device type selection.</span>',
+            )
+
+        try:
+            device_type = DeviceType.objects.get(pk=device_type_id)
+        except DeviceType.DoesNotExist:
+            return HttpResponse(
+                '<span class="text-danger small">Selected device type not found.</span>',
+            )
+
+        try:
+            with transaction.atomic():
+                mapping, created = DeviceTypeMapping.objects.get_or_create(
+                    librenms_hardware=hardware.lower(),
+                    defaults={"netbox_device_type": device_type},
+                )
+                if not created and mapping.netbox_device_type_id != device_type_id:
+                    mapping.netbox_device_type = device_type
+                    mapping.full_clean()
+                    mapping.save()
+        except Exception as exc:
+            logger.warning("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
+            return HttpResponse(
+                f'<span class="text-danger small">Error saving mapping: {escape(str(exc))}</span>',
+            )
+
+        # Clear cached LibreNMS device data so re-validation picks up the new mapping
+        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
+        cache.delete(cache_key)
+
+        # Re-render the modal content as an OOB swap so it updates in place
+        detail_view = DeviceValidationDetailsView()
+        detail_view._librenms_api = self._librenms_api
+        modal_html = detail_view.get(request, device_id).content.decode("utf-8")
+        oob_modal = f'<div id="htmx-modal-content" hx-swap-oob="innerHTML">{modal_html}</div>'
+
+        # Re-validate and include the background table row as a second OOB swap so the
+        # row reflects the new mapping immediately without a secondary JS-triggered request.
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if libre_device is not None and validation is not None:
+            row_response = self.render_device_row(request, libre_device, validation, selections)
+            row_html = row_response.content.decode("utf-8")
+            # A <tr> following a <div> is invalid HTML and gets silently dropped by the browser
+            # parser when HTMX wraps the combined response in a <template> for parsing. Wrapping
+            # in <table><tbody> keeps the <tr> in a valid table context so HTMX finds and applies
+            # the OOB swap. The <div id="django-messages"> inside is foster-parented outside the
+            # table by the parser, so both OOB elements are preserved.
+            row_html = f"<table><tbody>{row_html}</tbody></table>"
+        else:
+            row_html = ""
+
+        return HttpResponse(oob_modal + row_html, content_type="text/html")
+
+
 class SaveUserPrefView(LibreNMSPermissionMixin, View):
     """Save a user preference via POST. Used by JS toggle handlers."""
 
