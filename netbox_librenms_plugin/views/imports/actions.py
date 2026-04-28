@@ -1403,6 +1403,9 @@ class AddDeviceTypeMappingView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
 
     def post(self, request, device_id):
         """Create a DeviceTypeMapping linking the LibreNMS hardware string to a NetBox DeviceType."""
+        if error := self.require_write_permission():
+            return error
+
         from dcim.models import DeviceType
         from netbox_librenms_plugin.models import DeviceTypeMapping
 
@@ -1424,6 +1427,7 @@ class AddDeviceTypeMappingView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         if not device_type_id:
             return HttpResponse(
                 '<span class="text-danger small">Please select a device type before submitting.</span>',
+                status=400,
             )
 
         try:
@@ -1431,6 +1435,7 @@ class AddDeviceTypeMappingView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         except (ValueError, TypeError):
             return HttpResponse(
                 '<span class="text-danger small">Invalid device type selection.</span>',
+                status=400,
             )
 
         try:
@@ -1438,6 +1443,7 @@ class AddDeviceTypeMappingView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         except DeviceType.DoesNotExist:
             return HttpResponse(
                 '<span class="text-danger small">Selected device type not found.</span>',
+                status=404,
             )
 
         try:
@@ -1448,12 +1454,12 @@ class AddDeviceTypeMappingView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
                 )
                 if not created and mapping.netbox_device_type_id != device_type_id:
                     mapping.netbox_device_type = device_type
-                    mapping.full_clean()
                     mapping.save()
         except Exception as exc:
             logger.warning("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
             return HttpResponse(
                 f'<span class="text-danger small">Error saving mapping: {escape(str(exc))}</span>',
+                status=500,
             )
 
         # Clear cached LibreNMS device data so re-validation picks up the new mapping

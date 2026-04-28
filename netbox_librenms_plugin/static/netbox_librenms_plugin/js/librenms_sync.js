@@ -751,13 +751,13 @@ function initializeVlanModalSave() {
             }).then(response => {
                 if (!response.ok) {
                     return response.text().then(t => {
-                        const ct = response.headers.get('Content-Type') || '';
+                        const ct = (response.headers.get('Content-Type') || '').toLowerCase();
                         let msg = '';
                         if (ct.includes('application/json')) {
-                            try { const d = JSON.parse(t); msg = d && (d.message || d.detail) || ''; } catch (_) {}
+                            try { const d = JSON.parse(t); msg = (d && (d.message || d.detail)) || ''; } catch (_) {}
                         }
                         if (!msg) msg = t || 'Unknown error';
-                        if (msg.length > 300) msg = msg.slice(0, 300) + '…';
+                        if (msg.length > 300) msg = msg.slice(0, 300) + '...';
                         throw new Error(`HTTP ${response.status}: ${msg}`);
                     });
                 }
