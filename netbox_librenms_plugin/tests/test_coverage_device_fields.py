@@ -769,6 +769,40 @@ class TestCreateAndAssignPlatformView:
         assert mock_locked.platform == mock_platform_instance
         mock_locked.save.assert_called_once()
 
+    def test_platform_constructor_includes_slug(self):
+        """Platform must be constructed with slug=slugify(name) — regression for #279."""
+        from django.utils.text import slugify
+
+        view = self._view()
+        platform_name = "Cisco IOS-XE 17.x"
+        req = _make_request({"platform_name": platform_name, "manufacturer": ""})
+
+        mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_instance = MagicMock()
+        mock_platform_cls.return_value = mock_platform_instance
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=1)
+
+        mock_platform_cls.assert_called_once_with(
+            name=platform_name,
+            slug=slugify(platform_name),
+            manufacturer=None,
+        )
+
     def test_platform_validation_error(self):
         from django.core.exceptions import ValidationError
 
