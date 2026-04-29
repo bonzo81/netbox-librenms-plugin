@@ -125,6 +125,25 @@ function getCookie(name) {
 }
 
 /**
+ * Extract a human-readable error message from a non-2xx fetch Response.
+ * Attempts JSON parse first, checking error/message/detail fields.
+ * Falls back to raw response text. Truncates to 300 characters.
+ * @param {Response} response
+ * @returns {Promise<string>}
+ */
+function fetchErrorMessage(response) {
+    return response.text().then(t => {
+        const ct = (response.headers.get('Content-Type') || '').toLowerCase();
+        let msg = t || `HTTP ${response.status}`;
+        if (ct.includes('application/json')) {
+            try { const d = JSON.parse(t); msg = d.error || d.message || d.detail || msg; } catch (_) {}
+        }
+        if (msg.length > 300) msg = msg.slice(0, 300) + '...';
+        return msg;
+    });
+}
+
+/**
  * Extract device/VM ID and type from current URL pathname.
  * Supports multiple URL patterns:
  * - /dcim/devices/{id}/
@@ -568,7 +587,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(t => { throw new Error(t || `HTTP ${response.status}`); });
+                return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
             }
             return response.json();
         })
@@ -750,16 +769,7 @@ function initializeVlanModalSave() {
                 })
             }).then(response => {
                 if (!response.ok) {
-                    return response.text().then(t => {
-                        const ct = (response.headers.get('Content-Type') || '').toLowerCase();
-                        let msg = '';
-                        if (ct.includes('application/json')) {
-                            try { const d = JSON.parse(t); msg = (d && (d.message || d.detail)) || ''; } catch (_) {}
-                        }
-                        if (!msg) msg = t || 'Unknown error';
-                        if (msg.length > 300) msg = msg.slice(0, 300) + '...';
-                        throw new Error(`HTTP ${response.status}: ${msg}`);
-                    });
+                    return fetchErrorMessage(response).then(msg => { throw new Error(`HTTP ${response.status}: ${msg}`); });
                 }
                 // Apply DOM mutations only after the server has persisted the overrides
                 applyButtonUpdates();
@@ -833,7 +843,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
     })
         .then(response => {
             if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
+                return fetchErrorMessage(response).then(msg => { throw new Error(`HTTP ${response.status}: ${msg}`); });
             }
             return response.json();
         })
@@ -903,7 +913,7 @@ function handleVRFChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(t => { throw new Error(t); });
+                return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
             }
             return response.json();
         })
@@ -945,9 +955,7 @@ function handleInterfaceChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(text => {
-                    throw new Error(`Server error ${response.status}: ${text}`);
-                });
+                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
             }
             return response.json();
         })
@@ -992,9 +1000,7 @@ function handleCableChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(text => {
-                    throw new Error(`Server error ${response.status}: ${text}`);
-                });
+                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
             }
             return response.json();
         })
@@ -1440,12 +1446,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(t => {
-                    const ct = (response.headers.get('Content-Type') || '').toLowerCase();
-                    let msg = t || `HTTP ${response.status}`;
-                    if (ct.includes('application/json')) {
-                        try { const d = JSON.parse(t); msg = d.error || d.message || d.detail || msg; } catch (_) {}
-                    }
+                return fetchErrorMessage(response).then(msg => {
                     throw new Error(`HTTP ${response.status} ${response.statusText}: ${msg}`);
                 });
             }
@@ -1617,7 +1618,7 @@ function initializeModuleReplaceButtons() {
                 headers: fetchHeaders,
             })
                 .then(response => {
-                    if (!response.ok) return response.text().then(t => { throw new Error(t); });
+                    if (!response.ok) return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
                     return response.text();
                 })
                 .then(html => {
