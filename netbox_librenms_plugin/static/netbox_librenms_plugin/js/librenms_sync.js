@@ -1440,7 +1440,14 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(t => { throw new Error(`HTTP ${response.status} ${response.statusText}: ${t}`); });
+                return response.text().then(t => {
+                    const ct = (response.headers.get('Content-Type') || '').toLowerCase();
+                    let msg = t || `HTTP ${response.status}`;
+                    if (ct.includes('application/json')) {
+                        try { const d = JSON.parse(t); msg = d.error || d.message || d.detail || msg; } catch (_) {}
+                    }
+                    throw new Error(`HTTP ${response.status} ${response.statusText}: ${msg}`);
+                });
             }
             return response.json();
         })
@@ -1706,7 +1713,7 @@ function updateHtmxModalLabel() {
     const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
     const labelId = htmxModal.getAttribute('aria-labelledby');
     const label = (labelId && document.getElementById(labelId)) || document.getElementById('htmx-modal-label');
-    if (header && label) {
+    if (header && label && header !== label) {
         label.textContent = header.textContent.trim();
     }
 }
