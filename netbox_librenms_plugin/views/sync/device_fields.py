@@ -417,9 +417,10 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     mapping_existed = True
                 else:
                     try:
-                        mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
-                        mapping.full_clean()
-                        mapping.save()
+                        with transaction.atomic():
+                            mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
+                            mapping.full_clean()
+                            mapping.save()
                         mapping_created = True
                     except (ValidationError, IntegrityError) as e:
                         mapping_error = e.message_dict if hasattr(e, "message_dict") else str(e)

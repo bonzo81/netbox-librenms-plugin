@@ -233,6 +233,7 @@
                           var hiddenEl = document.getElementById("dt-id-{{ libre_device.device_id }}");
                           if (!searchEl) return;
                           var timer = null;
+                          var requestSeq = 0;
 
                           searchEl.addEventListener("input", function () {
                             clearTimeout(timer);
@@ -240,9 +241,11 @@
                             var q = this.value.trim();
                             if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
                             timer = setTimeout(function () {
+                              var seq = ++requestSeq;
                               fetch("{% url 'dcim-api:devicetype-list' %}?q=" + encodeURIComponent(q) + "&limit=20")
                                 .then(function (r) { return r.json(); })
                                 .then(function (data) {
+                                  if (seq !== requestSeq) return;
                                   dropdownEl.innerHTML = "";
                                   if (!data.results || data.results.length === 0) {
                                     dropdownEl.innerHTML = '<a class="dropdown-item small py-1 text-muted disabled">No results</a>';
