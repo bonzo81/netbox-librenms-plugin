@@ -409,21 +409,36 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
             mapping_created = False
+            mapping_error = None
+            mapping_existed = False
             if create_mapping and librenms_os:
                 existing = PlatformMapping.objects.filter(librenms_os=librenms_os).first()
-                if existing is None:
+                if existing is not None:
+                    mapping_existed = True
+                else:
                     try:
                         mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
                         mapping.full_clean()
                         mapping.save()
                         mapping_created = True
-                    except (ValidationError, IntegrityError):
+                    except (ValidationError, IntegrityError) as e:
+                        mapping_error = e.message_dict if hasattr(e, "message_dict") else str(e)
                         logger.exception("Failed to create PlatformMapping '%s' -> '%s'", librenms_os, platform_name)
 
         msg = f"Created platform '{platform}' and assigned to device"
         if mapping_created:
             msg += f" — platform mapping '{librenms_os}' → '{platform}' added"
         messages.success(request, msg)
+        if mapping_error:
+            messages.warning(
+                request,
+                f"Platform mapping '{librenms_os}' → '{platform}' could not be created: {mapping_error}",
+            )
+        elif mapping_existed:
+            messages.info(
+                request,
+                f"Platform mapping for '{librenms_os}' already exists; not modified.",
+            )
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 

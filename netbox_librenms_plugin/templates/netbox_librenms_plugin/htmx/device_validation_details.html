@@ -208,6 +208,9 @@
                               id="dt-mapping-form-{{ libre_device.device_id }}">
                           {% csrf_token %}
                           <div class="position-relative">
+                            <label for="dt-search-{{ libre_device.device_id }}" class="visually-hidden">
+                              Search device types
+                            </label>
                             <input type="text"
                                    class="form-control form-control-sm"
                                    id="dt-search-{{ libre_device.device_id }}"
@@ -237,7 +240,7 @@
                             var q = this.value.trim();
                             if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
                             timer = setTimeout(function () {
-                              fetch("/api/dcim/device-types/?q=" + encodeURIComponent(q) + "&limit=20")
+                              fetch("{% url 'dcim-api:devicetype-list' %}?q=" + encodeURIComponent(q) + "&limit=20")
                                 .then(function (r) { return r.json(); })
                                 .then(function (data) {
                                   dropdownEl.innerHTML = "";
