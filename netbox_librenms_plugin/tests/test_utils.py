@@ -230,7 +230,8 @@ class TestPlatformMatching:
         assert result["found"] is True
         assert result["platform"] == mock_platform
         assert result["match_type"] == "exact"
-        mock_platform_mapping.objects.get.assert_called_once_with(librenms_os__iexact="ios")
+        # Exact name matched — PlatformMapping is never consulted
+        mock_platform_mapping.objects.get.assert_not_called()
         mock_platform_model.objects.get.assert_called_once_with(name__iexact="ios")
 
     @patch("netbox_librenms_plugin.models.PlatformMapping")

@@ -842,9 +842,10 @@ class TestGetPlatformInfo:
             }
         }
 
-        with patch("dcim.models.Platform") as MockPlatform:
-            MockPlatform.DoesNotExist = type("DoesNotExist", (Exception,), {})
-            MockPlatform.objects.get.return_value = mock_platform
+        with patch(
+            "netbox_librenms_plugin.views.base.librenms_sync_view.find_matching_platform",
+            return_value={"found": True, "platform": mock_platform, "match_type": "exact"},
+        ):
             result = view._get_platform_info(librenms_info, obj)
 
         assert result["platform_exists"] is True
@@ -862,9 +863,10 @@ class TestGetPlatformInfo:
             }
         }
 
-        with patch("dcim.models.Platform") as MockPlatform:
-            MockPlatform.DoesNotExist = type("DoesNotExist", (Exception,), {})
-            MockPlatform.objects.get.side_effect = MockPlatform.DoesNotExist()
+        with patch(
+            "netbox_librenms_plugin.views.base.librenms_sync_view.find_matching_platform",
+            return_value={"found": False, "platform": None, "match_type": None},
+        ):
             result = view._get_platform_info(librenms_info, obj)
 
         assert result["platform_exists"] is False

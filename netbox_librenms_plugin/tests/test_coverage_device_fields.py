@@ -924,6 +924,95 @@ class TestCreateAndAssignPlatformView:
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
 
+    def _success_patches(self, platform_name="ios", librenms_os="ios", create_mapping="1"):
+        """Return (view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked)."""
+        view = self._view()
+        req = _make_request(
+            {
+                "platform_name": platform_name,
+                "manufacturer": "",
+                "librenms_os": librenms_os,
+                "create_mapping": create_mapping,
+            }
+        )
+        mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_instance = MagicMock()
+        mock_platform_cls.return_value = mock_platform_instance
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+        return view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked
+
+    def test_mapping_created_when_name_differs(self):
+        """A PlatformMapping is created when name differs from librenms_os and checkbox is on."""
+        view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, _ = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
+        )
+        mock_mapping_cls = MagicMock()
+        mock_mapping_instance = MagicMock()
+        mock_mapping_cls.return_value = mock_mapping_instance
+        mock_mapping_cls.objects.filter.return_value.first.return_value = None
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+        ):
+            view.post(req, pk=1)
+
+        mock_mapping_cls.assert_called_once_with(librenms_os="ios", netbox_platform=mock_platform_instance)
+        mock_mapping_instance.full_clean.assert_called_once()
+        mock_mapping_instance.save.assert_called_once()
+        success_msg = mock_msg.success.call_args[0][1]
+        assert "platform mapping" in success_msg
+
+    def test_mapping_skipped_when_checkbox_off(self):
+        """No PlatformMapping is created when checkbox is unchecked."""
+        view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, _ = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping=""
+        )
+        mock_mapping_cls = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+        ):
+            view.post(req, pk=1)
+
+        mock_mapping_cls.assert_not_called()
+
+    def test_mapping_skipped_when_already_exists(self):
+        """No duplicate PlatformMapping is created when one already exists for the OS."""
+        view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, _ = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
+        )
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.first.return_value = MagicMock()  # existing mapping
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+        ):
+            view.post(req, pk=1)
+
+        mock_mapping_cls.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # AssignVCSerialView

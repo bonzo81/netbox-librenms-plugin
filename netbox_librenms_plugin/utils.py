@@ -398,8 +398,8 @@ def find_matching_platform(librenms_os: str) -> dict:
     """
     Find matching NetBox platform for a LibreNMS OS.
 
-    Checks PlatformMapping table first (explicit user-defined mapping),
-    then falls back to exact case-insensitive name match.
+    Tries exact case-insensitive name match first, then falls back to
+    PlatformMapping for when the platform name differs from the LibreNMS OS string.
 
     Args:
         librenms_os (str): OS string from LibreNMS (e.g., 'ios', 'linux', 'junos')
@@ -418,7 +418,16 @@ def find_matching_platform(librenms_os: str) -> dict:
     if not librenms_os or librenms_os == "-":
         return {"found": False, "platform": None, "match_type": None}
 
-    # Check PlatformMapping table first (lazy import to match pattern used by other optional models)
+    # Try case-insensitive exact name match first
+    try:
+        platform = Platform.objects.get(name__iexact=librenms_os)
+        return {"found": True, "platform": platform, "match_type": "exact"}
+    except Platform.DoesNotExist:
+        pass
+    except Platform.MultipleObjectsReturned:
+        return {"found": False, "platform": None, "match_type": "ambiguous"}
+
+    # Fall back to PlatformMapping for when the platform name differs from the LibreNMS OS string
     try:
         from netbox_librenms_plugin.models import PlatformMapping as _PlatformMapping
 
@@ -434,15 +443,6 @@ def find_matching_platform(librenms_os: str) -> dict:
             pass
         except _PlatformMapping.MultipleObjectsReturned:
             return {"found": False, "platform": None, "match_type": "ambiguous"}
-
-    # Try case-insensitive exact name match
-    try:
-        platform = Platform.objects.get(name__iexact=librenms_os)
-        return {"found": True, "platform": platform, "match_type": "exact"}
-    except Platform.DoesNotExist:
-        pass
-    except Platform.MultipleObjectsReturned:
-        return {"found": False, "platform": None, "match_type": "ambiguous"}
 
     return {"found": False, "platform": None, "match_type": None}
 

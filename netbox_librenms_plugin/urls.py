@@ -11,6 +11,7 @@ from .models import (
 )
 from .views import (
     AddDeviceToLibreNMSView,
+    AddDeviceTypeMappingView,
     AssignVCSerialView,
     BulkImportConfirmView,
     BulkImportDevicesView,
@@ -393,6 +394,11 @@ urlpatterns = [
         "device-import/conflict-action/<str:device_id>/",
         DeviceConflictActionView.as_view(),
         name="device_conflict_action",
+    ),
+    path(
+        "device-import/add-device-type-mapping/<str:device_id>/",
+        AddDeviceTypeMappingView.as_view(),
+        name="add_device_type_mapping",
     ),
     path(
         "save-user-pref/",

@@ -315,22 +315,26 @@ class TestToYamlOnAllMappingModels:
 class TestFindMatchingPlatformWithMapping:
     """find_matching_platform checks PlatformMapping before direct name match."""
 
-    def test_platform_mapping_takes_priority_over_name_match(self):
-        """When a PlatformMapping exists for the OS, it is returned without querying Platform directly."""
+    def test_platform_mapping_used_as_fallback_when_no_name_match(self):
+        """When no Platform name matches, PlatformMapping is used as fallback."""
         from netbox_librenms_plugin.utils import find_matching_platform
 
         mock_mapped_platform = MagicMock(name="mapped_platform")
         mock_mapping = MagicMock()
         mock_mapping.netbox_platform = mock_mapped_platform
 
-        mock_pm_qs = MagicMock()
-        mock_pm_qs.get.return_value = mock_mapping
-
         mock_pm_class = MagicMock()
-        mock_pm_class.objects = mock_pm_qs
-        mock_pm_class.DoesNotExist = Exception
+        mock_pm_class.objects.get.return_value = mock_mapping
+        mock_pm_class.DoesNotExist = type("DoesNotExist", (Exception,), {})
 
-        with patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class):
+        mock_platform_model = MagicMock()
+        mock_platform_model.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_platform_model.objects.get.side_effect = mock_platform_model.DoesNotExist
+
+        with (
+            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
+            patch("dcim.models.Platform", mock_platform_model),
+        ):
             result = find_matching_platform("ios")
 
         assert result["found"] is True
@@ -384,17 +388,20 @@ class TestFindMatchingPlatformWithMapping:
         assert result["platform"] is None
 
     def test_multiple_platform_mappings_returns_ambiguous(self):
-        """When PlatformMapping.MultipleObjectsReturned, returns ambiguous and skips Platform lookup."""
+        """When exact name fails and PlatformMapping.MultipleObjectsReturned, returns ambiguous."""
         from netbox_librenms_plugin.utils import find_matching_platform
 
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
         MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
 
         mock_pm_class = MagicMock()
-        mock_pm_class.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_pm_class.DoesNotExist = DoesNotExist
         mock_pm_class.MultipleObjectsReturned = MultipleObjectsReturned
         mock_pm_class.objects.get.side_effect = MultipleObjectsReturned
 
         mock_platform_model = MagicMock()
+        mock_platform_model.DoesNotExist = DoesNotExist
+        mock_platform_model.objects.get.side_effect = DoesNotExist
 
         with (
             patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
@@ -403,7 +410,6 @@ class TestFindMatchingPlatformWithMapping:
             result = find_matching_platform("ios")
 
         assert result == {"found": False, "platform": None, "match_type": "ambiguous"}
-        mock_platform_model.objects.get.assert_not_called()
 
 
 # =============================================================================

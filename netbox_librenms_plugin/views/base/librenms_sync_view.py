@@ -8,6 +8,7 @@ from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.utils import (
+    find_matching_platform,
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
@@ -258,12 +259,12 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 librenms_sysname = device_info.get("sysName")
                 librenms_ip = device_info.get("ip")
 
-                # Extract new fields
-                hardware = device_info.get("hardware", "-")
-                serial = device_info.get("serial", "-")
-                os_name = device_info.get("os", "-")
-                version = device_info.get("version", "-")
-                features = device_info.get("features", "-")
+                # Extract new fields; use `or "-"` so null/empty from LibreNMS renders as "-"
+                hardware = device_info.get("hardware") or "-"
+                serial = device_info.get("serial") or "-"
+                os_name = device_info.get("os") or "-"
+                version = device_info.get("version") or "-"
+                features = device_info.get("features") or "-"
 
                 # Try to match hardware to NetBox DeviceType
                 hardware_match = match_librenms_hardware_to_device_type(hardware)
@@ -301,11 +302,11 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                         "librenms_device_os": os_name,
                         "librenms_device_version": version,
                         "librenms_device_features": features,
-                        "librenms_device_location": device_info.get("location", "-"),
+                        "librenms_device_location": device_info.get("location") or "-",
                         "librenms_device_ip": librenms_ip,
                         "sysName": librenms_sysname,
                         "resolved_name": resolved_name or librenms_sysname,
-                        "librenms_device_hostname": device_info.get("hostname", "-"),
+                        "librenms_device_hostname": device_info.get("hostname") or "-",
                         "librenms_device_hardware_match": hardware_match,
                     }
                 )
@@ -520,23 +521,20 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 'matching_platform': Platform object or None
             }
         """
-        from dcim.models import Platform
-
         librenms_os = librenms_info["librenms_device_details"].get("librenms_device_os", "-")
         librenms_version = librenms_info["librenms_device_details"].get("librenms_device_version", "-")
 
         # Platform name is just the OS (not OS + version)
         platform_name = librenms_os if librenms_os != "-" else None
 
-        # Check if platform exists (match by OS name only)
+        # Check PlatformMapping first, then fall back to exact name match
         platform_exists = False
         matching_platform = None
         if platform_name:
-            try:
-                matching_platform = Platform.objects.get(name__iexact=platform_name)
+            result = find_matching_platform(platform_name)
+            if result["found"] and result["match_type"] != "ambiguous":
+                matching_platform = result["platform"]
                 platform_exists = True
-            except Platform.DoesNotExist:
-                pass
 
         return {
             "netbox_platform": obj.platform,

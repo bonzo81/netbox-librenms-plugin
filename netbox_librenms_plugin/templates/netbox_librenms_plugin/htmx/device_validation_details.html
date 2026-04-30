@@ -198,7 +198,82 @@
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     </span>
                   {% else %}
-                    <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
+                    {% if libre_device.hardware and libre_device.hardware != "-" %}
+                      <div>
+                        <span class="text-danger d-block"><i class="mdi mdi-close-circle"></i> No matching type</span>
+                        <form hx-post="{% url 'plugins:netbox_librenms_plugin:add_device_type_mapping' device_id=libre_device.device_id %}"
+                              hx-swap="none"
+                              hx-include="[name=role_{{ libre_device.device_id }}], [name=rack_{{ libre_device.device_id }}], [name=cluster_{{ libre_device.device_id }}], #use-sysname-toggle, #strip-domain-toggle"
+                              class="mt-1"
+                              id="dt-mapping-form-{{ libre_device.device_id }}">
+                          {% csrf_token %}
+                          <div class="position-relative">
+                            <input type="text"
+                                   class="form-control form-control-sm"
+                                   id="dt-search-{{ libre_device.device_id }}"
+                                   placeholder="Search device types…"
+                                   autocomplete="off">
+                            <input type="hidden"
+                                   name="device_type_id"
+                                   id="dt-id-{{ libre_device.device_id }}">
+                            <div id="dt-dropdown-{{ libre_device.device_id }}"
+                                 class="dropdown-menu w-100 shadow"
+                                 style="z-index:1050; max-height:200px; overflow-y:auto; display:none;"></div>
+                          </div>
+                          <button type="submit" class="btn btn-sm btn-primary mt-1 w-100">Add Mapping</button>
+                        </form>
+                      </div>
+                      <script>
+                        (function () {
+                          var searchEl = document.getElementById("dt-search-{{ libre_device.device_id }}");
+                          var dropdownEl = document.getElementById("dt-dropdown-{{ libre_device.device_id }}");
+                          var hiddenEl = document.getElementById("dt-id-{{ libre_device.device_id }}");
+                          if (!searchEl) return;
+                          var timer = null;
+
+                          searchEl.addEventListener("input", function () {
+                            clearTimeout(timer);
+                            hiddenEl.value = "";
+                            var q = this.value.trim();
+                            if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
+                            timer = setTimeout(function () {
+                              fetch("/api/dcim/device-types/?q=" + encodeURIComponent(q) + "&limit=20")
+                                .then(function (r) { return r.json(); })
+                                .then(function (data) {
+                                  dropdownEl.innerHTML = "";
+                                  if (!data.results || data.results.length === 0) {
+                                    dropdownEl.innerHTML = '<a class="dropdown-item small py-1 text-muted disabled">No results</a>';
+                                  } else {
+                                    data.results.forEach(function (dt) {
+                                      var a = document.createElement("a");
+                                      a.className = "dropdown-item small py-1";
+                                      a.href = "#";
+                                      a.textContent = (dt.manufacturer ? dt.manufacturer.display + " — " : "") + dt.display;
+                                      a.addEventListener("click", function (e) {
+                                        e.preventDefault();
+                                        searchEl.value = (dt.manufacturer ? dt.manufacturer.display + " — " : "") + dt.display;
+                                        hiddenEl.value = dt.id;
+                                        dropdownEl.style.display = "none";
+                                      });
+                                      dropdownEl.appendChild(a);
+                                    });
+                                  }
+                                  dropdownEl.style.display = "block";
+                                })
+                                .catch(function () { dropdownEl.style.display = "none"; });
+                            }, 300);
+                          });
+
+                          document.addEventListener("click", function (e) {
+                            if (!searchEl.contains(e.target) && !dropdownEl.contains(e.target)) {
+                              dropdownEl.style.display = "none";
+                            }
+                          });
+                        })();
+                      </script>
+                    {% else %}
+                      <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
+                    {% endif %}
                   {% endif %}
                 </td>
                 <td>{{ libre_device.hardware|default:"—" }}</td>

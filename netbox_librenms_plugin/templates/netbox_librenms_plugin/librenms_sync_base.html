@@ -1009,20 +1009,23 @@
             </div>
             <form method="post" action="{% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk %}">
                 {% csrf_token %}
+                <input type="hidden" name="librenms_os" value="{{ platform_info.librenms_os }}">
                 <div class="modal-body">
                     <div class="alert alert-warning">
                         <i class="mdi mdi-information"></i>
-                        The platform <strong>{{ platform_info.platform_name }}</strong> does not exist in NetBox.
+                        No NetBox platform matches LibreNMS OS <strong>{{ platform_info.librenms_os }}</strong>.
                     </div>
                     <p>This will:</p>
                     <ol>
-                        <li>Create a new Platform named <strong>{{ platform_info.platform_name }}</strong></li>
+                        <li>Create a new Platform with the name below (defaults to the LibreNMS OS name)</li>
                         <li>Assign it to this device</li>
+                        <li>Optionally add a platform mapping so future syncs match correctly</li>
                     </ol>
                     <div class="mb-3">
                         <label for="platform_name" class="form-label">Platform Name</label>
                         <input type="text" class="form-control" id="platform_name" name="platform_name"
-                               value="{{ platform_info.platform_name }}" required>
+                               value="{{ platform_info.platform_name }}" required
+                               data-librenms-os="{{ platform_info.librenms_os }}">
                     </div>
                     <div class="mb-3">
                         <label for="manufacturer" class="form-label">Manufacturer (optional)</label>
@@ -1036,6 +1039,20 @@
                         </select>
                         <small class="form-text text-muted">Optionally associate with device manufacturer</small>
                     </div>
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="create_mapping"
+                                   id="create_mapping" value="1" checked>
+                            <label class="form-check-label" for="create_mapping">
+                                Add platform mapping
+                                (<code>{{ platform_info.librenms_os }}</code> → new platform)
+                            </label>
+                        </div>
+                        <small class="form-text text-warning fw-semibold" id="mapping-name-mismatch-note" style="display:none;">
+                            <i class="mdi mdi-alert-outline"></i>
+                            Name differs from LibreNMS OS — mapping is required for future matching
+                        </small>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -1047,6 +1064,20 @@
         </div>
     </div>
 </div>
+<script>
+(function () {
+    var input = document.getElementById('platform_name');
+    var note = document.getElementById('mapping-name-mismatch-note');
+    if (!input || !note) return;
+    var original = (input.dataset.librenmsOs || '').toLowerCase();
+    function updateNote() {
+        var differs = input.value.trim().toLowerCase() !== original;
+        note.style.display = differs ? '' : 'none';
+    }
+    input.addEventListener('input', updateNote);
+    updateNote();
+})();
+</script>
 {% endif %}
 
 {% endblock %} <!-- End content -->

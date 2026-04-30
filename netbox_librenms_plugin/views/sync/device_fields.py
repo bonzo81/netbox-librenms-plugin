@@ -13,6 +13,7 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.utils import (
     find_by_librenms_id,
     get_librenms_sync_device,
@@ -316,6 +317,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         platform_name = request.POST.get("platform_name")
         manufacturer_id = request.POST.get("manufacturer")
+        librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
+        create_mapping = bool(request.POST.get("create_mapping"))
 
         if not platform_name:
             messages.error(request, "Platform name is required")
@@ -405,10 +408,22 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 )
                 return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        messages.success(
-            request,
-            f"Created platform '{platform}' and assigned to device",
-        )
+            mapping_created = False
+            if create_mapping and librenms_os:
+                existing = PlatformMapping.objects.filter(librenms_os=librenms_os).first()
+                if existing is None:
+                    try:
+                        mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
+                        mapping.full_clean()
+                        mapping.save()
+                        mapping_created = True
+                    except (ValidationError, IntegrityError):
+                        logger.exception("Failed to create PlatformMapping '%s' -> '%s'", librenms_os, platform_name)
+
+        msg = f"Created platform '{platform}' and assigned to device"
+        if mapping_created:
+            msg += f" — platform mapping '{librenms_os}' → '{platform}' added"
+        messages.success(request, msg)
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
