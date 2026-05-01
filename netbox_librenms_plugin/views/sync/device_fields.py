@@ -309,6 +309,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
     def post(self, request, pk):
         """Create a new platform and assign it to the device."""
+        # Read create_mapping before permission check so it can be included in the check.
+        create_mapping = bool(request.POST.get("create_mapping"))
+        if create_mapping:
+            self.required_object_permissions = {
+                "POST": [
+                    ("change", Device),
+                    ("add", Platform),
+                    ("add", PlatformMapping),
+                ],
+            }
+
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -318,7 +329,6 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         platform_name = request.POST.get("platform_name")
         manufacturer_id = request.POST.get("manufacturer")
         librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
-        create_mapping = bool(request.POST.get("create_mapping"))
 
         if not platform_name:
             messages.error(request, "Platform name is required")
