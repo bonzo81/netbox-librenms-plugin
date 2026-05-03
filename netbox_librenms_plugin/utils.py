@@ -652,6 +652,26 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
         value = cf_value.get(server_key)
         if isinstance(value, bool):
             return None
+        if isinstance(value, dict):
+            # New form: {"id": 42, "oob": {...}} — extract the main device id.
+            inner = value.get("id")
+            if isinstance(inner, bool):
+                return None
+            if isinstance(inner, int):
+                return inner if inner > 0 else None
+            if isinstance(inner, str):
+                try:
+                    int_id = int(inner)
+                except (ValueError, TypeError):
+                    return None
+                if int_id <= 0:
+                    return None
+                if auto_save:
+                    value["id"] = int_id
+                    obj.custom_field_data["librenms_id"] = cf_value
+                    obj.save(update_fields=["custom_field_data"])
+                return int_id
+            return None
         if isinstance(value, str):
             # Normalise string-stored ID inside JSON dict and write back.
             try:
@@ -725,7 +745,7 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         )
         cf_value = {}
     try:
-        cf_value[server_key] = int(device_id)
+        int_id = int(device_id)
     except (TypeError, ValueError):
         logger.warning(
             "librenms_id device_id %r is not a valid integer on %r; not storing.",
@@ -733,6 +753,12 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
             obj,
         )
         return  # Don't persist an invalid entry
+    # Preserve any existing OOB sub-object when rewriting the main device id.
+    existing_entry = cf_value.get(server_key)
+    if isinstance(existing_entry, dict) and "oob" in existing_entry:
+        cf_value[server_key] = {"id": int_id, "oob": existing_entry["oob"]}
+    else:
+        cf_value[server_key] = int_id
     obj.custom_field_data["librenms_id"] = cf_value
 
 
@@ -771,6 +797,12 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
     # Also match when the namespaced value was stored as a string (e.g. {"production": "42"}).
     q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
+    # Match when value stored as {"id": librenms_id, "oob": {...}} — new dict-with-id form.
+    q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": librenms_id})
+    q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": str(librenms_id)})
+    # Match when librenms_id is the OOB device id — so re-import recognises merged device.
+    q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": librenms_id})
+    q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": str(librenms_id)})
     # Always include legacy bare-integer and bare-string IDs as a universal fallback.
     # Legacy records were created before multi-server support; they should be visible
     # regardless of which server is currently active.
@@ -787,11 +819,128 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
                 canonical_str = str(int_value)
                 q |= Q(**{f"custom_field_data__librenms_id__{server_key}": canonical_str})
                 q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
+                q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": canonical_str})
+                q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": int_value})
+                q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": canonical_str})
+                q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": int_value})
                 q |= Q(custom_field_data__librenms_id=canonical_str)
                 q |= Q(custom_field_data__librenms_id=int_value)
         except ValueError:
             pass
     return model.objects.filter(q).first()
+
+
+def get_librenms_oob(obj, server_key: str = "default") -> dict | None:
+    """
+    Return the OOB sub-object from the ``librenms_id`` JSON custom field, or ``None``.
+
+    Read-only — never triggers a DB write.  Returns the raw ``oob`` dict verbatim so
+    callers can inspect ``id``, ``type``, ``version``, and ``ip`` without additional helpers.
+
+    Returns ``None`` when:
+    - the field is absent, a legacy bare integer, or not a dict;
+    - the server-key entry is a bare integer (no OOB attached);
+    - the ``oob`` key is missing or not a dict.
+
+    Args:
+        obj: NetBox object with a ``librenms_id`` custom field.
+        server_key: LibreNMS server key (from plugin ``servers`` config).
+
+    Returns:
+        dict or None
+    """
+    cf_value = obj.cf.get("librenms_id")
+    if not isinstance(cf_value, dict):
+        return None
+    entry = cf_value.get(server_key)
+    if not isinstance(entry, dict):
+        return None
+    oob = entry.get("oob")
+    return oob if isinstance(oob, dict) else None
+
+
+def set_librenms_oob(
+    obj,
+    oob_device_id: int,
+    server_key: str = "default",
+    *,
+    oob_type: str,
+    version: str | None = None,
+    ip: str | None = None,
+) -> None:
+    """
+    Attach an OOB management controller to a device under *server_key*.
+
+    Promotes the server-key value to the ``{"id": N, "oob": {...}}`` dict form if it is
+    currently a bare integer.  Validates *oob_type* against ``OOB_TYPE_PATTERN``; raises
+    ``ValueError`` if the type is not recognized.
+
+    Does **not** call ``obj.save()`` — the caller is responsible for persisting the change.
+
+    Args:
+        obj: NetBox object with a ``librenms_id`` custom field.
+        oob_device_id: LibreNMS device ID of the OOB controller.
+        server_key: LibreNMS server key (from plugin ``servers`` config).
+        oob_type: Raw type string (e.g. ``"iDRAC9"``, ``"ilo"``); will be normalized.
+        version: Optional firmware/software version string.
+        ip: Optional IP address string of the OOB controller.
+
+    Raises:
+        ValueError: if *oob_type* does not match any known OOB type.
+    """
+    from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN, OOB_TYPES
+
+    if not OOB_TYPE_PATTERN.search(oob_type):
+        raise ValueError(f"oob_type {oob_type!r} does not match any known OOB type {OOB_TYPES}")
+    normalized_type = OOB_TYPE_PATTERN.search(oob_type).group(1).lower()
+
+    cf_value = obj.custom_field_data.get("librenms_id") or {}
+    if not isinstance(cf_value, dict):
+        logger.warning("librenms_id on %r is not a dict; cannot set OOB.", obj)
+        return
+
+    entry = cf_value.get(server_key)
+    if isinstance(entry, int) and not isinstance(entry, bool):
+        # Promote bare int to dict form, preserving the main device id.
+        entry = {"id": entry}
+    elif isinstance(entry, dict):
+        entry = dict(entry)  # shallow copy so we don't mutate the stored dict in-place
+    else:
+        entry = {}
+
+    oob: dict = {"id": int(oob_device_id), "type": normalized_type}
+    if version:
+        oob["version"] = version
+    if ip:
+        oob["ip"] = ip
+    entry["oob"] = oob
+    cf_value[server_key] = entry
+    obj.custom_field_data["librenms_id"] = cf_value
+
+
+def clear_librenms_oob(obj, server_key: str = "default") -> None:
+    """
+    Remove the OOB sub-object from the server-key entry of ``librenms_id``.
+
+    The entry is left in ``{"id": N}`` object form — it is NOT demoted back to a bare
+    integer (either form is valid; keeping object form avoids an extra save).
+
+    Does **not** call ``obj.save()`` — the caller is responsible for persisting the change.
+    Is a no-op when the server-key entry has no ``oob`` sub-key.
+
+    Args:
+        obj: NetBox object with a ``librenms_id`` custom field.
+        server_key: LibreNMS server key (from plugin ``servers`` config).
+    """
+    cf_value = obj.custom_field_data.get("librenms_id")
+    if not isinstance(cf_value, dict):
+        return
+    entry = cf_value.get(server_key)
+    if not isinstance(entry, dict):
+        return
+    entry.pop("oob", None)
+    cf_value[server_key] = entry
+    obj.custom_field_data["librenms_id"] = cf_value
 
 
 def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:

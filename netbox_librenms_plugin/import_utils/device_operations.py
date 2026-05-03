@@ -15,9 +15,11 @@ from ..utils import (
     find_by_librenms_id,
     find_matching_platform,
     find_matching_site,
+    get_librenms_oob,
     match_librenms_hardware_to_device_type,
     set_librenms_device_id,
 )
+from ..constants import normalize_oob_type
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
     _generate_vc_member_name,
@@ -206,10 +208,11 @@ def validate_device_for_import(
         "resolved_name": None,  # Final device name after applying user preferences
         "existing_device": None,
         "existing_match_type": None,  # Track how existing device was matched
-        "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs"
+        "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs", "oob_candidate"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "serial_duplicate": False,  # True when incoming serial is already on a different device
         "librenms_id_needs_migration": False,  # True when existing device has legacy bare-int ID
+        "oob_candidate": None,  # dict {device, type, version, ip} when oob_candidate detected
         "name_matches": False,  # True when existing device name matches LibreNMS sysName
         "name_sync_available": False,  # True when existing device name differs from sysName
         "suggested_name": None,  # sysName to suggest when name_sync_available is True
@@ -324,6 +327,11 @@ def validate_device_for_import(
                 result["existing_device"] = existing_device
                 result["existing_match_type"] = "librenms_id"
                 result["can_import"] = False
+
+                # If the match was via the OOB sub-key, mark it so the UI shows no duplicate warning.
+                _existing_oob = get_librenms_oob(existing_device, server_key=server_key)
+                if _existing_oob and _existing_oob.get("id") == librenms_id:
+                    result["existing_match_type"] = "librenms_oob"
 
                 # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
                 # Direct access needed to detect legacy format for migration prompt:
@@ -450,7 +458,31 @@ def validate_device_for_import(
                         result["existing_match_type"] = "serial"
                         result["can_import"] = False
 
-                        if existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower():
+                        # Check whether this LibreNMS device is an OOB controller (iDRAC/iLO/IPMI/BMC/DRAC).
+                        # If so, and the matching device has no OOB linked yet, offer "Add as OOB" instead
+                        # of a serial conflict/link action.
+                        oob_type = normalize_oob_type(
+                            libre_device.get("os", ""),
+                            libre_device.get("hardware", ""),
+                        )
+                        if oob_type:
+                            existing_oob = get_librenms_oob(existing_by_serial, server_key=server_key)
+                            if existing_oob is None:
+                                result["serial_action"] = "oob_candidate"
+                                result["oob_candidate"] = {
+                                    "device": existing_by_serial,
+                                    "type": oob_type,
+                                    "version": libre_device.get("version") or None,
+                                    "ip": libre_device.get("ip") or None,
+                                }
+                            else:
+                                # OOB already linked — inform without blocking
+                                result["serial_action"] = "link"
+                                result["warnings"].append(
+                                    f"Device '{existing_by_serial.name}' already has an OOB controller linked. "
+                                    f"Re-import will update the existing OOB entry."
+                                )
+                        elif existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower():
                             result["warnings"].append(
                                 f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
                                 f"(not linked to LibreNMS)"
@@ -477,12 +509,42 @@ def validate_device_for_import(
                             else None
                         )
                         if device:
-                            result["existing_device"] = device
-                            result["existing_match_type"] = "primary_ip"
-                            result["warnings"].append(
-                                f"IP address {primary_ip} already assigned to device '{device.name}' (not linked to LibreNMS)"
+                            # Check if this is an OOB candidate via the IP path.
+                            # The OOB controller's IP may already be the device's oob_ip, or the
+                            # LibreNMS device may identify itself as an OOB type (iDRAC/iLO/etc.).
+                            oob_type = normalize_oob_type(
+                                libre_device.get("os", ""),
+                                libre_device.get("hardware", ""),
                             )
-                            result["can_import"] = False
+                            is_oob_ip = device.oob_ip_id is not None and existing_ip.pk == device.oob_ip_id
+                            if oob_type and (is_oob_ip or not device.primary_ip4_id):
+                                existing_oob = get_librenms_oob(device, server_key=server_key)
+                                if existing_oob is None:
+                                    result["existing_device"] = device
+                                    result["existing_match_type"] = "primary_ip"
+                                    result["serial_action"] = "oob_candidate"
+                                    result["oob_candidate"] = {
+                                        "device": device,
+                                        "type": oob_type,
+                                        "version": libre_device.get("version") or None,
+                                        "ip": libre_device.get("ip") or None,
+                                    }
+                                    result["can_import"] = False
+                                else:
+                                    result["existing_device"] = device
+                                    result["existing_match_type"] = "primary_ip"
+                                    result["warnings"].append(
+                                        f"IP address {primary_ip} already assigned to device '{device.name}' "
+                                        f"(OOB already linked)"
+                                    )
+                                    result["can_import"] = False
+                            else:
+                                result["existing_device"] = device
+                                result["existing_match_type"] = "primary_ip"
+                                result["warnings"].append(
+                                    f"IP address {primary_ip} already assigned to device '{device.name}' (not linked to LibreNMS)"
+                                )
+                                result["can_import"] = False
 
         # Refresh local variable to reflect any VM-mode adjustments made during detection
         # (e.g. existing VM found by hostname sets result["import_as_vm"] = True)

@@ -6,6 +6,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_oob,
     get_virtual_chassis_member,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -91,9 +92,35 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # Enrich ports with VLAN data for trunk ports
         ports = librenms_data.get("ports", [])
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
+        for port in enriched_ports:
+            port["_source"] = "main"
         librenms_data["ports"] = enriched_ports
 
+        # If an OOB controller is linked, fetch its ports and merge them in.
         _server_key = self.librenms_api.server_key
+        oob = get_librenms_oob(obj, server_key=_server_key)
+        if oob and oob.get("id"):
+            oob_success, oob_raw = self.librenms_api.get_ports(oob["id"])
+            if oob_success:
+                oob_ports = oob_raw.get("ports", [])
+                oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
+                for port in oob_enriched:
+                    port["_source"] = "oob"
+                # Detect shared-LOM: same MAC seen on both main and OOB sides
+                mac_index = {}
+                for port in enriched_ports:
+                    mac = (port.get("ifPhysAddress") or "").lower().strip()
+                    if mac:
+                        mac_index.setdefault(mac, []).append(port)
+                for port in oob_enriched:
+                    mac = (port.get("ifPhysAddress") or "").lower().strip()
+                    if mac:
+                        mac_index.setdefault(mac, []).append(port)
+                for mac, rows in mac_index.items():
+                    if len(rows) > 1:
+                        for row in rows:
+                            row["_dedup_conflict"] = True
+                librenms_data["ports"] = enriched_ports + oob_enriched
         # Store data in cache (keyed by server to avoid cross-server collisions)
         cache.set(
             self.get_cache_key(obj, "ports", _server_key),
