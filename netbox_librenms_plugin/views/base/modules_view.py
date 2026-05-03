@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.utils import get_librenms_sync_device
+from netbox_librenms_plugin.utils import get_librenms_oob, get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -286,6 +286,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     "has_write_permission": self.has_write_permission(),
                 },
             )
+
+        for item in inventory_data:
+            item["_source"] = "main"
+
+        # If an OOB controller is linked, fetch its inventory and merge.
+        # Offset OOB entPhysicalIndex values by 1_000_000 to prevent collisions.
+        _server_key = self.librenms_api.server_key
+        oob = get_librenms_oob(obj, server_key=_server_key)
+        if oob and oob.get("id"):
+            oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob["id"])
+            if oob_success:
+                _OOB_OFFSET = 1_000_000
+                for item in oob_inventory:
+                    item["_source"] = "oob"
+                    if (idx := item.get("entPhysicalIndex")) is not None:
+                        item["entPhysicalIndex"] = idx + _OOB_OFFSET
+                    if (parent := item.get("entPhysicalContainedIn")) is not None and parent != 0:
+                        item["entPhysicalContainedIn"] = parent + _OOB_OFFSET
+                inventory_data = inventory_data + oob_inventory
 
         # Fetch transceiver data and merge with inventory
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data)
@@ -1692,6 +1711,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "depth": depth,
             "ent_physical_index": item.get("entPhysicalIndex"),
             "has_installable_children": False,
+            "_source": item.get("_source", "main"),
         }
         if name_conflict_reason:
             row["name_conflict_reason"] = name_conflict_reason

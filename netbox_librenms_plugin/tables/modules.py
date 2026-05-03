@@ -123,12 +123,17 @@ class LibreNMSModuleTable(tables.Table):
     def render_name(self, value, record):
         """Render inventory item name with tree indentation for sub-components."""
         depth = record.get("depth", 0)
+        oob_badge = (
+            format_html(' <span class="badge bg-secondary ms-1" title="From OOB controller">OOB</span>')
+            if record.get("_source") == "oob"
+            else ""
+        )
         if depth == 0:
-            return format_html("{}", value or "-")
+            return format_html("{}{}", value or "-", oob_badge)
         # Build visual tree prefix based on nesting depth
         padding_px = depth * 20
         prefix = "└─ "
-        return format_html('<span style="padding-left:{}px">{}{}</span>', padding_px, prefix, value or "-")
+        return format_html('<span style="padding-left:{}px">{}{}</span>{}', padding_px, prefix, value or "-", oob_badge)
 
     def render_model(self, value, record):
         """Render model with link to module type if matched."""
