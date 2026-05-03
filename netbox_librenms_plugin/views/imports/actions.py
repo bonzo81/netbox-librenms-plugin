@@ -1765,6 +1765,133 @@ class CreatePlatformFromImportView(
         return HttpResponse(oob_modal + row_html, content_type="text/html")
 
 
+class AddAsOOBView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """HTMX view to link a LibreNMS OOB controller device to an existing NetBox Device."""
+
+    def post(self, request, device_id):
+        """Attach a LibreNMS OOB identity to the matched NetBox device."""
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Device
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        existing_device_id = request.POST.get("existing_device_id")
+        if not existing_device_id:
+            return HttpResponse("Missing existing_device_id", status=400)
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        try:
+            existing_device = Device.objects.get(pk=int(existing_device_id))
+        except (Device.DoesNotExist, ValueError):
+            return HttpResponse("Existing device not found", status=404)
+
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return HttpResponse("LibreNMS device not found", status=404)
+
+        oob_candidate = validation.get("oob_candidate") if validation else None
+        if not oob_candidate:
+            return HttpResponse("No OOB candidate found in validation data", status=400)
+        if oob_candidate["device"].pk != existing_device.pk:
+            return HttpResponse(
+                "Device ID mismatch: existing_device_id does not match OOB candidate",
+                status=400,
+            )
+
+        librenms_id = libre_device.get("device_id")
+        if isinstance(librenms_id, bool):
+            return HttpResponse("Invalid or missing LibreNMS device_id", status=400)
+        try:
+            librenms_id = int(librenms_id)
+        except (TypeError, ValueError):
+            return HttpResponse("Invalid or missing LibreNMS device_id", status=400)
+        if librenms_id <= 0:
+            return HttpResponse("Invalid LibreNMS device_id", status=400)
+
+        # Reject legacy bare-int librenms_id (same guard as DeviceConflictActionView).
+        stored_id = existing_device.custom_field_data.get("librenms_id")
+        _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
+        if not _is_legacy and isinstance(stored_id, str):
+            try:
+                int(stored_id)
+                _is_legacy = True
+            except (ValueError, TypeError):
+                pass
+        if _is_legacy:
+            return HttpResponse(
+                "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first.",
+                status=409,
+            )
+
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        oob_type = oob_candidate.get("type") or ""
+        oob_version = oob_candidate.get("version") or None
+        oob_ip_str = oob_candidate.get("ip") or None
+        server_key = self.librenms_api.server_key
+
+        with transaction.atomic():
+            try:
+                existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+            except Device.DoesNotExist:
+                return HttpResponse(
+                    "Device no longer exists; it may have been deleted concurrently.",
+                    status=409,
+                )
+
+            try:
+                set_librenms_oob(
+                    existing_device,
+                    librenms_id,
+                    server_key,
+                    type=oob_type,
+                    version=oob_version,
+                    ip=oob_ip_str,
+                )
+            except ValueError as exc:
+                return HttpResponse(f"Invalid OOB data: {escape(str(exc))}", status=400)
+
+            # Assign device.oob_ip if not already set and the IP exists in NetBox.
+            if oob_ip_str and existing_device.oob_ip_id is None:
+                from ipam.models import IPAddress
+
+                existing_ip = IPAddress.objects.filter(address__net_host=oob_ip_str).first()
+                if existing_ip:
+                    existing_device.oob_ip = existing_ip
+
+            if err := _save_device(existing_device):
+                return err
+
+        logger.info(
+            "Linked OOB device (LibreNMS ID %d, type %s) to '%s' (server: %s)",
+            librenms_id,
+            oob_type,
+            existing_device.name,
+            server_key,
+        )
+
+        cache_key = get_import_device_cache_key(device_id, server_key)
+        cache.delete(cache_key)
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return HttpResponse("Device not found after action", status=404)
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        response["HX-Trigger"] = "closeModal"
+        return response
+
+
 class SaveUserPrefView(LibreNMSPermissionMixin, View):
     """Save a user preference via POST. Used by JS toggle handlers."""
 

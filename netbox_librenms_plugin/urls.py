@@ -12,6 +12,7 @@ from .models import (
 )
 from .views import (
     AddDeviceToLibreNMSView,
+    AddAsOOBView,
     AddDeviceTypeMappingView,
     AssignVCSerialView,
     BulkImportConfirmView,
@@ -417,6 +418,11 @@ urlpatterns = [
         "device-import/conflict-action/<int:device_id>/",
         DeviceConflictActionView.as_view(),
         name="device_conflict_action",
+    ),
+    path(
+        "device-import/add-as-oob/<int:device_id>/",
+        AddAsOOBView.as_view(),
+        name="device_add_as_oob",
     ),
     path(
         "device-import/add-device-type-mapping/<int:device_id>/",
