@@ -9,6 +9,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
+    get_librenms_oob,
     get_librenms_sync_device,
     get_module_template_interface_names,
     normalize_librenms_port_id,
@@ -50,6 +51,19 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 
 # Physical classes filtered out when counting hardware siblings under a parent bay.
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
+
+
+def _try_int(v: object) -> int | None:
+    """Return int(v), or None if v is not coercible to int.
+
+    LibreNMS API responses may return numeric SNMP indices as strings.
+    This helper lets callers safely coerce without crashing on unexpected
+    non-numeric values such as empty strings or "N/A".
+    """
+    try:
+        return int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _check_ignore_rules(
@@ -310,6 +324,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 },
             )
 
+        for item in inventory_data:
+            item["_source"] = "main"
+
         # Fetch ports once and reuse in subsequent enrichment steps.
         ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
         ports_error = None
@@ -317,11 +334,53 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ports_error = str(ports_data) if ports_data else "unknown error"
             ports_data = {}
 
-        # Fetch transceiver data and merge with inventory
+        # Merge main-device transceiver data BEFORE computing the OOB offset so
+        # that synthetic transceiver rows (whose entity_physical_index values come
+        # from the transceiver API and may exceed the ENTITY-MIB high-water mark)
+        # are counted in main_max_idx.  Vendors like Nokia expose SFPs in the
+        # transceiver API with indices that are absent from ENTITY-MIB; without
+        # this reordering those high indices could fall inside the OOB namespace.
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
+        for item in inventory_data:
+            item.setdefault("_source", "main")
         # Enrich port rows with stable LibreNMS port_id using ports data so
         # interface matching works even when transceiver metadata is absent.
         self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
+
+        # If an OOB controller is linked, fetch its inventory and merge.
+        # Offset OOB entPhysicalIndex values by a dynamic amount to prevent
+        # collisions with the main device's real entPhysicalIndex values.
+        # RFC 2737 does not cap entPhysicalIndex, so a static 1_000_000 offset
+        # is not safe for high-density chassis. Instead we compute an offset
+        # that is always above the main device's highest observed index,
+        # including any synthetic transceiver rows added above.
+        _server_key = self.librenms_api.server_key
+        oob = get_librenms_oob(sync_device, server_key=_server_key)
+        oob_failed = False
+        if oob and oob.get("id"):
+            oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob["id"])
+            if oob_success:
+                main_max_idx = max(
+                    (cast for item in inventory_data if (cast := _try_int(item.get("entPhysicalIndex"))) is not None),
+                    default=0,
+                )
+                # Round up to the next 1000-boundary for a clean namespace.
+                _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
+                for item in oob_inventory:
+                    item["_source"] = "oob"
+                    if (idx := _try_int(item.get("entPhysicalIndex"))) is not None:
+                        item["entPhysicalIndex"] = idx + _OOB_OFFSET
+                    if (parent := _try_int(item.get("entPhysicalContainedIn"))) is not None and parent != 0:
+                        item["entPhysicalContainedIn"] = parent + _OOB_OFFSET
+                inventory_data = inventory_data + oob_inventory
+            else:
+                oob_failed = True
+                logger.warning(
+                    "OOB inventory fetch failed for device %s (OOB id %s): %s",
+                    self.librenms_id,
+                    oob["id"],
+                    oob_inventory,
+                )
 
         # Cache the merged inventory data, namespaced by server and librenms_id to detect remapping
         cache.set(
@@ -341,7 +400,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if txr_error:
             logger.warning("Transceiver fetch failed for device %s: %s", self.librenms_id, txr_error)
             messages.warning(request, "Inventory refreshed, but transceiver fetch failed; see server logs for details.")
-        elif not ports_error:
+        if oob_failed:
+            messages.warning(
+                request,
+                f"Inventory refreshed, but OOB controller inventory fetch failed (device {self.librenms_id}, OOB id {oob['id']}); see server logs for details.",
+            )
+        if not txr_error and not oob_failed and not ports_error:
             messages.success(request, "Inventory data refreshed successfully.")
         return render(
             request,
@@ -2116,6 +2180,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "has_installable_children": False,
                 "integrated_in_name": ancestor_name,
                 "integrated_in_index": integrating_ancestor.get("entPhysicalIndex"),
+                "_source": item.get("_source", "main"),
             }
 
         # Match to NetBox module bay
@@ -2161,6 +2226,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "librenms_ifname": item.get("_librenms_ifname"),
             "librenms_ifdescr": item.get("_librenms_ifdescr"),
             "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
+            "_source": item.get("_source", "main"),
         }
         if name_conflict_reason:
             row["name_conflict_reason"] = name_conflict_reason

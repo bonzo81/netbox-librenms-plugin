@@ -61,9 +61,14 @@ class LibreNMSCableTable(tables.Table):
 
     def render_local_port(self, value, record):
         """Render local port name as a link if URL is available."""
+        oob_badge = (
+            format_html(' <span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>')
+            if record.get("_source") == "oob"
+            else ""
+        )
         if url := record.get("local_port_url"):
-            return format_html('<a href="{}">{}</a>', url, value)
-        return value
+            return format_html('<a href="{}">{}</a>{}', url, value, oob_badge)
+        return format_html("{}{}", value or "", oob_badge)
 
     def render_remote_port(self, value, record):
         """Render remote port name as a link if URL is available."""

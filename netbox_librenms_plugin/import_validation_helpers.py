@@ -137,6 +137,77 @@ def remove_validation_issue(validation: dict, keyword: str) -> None:
     validation["issues"] = [issue for issue in validation["issues"] if keyword.lower() not in issue.lower()]
 
 
+def apply_oob_detection_result(
+    result: dict,
+    *,
+    serial_action: "str | None",
+    oob_candidate: "dict | None",
+    promote_to_host: "dict | None",
+    serial_role_choice_available: bool,
+    warnings: "list | None" = None,
+) -> None:
+    """Apply OOB/promote-to-host serial detection results to the validation dict.
+
+    Call this after computing all OOB/promote-to-host flags from the LibreNMS
+    and NetBox data.  All mutations to ``result["oob_candidate"]``,
+    ``result["promote_to_host"]``, ``result["serial_action"]``,
+    ``result["serial_role_choice_available"]``, and their associated warnings
+    are routed through here so the mutation pattern stays consistent and
+    testable independently of the DB-heavy computation in device_operations.
+
+    Args:
+        result: Validation dict produced by validate_device_for_import()
+        serial_action: The resolved action string, or None
+        oob_candidate: Dict {device, type, version, ip} when OOB role is available
+        promote_to_host: Dict {existing_libre_id, existing_oob_type, existing_device}
+            when host-promotion is available
+        serial_role_choice_available: True when both oob_candidate and
+            promote_to_host are feasible and the UI should offer a toggle
+        warnings: Optional list of warning strings to append to result["warnings"]
+    """
+    result["serial_action"] = serial_action
+    result["oob_candidate"] = oob_candidate
+    result["promote_to_host"] = promote_to_host
+    result["serial_role_choice_available"] = serial_role_choice_available
+    for warning in warnings or []:
+        result["warnings"].append(warning)
+
+
+def apply_merge_candidates(
+    result: dict,
+    *,
+    host_named: dict,
+    oob_named: dict,
+    warning: str,
+) -> None:
+    """Apply merge-candidates detection results to the validation dict.
+
+    Called when the hostname-matched and serial-matched NetBox devices are
+    different objects and at least one already has a LibreNMS linkage,
+    indicating they likely represent the two sides of a single physical box.
+
+    Sets ``serial_action`` to ``"merge_netbox_devices"``, populates
+    ``merge_candidates``, sets ``can_import`` to False, and appends the
+    supplied warning so callers do not need to know the dict shape.
+
+    Args:
+        result: Validation dict produced by validate_device_for_import()
+        host_named: Dict {pk, name, librenms_link} for the hostname-matched device
+        oob_named: Dict {pk, name, librenms_link} for the serial-matched device
+        warning: Warning string describing the merge situation
+    """
+    result["serial_action"] = "merge_netbox_devices"
+    result["merge_candidates"] = {
+        "host_named": host_named,
+        "oob_named": oob_named,
+    }
+    result["can_import"] = False
+    result["oob_candidate"] = None
+    result["promote_to_host"] = None
+    result["serial_role_choice_available"] = False
+    result["warnings"].append(warning)
+
+
 def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None:
     """
     Recalculate can_import and is_ready flags based on current validation state.

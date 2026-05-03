@@ -6,6 +6,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_oob,
     get_virtual_chassis_member,
     normalize_librenms_port_id,
 )
@@ -123,9 +124,40 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # Enrich ports with VLAN data for trunk ports
         ports = librenms_data.get("ports", [])
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
+        for port in enriched_ports:
+            port["_source"] = "main"
         librenms_data["ports"] = enriched_ports
 
+        # If an OOB controller is linked, fetch its ports and merge them in.
         _server_key = self.librenms_api.server_key
+        oob = get_librenms_oob(obj, server_key=_server_key)
+        if oob and oob.get("id"):
+            oob_success, oob_raw = self.librenms_api.get_ports(oob["id"])
+            if oob_success:
+                oob_ports = oob_raw.get("ports", [])
+                oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
+                for port in oob_enriched:
+                    port["_source"] = "oob"
+                # Detect shared-LOM: same MAC seen on BOTH main and OOB sides.
+                # Build separate per-source MAC sets so that within-source
+                # duplicates are not falsely flagged as cross-source conflicts.
+                main_macs: set[str] = set()
+                for port in enriched_ports:
+                    mac = (port.get("ifPhysAddress") or "").lower().strip()
+                    if mac:
+                        main_macs.add(mac)
+                oob_macs: set[str] = set()
+                for port in oob_enriched:
+                    mac = (port.get("ifPhysAddress") or "").lower().strip()
+                    if mac:
+                        oob_macs.add(mac)
+                shared_macs = main_macs & oob_macs
+                if shared_macs:
+                    for port in enriched_ports + oob_enriched:
+                        mac = (port.get("ifPhysAddress") or "").lower().strip()
+                        if mac in shared_macs:
+                            port["_dedup_conflict"] = True
+                librenms_data["ports"] = enriched_ports + oob_enriched
         # Store data in cache (keyed by server to avoid cross-server collisions)
         cache.set(
             self.get_cache_key(obj, "ports", _server_key),
@@ -219,7 +251,8 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     chassis_member = get_virtual_chassis_member(obj, port.get(interface_name_field))
                     device_interfaces = interfaces_by_device.get(
-                        chassis_member.id, {"by_name": {}, "by_librenms_id": {}}
+                        chassis_member.id if chassis_member else obj.id,
+                        {"by_name": {}, "by_librenms_id": {}},
                     )
                 else:
                     device_interfaces = interfaces_by_device.get(obj.id, {"by_name": {}, "by_librenms_id": {}})

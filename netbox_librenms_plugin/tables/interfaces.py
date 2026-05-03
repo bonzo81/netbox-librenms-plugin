@@ -300,7 +300,15 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox"""
-        return self._render_field(value, record, self.interface_name_field, "name")
+        rendered = self._render_field(value, record, self.interface_name_field, "name")
+        badges = ""
+        if record.get("_source") == "oob":
+            badges += '<span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
+        if record.get("_dedup_conflict"):
+            badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
+        if badges:
+            return format_html("{}{}", rendered, mark_safe(badges))
+        return rendered
 
     def _get_interface_status_display(self, enabled, record):
         """

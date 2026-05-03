@@ -1,0 +1,61 @@
+{# Bulk-import collision warning: shown when two or more selected LibreNMS rows resolve to the same NetBox device. #}
+<div class="modal-header">
+  <h5 class="modal-title text-danger">
+    <i class="mdi mdi-alert-octagon"></i> Bulk import blocked: NetBox device collisions
+  </h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<div class="modal-body">
+  <div class="alert alert-danger mb-3">
+    <div>
+      <i class="mdi mdi-alert-octagon me-1"></i>
+      Two or more selected LibreNMS devices would update the
+      <strong>same NetBox device</strong>. Importing them as a batch could
+      leave NetBox in an inconsistent state, so the whole import has been
+      blocked. Resolve each colliding NetBox device individually first
+      (use the per-row import action on the table), or deselect the
+      duplicates and try again.
+    </div>
+  </div>
+
+  {% for group in collisions %}
+    <div class="border border-danger rounded-3 p-3 mb-3">
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+        <span class="badge bg-danger">Collision</span>
+        <span class="text-muted small">NetBox device:</span>
+        <a href="{% url 'dcim:device' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
+          {{ group.nb_device_name }}
+        </a>
+        <span class="text-muted small">(pk {{ group.nb_device_pk }})</span>
+      </div>
+      <div class="text-muted small mb-1">Selected LibreNMS rows targeting this device:</div>
+      <ul class="list-unstyled mb-0 ps-2 small">
+        {% for row in group.librenms_rows %}
+          <li class="mb-1">
+            <i class="mdi mdi-circle-small"></i>
+            <strong>{{ row.hostname }}</strong>
+            <span class="text-muted">(LibreNMS id {{ row.device_id }})</span>
+            <span class="badge bg-secondary-lt ms-1">{{ row.role }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endfor %}
+
+  <div class="alert alert-info mb-0 small">
+    <div>
+      <i class="mdi mdi-lightbulb-outline me-1"></i>
+      <strong>How to fix:</strong> close this dialog, untick all but one
+      of the LibreNMS rows in each colliding group, and click
+      <em>Bulk Import</em> again. After the first row is imported, the
+      conflict for the second one usually resolves into an
+      <em>Add as OOB</em> or <em>Promote to host</em> action that you
+      can run from the per-row import button.
+    </div>
+  </div>
+</div>
+<div class="modal-footer">
+  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+    <i class="mdi mdi-close"></i> Close
+  </button>
+</div>

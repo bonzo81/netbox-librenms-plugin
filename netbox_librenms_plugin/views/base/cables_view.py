@@ -13,6 +13,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_oob,
     get_librenms_sync_device,
     get_virtual_chassis_member,
 )
@@ -109,8 +110,47 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                     "remote_device": link.get("remote_hostname"),
                     "remote_port_id": link.get("remote_port_id"),
                     "remote_device_id": link.get("remote_device_id"),
+                    "_source": "main",
                 }
             )
+
+        # If an OOB controller is linked, fetch its LLDP links and merge.
+        lookup_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key) or obj
+        oob = get_librenms_oob(lookup_device, server_key=self.librenms_api.server_key)
+        if oob and oob.get("id"):
+            oob_success, oob_data = self.librenms_api.get_device_links(oob["id"])
+            if oob_success and "error" not in oob_data:
+                # Build a port-id → name map for the OOB device using the same
+                # interface_name_field as the main device so names are consistent.
+                oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob["id"])
+                oob_local_ports_map = {}
+                if oob_ports_success:
+                    for port in (oob_ports_data or {}).get("ports", []):
+                        raw_port_id = port.get("port_id")
+                        if raw_port_id is None:
+                            continue
+                        port_name = port.get(interface_name_field)
+                        if port_name is None:
+                            continue
+                        oob_local_ports_map[str(raw_port_id)] = port_name
+
+                for link in oob_data.get("links", []):
+                    oob_port_id = link.get("local_port_id")
+                    oob_local_port = oob_local_ports_map.get(str(oob_port_id)) if oob_port_id else None
+                    if oob_local_port is None:
+                        oob_local_port = link.get("local_port")
+                    links_data.append(
+                        {
+                            "local_port": oob_local_port,
+                            "local_port_id": oob_port_id,
+                            "remote_port": link.get("remote_port"),
+                            "remote_device": link.get("remote_hostname"),
+                            "remote_port_id": link.get("remote_port_id"),
+                            "remote_device_id": link.get("remote_device_id"),
+                            "_source": "oob",
+                        }
+                    )
+
         return links_data
 
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None):
@@ -340,6 +380,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 "remote_device",
                 "remote_port_id",
                 "remote_device_id",
+                "_source",
             }
             links_data = [{k: v for k, v in link.items() if k in _raw_keys} for link in links_data]
 
@@ -471,6 +512,7 @@ class SingleCableVerifyView(BaseCableTableView):
                         "remote_device",
                         "remote_port_id",
                         "remote_device_id",
+                        "_source",
                     }
                     link_data = {k: v for k, v in link_data.items() if k in _raw_keys}
 

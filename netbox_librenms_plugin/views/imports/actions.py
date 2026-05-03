@@ -2,6 +2,7 @@
 
 import json
 import logging
+from ipaddress import ip_address as _ipaddr_parse
 from urllib.parse import parse_qs, urlparse
 
 from django.contrib import messages
@@ -11,6 +12,7 @@ from django.db import IntegrityError, transaction
 
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
+from django.template.loader import render_to_string
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django.utils.text import slugify
@@ -20,9 +22,11 @@ from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
     bulk_import_vms,
+    detect_bulk_collisions,
     fetch_device_with_cache,
     get_import_device_cache_key,
     get_librenms_device_by_id,
+    get_or_create_global_ip,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
     validate_device_for_import,
@@ -43,6 +47,34 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
+
+
+def _attach_messages_oob(response, request):
+    """
+    Append a single OOB-swap toast container to an HTMX response.
+
+    NetBox's standard ``inc/messages.html`` renders a
+    ``<div id="django-messages" hx-swap-oob="true">`` with one Bootstrap toast
+    per pending Django message. Including this snippet inside per-row partials
+    causes problems on multi-row OOB responses because each render emits a
+    matching ``id="django-messages"`` div and the LAST swap (typically empty
+    once messages have been consumed by an earlier render) wipes the toasts.
+
+    Centralising the include here guarantees a single render per HTMX response
+    so toasts always make it to NetBox's afterSettle ``initMessages()`` hook.
+    """
+    if response is None or not hasattr(response, "content"):
+        return response
+    if not isinstance(response.content, (bytes, bytearray)):
+        return response
+    try:
+        rendered = render_to_string("inc/messages.html", request=request)
+    except Exception:  # pragma: no cover - defensive: don't break HTMX response on render error
+        logger.debug("Failed to render inc/messages.html for OOB toast attach", exc_info=True)
+        return response
+    response.content = response.content + rendered.encode("utf-8")
+    return response
+
 
 # Actions that require the force checkbox when a device-type mismatch is detected.
 _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_type"})
@@ -136,18 +168,51 @@ def _htmx_error_response(message: str) -> HttpResponse:
     return resp
 
 
-def _save_device(device) -> HttpResponse | None:
-    """Call full_clean() then save(). Return an HttpResponse on failure, None on success."""
+def _save_device(device, update_fields: list[str] | None = None, request=None) -> HttpResponse | None:
+    """Persist a Device row, returning an HttpResponse on failure or None on success.
+
+    When ``update_fields`` is provided, the call uses ``save(update_fields=...)``
+    which (a) issues a narrower UPDATE that only writes those columns and
+    (b) bypasses ``full_clean()``.  This is the correct mode when the
+    caller mutates only a known small set of fields and the device row
+    may carry pre-existing inconsistencies on *other* fields (e.g. a
+    legacy ``face`` value left behind after a rack was cleared).
+    Validating those untouched fields would block legitimate updates.
+
+    When ``update_fields`` is ``None`` (the default), the legacy behaviour
+    is preserved: ``full_clean()`` runs against the entire row before
+    ``save()`` writes every column.
+
+    When ``request`` is provided and the request is an HTMX request, errors
+    are returned via ``_htmx_error_response()`` so modal swap/toast flows
+    remain intact.  Otherwise plain ``HttpResponse`` status codes are returned.
+    """
+    from django.db import IntegrityError
+
+    def _err(msg: str, status: int) -> HttpResponse:
+        if request is not None and request.META.get("HTTP_HX_REQUEST"):
+            return _htmx_error_response(msg)
+        return HttpResponse(escape(msg), status=status)
+
+    if update_fields is None:
+        try:
+            device.full_clean()
+        except ValidationError as exc:
+            error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+            return _err(f"Validation error: {error_msg}", 400)
+        try:
+            device.save()
+        except IntegrityError as exc:
+            return _err(f"Integrity error: {exc}", 409)
+        return None
+
     try:
-        device.full_clean()
+        device.save(update_fields=update_fields)
+    except IntegrityError as exc:
+        return _err(f"Integrity error: {exc}", 409)
     except ValidationError as exc:
         error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-        return _htmx_error_response(f"Validation error: {error_msg}")
-    try:
-        device.save()
-    except IntegrityError:
-        logger.exception("Failed to save %s pk=%s", type(device).__name__, getattr(device, "pk", None))
-        return _htmx_error_response("Unable to save changes. Please try again.")
+        return _err(f"Validation error: {error_msg}", 400)
     return None
 
 
@@ -289,10 +354,13 @@ class DeviceImportHelperMixin:
             "rack_id": selections["rack_id"],
         }
 
-        return render(
+        return _attach_messages_oob(
+            render(
+                request,
+                "netbox_librenms_plugin/htmx/device_import_row.html",
+                context,
+            ),
             request,
-            "netbox_librenms_plugin/htmx/device_import_row.html",
-            context,
         )
 
 
@@ -507,6 +575,19 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "server_key": self.librenms_api.server_key,
             "vc_detection_enabled": vc_detection_enabled,
         }
+
+        collisions = detect_bulk_collisions(devices)
+        if collisions:
+            # Render at 200 (not 4xx): this is an interstitial modal swapped
+            # into #htmx-modal-content, exactly like the confirm step. A non-2xx
+            # status makes HTMX skip the swap and route the body through
+            # htmx:responseError -> showErrorToast(), which would dump the
+            # collision template as raw text in a toast.
+            return render(
+                request,
+                "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+                {"collisions": collisions, "device_count": len(devices)},
+            )
 
         return render(
             request,
@@ -1200,9 +1281,11 @@ class DeviceConflictActionView(
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
                     existing_device.name = hostname
+                    fields = ["custom_field_data", "name"]
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
-                    if err := _save_device(existing_device):
+                        fields.append("device_type")
+                    if err := _save_device(existing_device, update_fields=fields, request=request):
                         return err
                     logger.info(f"Linked device '{existing_device.name}' to LibreNMS ID {librenms_id}")
 
@@ -1210,6 +1293,7 @@ class DeviceConflictActionView(
                     # Update hostname, serial, and link to LibreNMS
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     incoming_serial = libre_device.get("serial") or ""
+                    fields = ["custom_field_data", "name"]
                     if incoming_serial and incoming_serial != "-":
                         # Lock any conflicting device under the same transaction to reduce
                         # the serial-assignment race window (best-effort; a DB unique
@@ -1226,11 +1310,13 @@ class DeviceConflictActionView(
                                 f"'{conflict_device.name}' (ID: {conflict_device.pk})"
                             )
                         existing_device.serial = incoming_serial
+                        fields.append("serial")
                     existing_device.name = hostname
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
+                        fields.append("device_type")
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-                    if err := _save_device(existing_device):
+                    if err := _save_device(existing_device, update_fields=fields, request=request):
                         return err
                     logger.info(
                         f"Updated device '{existing_device.name}': serial={incoming_serial}, "
@@ -1240,6 +1326,7 @@ class DeviceConflictActionView(
                 elif action == "update_serial":
                     # Update only the serial and link to LibreNMS
                     incoming_serial = libre_device.get("serial") or ""
+                    fields = ["custom_field_data"]
                     if incoming_serial and incoming_serial != "-":
                         # Lock any conflicting device under the same transaction to reduce
                         # the serial-assignment race window (best-effort; a DB unique
@@ -1256,10 +1343,12 @@ class DeviceConflictActionView(
                                 f"'{conflict_device.name}' (ID: {conflict_device.pk})"
                             )
                         existing_device.serial = incoming_serial
+                        fields.append("serial")
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
+                        fields.append("device_type")
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-                    if err := _save_device(existing_device):
+                    if err := _save_device(existing_device, update_fields=fields, request=request):
                         return err
                     logger.info(
                         f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
@@ -1270,7 +1359,7 @@ class DeviceConflictActionView(
             # Sync device name from LibreNMS (e.g., IP → sysName)
             hostname = _get_hostname_for_action(request, validation, libre_device)
             existing_device.name = hostname
-            if err := _save_device(existing_device):
+            if err := _save_device(existing_device, update_fields=["name"], request=request):
                 return err
             logger.info(f"Synced name on device '{existing_device.name}' from LibreNMS")
 
@@ -1278,7 +1367,7 @@ class DeviceConflictActionView(
             # Update device type from LibreNMS (requires force for mismatch)
             if librenms_device_type:
                 existing_device.device_type = librenms_device_type
-                if err := _save_device(existing_device):
+                if err := _save_device(existing_device, update_fields=["device_type"], request=request):
                     return err
                 logger.info(f"Updated device type on '{existing_device.name}' to {librenms_device_type}")
             else:
@@ -1313,7 +1402,7 @@ class DeviceConflictActionView(
                             f"'{conflict_device.name}' (ID: {conflict_device.pk})"
                         )
                     locked_device.serial = incoming_serial
-                    if err := _save_device(locked_device):
+                    if err := _save_device(locked_device, update_fields=["serial"], request=request):
                         return err
                     logger.info(f"Synced serial on '{locked_device.name}' to {incoming_serial}")
             else:
@@ -1328,7 +1417,7 @@ class DeviceConflictActionView(
                 match_result = find_matching_platform(librenms_os)
                 if match_result["found"]:
                     existing_device.platform = match_result["platform"]
-                    if err := _save_device(existing_device):
+                    if err := _save_device(existing_device, update_fields=["platform"], request=request):
                         return err
                     logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
                 elif match_result.get("match_type") == "ambiguous":
@@ -1353,7 +1442,7 @@ class DeviceConflictActionView(
             hw_match = match_librenms_hardware_to_device_type(hardware)
             if hw_match and hw_match.get("matched"):
                 existing_device.device_type = hw_match["device_type"]
-                if err := _save_device(existing_device):
+                if err := _save_device(existing_device, update_fields=["device_type"], request=request):
                     return err
                 logger.info(f"Synced device type on '{existing_device.name}' to {hw_match['device_type']}")
             else:
@@ -1555,7 +1644,8 @@ class AddDeviceTypeMappingView(
         # Re-render the modal content as an OOB swap so it updates in place.
         # The inner views render via Django templates (auto-escaped), so the
         # decoded content is already safe HTML; wrap with format_html + mark_safe
-        # to compose the OOB envelope without introducing new escape boundaries.
+        # to compose the OOB envelope without introducing new escape boundaries
+        # (CodeQL trust-assertion pattern, see plugin docs).
         detail_view = DeviceValidationDetailsView()
         detail_view._librenms_api = self._librenms_api
         modal_html = detail_view.get(request, device_id).content.decode("utf-8")
@@ -1804,6 +1894,601 @@ class CreatePlatformFromImportView(
             row_html = mark_safe("")
 
         return HttpResponse(oob_modal + row_html, content_type="text/html")
+
+
+class AddAsOOBView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """HTMX view to link a LibreNMS OOB controller device to an existing NetBox Device."""
+
+    def post(self, request, device_id):
+        """Attach a LibreNMS OOB identity to the matched NetBox device."""
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Device
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        existing_device_id = request.POST.get("existing_device_id")
+        if not existing_device_id:
+            return _htmx_error_response("Missing existing_device_id")
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        try:
+            existing_device = Device.objects.get(pk=int(existing_device_id))
+        except (Device.DoesNotExist, ValueError):
+            return _htmx_error_response("Existing device not found")
+
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return _htmx_error_response("LibreNMS device not found")
+
+        oob_candidate = validation.get("oob_candidate") if validation else None
+        if not oob_candidate:
+            return _htmx_error_response("No OOB candidate found in validation data")
+        if oob_candidate["device"].pk != existing_device.pk:
+            return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
+
+        librenms_id = libre_device.get("device_id")
+        if isinstance(librenms_id, bool):
+            return _htmx_error_response("Invalid or missing LibreNMS device_id")
+        try:
+            librenms_id = int(librenms_id)
+        except (TypeError, ValueError):
+            return _htmx_error_response("Invalid or missing LibreNMS device_id")
+        if librenms_id <= 0:
+            return _htmx_error_response("Invalid LibreNMS device_id")
+
+        # Reject legacy bare-int librenms_id (same guard as DeviceConflictActionView).
+        stored_id = existing_device.custom_field_data.get("librenms_id")
+        _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
+        if not _is_legacy and isinstance(stored_id, str):
+            try:
+                int(stored_id)
+                _is_legacy = True
+            except (ValueError, TypeError):
+                pass
+        if _is_legacy:
+            return _htmx_error_response(
+                "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
+            )
+
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        oob_type = oob_candidate.get("type") or ""
+        oob_version = oob_candidate.get("version") or None
+        oob_ip_str = oob_candidate.get("ip") or None
+        server_key = self.librenms_api.server_key
+
+        with transaction.atomic():
+            try:
+                existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+            except Device.DoesNotExist:
+                return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+
+            from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_oob
+
+            current_oob = get_librenms_oob(existing_device, server_key=server_key)
+            if current_oob and coerce_librenms_id(current_oob.get("id")) != coerce_librenms_id(librenms_id):
+                return _htmx_error_response("OOB link was modified concurrently; refresh and retry.")
+
+            try:
+                set_librenms_oob(
+                    existing_device,
+                    librenms_id,
+                    server_key,
+                    oob_type=oob_type,
+                    version=oob_version,
+                    ip=oob_ip_str,
+                )
+            except ValueError as exc:
+                return _htmx_error_response(f"Invalid OOB data: {escape(str(exc))}")
+
+            update_fields = ["custom_field_data"]
+            # Assign device.oob_ip if not already set; auto-create the IPAM
+            # record if it doesn't exist yet so the user has something to
+            # later attach to an interface and re-home if needed.
+            if oob_ip_str and existing_device.oob_ip_id is None:
+                oob_ip, oob_ip_created = get_or_create_global_ip(
+                    oob_ip_str, auto_create=resolve_auto_create_ipam(request)
+                )
+                if oob_ip is not None:
+                    existing_device.oob_ip = oob_ip
+                    update_fields.append("oob_ip")
+                    if oob_ip_created:
+                        messages.info(
+                            request,
+                            f"Auto-created OOB IP {oob_ip_str} in IPAM (unassigned, global scope).",
+                        )
+
+            if err := _save_device(existing_device, update_fields=update_fields, request=request):
+                return err
+
+        logger.info(
+            "Linked OOB device (LibreNMS ID %d, type %s) to '%s' (server: %s)",
+            librenms_id,
+            oob_type,
+            existing_device.name,
+            server_key,
+        )
+
+        cache_key = get_import_device_cache_key(device_id, server_key)
+        cache.delete(cache_key)
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return _htmx_error_response("Device not found after action")
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        # Keep the validation modal open and refresh its contents in place so
+        # the user can confirm the new OOB attachment without losing context.
+        response["HX-Trigger"] = json.dumps({"validationRefresh": {"deviceId": device_id}})
+        return response
+
+
+class PromoteToHostView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """
+    Promote an incoming LibreNMS host device to be the *primary* link of an existing
+    NetBox device whose current LibreNMS link is the OOB controller.
+
+    The existing NetBox device's current ``librenms_id.{server_key}.id`` is moved into
+    the ``oob`` slot (preserving its bare-int → dict-form transition), and the incoming
+    LibreNMS device id becomes the new host id.  No new NetBox device is created — this
+    is a reassignment, not an import.
+    """
+
+    def post(self, request, device_id):
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Device
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        existing_device_id = request.POST.get("existing_device_id")
+        if not existing_device_id:
+            return _htmx_error_response("Missing existing_device_id")
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        try:
+            existing_device = Device.objects.get(pk=int(existing_device_id))
+        except (Device.DoesNotExist, ValueError):
+            return _htmx_error_response("Existing device not found")
+
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        # Optional per-field overrides from the pre-promote pick modal.
+        # All three default to "keep current"; only applied when the POST
+        # carries an explicit non-empty value.
+        override_name = (request.POST.get("override_name") or "").strip() or None
+        override_dt_id = (request.POST.get("override_device_type_id") or "").strip() or None
+        override_platform_id = (request.POST.get("override_platform_id") or "").strip() or None
+
+        override_device_type = None
+        if override_dt_id:
+            from dcim.models import DeviceType
+
+            try:
+                override_device_type = DeviceType.objects.get(pk=int(override_dt_id))
+            except (DeviceType.DoesNotExist, ValueError, TypeError):
+                return _htmx_error_response("Invalid override_device_type_id")
+
+        override_platform = None
+        if override_platform_id:
+            from dcim.models import Platform
+
+            try:
+                override_platform = Platform.objects.get(pk=int(override_platform_id))
+            except (Platform.DoesNotExist, ValueError, TypeError):
+                return _htmx_error_response("Invalid override_platform_id")
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return _htmx_error_response("LibreNMS device not found")
+
+        promote = validation.get("promote_to_host") if validation else None
+        if not promote:
+            return _htmx_error_response("Promotion is not applicable for this device")
+        validated_existing = validation.get("existing_device")
+        if validated_existing is None:
+            return _htmx_error_response("Missing validated conflict target for promotion")
+        if validated_existing.pk != existing_device.pk:
+            return _htmx_error_response("Device ID mismatch: existing_device_id does not match validation result")
+
+        new_host_id = libre_device.get("device_id")
+        if isinstance(new_host_id, bool):
+            return _htmx_error_response("Invalid or missing LibreNMS device_id")
+        try:
+            new_host_id = int(new_host_id)
+        except (TypeError, ValueError):
+            return _htmx_error_response("Invalid or missing LibreNMS device_id")
+        if new_host_id <= 0:
+            return _htmx_error_response("Invalid LibreNMS device_id")
+
+        existing_libre_id = promote.get("existing_libre_id")
+        try:
+            existing_libre_id = int(existing_libre_id)
+        except (TypeError, ValueError):
+            return _htmx_error_response("Invalid existing LibreNMS id in promotion data")
+        if existing_libre_id == new_host_id:
+            return _htmx_error_response("Existing link already points at this LibreNMS device")
+
+        oob_type = promote.get("existing_oob_type") or ""
+        if not oob_type:
+            return _htmx_error_response("Cannot determine OOB type for promotion")
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id, set_librenms_oob
+
+        server_key = self.librenms_api.server_key
+
+        # Pull stored OOB metadata (ip/version) from existing librenms link if possible,
+        # then ensure the incoming device's IP populates oob_ip on the existing device
+        # only if oob_ip isn't already set.
+        existing_oob_ip = None
+        oob_ip_str = None
+        cf_value = existing_device.custom_field_data.get("librenms_id")
+        if isinstance(cf_value, dict):
+            entry = cf_value.get(server_key)
+            if isinstance(entry, dict):
+                existing_oob_dict = entry.get("oob") if isinstance(entry.get("oob"), dict) else {}
+                existing_oob_ip = existing_oob_dict.get("ip") if isinstance(existing_oob_dict, dict) else None
+        # Prefer existing OOB ip if it was already known; otherwise use existing device's
+        # current oob_ip relationship; otherwise leave unset (do NOT inherit incoming
+        # device's IP — that IP belongs to the host, not the OOB controller).
+        if not existing_oob_ip and existing_device.oob_ip_id:
+            try:
+                from ipam.models import IPAddress  # noqa
+
+                existing_oob_ip = str(existing_device.oob_ip).split("/")[0] if existing_device.oob_ip else None
+            except Exception:  # pragma: no cover - defensive
+                existing_oob_ip = None
+        oob_ip_str = existing_oob_ip or None
+
+        # Reject legacy bare-int librenms_id form (caller should migrate first).
+        stored_id = existing_device.custom_field_data.get("librenms_id")
+        _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
+        if not _is_legacy and isinstance(stored_id, str):
+            try:
+                int(stored_id)
+                _is_legacy = True
+            except (ValueError, TypeError):
+                pass
+        if _is_legacy:
+            return _htmx_error_response(
+                "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
+            )
+
+        # Fetch OOB IP from LibreNMS outside the transaction so the row lock
+        # is not held during a potentially slow network round-trip.
+        _pre_fetched_oob_ip = None
+        if not oob_ip_str:
+            try:
+                ok, oob_info = self.librenms_api.get_device_info(existing_libre_id)
+            except Exception:  # pragma: no cover - defensive
+                ok, oob_info = False, None
+            if ok and isinstance(oob_info, dict):
+                _fetched = (oob_info.get("ip") or "").strip() or None
+                if _fetched:
+                    _pre_fetched_oob_ip = _fetched
+
+        with transaction.atomic():
+            try:
+                existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+            except Device.DoesNotExist:
+                return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+
+            from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_device_id, get_librenms_oob
+
+            current_host_id = get_librenms_device_id(existing_device, server_key=server_key, auto_save=False)
+            current_oob = get_librenms_oob(existing_device, server_key=server_key)
+            if coerce_librenms_id(current_host_id) != coerce_librenms_id(existing_libre_id):
+                return _htmx_error_response("LibreNMS host link changed concurrently; refresh and retry.")
+            if current_oob:
+                return _htmx_error_response(
+                    "OOB link already set; this device may have been promoted by a concurrent request."
+                )
+
+            try:
+                # First, swap the host id to the incoming LibreNMS device id.
+                # set_librenms_device_id preserves any existing OOB sub-object.
+                set_librenms_device_id(
+                    existing_device,
+                    new_host_id,
+                    server_key=server_key,
+                )
+                # Then attach the previously-linked LibreNMS id as the OOB controller.
+                set_librenms_oob(
+                    existing_device,
+                    existing_libre_id,
+                    server_key,
+                    oob_type=oob_type,
+                    ip=oob_ip_str,
+                )
+            except ValueError as exc:
+                return _htmx_error_response(f"Invalid promotion data: {escape(str(exc))}")
+
+            # After promotion, populate IP relationships on the existing device:
+            #   - primary_ip4 / primary_ip6 from the incoming LibreNMS host's IP
+            #     (the device that's now linked as the host)
+            #   - oob_ip from the previously-linked LibreNMS device's IP
+            #     (the device that's now demoted into the OOB slot)
+            # If the IP does not yet exist in NetBox we create a global /32 (or
+            # /128) entry so the device row looks complete after promotion;
+            # the user can re-home / mask it later via the IP-sync flow.
+            # Both writes are best-effort and never overwrite an already-set
+            # primary_ip4 / primary_ip6 / oob_ip relationship.
+            update_fields = ["custom_field_data"]
+
+            host_ip_str = (libre_device.get("ip") or "").strip() or None
+            if host_ip_str:
+                _auto_create = resolve_auto_create_ipam(request)
+                host_ip, host_ip_created = get_or_create_global_ip(host_ip_str, auto_create=_auto_create)
+                if host_ip is not None:
+                    try:
+                        is_v6 = _ipaddr_parse(host_ip_str).version == 6
+                    except ValueError:
+                        is_v6 = False
+                    # Only set as primary if the IP is unassigned OR already
+                    # assigned to an interface that belongs to this device.
+                    # Setting a primary IP whose assigned_object belongs to a
+                    # different device would create an inconsistent state.
+                    ao = host_ip.assigned_object
+                    ip_owned_by_device = ao is None or (hasattr(ao, "device_id") and ao.device_id == existing_device.pk)
+                    assigned = False
+                    if ip_owned_by_device:
+                        if is_v6 and existing_device.primary_ip6_id is None:
+                            existing_device.primary_ip6 = host_ip
+                            update_fields.append("primary_ip6")
+                            assigned = True
+                        elif not is_v6 and existing_device.primary_ip4_id is None:
+                            existing_device.primary_ip4 = host_ip
+                            update_fields.append("primary_ip4")
+                            assigned = True
+                    else:
+                        logger.warning(
+                            "Skipping primary IP assignment for %s: IP %s is already assigned "
+                            "to a different object (%r); user must assign it manually.",
+                            existing_device,
+                            host_ip_str,
+                            ao,
+                        )
+                    if host_ip_created and assigned:
+                        messages.info(
+                            request,
+                            f"Auto-created primary IP {host_ip_str} in IPAM (unassigned, global scope).",
+                        )
+
+            # Apply pre-fetched OOB IP if we got one and the row is still eligible.
+            if _pre_fetched_oob_ip and not oob_ip_str and existing_device.oob_ip_id is None:
+                oob_ip_str = _pre_fetched_oob_ip
+                # Cache the fetched IP in the OOB sub-object (CFD) while we hold the lock.
+                try:
+                    set_librenms_oob(
+                        existing_device,
+                        existing_libre_id,
+                        server_key,
+                        oob_type=oob_type,
+                        ip=oob_ip_str,
+                    )
+                except ValueError:  # pragma: no cover - defensive
+                    pass
+
+            if oob_ip_str and existing_device.oob_ip_id is None:
+                oob_ip, oob_ip_created = get_or_create_global_ip(
+                    oob_ip_str, auto_create=resolve_auto_create_ipam(request)
+                )
+                if oob_ip is not None:
+                    existing_device.oob_ip = oob_ip
+                    update_fields.append("oob_ip")
+                    if oob_ip_created:
+                        messages.info(
+                            request,
+                            f"Auto-created OOB IP {oob_ip_str} in IPAM (unassigned, global scope).",
+                        )
+
+            # Apply any explicit per-field overrides chosen in the pre-promote modal.
+            # Default behaviour (no overrides) keeps the existing device's name, type
+            # and platform — matching the original promote semantics.
+            if override_name and override_name != existing_device.name:
+                existing_device.name = override_name
+                update_fields.append("name")
+            if override_device_type and existing_device.device_type_id != override_device_type.pk:
+                existing_device.device_type = override_device_type
+                update_fields.append("device_type")
+            if override_platform and existing_device.platform_id != override_platform.pk:
+                existing_device.platform = override_platform
+                update_fields.append("platform")
+
+            if err := _save_device(existing_device, update_fields=update_fields, request=request):
+                return err
+
+        logger.info(
+            "Promoted LibreNMS host (id %d) to '%s' on server %s; demoted previous link (id %d, type %s) to OOB slot",
+            new_host_id,
+            existing_device.name,
+            server_key,
+            existing_libre_id,
+            oob_type,
+        )
+
+        cache_key = get_import_device_cache_key(device_id, server_key)
+        cache.delete(cache_key)
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return _htmx_error_response("Device not found after action")
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        # Keep the underlying validation modal open and re-fetch its content so
+        # the user can see the device's new link state (host id + OOB slot)
+        # without losing context. The JS handler in librenms_import.js fires a
+        # fresh GET to the validation URL using the row's existing details
+        # button.
+        response["HX-Trigger"] = json.dumps({"validationRefresh": {"deviceId": device_id}})
+        return response
+
+
+class MergeNetBoxDevicesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """
+    Merge two existing NetBox devices that represent the same physical box.
+
+    The user (via radio buttons in the validation modal) picks which device is
+    the **winner** (kept) and which is the **donor** (absorbed). The donor's
+    LibreNMS link state under the active ``server_key`` is merged into the
+    winner; the donor's active link is then cleared and a ``_migrated_to``
+    marker is written.  Interfaces, cables and primary IPs are NOT moved —
+    those stay on the donor for the user to re-home incrementally via the
+    Stage-2b "Migrated to X" tab.
+    """
+
+    def post(self, request, device_id):
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Device
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.utils import (
+            mark_librenms_migrated,
+            merge_librenms_links,
+        )
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        winner_pk_raw = request.POST.get("winner_pk")
+        donor_pk_raw = request.POST.get("donor_pk")
+        if not winner_pk_raw or not donor_pk_raw:
+            return _htmx_error_response("Missing winner_pk or donor_pk")
+        try:
+            winner_pk = int(winner_pk_raw)
+            donor_pk = int(donor_pk_raw)
+        except (TypeError, ValueError):
+            return _htmx_error_response("Invalid winner_pk or donor_pk")
+        if winner_pk == donor_pk:
+            return _htmx_error_response("Winner and donor must be different devices")
+
+        try:
+            winner = Device.objects.get(pk=winner_pk)
+            donor = Device.objects.get(pk=donor_pk)
+        except Device.DoesNotExist:
+            return _htmx_error_response("Winner or donor device not found")
+
+        # Permission gate: user must be able to change BOTH devices.
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return _htmx_error_response("LibreNMS device not found")
+
+        merge_candidates = (validation or {}).get("merge_candidates") or {}
+        candidate_pks = {
+            (merge_candidates.get("host_named") or {}).get("pk"),
+            (merge_candidates.get("oob_named") or {}).get("pk"),
+        }
+        candidate_pks.discard(None)
+        if {winner_pk, donor_pk} != candidate_pks:
+            return _htmx_error_response("winner_pk/donor_pk do not match the validation result's merge candidates")
+
+        # Reject legacy bare-int librenms_id form on either side. The merge
+        # helpers refuse to operate on legacy data to prevent silent migration.
+        for label, obj in (("winner", winner), ("donor", donor)):
+            stored = obj.custom_field_data.get("librenms_id")
+            is_legacy = isinstance(stored, int) and not isinstance(stored, bool)
+            if not is_legacy and isinstance(stored, str):
+                try:
+                    int(stored)
+                    is_legacy = True
+                except (ValueError, TypeError):
+                    pass
+            if is_legacy:
+                return _htmx_error_response(
+                    f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
+                    "use 'Convert mapping' to migrate before merging."
+                )
+
+        server_key = self.librenms_api.server_key
+
+        with transaction.atomic():
+            # Lock both rows in deterministic pk order to avoid deadlocks.
+            locked = list(Device.objects.select_for_update().filter(pk__in=[winner_pk, donor_pk]).order_by("pk"))
+            if len(locked) != 2:
+                return _htmx_error_response(
+                    "One of the devices no longer exists; it may have been deleted concurrently."
+                )
+            locked_by_pk = {d.pk: d for d in locked}
+            winner = locked_by_pk[winner_pk]
+            donor = locked_by_pk[donor_pk]
+
+            try:
+                summary = merge_librenms_links(winner, donor, server_key=server_key)
+            except ValueError as exc:
+                return _htmx_error_response(f"Cannot merge: {escape(str(exc))}")
+
+            # Transfer OOB IP relationship if winner has none and donor has one.
+            oob_ip_transferred = False
+            if donor.oob_ip_id and not winner.oob_ip_id:
+                winner.oob_ip = donor.oob_ip
+                donor.oob_ip = None
+                oob_ip_transferred = True
+
+            # Clear donor's active link and stamp migration marker.
+            mark_librenms_migrated(donor, winner.pk, server_key=server_key)
+
+            # Persist only the fields we actually touched.  Calling
+            # ``full_clean()`` here (or relying on it via ``_save_device``)
+            # would re-validate every field on the device — which is
+            # undesirable when the rows hold pre-existing inconsistencies
+            # (e.g. ``face`` set without ``rack``) that are unrelated to
+            # this merge.  See issue surfaced during eve-ng-02 merge.
+            update_fields = ["custom_field_data"]
+            if oob_ip_transferred:
+                update_fields.append("oob_ip")
+            try:
+                winner.save(update_fields=update_fields)
+                donor.save(update_fields=update_fields)
+            except Exception as exc:  # pragma: no cover - defensive
+                transaction.set_rollback(True)
+                return _htmx_error_response(f"Save failed: {escape(str(exc))}")
+
+        logger.info(
+            "Merged NetBox device '%s' (pk=%d) into '%s' (pk=%d) on server %s. Summary: %s; oob_ip_transferred=%s",
+            donor.name,
+            donor.pk,
+            winner.name,
+            winner.pk,
+            server_key,
+            summary,
+            oob_ip_transferred,
+        )
+
+        cache_key = get_import_device_cache_key(device_id, server_key)
+        cache.delete(cache_key)
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return _htmx_error_response("Device not found after merge")
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        response["HX-Trigger"] = "closeModal"
+        return response
 
 
 class SaveUserPrefView(LibreNMSPermissionMixin, View):

@@ -56,8 +56,8 @@ class TestSaveDevice:
         device.full_clean.side_effect = ValidationError({"name": ["This field is required."]})
 
         response = _save_device(device)
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
+        assert response.status_code == 400
+        assert b"Validation error" in response.content
 
     def test_integrity_error_returns_409(self):
         from django.db import IntegrityError
@@ -69,8 +69,8 @@ class TestSaveDevice:
         device.save.side_effect = IntegrityError("duplicate key")
 
         response = _save_device(device)
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
+        assert response.status_code == 409
+        assert b"Integrity error" in response.content
 
     def test_success_returns_none(self):
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -446,6 +446,55 @@ class TestDeviceImportHelperMixin:
 
         mock_render.assert_called_once()
         assert "device_import_row.html" in mock_render.call_args[0][1]
+
+
+class TestAttachMessagesOob:
+    """Tests for the _attach_messages_oob helper."""
+
+    def test_returns_none_when_response_is_none(self):
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        assert _attach_messages_oob(None, MagicMock()) is None
+
+    def test_skips_response_without_bytes_content(self):
+        """When .content is a MagicMock or similar non-bytes value, skip cleanly."""
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        response = MagicMock()
+        response.content = MagicMock()  # not bytes / bytearray
+        result = _attach_messages_oob(response, MagicMock())
+        assert result is response  # returned unchanged
+
+    def test_appends_rendered_messages_to_bytes_content(self):
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        response = HttpResponse(b"<tr>row html</tr>")
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.render_to_string",
+            return_value='<div id="django-messages" hx-swap-oob="true"></div>',
+        ) as mock_render:
+            result = _attach_messages_oob(response, MagicMock())
+
+        mock_render.assert_called_once()
+        assert b'<div id="django-messages"' in result.content
+        assert result.content.startswith(b"<tr>row html</tr>")
+
+    def test_swallows_render_errors(self):
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        response = HttpResponse(b"<tr>row html</tr>")
+        original = response.content
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.render_to_string",
+            side_effect=RuntimeError("db not available"),
+        ):
+            result = _attach_messages_oob(response, MagicMock())
+
+        assert result.content == original
 
 
 class TestDeviceValidationDetailsView:
@@ -2392,7 +2441,7 @@ class TestSaveDevicePath:
     """Test _save_device IntegrityError and ValidationError paths (line 168)."""
 
     def test_save_device_validation_error(self):
-        """Lines 50-52: ValidationError during save."""
+        """ValidationError during full_clean → 400 response."""
         from netbox_librenms_plugin.views.imports.actions import _save_device
         from django.core.exceptions import ValidationError as DjangoValidationError
 
@@ -2401,11 +2450,11 @@ class TestSaveDevicePath:
 
         result = _save_device(mock_device)
         assert result is not None
-        assert result.status_code == 200
-        assert result.headers.get("HX-Reswap") == "none"
+        assert result.status_code == 400
+        assert b"Validation error" in result.content
 
     def test_save_device_integrity_error(self):
-        """Lines 54-56: IntegrityError during save."""
+        """IntegrityError during save → 409 response."""
         from netbox_librenms_plugin.views.imports.actions import _save_device
         from django.db import IntegrityError
 
@@ -2415,8 +2464,8 @@ class TestSaveDevicePath:
 
         result = _save_device(mock_device)
         assert result is not None
-        assert result.status_code == 200
-        assert result.headers.get("HX-Reswap") == "none"
+        assert result.status_code == 409
+        assert b"Integrity error" in result.content
 
     def test_should_enable_vc_detection_when_cached(self):
         """Line 168: VC data already cached → returns True."""
@@ -4080,3 +4129,340 @@ class TestBulkImportEdgePaths:
                                     view.post(request)
 
         mock_redirect.assert_called()
+
+
+class TestBulkImportConfirmCollisions:
+    """Tests for Stage 3 collision-blocking behaviour."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
+
+        view = object.__new__(BulkImportConfirmView)
+        view._librenms_api = _make_api()
+        return view
+
+    def _run_with_two_devices(self, validation_a, validation_b):
+        """Drive BulkImportConfirmView.post with two LibreNMS rows whose
+        validations are stubbed to whatever the test wants. Returns the
+        actual response object returned by view.post()."""
+        view = self._make_view()
+        request = _make_request(post={"select": ["1", "2"]})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.GET = MagicMock()
+        request.GET.get = MagicMock(return_value=None)
+
+        libre_devices = {
+            1: {"device_id": 1, "hostname": "alpha"},
+            2: {"device_id": 2, "hostname": "beta"},
+        }
+        validations = {1: validation_a, 2: validation_b}
+
+        def fake_validate(libre_device, **_kwargs):
+            return validations[libre_device["device_id"]]
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre_devices.get(did),
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
+                    return_value={"cluster_id": None, "role_id": None, "rack_id": None},
+                ):
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                        side_effect=fake_validate,
+                    ):
+                        with patch(
+                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
+                            return_value=(True, False),
+                        ):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.actions.render",
+                            ) as mock_render:
+                                mock_render.side_effect = lambda req, tpl, ctx, status=200: MagicMock(
+                                    status_code=status,
+                                    template_name=tpl,
+                                    context=ctx,
+                                )
+                                response = view.post(request)
+        return response
+
+    def test_collision_path_renders_collision_template(self):
+        from types import SimpleNamespace
+
+        nb_device = SimpleNamespace(pk=42, name="srv-collide")
+        validation_a = {
+            "status": "importable",
+            "resolved_name": "alpha",
+            "virtual_chassis": {},
+            "existing_device": nb_device,
+        }
+        validation_b = {
+            "status": "importable",
+            "resolved_name": "beta",
+            "virtual_chassis": {},
+            "oob_candidate": {"device": nb_device, "type": "idrac"},
+        }
+        response = self._run_with_two_devices(validation_a, validation_b)
+        # Collision modal is an interstitial swapped into #htmx-modal-content,
+        # so it must render at 200 -- a non-2xx status makes HTMX skip the swap.
+        assert response is not None, "view.post returned None instead of a rendered response"
+        assert "bulk_import_collision.html" in response.template_name
+        assert response.status_code == 200
+        assert len(response.context["collisions"]) == 1
+        assert response.context["collisions"][0]["nb_device_pk"] == 42
+
+    def test_clean_batch_renders_normal_confirm_template(self):
+        from types import SimpleNamespace
+
+        validation_a = {
+            "status": "importable",
+            "resolved_name": "alpha",
+            "virtual_chassis": {},
+            "existing_device": SimpleNamespace(pk=1, name="nb-a"),
+        }
+        validation_b = {
+            "status": "importable",
+            "resolved_name": "beta",
+            "virtual_chassis": {},
+            "existing_device": SimpleNamespace(pk=2, name="nb-b"),
+        }
+        response = self._run_with_two_devices(validation_a, validation_b)
+        assert response is not None, "view.post returned None instead of a rendered response"
+        assert "bulk_import_confirm.html" in response.template_name
+        # Default render() status is 200.
+        assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# AddAsOOBView / PromoteToHostView — generic "oob" sentinel regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestAddAsOOBViewGenericSentinel:
+    """AddAsOOBView must not return HTTP 400 when oob_candidate.type == "oob".
+
+    Regression for the bug where the detection layer produced type="oob" as a
+    sentinel (hostname mismatch, no OOB keywords in names) but set_librenms_oob
+    rejected "oob" with ValueError, causing every non-keyword device to fail.
+
+    Per testing conventions the submit-path behavior is tested at the utility
+    layer (set_librenms_oob) rather than by driving the full view.
+    """
+
+    def test_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
+        """set_librenms_oob must not raise ValueError for oob_type='oob'.
+
+        This is the direct root cause: AddAsOOBView calls
+        set_librenms_oob(..., oob_type=oob_candidate["type"]) where the
+        candidate type may be the detection-layer sentinel "oob".
+        """
+        from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+        obj.cf = obj.custom_field_data
+
+        # Previously this raised ValueError("does not match any known OOB type")
+        # → AddAsOOBView returned HTTP 400 "Invalid OOB data: ..."
+        set_librenms_oob(obj, 55, "default", oob_type="oob")
+        result = get_librenms_oob(obj, "default")
+        assert result is not None
+        assert result["type"] == "oob"
+
+    def test_sentinel_from_detection_layer_flows_to_storage(self):
+        """The three-layer fallback in device_operations produces oob_type='oob'
+        when neither the LibreNMS OS field nor either device name contains an OOB
+        keyword. That value must store without error.
+        """
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        # Simulate: oob_type_from_libre=None, _detect_oob_type_from_name(...)=None
+        # → inferred_oob_type = "oob"  (device_operations.py line ~563)
+        oob_type_from_libre = None
+        detected_from_hostname = None
+        inferred_oob_type = oob_type_from_libre or detected_from_hostname or "oob"
+        assert inferred_oob_type == "oob"
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
+
+        # Must not raise
+        set_librenms_oob(obj, 42, "default", oob_type=inferred_oob_type)
+        assert obj.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 42
+
+
+class TestPromoteToHostViewGenericSentinel:
+    """PromoteToHostView must not return HTTP 400 when existing_oob_type == "oob".
+
+    Regression for the same sentinel bug: when the existing device's name has no
+    OOB keyword, promote_to_host["existing_oob_type"] = "oob" (device_operations.py
+    line ~574), which was rejected by set_librenms_oob.
+    """
+
+    def test_promote_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
+        """Promote path: set_librenms_oob with oob_type='oob' must not raise."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+
+        # Simulate: existing_oob_from_name = None
+        # → promote["existing_oob_type"] = None or "oob" = "oob"
+        existing_oob_type = None or "oob"
+        assert existing_oob_type == "oob"
+
+        # Previously: ValueError("oob_type 'oob' does not match any known OOB type")
+        # → PromoteToHostView returned HTTP 400 "Invalid promotion data: ..."
+        set_librenms_oob(obj, 7, "default", oob_type=existing_oob_type)
+        assert obj.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "oob"
+
+
+class TestAddAsOOBViewPost:
+    """View-level tests for AddAsOOBView.post() — HTTP interface + OOB sentinel regression."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        view = object.__new__(AddAsOOBView)
+        view.kwargs = {}
+        view._librenms_api = _make_api()
+
+        # Default: write permission granted
+        view.require_write_permission = MagicMock(return_value=None)
+        # Default: object permissions granted
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def test_missing_existing_device_id_returns_htmx_error(self):
+        """POST without existing_device_id returns HTMX error."""
+        view = self._make_view()
+        request = _make_request(post={})
+
+        response = view.post(request, device_id=1)
+
+        assert response.status_code == 200
+        assert b"Missing existing_device_id" in response.content
+
+    def test_write_permission_denied_returns_error(self):
+        """When write permission is denied, view returns that error immediately."""
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        perm_error = HttpResponse("Forbidden", status=403)
+        view.require_write_permission = MagicMock(return_value=perm_error)
+
+        request = _make_request(post={"existing_device_id": "1"})
+        response = view.post(request, device_id=1)
+
+        assert response.status_code == 403
+
+    def test_invalid_existing_device_id_returns_htmx_error(self):
+        """POST with a non-integer existing_device_id returns HTMX error."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "not-a-number"})
+
+        with patch("dcim.models.Device") as mock_device:
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.side_effect = ValueError("invalid literal")
+            response = view.post(request, device_id=1)
+
+        assert response.status_code == 200
+        assert b"Existing device not found" in response.content
+
+    def test_device_does_not_exist_returns_htmx_error(self):
+        """POST with an existing_device_id that refers to a deleted device returns HTMX error."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "999"})
+
+        with patch("dcim.models.Device") as mock_device:
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.side_effect = Exception("not found")
+            response = view.post(request, device_id=1)
+
+        assert response.status_code == 200
+        assert b"Existing device not found" in response.content
+
+    def test_no_oob_candidate_in_validation_returns_htmx_error(self):
+        """When validation has no oob_candidate, view returns an HTMX error."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+
+        with patch("dcim.models.Device") as mock_device:
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            view.get_validated_device_with_selections = MagicMock(
+                return_value=({"device_id": 99}, {"oob_candidate": None}, {})
+            )
+            response = view.post(request, device_id=99)
+
+        assert response.status_code == 200
+        assert b"No OOB candidate" in response.content
+
+    def test_device_id_mismatch_returns_htmx_error(self):
+        """When oob_candidate device pk does not match existing_device_id, returns HTMX error."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+        existing_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+
+        oob_device = MagicMock()
+        oob_device.pk = 99  # Different PK
+
+        with patch("dcim.models.Device") as mock_device:
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            view.get_validated_device_with_selections = MagicMock(
+                return_value=({"device_id": 50}, {"oob_candidate": {"device": oob_device, "type": "oob"}}, {})
+            )
+            response = view.post(request, device_id=50)
+
+        assert response.status_code == 200
+        assert b"mismatch" in response.content.lower() or b"Device ID mismatch" in response.content
+
+    def test_legacy_librenms_id_returns_htmx_error(self):
+        """Device with legacy bare-int librenms_id is rejected with convert-first message."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+        # Legacy bare-int librenms_id (not the expected dict structure)
+        existing_device.custom_field_data = {"librenms_id": 42}
+
+        oob_candidate_device = MagicMock()
+        oob_candidate_device.pk = 5
+
+        with patch("dcim.models.Device") as mock_device:
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            view.get_validated_device_with_selections = MagicMock(
+                return_value=({"device_id": 77}, {"oob_candidate": {"device": oob_candidate_device, "type": "oob"}}, {})
+            )
+            response = view.post(request, device_id=77)
+
+        assert response.status_code == 200
+        assert b"legacy" in response.content.lower()
+
+    def test_libre_device_not_found_returns_htmx_error(self):
+        """When get_validated_device_with_selections returns no libre_device, returns HTMX error."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+
+        with patch("dcim.models.Device") as mock_device:
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            view.get_validated_device_with_selections = MagicMock(return_value=(None, None, None))
+            response = view.post(request, device_id=1)
+
+        assert response.status_code == 200
+        assert b"not found" in response.content.lower()

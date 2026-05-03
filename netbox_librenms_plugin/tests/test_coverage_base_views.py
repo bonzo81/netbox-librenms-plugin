@@ -138,6 +138,107 @@ class TestBaseCableTableViewGetLinksData:
 
         assert result is not None
 
+    def test_get_links_data_oob_uses_interface_name_field(self):
+        """OOB links resolve local port name via interface_name_field, not raw LLDP name."""
+
+        view = self._make_view()
+
+        # Main device: one direct link
+        main_links = {
+            "links": [
+                {
+                    "local_port_id": 10,
+                    "remote_hostname": "peer-a",
+                    "remote_port": "Gi0/1",
+                    "remote_port_id": 20,
+                    "remote_device_id": 5,
+                }
+            ]
+        }
+        # OOB device: one link whose raw local_port is the ifName, not the stored ifDescr
+        oob_links = {
+            "links": [
+                {
+                    "local_port_id": 99,
+                    "local_port": "eth0",
+                    "remote_hostname": "peer-b",
+                    "remote_port": "Gi0/2",
+                    "remote_port_id": 21,
+                    "remote_device_id": 6,
+                }
+            ]
+        }
+
+        view._librenms_api.get_device_links.side_effect = [
+            (True, main_links),
+            (True, oob_links),
+        ]
+        # OOB device ports: port_id=99 maps to ifDescr "Management0" (different from raw ifName "eth0")
+        view._librenms_api.get_ports.return_value = (
+            True,
+            {"ports": [{"port_id": 99, "ifDescr": "Management0", "ifName": "eth0"}]},
+        )
+
+        main_ports = {"ports": [{"port_id": 10, "ifDescr": "GigabitEthernet0/0"}]}
+        obj = _mock_obj()
+
+        oob_mock = {"id": 7}
+
+        with (
+            patch.object(view, "get_ports_data", return_value=main_ports),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifDescr"),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=oob_mock),
+        ):
+            result = view.get_links_data(obj)
+
+        assert result is not None
+        assert len(result) == 2
+        oob_entry = next(r for r in result if r["_source"] == "oob")
+        # Should use ifDescr "Management0", not raw LLDP value "eth0"
+        assert oob_entry["local_port"] == "Management0"
+        assert oob_entry["remote_device"] == "peer-b"
+
+    def test_get_links_data_oob_falls_back_to_raw_name_on_port_fetch_failure(self):
+        """When OOB port fetch fails, falls back to raw local_port from LLDP data."""
+        view = self._make_view()
+
+        main_links = {"links": []}
+        oob_links = {
+            "links": [
+                {
+                    "local_port_id": 99,
+                    "local_port": "eth0",
+                    "remote_hostname": "peer-b",
+                    "remote_port": "Gi0/2",
+                    "remote_port_id": 21,
+                    "remote_device_id": 6,
+                }
+            ]
+        }
+
+        view._librenms_api.get_device_links.side_effect = [
+            (True, main_links),
+            (True, oob_links),
+        ]
+        view._librenms_api.get_ports.return_value = (False, {})
+
+        main_ports = {"ports": []}
+        obj = _mock_obj()
+        oob_mock = {"id": 7}
+
+        with (
+            patch.object(view, "get_ports_data", return_value=main_ports),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifDescr"),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=oob_mock),
+        ):
+            result = view.get_links_data(obj)
+
+        assert result is not None
+        oob_entry = result[0]
+        assert oob_entry["local_port"] == "eth0"  # Raw fallback
+
 
 class TestBaseCableTableViewGetDeviceByIdOrName:
     """Tests for BaseCableTableView.get_device_by_id_or_name."""

@@ -6,7 +6,7 @@
     {% if validation.existing_device %}
       {% if validation.device_type_mismatch %}
         <i class="mdi mdi-alert-circle text-danger"></i>
-      {% elif validation.existing_match_type == 'librenms_id' %}
+      {% elif validation.existing_match_type == 'librenms_id' or validation.existing_match_type == 'librenms_oob' %}
         <i class="mdi mdi-check-decagram text-info"></i>
       {% else %}
         <i class="mdi mdi-alert text-warning"></i>
@@ -116,7 +116,7 @@
                       <form style="display:inline" class="ms-2"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                             hx-swap="none"
-                            hx-include="#use-sysname-toggle, #strip-domain-toggle">
+                            hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
                         {% csrf_token %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
@@ -165,7 +165,7 @@
                     <form style="display:inline" class="ms-1"
                           hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                           hx-swap="none"
-                          hx-include="#use-sysname-toggle, #strip-domain-toggle">
+                          hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
                       {% csrf_token %}
                       <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                       <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
@@ -342,8 +342,8 @@
                     {% endif %}
                     {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% endif %}
-                  </td>
-                  <td>{{ libre_device.os|default:"—" }}</td>
+                </td>
+                <td>{{ libre_device.os|default:"—" }}</td>
               </tr>
 
               {% if validation.import_as_vm and not validation.existing_device or validation.existing_device and existing_device_model_name == "virtualmachine" %}
@@ -403,7 +403,84 @@
 
   {# Status & Actions #}
   {% if validation.existing_device %}
-    {% if validation.existing_match_type == 'librenms_id' %}
+    {% if validation.serial_action == 'merge_netbox_devices' %}
+      {# Stage 2: two NetBox devices appear to represent the same physical box. #}
+      <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-warning me-1"><i class="mdi mdi-merge"></i> Two NetBox devices</span>
+        <span class="text-muted ms-1">
+          — A hostname match and a chassis-serial match resolved to two different NetBox
+          devices. Pick which one to keep; the other will be marked as merged.
+        </span>
+      </div>
+      <div class="alert alert-info py-2 mb-3 small">
+        <div class="mb-1">
+          <i class="mdi mdi-information-outline"></i>
+          <strong>Pick the device to keep (winner).</strong>
+          The other one becomes the <em>donor</em> and is absorbed.
+        </div>
+        <ul class="mb-1 ps-3">
+          <li><strong>Moved to winner:</strong> LibreNMS link (host id, OOB id, OOB type) and OOB IP <span class="text-muted">(only if the winner has no OOB IP yet)</span>.</li>
+          <li><strong>Stays on donor:</strong> interfaces, cables, primary IP. Re-home them later from the donor's <em>"Migrated to ..."</em> tab.</li>
+        </ul>
+        <div class="text-muted">
+          <i class="mdi mdi-alert-outline"></i>
+          The donor device is <strong>not deleted</strong>. After you have re-homed its
+          child objects, you can delete it from NetBox manually if no longer needed.
+        </div>
+      </div>
+      <form
+        hx-post="{% url 'plugins:netbox_librenms_plugin:device_merge_netbox_devices' device_id=libre_device.device_id %}"
+        hx-swap="none">
+        {% csrf_token %}
+        <input type="hidden" name="server_key" value="{{ server_key }}">
+        <input type="hidden" name="donor_pk" id="merge-donor-{{ libre_device.device_id }}" value="">
+        <div class="mb-3">
+          <div class="text-muted small mb-2">Choose the winner (kept). The other becomes the donor (absorbed):</div>
+          {% with host=validation.merge_candidates.host_named oob=validation.merge_candidates.oob_named %}
+          <div class="form-check mb-1">
+            <input class="form-check-input merge-winner-radio" type="radio" name="winner_pk"
+                   id="merge-winner-host-{{ libre_device.device_id }}"
+                   value="{{ host.pk }}"
+                   data-donor-pk="{{ oob.pk }}"
+                   checked>
+            <label class="form-check-label" for="merge-winner-host-{{ libre_device.device_id }}">
+              <span class="badge bg-primary-lt me-1">Host name match</span>
+              <strong>{{ host.name }}</strong>
+              <span class="text-muted">— matches LibreNMS hostname{% if host.librenms_link.host_id %}, currently linked to LibreNMS device #{{ host.librenms_link.host_id }}{% if host.librenms_link.oob_id %} (OOB #{{ host.librenms_link.oob_id }}{% if host.librenms_link.oob_type %}, {{ host.librenms_link.oob_type }}{% endif %}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
+            </label>
+          </div>
+          <div class="form-check mb-1">
+            <input class="form-check-input merge-winner-radio" type="radio" name="winner_pk"
+                   id="merge-winner-oob-{{ libre_device.device_id }}"
+                   value="{{ oob.pk }}"
+                   data-donor-pk="{{ host.pk }}">
+            <label class="form-check-label" for="merge-winner-oob-{{ libre_device.device_id }}">
+              <span class="badge bg-purple text-white me-1">Serial match (OOB)</span>
+              <strong>{{ oob.name }}</strong>
+              <span class="text-muted">— matches chassis serial{% if oob.librenms_link.host_id %}, currently linked to LibreNMS device #{{ oob.librenms_link.host_id }}{% if oob.librenms_link.oob_id %} (OOB #{{ oob.librenms_link.oob_id }}{% if oob.librenms_link.oob_type %}, {{ oob.librenms_link.oob_type }}{% endif %}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
+            </label>
+          </div>
+          {% endwith %}
+        </div>
+        <button type="submit" class="btn btn-sm btn-warning">
+          <i class="mdi mdi-merge"></i> Merge donor into selected winner
+        </button>
+      </form>
+      <script>
+        (function() {
+          var donorInput = document.getElementById("merge-donor-{{ libre_device.device_id }}");
+          var radios = document.querySelectorAll('input.merge-winner-radio[name="winner_pk"]');
+          function syncDonor() {
+            radios.forEach(function(r) {
+              if (r.checked) { donorInput.value = r.dataset.donorPk || ""; }
+            });
+          }
+          radios.forEach(function(r) { r.addEventListener("change", syncDonor); });
+          syncDonor();
+        })();
+      </script>
+
+    {% elif validation.existing_match_type == 'librenms_id' %}
       <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         {% if existing_id_servers %}
           {% for srv in existing_id_servers %}
@@ -495,7 +572,7 @@
         <form style="display:inline"
               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
               hx-swap="none"
-              hx-include="#use-sysname-toggle, #strip-domain-toggle">
+              hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
           {% csrf_token %}
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
@@ -525,26 +602,302 @@
 
     {% elif validation.existing_match_type == 'serial' %}
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
-        <span class="badge bg-warning-lt me-1"><i class="mdi mdi-barcode"></i> Serial match</span>
+        {% if validation.serial_action == 'oob_candidate' %}
+          <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
+        {% elif validation.serial_action == 'promote_to_host' %}
+          <span class="badge bg-info-lt me-1"><i class="mdi mdi-server"></i> Host Detected</span>
+        {% else %}
+          <span class="badge bg-warning-lt me-1"><i class="mdi mdi-barcode"></i> Serial match</span>
+        {% endif %}
         {% if validation.serial_action == 'hostname_differs' %}
           <span class="badge bg-warning-lt me-1"><i class="mdi mdi-alert"></i> Name differs</span>
         {% elif validation.serial_action == 'link' %}
           <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Name match</span>
         {% endif %}
-        {% if validation.device_type_mismatch %}
+        {% if validation.device_type_mismatch and validation.serial_action != 'oob_candidate' and validation.serial_action != 'promote_to_host' %}
           <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Type mismatch</span>
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
-          not linked to LibreNMS.
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% if validation.existing_librenms_link.host_id %},
+          currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% else %},
+          not linked to LibreNMS.{% endif %}
         </span>
       </div>
+      {% if validation.serial_role_choice_available %}
+        <div class="mb-2 small d-flex flex-wrap align-items-center gap-2">
+          <span class="text-muted">This LibreNMS device is the:</span>
+          <div class="btn-group btn-group-sm" role="group" aria-label="LibreNMS device role">
+            <input type="radio" class="btn-check serial-role-radio"
+                   name="serial-role-{{ libre_device.device_id }}"
+                   id="serial-role-host-{{ libre_device.device_id }}-radio"
+                   data-target="serial-role-host-{{ libre_device.device_id }}"
+                   autocomplete="off"
+                   {% if validation.serial_action == 'promote_to_host' %}checked{% endif %}>
+            <label class="btn btn-outline-info" for="serial-role-host-{{ libre_device.device_id }}-radio">
+              <i class="mdi mdi-server"></i> Host
+            </label>
+            <input type="radio" class="btn-check serial-role-radio"
+                   name="serial-role-{{ libre_device.device_id }}"
+                   id="serial-role-oob-{{ libre_device.device_id }}-radio"
+                   data-target="serial-role-oob-{{ libre_device.device_id }}"
+                   autocomplete="off"
+                   {% if validation.serial_action == 'oob_candidate' %}checked{% endif %}>
+            <label class="btn btn-outline-purple" for="serial-role-oob-{{ libre_device.device_id }}-radio">
+              <i class="mdi mdi-chip"></i> OOB controller
+            </label>
+          </div>
+          <span class="text-muted small">(heuristic guess pre-selected -- flip if wrong)</span>
+        </div>
+      {% endif %}
+      {% if validation.oob_candidate %}
+      <div id="serial-role-oob-{{ libre_device.device_id }}"
+           {% if validation.serial_role_choice_available and validation.serial_action != 'oob_candidate' %}style="display:none"{% endif %}>
+        <div class="alert alert-info py-2 mb-3 small">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <i class="mdi mdi-swap-horizontal"></i>
+            <strong>OOB attach effect on
+              <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+            </strong>
+          </div>
+          <table class="table table-sm table-borderless mb-1" style="width:auto;">
+            <thead>
+              <tr class="text-muted">
+                <th class="py-0 pe-3 fw-normal">Slot</th>
+                <th class="py-0 pe-3 fw-normal">Before</th>
+                <th class="py-0 pe-3 fw-normal"></th>
+                <th class="py-0 fw-normal">After</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
+                <td class="py-0 pe-3 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }}{% else %}--{% endif %}</td>
+                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                <td class="py-0 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
+              </tr>
+              <tr>
+                <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
+                <td class="py-0 pe-3 text-muted">--</td>
+                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                <td class="py-0">#{{ libre_device.device_id }} <span class="text-muted">({{ validation.oob_candidate.type }}{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="text-muted">
+            <i class="mdi mdi-information-outline"></i>
+            Existing device is updated in place -- no new NetBox device is created.
+          </div>
+        </div>
+        <div class="mb-3">
+          <form style="display:inline"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
+                hx-swap="none"
+                hx-include="#auto-create-ipam-toggle">
+            {% csrf_token %}
+            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+            <input type="hidden" name="server_key" value="{{ server_key }}">
+            <button type="submit" class="btn btn-sm btn-primary">
+              <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
+            </button>
+          </form>
+        </div>
+      </div>
+      {% endif %}
+      {% if validation.promote_to_host %}
+      <div id="serial-role-host-{{ libre_device.device_id }}"
+           {% if validation.serial_role_choice_available and validation.serial_action != 'promote_to_host' %}style="display:none"{% endif %}>
+        <div class="alert alert-info py-2 mb-3 small">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <i class="mdi mdi-swap-horizontal"></i>
+            <strong>Promote effect on
+              <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+            </strong>
+          </div>
+          <table class="table table-sm table-borderless mb-1" style="width:auto;">
+            <thead>
+              <tr class="text-muted">
+                <th class="py-0 pe-3 fw-normal">Slot</th>
+                <th class="py-0 pe-3 fw-normal">Before</th>
+                <th class="py-0 pe-3 fw-normal"></th>
+                <th class="py-0 fw-normal">After</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
+                <td class="py-0 pe-3 text-muted">#{{ validation.promote_to_host.existing_libre_id }}</td>
+                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                <td class="py-0">#{{ libre_device.device_id }} <span class="text-muted">({{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }})</span></td>
+              </tr>
+              <tr>
+                <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
+                <td class="py-0 pe-3 text-muted">--</td>
+                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                <td class="py-0">#{{ validation.promote_to_host.existing_libre_id }} <span class="text-muted">({{ validation.promote_to_host.existing_oob_type }})</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="text-muted">
+            <i class="mdi mdi-information-outline"></i>
+            Existing device is updated in place -- no new NetBox device is created.
+          </div>
+        </div>
+        <div class="mb-3">
+          <button type="button"
+                  class="btn btn-sm btn-primary promote-modal-trigger"
+                  data-modal-target="promote-modal-{{ libre_device.device_id }}">
+            <i class="mdi mdi-server"></i> Promote to host of {{ validation.existing_device.name }}...
+          </button>
+
+          <div class="modal fade" id="promote-modal-{{ libre_device.device_id }}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content">
+                <form hx-post="{% url 'plugins:netbox_librenms_plugin:device_promote_to_host' device_id=libre_device.device_id %}"
+                      hx-swap="none"
+                      hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
+                  {% csrf_token %}
+                  <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                  <input type="hidden" name="server_key" value="{{ server_key }}">
+
+                  <div class="modal-header py-2">
+                    <h5 class="modal-title">Promote to host of {{ validation.existing_device.name }}</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                  </div>
+                  <div class="modal-body small">
+                    <p class="text-muted mb-3">
+                      Pick which value to keep on the existing NetBox device. Defaults are
+                      <strong>Keep current</strong> for every field — the original promote
+                      behaviour is unchanged unless you explicitly choose <em>Use new</em>.
+                    </p>
+
+                    {# Name: use resolved_name so the sysName/strip_domain pipeline is respected #}
+                    {% with new_name=validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname %}
+                    <fieldset class="mb-3">
+                      <legend class="fs-6 mb-1">Name</legend>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_name_choice"
+                               id="promote-name-keep-{{ libre_device.device_id }}" value="keep" checked>
+                        <label class="form-check-label" for="promote-name-keep-{{ libre_device.device_id }}">
+                          Keep <code>{{ validation.existing_device.name }}</code>
+                        </label>
+                      </div>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_name_choice"
+                               id="promote-name-new-{{ libre_device.device_id }}" value="new"
+                               data-override-target="override_name"
+                               data-override-value="{{ new_name }}"
+                               {% if not new_name or new_name == validation.existing_device.name %}disabled{% endif %}>
+                        <label class="form-check-label" for="promote-name-new-{{ libre_device.device_id }}">
+                          Use <code>{{ new_name|default:"—" }}</code>
+                        </label>
+                      </div>
+                      <input type="hidden" name="override_name" value="">
+                    </fieldset>
+                    {% endwith %}
+
+                    {# Device type #}
+                    <fieldset class="mb-3">
+                      <legend class="fs-6 mb-1">Device type</legend>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_dt_choice"
+                               id="promote-dt-keep-{{ libre_device.device_id }}" value="keep" checked>
+                        <label class="form-check-label" for="promote-dt-keep-{{ libre_device.device_id }}">
+                          Keep <code>{{ validation.existing_device.device_type|default:"—" }}</code>
+                        </label>
+                      </div>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_dt_choice"
+                               id="promote-dt-new-{{ libre_device.device_id }}" value="new"
+                               data-override-target="override_device_type_id"
+                               data-override-value="{% if validation.device_type.device_type %}{{ validation.device_type.device_type.pk }}{% endif %}"
+                               {% if not validation.device_type.device_type or validation.existing_device.device_type_id == validation.device_type.device_type.pk %}disabled{% endif %}>
+                        <label class="form-check-label" for="promote-dt-new-{{ libre_device.device_id }}">
+                          {% if validation.device_type.device_type %}
+                            Use <code>{{ validation.device_type.device_type }}</code>
+                          {% else %}
+                            <span class="text-muted">No NetBox device type matches LibreNMS hardware
+                            <em>{{ libre_device.hardware|default:"—" }}</em>. Use the
+                            <strong>Add Mapping</strong> shortcut on the Device Type row first.</span>
+                          {% endif %}
+                        </label>
+                      </div>
+                      <input type="hidden" name="override_device_type_id" value="">
+                    </fieldset>
+
+                    {# Platform #}
+                    <fieldset class="mb-3">
+                      <legend class="fs-6 mb-1">Platform</legend>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_pl_choice"
+                               id="promote-pl-keep-{{ libre_device.device_id }}" value="keep" checked>
+                        <label class="form-check-label" for="promote-pl-keep-{{ libre_device.device_id }}">
+                          Keep <code>{{ validation.existing_device.platform|default:"—" }}</code>
+                        </label>
+                      </div>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_pl_choice"
+                               id="promote-pl-new-{{ libre_device.device_id }}" value="new"
+                               data-override-target="override_platform_id"
+                               data-override-value="{% if validation.platform.platform %}{{ validation.platform.platform.pk }}{% endif %}"
+                               {% if not validation.platform.platform or validation.existing_device.platform_id == validation.platform.platform.pk %}disabled{% endif %}>
+                        <label class="form-check-label" for="promote-pl-new-{{ libre_device.device_id }}">
+                          {% if validation.platform.platform %}
+                            Use <code>{{ validation.platform.platform }}</code>
+                          {% else %}
+                            <span class="text-muted">No NetBox platform matches LibreNMS OS
+                            <em>{{ libre_device.os|default:"—" }}</em>. Use the
+                            <strong>Add Mapping</strong> shortcut on the Platform row first.</span>
+                          {% endif %}
+                        </label>
+                      </div>
+                      <input type="hidden" name="override_platform_id" value="">
+                    </fieldset>
+                  </div>
+                  <div class="modal-footer py-2">
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-sm btn-primary">
+                      <i class="mdi mdi-server"></i> Confirm Promote
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            (function () {
+              var modal = document.getElementById("promote-modal-{{ libre_device.device_id }}");
+              if (!modal) return;
+              modal.addEventListener("change", function (e) {
+                var t = e.target;
+                if (!t || t.type !== "radio") return;
+                var name = t.name;
+                if (!name || !name.startsWith("_promote_")) return;
+                var group = modal.querySelectorAll('input[name="' + name + '"]');
+                group.forEach(function (r) {
+                  var target = r.getAttribute("data-override-target");
+                  if (!target) return;
+                  var hidden = modal.querySelector('input[type=hidden][name="' + target + '"]');
+                  if (!hidden) return;
+                  if (r.checked && r.value === "new") {
+                    hidden.value = r.getAttribute("data-override-value") || "";
+                  } else if (r.checked && r.value === "keep") {
+                    hidden.value = "";
+                  }
+                });
+              });
+            })();
+          </script>
+        </div>
+      </div>
+      {% endif %}
+      {% if validation.serial_action == 'link' or validation.serial_action == 'hostname_differs' %}
       <div class="mb-3">
         <form style="display:inline"
               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
               hx-swap="none"
-              hx-include="#use-sysname-toggle, #strip-domain-toggle">
+              hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
           {% csrf_token %}
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
@@ -553,7 +906,7 @@
               <input class="form-check-input" type="checkbox" name="force" id="force-serial-{{ libre_device.device_id }}"
                      onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
               <label class="form-check-label text-danger" for="force-serial-{{ libre_device.device_id }}">
-                <i class="mdi mdi-alert-circle"></i> Device type mismatch — check to force
+                <i class="mdi mdi-alert-circle"></i> Device type mismatch -- check to force
               </label>
             </div>
           {% endif %}
@@ -569,14 +922,55 @@
           {% endif %}
         </form>
       </div>
+      {% endif %}
 
     {% elif validation.existing_match_type == 'primary_ip' %}
+      {% if validation.serial_action == 'oob_candidate' %}
+        <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+          <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
+          <span class="text-muted ms-1">
+            — Exists as
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+            (matched via IP {{ libre_device.ip }}).
+          </span>
+        </div>
+        <div class="alert alert-info py-2 mb-3">
+          <i class="mdi mdi-information-outline"></i>
+          LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
+          appears to be an OOB management controller
+          (<strong>{{ validation.oob_candidate.type }}</strong>
+          {% if validation.oob_candidate.ip %}— {{ validation.oob_candidate.ip }}{% endif %}).
+        </div>
+        <div class="mb-3">
+          <form style="display:inline"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
+                hx-swap="none"
+                hx-include="#auto-create-ipam-toggle">
+            {% csrf_token %}
+            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+            <input type="hidden" name="server_key" value="{{ server_key }}">
+            <button type="submit" class="btn btn-sm btn-primary">
+              <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
+            </button>
+          </form>
+        </div>
+      {% else %}
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         <span class="badge bg-warning-lt me-1"><i class="mdi mdi-ip-network"></i> IP match</span>
         <span class="text-muted ms-1">
           — Device with IP {{ libre_device.ip }} exists as
           <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
           Consider adding LibreNMS ID manually.
+        </span>
+      </div>
+      {% endif %}
+
+    {% elif validation.existing_match_type == 'librenms_oob' %}
+      <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB linked</span>
+        <span class="text-muted ms-1">
+          — LibreNMS ID {{ libre_device.device_id }} is already linked as the OOB controller for
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
         </span>
       </div>
 
@@ -635,7 +1029,7 @@
          class="btn btn-primary btn-sm" target="_blank" rel="noopener noreferrer">
         <i class="mdi mdi-open-in-new"></i> View in NetBox
       </a>
-      {% if validation.existing_match_type == 'librenms_id' %}
+      {% if validation.existing_match_type == 'librenms_id' or validation.existing_match_type == 'librenms_oob' %}
         <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}"
            class="btn btn-outline-primary btn-sm" target="_blank" rel="noopener noreferrer">
           <i class="mdi mdi-sync"></i> Full Sync Page
@@ -647,3 +1041,59 @@
     <i class="mdi mdi-close"></i> Close
   </button>
 </div>
+
+<script>
+  (function () {
+    document.querySelectorAll(".serial-role-radio").forEach(function (radio) {
+      if (radio.dataset.serialRoleBound) return;
+      radio.dataset.serialRoleBound = "1";
+      radio.addEventListener("change", function () {
+        var name = radio.name;
+        document.querySelectorAll('input.serial-role-radio[name="' + name + '"]').forEach(function (r) {
+          var target = document.getElementById(r.dataset.target);
+          if (target) target.style.display = r.checked ? "" : "none";
+        });
+      });
+    });
+
+    // Open the nested Promote-options modal manually. We bypass
+    // data-bs-toggle="modal" here because NetBox's bundled JS hooks
+    // the data-api click listener and crashes ("Cannot read properties
+    // of null (reading 'hide')") when triggered from inside our HTMX
+    // modal, which isn't owned by a Bootstrap Modal instance.
+    document.querySelectorAll(".promote-modal-trigger").forEach(function (btn) {
+      if (btn.dataset.promoteModalBound) return;
+      btn.dataset.promoteModalBound = "1";
+      btn.addEventListener("click", function (event) {
+        event.preventDefault();
+        var targetId = btn.dataset.modalTarget;
+        var modalEl = targetId && document.getElementById(targetId);
+        if (!modalEl) return;
+        if (typeof bootstrap !== "undefined" && bootstrap.Modal) {
+          bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        } else if (typeof window.bootstrap !== "undefined" && window.bootstrap.Modal) {
+          window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        } else {
+          modalEl.classList.add("show");
+          modalEl.style.display = "block";
+          modalEl.removeAttribute("aria-hidden");
+          modalEl.setAttribute("aria-modal", "true");
+          // Bind fallback dismiss handlers for the promote modal's close/cancel buttons.
+          modalEl.querySelectorAll("[data-bs-dismiss='modal']").forEach(function (closeBtn) {
+            if (closeBtn.dataset.fallbackDismissBound) return;
+            closeBtn.dataset.fallbackDismissBound = "1";
+            closeBtn.addEventListener("click", function () {
+              modalEl.classList.remove("show");
+              modalEl.style.display = "none";
+              modalEl.setAttribute("aria-hidden", "true");
+              modalEl.removeAttribute("aria-modal");
+              document.body.classList.remove("modal-open");
+              var backdrop = document.querySelector(".modal-backdrop");
+              if (backdrop) backdrop.remove();
+            });
+          });
+        }
+      });
+    });
+  })();
+</script>

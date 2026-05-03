@@ -467,11 +467,47 @@ class DeviceImportTable(tables.Table):
             match_type = validation.get("existing_match_type", "")
             serial_action = validation.get("serial_action")
             has_mismatch = validation.get("device_type_mismatch", False)
-            has_actions = match_type == "hostname" or (match_type == "serial" and serial_action is not None)
+            is_oob_candidate = serial_action == "oob_candidate"
+            is_oob_linked = match_type == "librenms_oob"
+            has_actions = match_type == "hostname" or (
+                match_type == "serial" and serial_action is not None and not is_oob_candidate
+            )
             has_name_sync = validation.get("name_sync_available", False)
             has_sync_needed = match_type == "librenms_id" and serial_action in ("update_serial", "conflict")
 
-            if has_mismatch:
+            existing_link = validation.get("existing_librenms_link") or {}
+            paired_oob_id = existing_link.get("oob_id")
+            paired_host_id = existing_link.get("host_id")
+            paired_oob_type = existing_link.get("oob_type") or "OOB"
+
+            def _coerce_pair_id(value):
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
+
+            if is_oob_candidate:
+                btn_class = "btn-outline-purple"
+                btn_icon = "mdi-chip"
+                btn_label = " OOB"
+                btn_title = "Add as OOB controller"
+            elif is_oob_linked:
+                # This LibreNMS row is the OOB half of an existing pair.
+                btn_class = "btn-outline-info"
+                btn_icon = "mdi-chip"
+                btn_label = " OOB"
+                if paired_host_id is not None:
+                    try:
+                        paired_host_id_int = int(paired_host_id)
+                    except (TypeError, ValueError):
+                        paired_host_id_int = None
+                    if paired_host_id_int is not None:
+                        btn_title = f"Linked as OOB controller (paired host: LibreNMS #{paired_host_id_int})"
+                    else:
+                        btn_title = "Linked as OOB controller"
+                else:
+                    btn_title = "Linked as OOB controller"
+            elif has_mismatch:
                 btn_class = "btn-outline-danger"
                 btn_icon = "mdi-alert-circle"
                 btn_label = " Conflict"
@@ -491,6 +527,28 @@ class DeviceImportTable(tables.Table):
                 btn_icon = "mdi-database-alert"
                 btn_label = " Legacy ID"
                 btn_title = "View legacy ID migration details"
+            elif (
+                match_type == "librenms_id"
+                and paired_oob_id is not None
+                and _coerce_pair_id(paired_oob_id) != _coerce_pair_id(paired_host_id)
+            ):
+                # This LibreNMS row is the host half of an existing host/OOB
+                # pair. Render it with the same info-tinted styling as the OOB
+                # row so the user sees them as one paired device rather than
+                # two unrelated statuses (one green "ready", one blue "OOB").
+                btn_class = "btn-outline-info"
+                btn_icon = "mdi-server-network"
+                btn_label = " Host"
+                # paired_oob_type comes from a user-editable custom field
+                # (librenms_id.<server>.oob.type) and is only string-type-checked,
+                # not sanitised, on the read path. Escape before interpolating
+                # into the title attribute to prevent stored XSS.
+                # paired_oob_id may be a string-digit from older serialization;
+                # coerce to int so display is clean.
+                _oob_id_fmt = (
+                    _coerce_pair_id(paired_oob_id) if _coerce_pair_id(paired_oob_id) is not None else paired_oob_id
+                )
+                btn_title = f"Linked as host (paired OOB: LibreNMS #{escape(str(_oob_id_fmt))}, {escape(paired_oob_type or '')})"
             else:
                 btn_class = "btn-outline-success"
                 btn_icon = "mdi-check-circle"

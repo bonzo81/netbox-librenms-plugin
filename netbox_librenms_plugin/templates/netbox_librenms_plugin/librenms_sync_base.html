@@ -35,6 +35,63 @@
 
 {% block content %}
 
+{% if migrated_to_marker %}
+<div class="alert alert-warning d-flex align-items-start" role="alert">
+    <i class="mdi mdi-alert-octagon me-2 fs-3"></i>
+    <div class="flex-grow-1">
+        <strong>This device was merged into another NetBox device.</strong>
+        {% if migrated_to_winner %}
+            All LibreNMS sync is disabled here. Use the per-row
+            <em>Move&nbsp;to&nbsp;winner</em> actions below to migrate
+            interfaces, IP addresses, primary IP and OOB IP to
+            <a href="{{ migrated_to_winner.get_absolute_url }}">
+                <strong>{{ migrated_to_winner.name }}</strong>
+            </a>.
+        {% else %}
+            The winner device (<code>id={{ migrated_to_marker.device_id }}</code>)
+            no longer exists. The marker is stale &mdash; remove it manually
+            from <code>librenms_id.{{ migrated_to_marker.server_key }}._migrated_to</code>
+            to re-enable sync.
+        {% endif %}
+        <div class="text-muted small mt-1">
+            Marked at {{ migrated_to_marker.at }} on server
+            <code>{{ migrated_to_marker.server_key }}</code>.
+        </div>
+        {% if migrated_to_winner and has_write_permission %}
+        <div class="mt-2 d-flex gap-2 flex-wrap">
+            {% if object.primary_ip4 %}
+            <button type="button" class="btn btn-sm btn-outline-warning"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='primary4' %}"
+                hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key }}"}'
+                hx-confirm="Transfer primary IPv4 ({{ object.primary_ip4.address }}) to {{ migrated_to_winner.name }}?">
+                <i class="mdi mdi-transfer-right"></i> Transfer primary IPv4
+            </button>
+            {% endif %}
+            {% if object.primary_ip6 %}
+            <button type="button" class="btn btn-sm btn-outline-warning"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='primary6' %}"
+                hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key }}"}'
+                hx-confirm="Transfer primary IPv6 ({{ object.primary_ip6.address }}) to {{ migrated_to_winner.name }}?">
+                <i class="mdi mdi-transfer-right"></i> Transfer primary IPv6
+            </button>
+            {% endif %}
+            {% if object.oob_ip %}
+            <button type="button" class="btn btn-sm btn-outline-warning"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='oob' %}"
+                hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key }}"}'
+                hx-confirm="Transfer OOB IP ({{ object.oob_ip.address }}) to {{ migrated_to_winner.name }}?">
+                <i class="mdi mdi-transfer-right"></i> Transfer OOB IP
+            </button>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <!-- LibreNMS Server Information -->
 {% if all_server_mappings %}
 <div class="card mb-3">

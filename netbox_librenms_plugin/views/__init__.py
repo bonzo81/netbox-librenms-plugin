@@ -110,8 +110,13 @@ from .mapping_views import (  # noqa: F401
     PlatformMappingListView,
     PlatformMappingView,
 )
-from .imports.actions import AddDeviceTypeMappingView  # noqa: F401
-from .imports.actions import AddPlatformMappingView  # noqa: F401
+from .imports.actions import (  # noqa: F401
+    AddAsOOBView,
+    AddDeviceTypeMappingView,
+    AddPlatformMappingView,
+    MergeNetBoxDevicesView,
+    PromoteToHostView,
+)
 from .object_sync import (  # noqa: F401
     DeviceCableTableView,
     DeviceInterfaceTableView,
@@ -145,4 +150,9 @@ from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView  # n
 from .sync.interfaces import DeleteNetBoxInterfacesView, SyncInterfacesView  # noqa: F401
 from .sync.ip_addresses import SyncIPAddressesView  # noqa: F401
 from .sync.locations import SyncSiteLocationView  # noqa: F401
+from .sync.migrate import (  # noqa: F401
+    MoveInterfaceToWinnerView,
+    MoveIPAddressToWinnerView,
+    TransferDeviceIPView,
+)
 from .sync.vlans import SyncVLANsView  # noqa: F401

@@ -92,7 +92,7 @@ Optional context:
           })
           .catch(function (error) {
             if (seq !== requestSeq) return;
-            console.debug("Device type lookup failed:", error.message);
+            console.warn("Device type lookup failed:", error.message);
             dropdownEl.style.display = "none";
           });
       }, 300);

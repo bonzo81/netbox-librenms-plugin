@@ -62,7 +62,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             return False
         return self._filter_form_data.get("use_background_job", True)
 
-    def _load_job_results(self, job_id):
+    def _load_job_results(self, job_id, request=None):
         """
         Load cached results from a completed background job.
 
@@ -128,6 +128,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             # Mirror the job's naming settings so toggle state matches the cached results
             self._use_sysname = use_sysname
             self._strip_domain = strip_domain
+            # IPAM auto-create toggle: honour the request-scoped POST/GET override
+            # first (set by the import page toggle), then fall through to saved pref
+            # and plugin settings — matches the cascade used by resolve_auto_create_ipam().
+            self._auto_create_ipam = resolve_auto_create_ipam(request)
 
         return validated_devices
 
@@ -158,6 +162,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         _use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
         _strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        _auto_create_ipam = get_user_pref(request, "plugins.netbox_librenms_plugin.auto_create_ipam")
         if _use_sysname is None:
             _use_sysname = getattr(settings_obj, "use_sysname_default", True) if settings_obj else True
         if _strip_domain is None:
@@ -186,7 +191,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             try:
                 job_id = int(job_id)
                 logger.info(f"Loading results from job {job_id}")
-                validated_devices = self._load_job_results(job_id)
+                validated_devices = self._load_job_results(job_id, request=request)
                 if validated_devices:
                     self._import_data = validated_devices
                     self._job_results_loaded = True

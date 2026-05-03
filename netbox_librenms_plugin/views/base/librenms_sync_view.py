@@ -12,6 +12,7 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
+    get_migrated_to_marker,
     match_librenms_hardware_to_device_type,
     resolve_naming_preferences,
 )
@@ -154,10 +155,40 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
                 ),
                 "object_model_name": obj._meta.model_name,
+                **self._build_migrated_context(_lookup_device, self.librenms_api.server_key),
             }
         )
 
         return context
+
+    @staticmethod
+    def _build_migrated_context(obj, server_key):
+        """
+        Build Stage 2b "donor migrated mode" context.
+
+        Returns a dict with:
+        * ``migrated_to_marker`` — the marker dict (``{device_id, server_key, at}``)
+          when this device was previously merged into another via
+          :func:`mark_librenms_migrated`, else ``None``.
+        * ``migrated_to_winner`` — the winner :class:`Device` instance (or
+          ``None`` if it has been deleted since the marker was written).
+
+        When ``migrated_to_marker`` is set, all sync action buttons should
+        be hidden and per-row "Move to winner" actions should be shown
+        instead.
+        """
+        marker = get_migrated_to_marker(obj, server_key)
+        if not marker:
+            return {"migrated_to_marker": None, "migrated_to_winner": None}
+
+        from dcim.models import Device
+
+        try:
+            winner_pk = int(marker.get("device_id"))
+        except (TypeError, ValueError):
+            return {"migrated_to_marker": marker, "migrated_to_winner": None}
+        winner = Device.objects.filter(pk=winner_pk).first()
+        return {"migrated_to_marker": marker, "migrated_to_winner": winner}
 
     @staticmethod
     def _build_all_server_mappings(obj, active_server_key):
