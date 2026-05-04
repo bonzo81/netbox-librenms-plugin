@@ -455,7 +455,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 return HttpResponse(
                     '<div class="alert alert-danger mb-0">'
                     "No valid devices selected. "
-                    f"{len(errors)} error(s) occurred: {' '.join(errors) if errors else 'Please check device validation status.'}"
+                    f"{len(errors)} error(s) occurred: {' '.join(escape(e) for e in errors) if errors else 'Please check device validation status.'}"
                     "</div>",
                     status=400,
                 )
@@ -701,7 +701,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.exception("Error during bulk import")
             if request.headers.get("HX-Request"):
-                return HttpResponse(str(exc), status=500)
+                return HttpResponse("Import failed. Please check server logs.", status=500)
             messages.error(request, f"Bulk import failed: {exc}")
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 

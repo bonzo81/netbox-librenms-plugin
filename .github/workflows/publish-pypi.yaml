@@ -8,6 +8,9 @@ on:
     tags:
       - '*'
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build distribution 📦
@@ -47,6 +50,7 @@ jobs:
       url: https://pypi.org/p/netbox-librenms-plugin
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
+      contents: read
 
     steps:
     - name: Download all the dists

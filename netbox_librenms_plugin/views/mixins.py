@@ -62,6 +62,7 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             if self.request.headers.get("HX-Request"):
                 return HttpResponse("", headers={"HX-Redirect": referrer})
 
+            # referrer is safe: validated by _get_safe_redirect_url via url_has_allowed_host_and_scheme
             return redirect(referrer)
         return None
 
@@ -144,6 +145,7 @@ class NetBoxObjectPermissionMixin:
             if self.request.headers.get("HX-Request"):
                 return HttpResponse("", headers={"HX-Redirect": referrer})
 
+            # referrer is safe: validated by _get_safe_redirect_url via url_has_allowed_host_and_scheme
             return redirect(referrer)
         return None
 

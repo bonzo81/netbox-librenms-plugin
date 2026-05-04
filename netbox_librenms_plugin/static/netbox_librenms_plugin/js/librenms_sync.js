@@ -1509,15 +1509,18 @@ function initializeSyncFormSpinners() {
         button.dataset.spinnerInitialized = 'true';
 
         button.addEventListener('htmx:beforeRequest', function () {
-            const originalText = button.textContent.trim();
-            button.dataset.originalText = originalText;
+            button.dataset.originalHtml = button.innerHTML;
             button.disabled = true;
-            button.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>' + originalText;
+            const label = button.textContent.trim();
+            const spinner = document.createElement('span');
+            spinner.className = 'spinner-border spinner-border-sm me-2';
+            button.textContent = label;
+            button.insertBefore(spinner, button.firstChild);
         });
 
         button.addEventListener('htmx:afterRequest', function () {
             button.disabled = false;
-            button.innerHTML = button.dataset.originalText || button.textContent;
+            button.innerHTML = button.dataset.originalHtml;
         });
     });
 }

@@ -8,6 +8,7 @@ from django.utils.text import slugify
 
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.utils.html import escape
 from django.views import View
 from virtualization.models import VirtualMachine
 
@@ -562,7 +563,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         if object_type == "virtualmachine":
             object_type = "vm"
         if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
+            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
         target_model = VirtualMachine if object_type == "vm" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
 
@@ -666,7 +667,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if object_type == "virtualmachine":
             object_type = "vm"
         if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
+            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
 
         target_model = VirtualMachine if object_type == "vm" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}

@@ -10,6 +10,9 @@ on:
       - master
       - develop
 
+permissions:
+  contents: read
+
 jobs:
   format-and-lint:
     runs-on: ubuntu-latest

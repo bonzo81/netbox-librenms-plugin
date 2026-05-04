@@ -382,8 +382,8 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                         errors.append(f"Error deleting interface {interface_name or interface_id}: {str(exc)}")
                         continue
 
-        except Exception as exc:  # pragma: no cover
-            return JsonResponse({"error": f"Transaction failed: {str(exc)}"}, status=500)
+        except Exception:  # pragma: no cover
+            return JsonResponse({"error": "Transaction failed. Please check server logs."}, status=500)
 
         response_data = {
             "status": "success",

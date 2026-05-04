@@ -19,9 +19,9 @@ if codespace_name:
         "127.0.0.1",
         "*",
     ]
-    print(f"🔗 Codespaces detected: {codespace_name}")
-    print(f"🔒 CSRF Trusted Origins: {CSRF_TRUSTED_ORIGINS}")
-    print(f"🌐 Allowed Hosts: {ALLOWED_HOSTS}")
+    print(f"🔗 Codespaces detected: {bool(codespace_name)}")
+    print("🔒 CSRF Trusted Origins configured")
+    print("🌐 Allowed Hosts configured")
 else:
     CSRF_TRUSTED_ORIGINS = [
         "http://localhost:8000",

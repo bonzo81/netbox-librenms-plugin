@@ -1,4 +1,5 @@
 import json
+import logging
 
 from dcim.models import Device
 from django.contrib import messages
@@ -13,6 +14,8 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import get_interface_name_field, get_librenms_device_id
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -494,5 +497,8 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
                 }
             )
 
-        except Exception as e:
-            return JsonResponse({"status": "error", "message": str(e)}, status=500)
+        except Exception:
+            logger.exception("Unexpected error in IP address sync")
+            return JsonResponse(
+                {"status": "error", "message": "An internal error occurred. Please check server logs."}, status=500
+            )
