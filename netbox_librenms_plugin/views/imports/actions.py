@@ -698,11 +698,11 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 )
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
-        except Exception as exc:  # pragma: no cover - defensive guard
+        except Exception:  # pragma: no cover - defensive guard
             logger.exception("Error during bulk import")
             if request.headers.get("HX-Request"):
                 return HttpResponse("Import failed. Please check server logs.", status=500)
-            messages.error(request, f"Bulk import failed: {exc}")
+            messages.error(request, "Bulk import failed. Please check server logs.")
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         # Combine results
@@ -1398,16 +1398,26 @@ class DeviceConflictActionView(
         return response
 
 
-class AddDeviceTypeMappingView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class AddDeviceTypeMappingView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
     """HTMX view to create a DeviceTypeMapping from the import validation modal."""
 
     def post(self, request, device_id):
         """Create a DeviceTypeMapping linking the LibreNMS hardware string to a NetBox DeviceType."""
-        if error := self.require_write_permission():
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        self.required_object_permissions = {"POST": [("add", DeviceTypeMapping), ("change", DeviceTypeMapping)]}
+        if error := self.require_all_permissions("POST"):
             return error
 
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
         from dcim.models import DeviceType
-        from netbox_librenms_plugin.models import DeviceTypeMapping
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
         if not libre_device:

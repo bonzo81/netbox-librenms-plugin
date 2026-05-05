@@ -175,6 +175,7 @@ class TestAddDeviceObjectResolution:
 
     def test_get_object_uses_get_object_or_404_for_virtualmachine(self):
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+        from virtualization.models import VirtualMachine
 
         view = object.__new__(AddDeviceToLibreNMSView)
         vm_obj = MagicMock()
@@ -183,7 +184,7 @@ class TestAddDeviceObjectResolution:
             result = view.get_object(123, object_type="virtualmachine")
 
         assert result is vm_obj
-        assert mock_get_obj.call_args[0][0].__name__ == "VirtualMachine"
+        mock_get_obj.assert_called_once_with(VirtualMachine, pk=123)
 
 
 class TestUpdateDeviceNameViewWiring:

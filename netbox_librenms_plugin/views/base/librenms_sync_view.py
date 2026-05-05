@@ -527,7 +527,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # Platform name is just the OS (not OS + version)
         platform_name = librenms_os if librenms_os != "-" else None
 
-        # Check PlatformMapping first, then fall back to exact name match
+        # Try case-insensitive exact name match first, then fall back to PlatformMapping
         platform_exists = False
         matching_platform = None
         if platform_name:
