@@ -425,7 +425,7 @@ def find_matching_platform(librenms_os: str) -> dict:
     except Platform.DoesNotExist:
         pass
     except Platform.MultipleObjectsReturned:
-        return {"found": False, "platform": None, "match_type": "ambiguous"}
+        return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
 
     # Fall back to PlatformMapping for when the platform name differs from the LibreNMS OS string
     try:
@@ -442,7 +442,7 @@ def find_matching_platform(librenms_os: str) -> dict:
         except _PlatformMapping.DoesNotExist:
             pass
         except _PlatformMapping.MultipleObjectsReturned:
-            return {"found": False, "platform": None, "match_type": "ambiguous"}
+            return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
 
     return {"found": False, "platform": None, "match_type": None}
 
@@ -1026,7 +1026,7 @@ def get_enabled_ignore_rules() -> list:
     """Return all enabled InventoryIgnoreRule instances as a list."""
     from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-    return list(InventoryIgnoreRule.objects.filter(enabled=True))
+    return list(InventoryIgnoreRule.objects.filter(enabled=True).order_by("pk"))
 
 
 def load_bay_mappings() -> tuple:

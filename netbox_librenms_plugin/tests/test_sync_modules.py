@@ -1039,7 +1039,7 @@ class TestParentRowIdxVsEntityIndex:
         with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping:
             mock_mapping.objects.all.return_value = []
             with patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore:
-                mock_ignore.objects.filter.return_value = []
+                mock_ignore.objects.filter.return_value.order_by.return_value = []
                 with patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}):
                     with patch.object(view, "_get_module_bays", return_value=({}, {})):
                         with patch.object(view, "_get_module_types", return_value={}):

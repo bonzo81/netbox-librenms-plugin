@@ -433,9 +433,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                             mapping.full_clean()
                             mapping.save()
                         mapping_created = True
-                    except (ValidationError, IntegrityError) as e:
+                    except ValidationError as e:
                         mapping_error = e.message_dict if hasattr(e, "message_dict") else str(e)
                         logger.exception("Failed to create PlatformMapping '%s' -> '%s'", librenms_os, platform_name)
+                    except IntegrityError:
+                        # Concurrent insert: mapping was created by another request
+                        mapping_existed = True
+                        logger.warning(
+                            "IntegrityError creating PlatformMapping '%s' -> '%s'; treating as already existing",
+                            librenms_os,
+                            platform_name,
+                        )
 
         msg = f"Created platform '{platform}' and assigned to device"
         if mapping_created:

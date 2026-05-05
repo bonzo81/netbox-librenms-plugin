@@ -277,11 +277,16 @@
                             }, 300);
                           });
 
-                          document.addEventListener("click", function (e) {
+                          function handleDocumentClick(e) {
+                            if (!document.body.contains(dropdownEl)) {
+                              document.removeEventListener("click", handleDocumentClick);
+                              return;
+                            }
                             if (!searchEl.contains(e.target) && !dropdownEl.contains(e.target)) {
                               dropdownEl.style.display = "none";
                             }
-                          });
+                          }
+                          document.addEventListener("click", handleDocumentClick);
                         })();
                       </script>
                     {% else %}

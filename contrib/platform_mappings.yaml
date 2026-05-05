@@ -1,0 +1,36 @@
+# Platform Mappings — Examples
+#
+# Maps LibreNMS OS strings to NetBox Platforms.
+# The librenms_os value is matched exactly (case-insensitive) against the
+# LibreNMS `os` field returned for each device.
+#
+# Import via: LibreNMS → Platform Mappings → Import → YAML
+#
+# Fields:
+#   librenms_os     — LibreNMS OS identifier (e.g. "ios", "nxos", "junos")
+#   netbox_platform — NetBox Platform name (must exist in NetBox)
+
+# ── Cisco ─────────────────────────────────────────────────────────────────────
+- librenms_os: ios
+  netbox_platform: Cisco IOS
+
+- librenms_os: iosxe
+  netbox_platform: Cisco IOS-XE
+
+- librenms_os: iosxr
+  netbox_platform: Cisco IOS-XR
+
+- librenms_os: nxos
+  netbox_platform: Cisco NX-OS
+
+# ── Juniper ───────────────────────────────────────────────────────────────────
+- librenms_os: junos
+  netbox_platform: Juniper Junos
+
+# ── Arista ────────────────────────────────────────────────────────────────────
+- librenms_os: eos
+  netbox_platform: Arista EOS
+
+# ── Linux / generic ───────────────────────────────────────────────────────────
+- librenms_os: linux
+  netbox_platform: Linux

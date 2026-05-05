@@ -1466,9 +1466,9 @@ class AddDeviceTypeMappingView(
                     mapping.netbox_device_type = device_type
                     mapping.save()
         except Exception as exc:
-            logger.warning("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
+            logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
             return HttpResponse(
-                f'<span class="text-danger small">Error saving mapping: {escape(str(exc))}</span>',
+                '<span class="text-danger small">Error saving mapping. Please try again.</span>',
                 status=500,
             )
 

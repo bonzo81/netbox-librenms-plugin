@@ -409,7 +409,7 @@ class TestFindMatchingPlatformWithMapping:
         ):
             result = find_matching_platform("ios")
 
-        assert result == {"found": False, "platform": None, "match_type": "ambiguous"}
+        assert result == {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
 
 
 # =============================================================================

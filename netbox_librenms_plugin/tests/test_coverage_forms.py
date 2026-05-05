@@ -153,17 +153,7 @@ class TestDeviceImportConfigFormInitialValues:
 
     def test_empty_validation_dict_no_initial_set(self):
         """With empty libre_device and validation, no field initials should be set by the form."""
-        from unittest.mock import patch
-
-        with (
-            patch("dcim.models.Platform"),
-            patch("netbox_librenms_plugin.forms.Site"),
-            patch("netbox_librenms_plugin.forms.DeviceType"),
-            patch("netbox_librenms_plugin.forms.DeviceRole"),
-        ):
-            from netbox_librenms_plugin.forms import DeviceImportConfigForm
-
-            form = DeviceImportConfigForm(libre_device={}, validation={})
+        form = self._make_form(libre_device={}, validation={})
 
         # Fields populated from libre_device should have blank/None initials when no data given
         assert form.fields["hostname"].initial in (None, "")
@@ -171,8 +161,6 @@ class TestDeviceImportConfigFormInitialValues:
 
     def test_libre_device_sets_initial_hostname(self):
         """libre_device dict populates hostname and hardware initial values."""
-        from unittest.mock import patch
-
         libre_device = {
             "device_id": 5,
             "hostname": "sw01",
@@ -180,15 +168,7 @@ class TestDeviceImportConfigFormInitialValues:
             "location": "NYC",
         }
 
-        with (
-            patch("dcim.models.Platform"),
-            patch("netbox_librenms_plugin.forms.Site"),
-            patch("netbox_librenms_plugin.forms.DeviceType"),
-            patch("netbox_librenms_plugin.forms.DeviceRole"),
-        ):
-            from netbox_librenms_plugin.forms import DeviceImportConfigForm
-
-            form = DeviceImportConfigForm(libre_device=libre_device, validation={})
+        form = self._make_form(libre_device=libre_device, validation={})
 
         assert form.fields["hostname"].initial == "sw01"
         assert form.fields["hardware"].initial == "Cisco 3850"

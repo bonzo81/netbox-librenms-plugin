@@ -1714,7 +1714,8 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
 function updateHtmxModalLabel() {
     const htmxModal = document.getElementById('htmx-modal');
     if (!htmxModal) return;
-    const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
+    const modalBody = htmxModal.querySelector('#htmx-modal-body') || htmxModal;
+    const header = modalBody.querySelector('.modal-title, .modal-header h5, .modal-header h4');
     const labelId = htmxModal.getAttribute('aria-labelledby');
     const label = (labelId && document.getElementById(labelId)) || document.getElementById('htmx-modal-label');
     if (header && label && header !== label) {

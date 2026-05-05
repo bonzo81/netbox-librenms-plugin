@@ -1121,7 +1121,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             else:
                 row["status"] = "Installed"
         else:
-            row["status"] = "Installed"
+            row["status"] = "No Type"
 
     def _determine_status(self, matched_bay, matched_type, serial):
         """Determine the sync status for an inventory item."""
