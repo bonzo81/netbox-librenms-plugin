@@ -3,6 +3,25 @@
 from django.db import migrations, models
 
 
+def remove_wildcard_duplicates(apps, schema_editor):
+    """Remove duplicate wildcard rows (librenms_speed IS NULL) before enforcing the constraint.
+
+    Keeps the row with the lowest PK for each librenms_type. This handles deployments that
+    applied migration 0010 and then hit the race condition before 0011 was available.
+    """
+    InterfaceTypeMapping = apps.get_model("netbox_librenms_plugin", "InterfaceTypeMapping")
+    seen = set()
+    for row in InterfaceTypeMapping.objects.filter(librenms_speed__isnull=True).order_by("id"):
+        if row.librenms_type in seen:
+            row.delete()
+        else:
+            seen.add(row.librenms_type)
+
+
+def reverse_noop(apps, schema_editor):
+    pass
+
+
 class Migration(migrations.Migration):
     dependencies = [
         ("extras", "0134_owner"),
@@ -10,6 +29,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(remove_wildcard_duplicates, reverse_noop),
         migrations.RemoveConstraint(
             model_name="interfacetypemapping",
             name="unique_interface_type_mapping",
