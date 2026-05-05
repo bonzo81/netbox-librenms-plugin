@@ -1,0 +1,120 @@
+{% load helpers %}
+{# Modal body fragment for the module replace / move dialog. #}
+{# Rendered server-side by ModuleMismatchPreviewView and injected into #htmx-modal-body via JS. #}
+
+<p class="text-muted small mb-3">Comparing the module currently in NetBox with the LibreNMS inventory data.</p>
+
+<table class="table table-bordered table-sm mb-3">
+    <thead>
+        <tr>
+            <th style="width:25%"></th>
+            <th>Currently in NetBox</th>
+            <th>From LibreNMS</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>Bay</strong></td>
+            <td colspan="2" class="text-center">{{ bay_name }}</td>
+        </tr>
+        <tr>
+            <td><strong>Module Type</strong></td>
+            <td{% if type_mismatch %} class="text-danger fw-semibold"{% endif %}>
+                {% if installed_module %}
+                    <a href="{{ installed_module.module_type.get_absolute_url }}">{{ installed_module.module_type.model }}</a>
+                {% else %}-{% endif %}
+            </td>
+            <td{% if type_mismatch %} class="text-danger fw-semibold"{% endif %}>{{ librenms_model }}</td>
+        </tr>
+        <tr>
+            <td><strong>Serial</strong></td>
+            <td{% if serial_mismatch %} class="text-warning fw-semibold"{% endif %}>{{ installed_serial|default:"-" }}</td>
+            <td{% if serial_mismatch %} class="text-warning fw-semibold"{% endif %}>{{ librenms_serial|default:"-" }}</td>
+        </tr>
+    </tbody>
+</table>
+
+{% if type_mismatch %}
+<div class="alert alert-warning py-2 mb-3">
+    <i class="mdi mdi-alert me-1"></i>
+    <strong>Different module type</strong> — the installed module type does not match LibreNMS.
+    Replacing will delete the current module and install <strong>{{ librenms_model }}</strong>.
+</div>
+{% elif serial_mismatch %}
+<div class="alert alert-info py-2 mb-3">
+    <i class="mdi mdi-information me-1"></i>
+    Same module type, different serial — the module may have been physically replaced.
+</div>
+{% endif %}
+
+{% if serial_conflict %}
+<div class="alert alert-danger py-2 mb-3">
+    <i class="mdi mdi-alert-circle me-1"></i>
+    <strong>Serial conflict:</strong> <code>{{ librenms_serial }}</code> is currently installed at
+    <strong>{{ serial_conflict.device.name }}</strong> /
+    Bay: <strong>{{ serial_conflict.module_bay.name }}</strong>.
+    <br><small>
+        <em>Replace</em> will also remove it from that location.
+        <em>Move</em> will update its location to this bay instead of creating a new entry.
+    </small>
+</div>
+{% elif serial_conflict_ambiguous %}
+<div class="alert alert-warning py-2 mb-3">
+    <i class="mdi mdi-alert me-1"></i>
+    <strong>Ambiguous serial conflict:</strong> Serial <code>{{ librenms_serial }}</code> is assigned to multiple
+    modules. Please resolve the conflict manually before proceeding.
+</div>
+{% endif %}
+
+<div class="d-flex gap-2 justify-content-end flex-wrap mt-3">
+    <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
+
+    {% if serial_mismatch and not type_mismatch and not serial_conflict and not serial_conflict_ambiguous and installed_module %}
+    {# Quick serial-only update — no delete/recreate needed #}
+    <form method="post"
+          action="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"
+          style="display:inline">
+        {% csrf_token %}
+        <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
+        <input type="hidden" name="serial" value="{{ librenms_serial }}">
+        <input type="hidden" name="server_key" value="{{ server_key }}">
+        <button type="submit" class="btn btn-warning">
+            <i class="mdi mdi-sync me-1"></i>Update Serial Only
+        </button>
+    </form>
+    {% endif %}
+
+    {% if serial_conflict %}
+    {# Move the existing module here rather than creating a new entry #}
+    <form method="post"
+          action="{% url 'plugins:netbox_librenms_plugin:move_module' pk=device_pk %}"
+          style="display:inline">
+        {% csrf_token %}
+        <input type="hidden" name="module_id" value="{{ installed_module.pk|default:'' }}">
+        <input type="hidden" name="conflict_module_id" value="{{ serial_conflict.pk }}">
+        <input type="hidden" name="target_bay_id" value="{{ target_bay_id }}">
+        <input type="hidden" name="server_key" value="{{ server_key }}">
+        <button type="submit" class="btn btn-info">
+            <i class="mdi mdi-arrow-right me-1"></i>Move from {{ serial_conflict.module_bay.name }}
+        </button>
+    </form>
+    {% endif %}
+
+    {# Replace: delete current + install fresh from LibreNMS data #}
+    {% if installed_module and not serial_conflict_ambiguous %}
+    <form method="post"
+          action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
+          style="display:inline">
+        {% csrf_token %}
+        <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
+        <input type="hidden" name="ent_index" value="{{ ent_index }}">
+        <input type="hidden" name="server_key" value="{{ server_key }}">
+        {% if serial_conflict %}
+        <input type="hidden" name="conflict_module_id" value="{{ serial_conflict.pk }}">
+        {% endif %}
+        <button type="submit" class="btn btn-danger">
+            <i class="mdi mdi-swap-horizontal me-1"></i>Replace Module
+        </button>
+    </form>
+    {% endif %}
+</div>

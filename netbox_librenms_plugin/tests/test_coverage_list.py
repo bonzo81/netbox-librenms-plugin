@@ -263,6 +263,33 @@ class TestLoadJobResults:
                         assert result == []
                         mock_logger.error.assert_called_once()
 
+    def test_load_job_results_sets_name_flags_from_job_data(self):
+        """_load_job_results mirrors use_sysname/strip_domain from job metadata."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        view = object.__new__(LibreNMSImportView)
+        mock_job = MagicMock()
+        mock_job.status = "completed"
+        mock_job.data = {
+            "device_ids": [1],
+            "filters": {},
+            "server_key": "default",
+            "vc_detection_enabled": False,
+            "use_sysname": False,
+            "strip_domain": True,
+        }
+
+        with patch("core.models.Job") as mock_job_cls:
+            mock_job_cls.objects.get.return_value = mock_job
+            with patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key", return_value="cache_key"):
+                with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
+                    mock_cache.get.return_value = {"device_id": 1, "hostname": "router1"}
+                    result = view._load_job_results(1)
+
+        assert len(result) == 1
+        assert view._use_sysname is False
+        assert view._strip_domain is True
+
 
 class TestGetTable:
     """Tests for get_table()."""
@@ -1143,8 +1170,70 @@ class TestGetViewFilterFields:
                                                     view.get(request)
                                                 mock_render.assert_called_once()
 
+    def test_get_settings_exception_in_inline_load(self):
+        """LibreNMSSettings exception inside filter block is caught."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        view, request = self._make_view(query_params={"apply_filters": "1", "librenms_location": "DC1"})
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+
+        with patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)):
+            with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
+                # First call (module-level read at top of get()) succeeds
+                # Second call (inline, inside the filter block) raises
+                first_call = [True]
+
+                def first_then_raise(*a, **kw):
+                    if first_call:
+                        first_call.pop()
+                        return None
+                    raise Exception("DB error")
+
+                mock_settings.objects.first.side_effect = first_then_raise
+                mock_settings.objects.get_or_create.return_value = (None, False)
+
+                with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
+                    mock_pref.return_value = None
+
+                    mock_form_cls = MagicMock()
+                    mock_form = MagicMock()
+                    mock_form.is_valid.return_value = True
+                    mock_form.cleaned_data = {
+                        "enable_vc_detection": False,
+                        "clear_cache": False,
+                        "use_background_job": False,
+                    }
+                    mock_form_cls.return_value = mock_form
+                    view.filterset_form = mock_form_cls
+
+                    with patch("netbox_librenms_plugin.views.imports.list.render") as mock_render:
+                        mock_render.return_value = MagicMock()
+
+                        with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                            ) as mock_searches:
+                                mock_searches.return_value = []
+
+                                with patch.object(view, "get_server_info", return_value={}):
+                                    with patch(
+                                        "netbox_librenms_plugin.import_utils.get_cache_metadata_key"
+                                    ) as mock_meta:
+                                        mock_meta.return_value = "meta_key"
+                                        with patch(
+                                            "netbox_librenms_plugin.import_utils.get_device_count_for_filters"
+                                        ) as mock_count:
+                                            mock_count.return_value = 3
+                                            with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
+                                                mock_cache.get.return_value = None
+                                                # Should not raise despite the settings exception
+                                                view.get(request)
+                                                mock_render.assert_called_once()
+
     def test_get_device_count_exception_defaults_zero(self):
-        """Device count exception falls back to 0 (lines 304-306)."""
+        """Device count exception falls back to 0."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view, request = self._make_view(query_params={"apply_filters": "1", "librenms_location": "DC1"})
@@ -1202,7 +1291,7 @@ class TestGetViewFilterFields:
                                                     assert context["device_count"] == 0
 
     def test_get_cache_check_exception_continues(self):
-        """Cache check exception is logged and processing continues (lines 293-294)."""
+        """Cache check exception is logged and processing continues."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         view, request = self._make_view(query_params={"apply_filters": "1", "librenms_location": "DC1"})
@@ -1339,8 +1428,33 @@ class TestGetImportQuerysetFilterFields:
                     result = view._get_import_queryset()
                     assert result == []
 
+    def test_settings_exception_in_get_import_queryset(self):
+        """LibreNMSSettings exception in _get_import_queryset is caught."""
+        view = self._make_view(
+            filter_data={
+                "librenms_location": "DC1",
+                "enable_vc_detection": False,
+                "clear_cache": False,
+            }
+        )
+
+        with patch("netbox_librenms_plugin.views.imports.list.process_device_filters") as mock_process:
+            mock_process.return_value = ([], False)
+
+            with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
+                mock_pref.return_value = None
+
+                with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
+                    mock_settings.objects.first.side_effect = Exception("DB error")
+
+                    with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
+                        mock_cache.get.return_value = None
+                        # Should not raise
+                        result = view._get_import_queryset()
+                        assert result == []
+
     def test_cache_metadata_found_sets_timestamps(self):
-        """When cache metadata is found, timestamps are set (lines 523-527)."""
+        """When cache metadata is found, timestamps are set."""
         mock_device = {"device_id": 1, "_validation": {}}
         view = self._make_view(
             filter_data={

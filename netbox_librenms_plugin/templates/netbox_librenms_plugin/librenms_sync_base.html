@@ -73,6 +73,7 @@
                 <td class="text-end pe-3">
                     {% if not mapping.is_configured %}
                     {% if lookup_device_model_name == "device" or lookup_device_model_name == "virtualmachine" %}
+                    {% if lookup_device_pk == object.pk %}
                     <form method="post"
                           action="{% url 'plugins:netbox_librenms_plugin:remove_server_mapping' pk=lookup_device_pk %}"
                           style="display:inline"
@@ -85,6 +86,11 @@
                             <i class="mdi mdi-trash-can-outline"></i> Remove
                         </button>
                     </form>
+                    {% else %}
+                    <span class="text-muted small" title="Mapping belongs to VC sync device {{ librenms_sync_device|escape }} — navigate there to remove it">
+                        <i class="mdi mdi-information-outline me-1"></i>Managed by VC sync device
+                    </span>
+                    {% endif %}
                     {% endif %}
                     {% endif %}
                 </td>
@@ -621,6 +627,14 @@
         </li>
         {% endif %}
         {% endwith %}
+        {% if module_sync and object|meta:"model_name" == "device" %}
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="modules-tab" data-tab="modules" data-bs-toggle="tab"
+                data-bs-target="#modules" type="button" role="tab" aria-controls="modules">
+                Modules
+            </button>
+        </li>
+        {% endif %}
     </ul>
     <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top"
         title="Select preferred interface name field"
@@ -649,6 +663,13 @@
         data-tab-id="ipaddresses">
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
+
+    {% if module_sync and object|meta:"model_name" == "device" %}
+    <div class="tab-pane fade" id="modules" role="tabpanel" aria-labelledby="modules-tab"
+        data-tab-id="modules">
+        {% include 'netbox_librenms_plugin/_module_sync.html' %}
+    </div>
+    {% endif %}
 
     {% with model_name=object|meta:"model_name" %}
     {% if model_name == "device" %}
@@ -708,6 +729,19 @@
 
 <!-- Add to LibreNMS Modal Placeholder-->
 <div id="modal-div"></div>
+
+<!-- Shared HTMX Modal (used by module replace and other dynamic content flows) -->
+<div class="modal fade" id="htmx-modal" tabindex="-1" aria-labelledby="htmx-modal-label" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content" id="htmx-modal-content">
+            <div class="modal-body text-center py-3">
+                <span id="htmx-modal-label" class="visually-hidden">Loading</span>
+                <i class="mdi mdi-loading mdi-spin mdi-36px"></i>
+                <p class="mt-2">Loading…</p>
+            </div>
+        </div>
+    </div>
+</div>
 
 {% if mismatched_device %}
 <!-- Device Identity Mismatch Modal -->
@@ -975,20 +1009,23 @@
             </div>
             <form method="post" action="{% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk %}">
                 {% csrf_token %}
+                <input type="hidden" name="librenms_os" value="{{ platform_info.librenms_os }}">
                 <div class="modal-body">
                     <div class="alert alert-warning">
                         <i class="mdi mdi-information"></i>
-                        The platform <strong>{{ platform_info.platform_name }}</strong> does not exist in NetBox.
+                        No NetBox platform matches LibreNMS OS <strong>{{ platform_info.librenms_os }}</strong>.
                     </div>
                     <p>This will:</p>
                     <ol>
-                        <li>Create a new Platform named <strong>{{ platform_info.platform_name }}</strong></li>
+                        <li>Create a new Platform with the name below (defaults to the LibreNMS OS name)</li>
                         <li>Assign it to this device</li>
+                        <li>Optionally add a platform mapping so future syncs match correctly</li>
                     </ol>
                     <div class="mb-3">
                         <label for="platform_name" class="form-label">Platform Name</label>
                         <input type="text" class="form-control" id="platform_name" name="platform_name"
-                               value="{{ platform_info.platform_name }}" required>
+                               value="{{ platform_info.platform_name }}" required
+                               data-librenms-os="{{ platform_info.librenms_os }}">
                     </div>
                     <div class="mb-3">
                         <label for="manufacturer" class="form-label">Manufacturer (optional)</label>
@@ -1002,6 +1039,20 @@
                         </select>
                         <small class="form-text text-muted">Optionally associate with device manufacturer</small>
                     </div>
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="create_mapping"
+                                   id="create_mapping" value="1" checked>
+                            <label class="form-check-label" for="create_mapping">
+                                Add platform mapping
+                                (<code>{{ platform_info.librenms_os }}</code> → new platform)
+                            </label>
+                        </div>
+                        <small class="form-text text-warning fw-semibold" id="mapping-name-mismatch-note" style="display:none;">
+                            <i class="mdi mdi-alert-outline"></i>
+                            Name differs from LibreNMS OS — mapping is required for future matching
+                        </small>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -1013,6 +1064,20 @@
         </div>
     </div>
 </div>
+<script>
+(function () {
+    var input = document.getElementById('platform_name');
+    var note = document.getElementById('mapping-name-mismatch-note');
+    if (!input || !note) return;
+    var original = (input.dataset.librenmsOs || '').toLowerCase();
+    function updateNote() {
+        var differs = input.value.trim().toLowerCase() !== original;
+        note.style.display = differs ? '' : 'none';
+    }
+    input.addEventListener('input', updateNote);
+    updateNote();
+})();
+</script>
 {% endif %}
 
 {% endblock %} <!-- End content -->

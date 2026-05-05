@@ -420,8 +420,12 @@ class TestDeviceImportHelperMixin:
                         "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
                         return_value={"status": "importable"},
                     ):
-                        request = _make_request()
-                        result_device, validation, selections = view.get_validated_device_with_selections(1, request)
+                        with patch("netbox_librenms_plugin.views.imports.actions.cache") as mock_cache:
+                            mock_cache.get.return_value = None
+                            request = _make_request()
+                            result_device, validation, selections = view.get_validated_device_with_selections(
+                                1, request
+                            )
         assert result_device is libre_device
         assert validation is not None
 
@@ -943,7 +947,10 @@ class TestShouldEnableVCDetection:
     def test_enable_vc_detection_from_post(self):
         view = self._make_view()
         request = _make_request(post={"enable_vc_detection": "on"})
-        assert view._should_enable_vc_detection(1, request) is True
+        with patch("netbox_librenms_plugin.views.imports.actions.cache") as mock_cache:
+            mock_cache.get.return_value = None
+            result = view._should_enable_vc_detection(1, request)
+        assert result is True
 
 
 class TestBuildSyncInfoNoPlatform:
@@ -3604,6 +3611,37 @@ class TestBulkImportDevicesMorePaths:
 
         mock_redirect.assert_called()
 
+    def test_vc_detection_disabled_in_post_is_passed_to_device_import(self):
+        """vc_detection_enabled=off from POST must propagate to bulk import call."""
+        view = self._make_view()
+        request = self._make_base_request(["1"])
+        request.POST.get = MagicMock(side_effect=lambda k, d=None: "off" if k == "enable_vc_detection" else None)
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
+                ) as mock_bulk_import:
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+                        return_value={"success": [], "failed": [], "skipped": []},
+                    ):
+                        with patch(
+                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                            return_value={"device_id": 1},
+                        ):
+                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
+                                with patch(
+                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
+                                ):
+                                    view.post(request)
+
+        call_kwargs = mock_bulk_import.call_args.kwargs
+        assert call_kwargs["sync_options"]["vc_detection_enabled"] is False
+
     def test_invalid_role_and_rack_values_log_warning(self):
         """Lines 534-535, 544-546: invalid role_id/rack_id → warning."""
         view = self._make_view()
@@ -3906,11 +3944,15 @@ class TestBulkImportEdgePaths:
                 "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    side_effect=DjPD("No permission"),
+                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                    return_value={"device_id": 1, "hostname": "test-device"},
                 ):
-                    with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                        response = view.post(request)
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                        side_effect=DjPD("No permission"),
+                    ):
+                        with patch("netbox_librenms_plugin.views.imports.actions.messages"):
+                            response = view.post(request)
 
         assert response.headers.get("HX-Redirect") is not None
 

@@ -549,30 +549,15 @@ class TestAddDeviceToLibreNMSViewGetObject:
             result = view.get_object(5, "virtualmachine")
         assert result is mock_vm
 
-    def test_no_type_tries_device_first(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+    def test_device_type_fetches_device(self):
+        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView, Device
 
         view = _make_view(AddDeviceToLibreNMSView)
         mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_dev_cls:
-            mock_dev_cls.objects.get.return_value = mock_device
-            mock_dev_cls.DoesNotExist = Exception
-            result = view.get_object(1)
+        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device) as mock_get:
+            result = view.get_object(1, "device")
         assert result is mock_device
-
-    def test_device_not_found_falls_back_to_vm(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
-
-        view = _make_view(AddDeviceToLibreNMSView)
-        mock_vm = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_dev_cls:
-            mock_dev_cls.DoesNotExist = Device.DoesNotExist
-            mock_dev_cls.objects.get.side_effect = Device.DoesNotExist
-            with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_vm):
-                result = view.get_object(1)
-        assert result is mock_vm
+        mock_get.assert_called_once_with(Device, pk=1)
 
 
 class TestAddDeviceToLibreNMSViewPost:

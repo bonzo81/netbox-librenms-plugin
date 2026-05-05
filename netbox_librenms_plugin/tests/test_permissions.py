@@ -971,7 +971,7 @@ class TestRemoveServerMappingViewErrorHandling:
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
 
         request = MagicMock()
-        request.POST = {"server_key": server_key, **(post_extra or {})}
+        request.POST = {"server_key": server_key, "object_type": "device", **(post_extra or {})}
         request.user = MagicMock()
         request.user.has_perm.return_value = True
 

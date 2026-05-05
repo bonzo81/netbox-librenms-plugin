@@ -216,6 +216,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         # indexing.  Some vendors use 0-based positions (0,1,2,3,4) instead of the
         # RFC 2737 standard 1-based (1,2,3,4,5).  If any raw position is 0, shift
         # all valid positions up by 1 so the resulting set is always 1-based.
+        # Exception: if *every* position is 0 the data is invalid (all members
+        # would collide on the same slot) — skip the shift and fall through to
+        # the per-member idx+1 fallback below.
         raw_positions = []
         for chassis in chassis_items:
             raw = chassis.get("entPhysicalParentRelPos")
@@ -225,7 +228,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
                 raw_positions.append(None)
 
         valid_positions = [p for p in raw_positions if p is not None]
-        zero_based = bool(valid_positions) and min(valid_positions) == 0
+        zero_based = bool(valid_positions) and min(valid_positions) == 0 and max(valid_positions) > 0
 
         # Identify the master member by matching the LibreNMS device serial
         # against the ENTITY-MIB serials.  The device-level serial reported by
@@ -592,7 +595,6 @@ def create_virtual_chassis_with_members(
                 )
                 members_created += 1
 
-            # Validate member count
             # Validate member count — exclude master-slot entries with blank serials
             expected_members = len(
                 [

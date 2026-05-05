@@ -455,7 +455,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 return HttpResponse(
                     '<div class="alert alert-danger mb-0">'
                     "No valid devices selected. "
-                    f"{len(errors)} error(s) occurred: {' '.join(errors) if errors else 'Please check device validation status.'}"
+                    f"{len(errors)} error(s) occurred: {' '.join(escape(e) for e in errors) if errors else 'Please check device validation status.'}"
                     "</div>",
                     status=400,
                 )
@@ -698,11 +698,11 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 )
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
-        except Exception as exc:  # pragma: no cover - defensive guard
+        except Exception:  # pragma: no cover - defensive guard
             logger.exception("Error during bulk import")
             if request.headers.get("HX-Request"):
-                return HttpResponse(str(exc), status=500)
-            messages.error(request, f"Bulk import failed: {exc}")
+                return HttpResponse("Import failed. Please check server logs.", status=500)
+            messages.error(request, "Bulk import failed. Please check server logs.")
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         # Combine results
@@ -1278,6 +1278,16 @@ class DeviceConflictActionView(
                     if err := _save_device(existing_device):
                         return err
                     logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
+                elif match_result.get("match_type") == "ambiguous":
+                    ambiguity_source = match_result.get("ambiguity_source", "mapping")
+                    if ambiguity_source == "platform":
+                        target = "Platforms"
+                    else:
+                        target = "Platform Mappings"
+                    return HttpResponse(
+                        f"Multiple {target} match OS '{escape(librenms_os)}' — resolve the conflict in {target}",
+                        status=400,
+                    )
                 else:
                     return HttpResponse(f"Platform '{escape(librenms_os)}' not found in NetBox", status=400)
             else:
@@ -1390,6 +1400,132 @@ class DeviceConflictActionView(
         response = self.render_device_row(request, libre_device, validation, selections)
         response["HX-Trigger"] = "closeModal"
         return response
+
+
+class AddDeviceTypeMappingView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """HTMX view to create a DeviceTypeMapping from the import validation modal."""
+
+    def post(self, request, device_id):
+        """Create a DeviceTypeMapping linking the LibreNMS hardware string to a NetBox DeviceType."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        # Check plugin write permission early (cheap, no API call needed).
+        if error := self.require_write_permission():
+            return error
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        from dcim.models import DeviceType
+
+        libre_device = fetch_device_with_cache(device_id, self.librenms_api)
+        if not libre_device:
+            return HttpResponse(
+                '<span class="text-danger small">Device not found in LibreNMS.</span>',
+                status=404,
+            )
+
+        hardware = (libre_device.get("hardware") or "").strip()
+        if not hardware or hardware == "-":
+            return HttpResponse(
+                '<span class="text-danger small">Device has no hardware string — cannot create mapping.</span>',
+                status=400,
+            )
+
+        device_type_id = request.POST.get("device_type_id", "").strip()
+        if not device_type_id:
+            return HttpResponse(
+                '<span class="text-danger small">Please select a device type before submitting.</span>',
+                status=400,
+            )
+
+        try:
+            device_type_id = int(device_type_id)
+        except (ValueError, TypeError):
+            return HttpResponse(
+                '<span class="text-danger small">Invalid device type selection.</span>',
+                status=400,
+            )
+
+        try:
+            device_type = DeviceType.objects.get(pk=device_type_id)
+        except DeviceType.DoesNotExist:
+            return HttpResponse(
+                '<span class="text-danger small">Selected device type not found.</span>',
+                status=404,
+            )
+
+        # Resolve the existing mapping first so we only require the permission
+        # actually needed: "add" for a new mapping, "change" for an update.
+        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware=hardware.lower()).first()
+        if existing_mapping:
+            self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+        else:
+            self.required_object_permissions = {"POST": [("add", DeviceTypeMapping)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        try:
+            with transaction.atomic():
+                # Lock the row to close the window between the upfront permission
+                # check and the actual write (select_for_update prevents a concurrent
+                # INSERT from slipping through undetected).
+                locked = (
+                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware=hardware.lower()).first()
+                )
+                if locked and not existing_mapping:
+                    # A concurrent request created the mapping after our upfront read.
+                    # Re-check that this user has change permission before overwriting.
+                    self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+                    if error := self.require_object_permissions("POST"):
+                        return error
+                if locked:
+                    if locked.netbox_device_type_id != device_type_id:
+                        locked.netbox_device_type = device_type
+                        locked.save()
+                else:
+                    DeviceTypeMapping.objects.create(
+                        librenms_hardware=hardware.lower(),
+                        netbox_device_type=device_type,
+                    )
+        except Exception as exc:
+            logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
+            return HttpResponse(
+                '<span class="text-danger small">Error saving mapping. Please try again.</span>',
+                status=500,
+            )
+
+        # Clear cached LibreNMS device data so re-validation picks up the new mapping
+        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
+        cache.delete(cache_key)
+
+        # Re-render the modal content as an OOB swap so it updates in place
+        detail_view = DeviceValidationDetailsView()
+        detail_view._librenms_api = self._librenms_api
+        modal_html = detail_view.get(request, device_id).content.decode("utf-8")
+        oob_modal = f'<div id="htmx-modal-content" hx-swap-oob="innerHTML">{modal_html}</div>'
+
+        # Re-validate and include the background table row as a second OOB swap so the
+        # row reflects the new mapping immediately without a secondary JS-triggered request.
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if libre_device is not None and validation is not None:
+            row_response = self.render_device_row(request, libre_device, validation, selections)
+            row_html = row_response.content.decode("utf-8")
+            # A <tr> following a <div> is invalid HTML and gets silently dropped by the browser
+            # parser when HTMX wraps the combined response in a <template> for parsing. Wrapping
+            # in <table><tbody> keeps the <tr> in a valid table context so HTMX finds and applies
+            # the OOB swap. The <div id="django-messages"> inside is foster-parented outside the
+            # table by the parser, so both OOB elements are preserved.
+            row_html = f"<table><tbody>{row_html}</tbody></table>"
+        else:
+            row_html = ""
+
+        return HttpResponse(oob_modal + row_html, content_type="text/html")
 
 
 class SaveUserPrefView(LibreNMSPermissionMixin, View):

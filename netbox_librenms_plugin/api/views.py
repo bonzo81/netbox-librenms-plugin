@@ -12,13 +12,39 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.filters import InterfaceTypeMappingFilterSet
+from netbox_librenms_plugin.filters import (
+    DeviceTypeMappingFilterSet,
+    InterfaceTypeMappingFilterSet,
+    InventoryIgnoreRuleFilterSet,
+    ModuleBayMappingFilterSet,
+    ModuleTypeMappingFilterSet,
+    NormalizationRuleFilterSet,
+    PlatformMappingFilterSet,
+)
 from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
-from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.models import (
+    DeviceTypeMapping,
+    InterfaceTypeMapping,
+    InventoryIgnoreRule,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+    NormalizationRule,
+    PlatformMapping,
+)
 
-from .serializers import InterfaceTypeMappingSerializer
+from .serializers import (
+    DeviceTypeMappingSerializer,
+    InterfaceTypeMappingSerializer,
+    InventoryIgnoreRuleSerializer,
+    ModuleBayMappingSerializer,
+    ModuleTypeMappingSerializer,
+    NormalizationRuleSerializer,
+    PlatformMappingSerializer,
+)
 
 logger = logging.getLogger(__name__)
+
+_LIBRENMS_JOB_NAMES = (FilterDevicesJob.Meta.name, ImportDevicesJob.Meta.name)
 
 
 class LibreNMSPluginPermission(BasePermission):
@@ -45,6 +71,66 @@ class InterfaceTypeMappingViewSet(NetBoxModelViewSet):
     serializer_class = InterfaceTypeMappingSerializer
 
 
+class DeviceTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for DeviceTypeMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = DeviceTypeMappingFilterSet
+
+    queryset = DeviceTypeMapping.objects.select_related("netbox_device_type")
+    serializer_class = DeviceTypeMappingSerializer
+
+
+class ModuleTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for ModuleTypeMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = ModuleTypeMappingFilterSet
+
+    queryset = ModuleTypeMapping.objects.select_related("netbox_module_type")
+    serializer_class = ModuleTypeMappingSerializer
+
+
+class ModuleBayMappingViewSet(NetBoxModelViewSet):
+    """API viewset for ModuleBayMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = ModuleBayMappingFilterSet
+
+    queryset = ModuleBayMapping.objects.all()
+    serializer_class = ModuleBayMappingSerializer
+
+
+class NormalizationRuleViewSet(NetBoxModelViewSet):
+    """API viewset for NormalizationRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = NormalizationRuleFilterSet
+
+    queryset = NormalizationRule.objects.select_related("manufacturer")
+    serializer_class = NormalizationRuleSerializer
+
+
+class InventoryIgnoreRuleViewSet(NetBoxModelViewSet):
+    """API viewset for InventoryIgnoreRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = InventoryIgnoreRuleFilterSet
+
+    queryset = InventoryIgnoreRule.objects.all()
+    serializer_class = InventoryIgnoreRuleSerializer
+
+
+class PlatformMappingViewSet(NetBoxModelViewSet):
+    """API viewset for PlatformMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = PlatformMappingFilterSet
+
+    queryset = PlatformMapping.objects.select_related("netbox_platform")
+    serializer_class = PlatformMappingSerializer
+
+
 @api_view(["POST"])
 @permission_classes([LibreNMSPluginPermission])
 def sync_job_status(request, job_pk):
@@ -63,20 +149,26 @@ def sync_job_status(request, job_pk):
     Returns:
         JsonResponse with updated status
     """
-    _LIBRENMS_JOB_NAMES = (FilterDevicesJob.Meta.name, ImportDevicesJob.Meta.name)
     try:
         job = Job.objects.get(pk=job_pk, user=request.user, name__in=_LIBRENMS_JOB_NAMES)
     except Job.DoesNotExist:
         return JsonResponse({"error": "Job not found"}, status=404)
 
     # Get RQ job status
-    queue = get_queue("default")
     try:
+        queue = get_queue("default")
         rq_job = RQJob.fetch(str(job.job_id), connection=queue.connection)
         rq_status = rq_job.get_status()
 
-        # If RQ job is stopped or failed, update database
+        # If RQ job is stopped or failed, update database (but never overwrite terminal states)
         if rq_job.is_stopped or rq_job.is_failed:
+            terminal_states = {
+                JobStatusChoices.STATUS_COMPLETED,
+                JobStatusChoices.STATUS_FAILED,
+                JobStatusChoices.STATUS_ERRORED,
+            }
+            if job.status in terminal_states:
+                return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": rq_status})
             job.status = JobStatusChoices.STATUS_FAILED
             if not job.completed:
                 job.completed = timezone.now()

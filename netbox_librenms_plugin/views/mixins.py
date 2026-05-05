@@ -62,6 +62,7 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             if self.request.headers.get("HX-Request"):
                 return HttpResponse("", headers={"HX-Redirect": referrer})
 
+            # referrer is safe: validated by _get_safe_redirect_url via url_has_allowed_host_and_scheme
             return redirect(referrer)
         return None
 
@@ -81,6 +82,18 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             msg = error_message or "You do not have permission to perform this action."
             return JsonResponse({"error": msg}, status=403)
         return None
+
+
+class LibreNMSWritePermissionMixin(LibreNMSPermissionMixin):
+    """
+    Mixin for mutation views requiring LibreNMS plugin write permission.
+
+    Sets permission_required to 'change_librenmssettings' so that only users
+    with write access can access Create, Edit, Delete, BulkImport, and
+    BulkDelete views.
+    """
+
+    permission_required = PERM_CHANGE_PLUGIN
 
 
 class NetBoxObjectPermissionMixin:
@@ -144,6 +157,7 @@ class NetBoxObjectPermissionMixin:
             if self.request.headers.get("HX-Request"):
                 return HttpResponse("", headers={"HX-Redirect": referrer})
 
+            # referrer is safe: validated by _get_safe_redirect_url via url_has_allowed_host_and_scheme
             return redirect(referrer)
         return None
 

@@ -4,14 +4,17 @@ from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.utils.text import slugify
 
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.utils.html import escape
 from django.views import View
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.utils import (
     find_by_librenms_id,
     get_librenms_sync_device,
@@ -194,7 +197,14 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
         match_result = match_librenms_hardware_to_device_type(hardware)
 
-        if not match_result or not match_result["matched"]:
+        if match_result is None:
+            messages.error(
+                request,
+                f"Ambiguous hardware match for '{hardware}': multiple matching mappings/device types found.",
+            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        if not match_result["matched"]:
             messages.error(
                 request,
                 f"No matching DeviceType found for hardware '{hardware}'",
@@ -300,6 +310,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
     def post(self, request, pk):
         """Create a new platform and assign it to the device."""
+        # Read create_mapping before permission check so it can be included in the check.
+        create_mapping = bool(request.POST.get("create_mapping"))
+        if create_mapping:
+            self.required_object_permissions = {
+                "POST": [
+                    ("change", Device),
+                    ("add", Platform),
+                    ("add", PlatformMapping),
+                ],
+            }
+
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -308,6 +329,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         platform_name = request.POST.get("platform_name")
         manufacturer_id = request.POST.get("manufacturer")
+        librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
 
         if not platform_name:
             messages.error(request, "Platform name is required")
@@ -331,6 +353,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             try:
                 platform = Platform(
                     name=platform_name,
+                    slug=slugify(platform_name),
                     manufacturer=manufacturer,
                 )
                 platform.full_clean()
@@ -396,10 +419,46 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 )
                 return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        messages.success(
-            request,
-            f"Created platform '{platform}' and assigned to device",
-        )
+            mapping_created = False
+            mapping_error = None
+            mapping_existed = False
+            if create_mapping and librenms_os:
+                existing = PlatformMapping.objects.filter(librenms_os=librenms_os).first()
+                if existing is not None:
+                    mapping_existed = True
+                else:
+                    try:
+                        with transaction.atomic():
+                            mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
+                            mapping.full_clean()
+                            mapping.save()
+                        mapping_created = True
+                    except ValidationError as e:
+                        mapping_error = e.message_dict if hasattr(e, "message_dict") else str(e)
+                        logger.exception("Failed to create PlatformMapping '%s' -> '%s'", librenms_os, platform_name)
+                    except IntegrityError:
+                        # Concurrent insert: mapping was created by another request
+                        mapping_existed = True
+                        logger.warning(
+                            "IntegrityError creating PlatformMapping '%s' -> '%s'; treating as already existing",
+                            librenms_os,
+                            platform_name,
+                        )
+
+        msg = f"Created platform '{platform}' and assigned to device"
+        if mapping_created:
+            msg += f" — platform mapping '{librenms_os}' → '{platform}' added"
+        messages.success(request, msg)
+        if mapping_error:
+            messages.warning(
+                request,
+                f"Platform mapping '{librenms_os}' → '{platform}' could not be created: {mapping_error}",
+            )
+        elif mapping_existed:
+            messages.info(
+                request,
+                f"Platform mapping for '{librenms_os}' already exists; not modified.",
+            )
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
@@ -512,7 +571,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         if object_type == "virtualmachine":
             object_type = "vm"
         if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
+            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
         target_model = VirtualMachine if object_type == "vm" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
 
@@ -616,7 +675,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if object_type == "virtualmachine":
             object_type = "vm"
         if object_type not in ("device", "vm"):
-            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
+            return HttpResponse(f"Invalid object_type: {escape(object_type)}", status=400)
 
         target_model = VirtualMachine if object_type == "vm" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}

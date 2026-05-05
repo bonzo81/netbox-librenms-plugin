@@ -1581,8 +1581,8 @@ class TestSingleIPAddressVerifyViewPost:
         data = json_mod.loads(response.content)
         assert data["status"] == "error"
 
-    def test_interface_from_device_used_when_no_cache(self):
-        """When no cache entry (port_id=None), first device interface is used."""
+    def test_interface_from_device_used_when_cache_has_no_port_id(self):
+        """When cache contains an IP entry with no port_id, first device interface is used."""
         import json as json_mod
 
         view = self._make_view()
@@ -1610,18 +1610,12 @@ class TestSingleIPAddressVerifyViewPost:
             patch.object(view, "_parse_ip_address", return_value=("10.0.0.1", 24)),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
-            patch.object(
-                view,
-                "_find_in_cache",
-                # Truthy cache_entry whose port_id (third element) is None
-                # → both cache enrichment and interfaces.first() fallback run
-                return_value=({"ip_address": "10.0.0.1", "prefix_length": 24}, None, None),
-            ),
             patch.object(view, "_find_existing_ip", return_value=(False, False, None)),
             patch.object(view, "_determine_status", return_value="sync"),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.IPAddressTable") as MockTable,
         ):
-            mock_cache.get.return_value = None
+            # Cache has an entry for this IP but no port_id → interfaces.first() fallback runs
+            mock_cache.get.return_value = {"ip_addresses": [{"ip_address": "10.0.0.1", "prefix_length": 24}]}
             mock_table_instance = MagicMock()
             mock_table_instance.render_status.return_value = "<span>sync</span>"
             MockTable.return_value = mock_table_instance
@@ -1629,7 +1623,7 @@ class TestSingleIPAddressVerifyViewPost:
             response = view.post(req)
 
         assert response.status_code == 200
-        # Cache entry was truthy but had no port_id → first device interface used
+        # Cache entry found but has no port_id → first device interface used
         mock_obj.interfaces.first.assert_called_once()
 
     def test_verify_with_non_default_server_key(self):
