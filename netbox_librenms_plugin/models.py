@@ -13,6 +13,34 @@ from netbox.models import NetBoxModel
 logger = logging.getLogger(__name__)
 
 
+def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> None:
+    """Verify that *replacement* is a valid back-reference template for *compiled*.
+
+    ``re.sub(pattern, replacement, test_string)`` only evaluates group references
+    when the pattern actually matches the test string.  Using the pattern text
+    itself as the test string may silently accept an invalid replacement when the
+    pattern does not match its own source (e.g. ``^(\\d+)$`` never matches the
+    string ``^(\\d+)$``).
+
+    This function constructs a synthetic test pattern with one trivial capture
+    group per group in *compiled* (named groups are preserved so ``\\g<name>``
+    references are validated correctly), guaranteeing a match and ensuring all
+    back-references are exercised.
+
+    Raises ``re.error`` or ``IndexError`` if the replacement is invalid.
+    """
+    n = compiled.groups
+    if n == 0:
+        test_pat = re.compile("a")
+        test_str = "a"
+    else:
+        name_by_pos = {v: k for k, v in compiled.groupindex.items()}
+        parts = [f"(?P<{name_by_pos[i]}>a)" if i in name_by_pos else "(a)" for i in range(1, n + 1)]
+        test_pat = re.compile("".join(parts))
+        test_str = "a" * n
+    test_pat.sub(replacement, test_str)
+
+
 class FullCleanOnSaveMixin:
     """Mixin that calls full_clean() on every save() so custom clean() logic runs even on programmatic saves."""
 
@@ -289,7 +317,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
             except re.error as e:
                 raise ValidationError({"librenms_name": f"Invalid regex: {e}"})
             try:
-                pattern.sub(self.netbox_bay_name, self.librenms_name)
+                _validate_replacement_template(pattern, self.netbox_bay_name)
             except (re.error, IndexError) as e:
                 raise ValidationError({"netbox_bay_name": f"Invalid replacement: {e}"})
 
@@ -397,7 +425,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
             raise ValidationError({"match_pattern": f"Invalid regex: {e}"})
         # Validate the replacement template by running a dummy substitution
         try:
-            compiled.sub(self.replacement, "")
+            _validate_replacement_template(compiled, self.replacement)
         except (re.error, IndexError) as e:
             raise ValidationError({"replacement": f"Invalid replacement template: {e}"})
 

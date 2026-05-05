@@ -2162,3 +2162,95 @@ class TestUpdateModuleSerialViewBehavior:
         mock_msg.success.assert_called_once()
         assert "NEW-SN" in mock_msg.success.call_args[0][1]
         mock_redirect.assert_called_once()
+
+
+# =============================================================================
+# TestBuildTableRowsBayCollisionDetection (Issue #65)
+# =============================================================================
+
+
+class TestBuildTableRowsBayCollisionDetection:
+    """_build_table_rows merges module-scoped bays into a deterministic flat dict.
+
+    When two modules expose bays with the same name the module with the lower PK
+    wins (first-match-wins with sorted module IDs).  Device-level bays always
+    take precedence over module-scoped bays.
+    """
+
+    def _make_bay(self, name, pk):
+        from unittest.mock import MagicMock
+
+        bay = MagicMock()
+        bay.name = name
+        bay.pk = pk
+        return bay
+
+    def test_no_collision_passthrough(self):
+        """When bay names are unique across modules, all bays are in all_bays."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = BaseModuleTableView.__new__(BaseModuleTableView)
+        bay_a = self._make_bay("Slot 1", 10)
+        bay_b = self._make_bay("Slot 2", 11)
+
+        device_bays = {}
+        module_scoped_bays = {
+            1: {"Slot 1": bay_a},
+            2: {"Slot 2": bay_b},
+        }
+
+        all_bays = view._compute_all_bays(device_bays, module_scoped_bays)
+        assert "Slot 1" in all_bays
+        assert "Slot 2" in all_bays
+        assert all_bays["Slot 1"] is bay_a
+        assert all_bays["Slot 2"] is bay_b
+
+    def test_collision_lower_pk_wins(self):
+        """When two modules share a bay name, the one with the lower module PK wins."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = BaseModuleTableView.__new__(BaseModuleTableView)
+        bay_low = self._make_bay("Slot 1", 5)
+        bay_high = self._make_bay("Slot 1", 99)
+
+        device_bays = {}
+        module_scoped_bays = {
+            10: {"Slot 1": bay_high},  # lower module PK gets processed first
+            2: {"Slot 1": bay_low},
+        }
+
+        all_bays = view._compute_all_bays(device_bays, module_scoped_bays)
+        # Module PK 2 < 10 → bay_low wins
+        assert all_bays["Slot 1"] is bay_low
+
+    def test_device_bays_take_precedence_over_module_bays(self):
+        """Device-level bays always override same-named module-scoped bays."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = BaseModuleTableView.__new__(BaseModuleTableView)
+        device_bay = self._make_bay("Slot 1", 1)
+        module_bay = self._make_bay("Slot 1", 2)
+
+        device_bays = {"Slot 1": device_bay}
+        module_scoped_bays = {1: {"Slot 1": module_bay}}
+
+        all_bays = view._compute_all_bays(device_bays, module_scoped_bays)
+        assert all_bays["Slot 1"] is device_bay
+
+    def test_collision_logs_debug(self, caplog):
+        """Collision names are logged at DEBUG level."""
+        import logging
+
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = BaseModuleTableView.__new__(BaseModuleTableView)
+        bay_a = self._make_bay("Slot 1", 1)
+        bay_b = self._make_bay("Slot 1", 2)
+
+        device_bays = {}
+        module_scoped_bays = {1: {"Slot 1": bay_a}, 2: {"Slot 1": bay_b}}
+
+        with caplog.at_level(logging.DEBUG, logger="netbox_librenms_plugin.views.base.modules_view"):
+            view._compute_all_bays(device_bays, module_scoped_bays)
+
+        assert any("Slot 1" in msg for msg in caplog.messages)

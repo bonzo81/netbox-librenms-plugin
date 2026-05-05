@@ -1,5 +1,5 @@
+import logging
 import re
-from collections import ChainMap
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -12,6 +12,8 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # entPhysicalClass values relevant for module sync
@@ -408,6 +410,33 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             top_items.append(item)
         return top_items
 
+    @staticmethod
+    def _compute_all_bays(device_bays: dict, module_scoped_bays: dict) -> dict:
+        """Build a deterministic flat bay lookup from module-scoped and device bays.
+
+        Module IDs are sorted so the first-match-wins behaviour is stable across
+        runs (lower PK wins on collision).  Device-level bays are merged last so
+        they always take precedence over module-scoped bays.
+
+        Logs a DEBUG message when the same bay name appears in more than one
+        module scope.
+        """
+        module_bay_flat: dict = {}
+        collision_names: set = set()
+        for mid in sorted(module_scoped_bays):
+            for name, bay in module_scoped_bays[mid].items():
+                if name in module_bay_flat:
+                    collision_names.add(name)
+                else:
+                    module_bay_flat[name] = bay
+        all_bays = {**module_bay_flat, **device_bays}
+        if collision_names:
+            logger.debug(
+                "Module-scoped bay name collisions (first-match by module PK kept): %s",
+                sorted(collision_names),
+            )
+        return all_bays
+
     def _build_table_rows(
         self,
         top_items,
@@ -421,8 +450,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         manufacturer=None,
     ):
         """Build table rows from top-level items and their sub-components."""
-        # ChainMap preserves scope ordering — device-level bays take precedence.
-        all_bays = ChainMap(device_bays, *module_scoped_bays.values())
+        all_bays = self._compute_all_bays(device_bays, module_scoped_bays)
         # Precompute per-module sibling bay counts to avoid N+1 in has_nested_name_conflict.
         sibling_counts = {mid: len(bays) for mid, bays in module_scoped_bays.items()}
         table_data = []
@@ -903,8 +931,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Try exact ModuleBayMapping entries against a candidate name.
 
         Checks class-scoped mappings first, then falls back to classless mappings.
-        When module_bays is a ChainMap, iterates the underlying scopes so that
-        the returned bay is from the correct scope (validated via _fpc_slot_matches).
+        Iterates the underlying dict scopes (supports both plain dicts and legacy
+        ChainMap instances) so the returned bay is validated via _fpc_slot_matches.
         Returns the matched module bay or None.
         """
         maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]

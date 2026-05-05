@@ -606,3 +606,143 @@ class TestPlatformMappingFormsExist:
 
         assert "librenms_os" in PlatformMappingImportForm._meta.fields
         assert "netbox_platform" in PlatformMappingImportForm._meta.fields
+
+
+# =============================================================================
+# TestReplacementTemplateValidation (Issue #64)
+# =============================================================================
+
+
+class TestReplacementTemplateValidation:
+    """Replacement template is validated against a guaranteed-match synthetic pattern."""
+
+    # --- ModuleBayMapping ---
+
+    def test_module_bay_mapping_rejects_out_of_range_backref(self):
+        """Referencing group \\2 when pattern has only one group should raise ValidationError."""
+        import pytest
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping.librenms_name = r"^(\d+)$"
+        mapping.librenms_class = ""
+        mapping.netbox_bay_name = r"Slot \2"  # only 1 group
+        mapping.is_regex = True
+        mapping.description = ""
+
+        with patch("netbox.models.NetBoxModel.clean"):
+            with pytest.raises(ValidationError) as exc_info:
+                mapping.clean()
+        assert "netbox_bay_name" in exc_info.value.message_dict
+
+    def test_module_bay_mapping_accepts_valid_backref(self):
+        """Valid \\1 back-reference on a single-group pattern is accepted."""
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping.librenms_name = r"^(\d+)$"
+        mapping.librenms_class = ""
+        mapping.netbox_bay_name = r"Slot \1"
+        mapping.is_regex = True
+        mapping.description = ""
+
+        with patch("netbox.models.NetBoxModel.clean"):
+            mapping.clean()  # Should not raise
+
+    def test_module_bay_mapping_accepts_named_backref(self):
+        """Valid \\g<n> back-reference on a named-group pattern is accepted."""
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping.librenms_name = r"^(?P<n>\d+)$"
+        mapping.librenms_class = ""
+        mapping.netbox_bay_name = r"Slot \g<n>"
+        mapping.is_regex = True
+        mapping.description = ""
+
+        with patch("netbox.models.NetBoxModel.clean"):
+            mapping.clean()  # Should not raise
+
+    def test_module_bay_mapping_rejects_invalid_named_backref(self):
+        """Referencing a named group that does not exist raises ValidationError."""
+        import pytest
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        mapping = ModuleBayMapping.__new__(ModuleBayMapping)
+        mapping.librenms_name = r"^(\d+)$"
+        mapping.librenms_class = ""
+        mapping.netbox_bay_name = r"Slot \g<missing>"
+        mapping.is_regex = True
+        mapping.description = ""
+
+        with patch("netbox.models.NetBoxModel.clean"):
+            with pytest.raises(ValidationError) as exc_info:
+                mapping.clean()
+        assert "netbox_bay_name" in exc_info.value.message_dict
+
+    # --- NormalizationRule ---
+
+    def test_normalization_rule_rejects_out_of_range_backref(self):
+        """Replacement referencing group \\2 when pattern has only 1 group raises ValidationError."""
+        import pytest
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rule = NormalizationRule.__new__(NormalizationRule)
+        rule.match_pattern = r"^(\w+)$"
+        rule.replacement = r"\2"  # only 1 group
+        rule.scope = "hardware"
+        rule.description = ""
+        _set_fk_cache(rule, "manufacturer", None)
+
+        with patch("netbox.models.NetBoxModel.clean"):
+            with pytest.raises(ValidationError) as exc_info:
+                rule.clean()
+        assert "replacement" in exc_info.value.message_dict
+
+    def test_normalization_rule_accepts_valid_backref(self):
+        """Replacement \\1 on single-group pattern is accepted."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rule = NormalizationRule.__new__(NormalizationRule)
+        rule.match_pattern = r"^(\w+)$"
+        rule.replacement = r"\1"
+        rule.scope = "hardware"
+        rule.description = ""
+        _set_fk_cache(rule, "manufacturer", None)
+
+        with patch("netbox.models.NetBoxModel.clean"):
+            rule.clean()  # Should not raise
+
+    def test_normalization_rule_accepts_named_backref(self):
+        """Replacement \\g<name> on named-group pattern is accepted."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rule = NormalizationRule.__new__(NormalizationRule)
+        rule.match_pattern = r"^(?P<hw>\w+)$"
+        rule.replacement = r"\g<hw>"
+        rule.scope = "hardware"
+        rule.description = ""
+        _set_fk_cache(rule, "manufacturer", None)
+
+        with patch("netbox.models.NetBoxModel.clean"):
+            rule.clean()  # Should not raise
+
+    def test_normalization_rule_empty_replacement_no_backref(self):
+        """Empty replacement string is valid for a pattern with capture groups."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rule = NormalizationRule.__new__(NormalizationRule)
+        rule.match_pattern = r"^(\d+)$"
+        rule.replacement = ""
+        rule.scope = "hardware"
+        rule.description = ""
+        _set_fk_cache(rule, "manufacturer", None)
+
+        with patch("netbox.models.NetBoxModel.clean"):
+            rule.clean()  # Should not raise
