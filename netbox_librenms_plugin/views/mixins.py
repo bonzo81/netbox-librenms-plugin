@@ -84,6 +84,18 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
         return None
 
 
+class LibreNMSWritePermissionMixin(LibreNMSPermissionMixin):
+    """
+    Mixin for mutation views requiring LibreNMS plugin write permission.
+
+    Sets permission_required to 'change_librenmssettings' so that only users
+    with write access can access Create, Edit, Delete, BulkImport, and
+    BulkDelete views.
+    """
+
+    permission_required = PERM_CHANGE_PLUGIN
+
+
 class NetBoxObjectPermissionMixin:
     """
     Mixin for views requiring specific NetBox object permissions.

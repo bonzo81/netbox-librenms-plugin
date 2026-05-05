@@ -101,7 +101,7 @@
 # Juniper MX transceiver bays
 # LibreNMS entPhysicalDescr format: "SFP+-10G-SR @ {fpc}/{pic}/{port}"
 # NetBox MPC-3D-16XGE-SFPP bay format: "Transceiver {pic}/{port}"
-- librenms_name: "[^@]+ @ \\d+/(\\d+)/(\\d+)"
+- librenms_name: "^[^@]+ @ \\d+/(\\d+)/(\\d+)$"
   librenms_class: "port"
   netbox_bay_name: "Transceiver \\1/\\2"
   is_regex: true

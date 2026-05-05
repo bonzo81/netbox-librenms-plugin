@@ -296,10 +296,9 @@ class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
 class DeviceTypeMappingForm(NetBoxModelForm):
     """Form for creating and editing device type mappings between LibreNMS and NetBox."""
 
-    netbox_device_type = forms.ModelChoiceField(
+    netbox_device_type = DynamicModelChoiceField(
         queryset=DeviceType.objects.all(),
         label="NetBox Device Type",
-        widget=forms.Select(attrs={"class": "form-select"}),
     )
 
     class Meta:
@@ -355,6 +354,11 @@ class DeviceTypeMappingFilterForm(NetBoxModelFilterSetForm):
 
 class ModuleTypeMappingForm(NetBoxModelForm):
     """Form for creating and editing module type mappings between LibreNMS and NetBox."""
+
+    netbox_module_type = DynamicModelChoiceField(
+        queryset=ModuleType.objects.all(),
+        label="NetBox Module Type",
+    )
 
     class Meta:
         """Meta options for ModuleTypeMappingForm."""

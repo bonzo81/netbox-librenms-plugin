@@ -29,6 +29,7 @@ class InterfaceTypeMappingTable(NetBoxTable):
 
         model = InterfaceTypeMapping
         fields = (
+            "pk",
             "id",
             "librenms_type",
             "librenms_speed",
@@ -37,6 +38,7 @@ class InterfaceTypeMappingTable(NetBoxTable):
             "actions",
         )
         default_columns = (
+            "pk",
             "id",
             "librenms_type",
             "librenms_speed",
@@ -60,6 +62,7 @@ class DeviceTypeMappingTable(NetBoxTable):
 
         model = DeviceTypeMapping
         fields = (
+            "pk",
             "id",
             "librenms_hardware",
             "netbox_device_type",
@@ -67,6 +70,7 @@ class DeviceTypeMappingTable(NetBoxTable):
             "actions",
         )
         default_columns = (
+            "pk",
             "id",
             "librenms_hardware",
             "netbox_device_type",
@@ -89,6 +93,7 @@ class ModuleTypeMappingTable(NetBoxTable):
 
         model = ModuleTypeMapping
         fields = (
+            "pk",
             "id",
             "librenms_model",
             "netbox_module_type",
@@ -96,6 +101,7 @@ class ModuleTypeMappingTable(NetBoxTable):
             "actions",
         )
         default_columns = (
+            "pk",
             "id",
             "librenms_model",
             "netbox_module_type",
@@ -120,6 +126,7 @@ class ModuleBayMappingTable(NetBoxTable):
 
         model = ModuleBayMapping
         fields = (
+            "pk",
             "id",
             "librenms_name",
             "librenms_class",
@@ -129,6 +136,7 @@ class ModuleBayMappingTable(NetBoxTable):
             "actions",
         )
         default_columns = (
+            "pk",
             "id",
             "librenms_name",
             "librenms_class",
@@ -156,6 +164,7 @@ class NormalizationRuleTable(NetBoxTable):
 
         model = NormalizationRule
         fields = (
+            "pk",
             "id",
             "scope",
             "manufacturer",
@@ -166,6 +175,7 @@ class NormalizationRuleTable(NetBoxTable):
             "actions",
         )
         default_columns = (
+            "pk",
             "id",
             "scope",
             "manufacturer",
@@ -214,6 +224,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
 
         model = InventoryIgnoreRule
         fields = (
+            "pk",
             "id",
             "name",
             "match_type",
@@ -225,6 +236,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "actions",
         )
         default_columns = (
+            "pk",
             "id",
             "name",
             "match_type",
@@ -250,6 +262,7 @@ class PlatformMappingTable(NetBoxTable):
 
         model = PlatformMapping
         fields = (
+            "pk",
             "id",
             "librenms_os",
             "netbox_platform",
@@ -257,6 +270,7 @@ class PlatformMappingTable(NetBoxTable):
             "actions",
         )
         default_columns = (
+            "pk",
             "id",
             "librenms_os",
             "netbox_platform",

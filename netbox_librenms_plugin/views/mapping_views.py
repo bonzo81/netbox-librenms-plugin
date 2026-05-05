@@ -53,7 +53,11 @@ from netbox_librenms_plugin.tables.mappings import (
     NormalizationRuleTable,
     PlatformMappingTable,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    LibreNMSPermissionMixin,
+    LibreNMSWritePermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 
 class InterfaceTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
@@ -68,7 +72,7 @@ class InterfaceTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListVi
     template_name = "netbox_librenms_plugin/interfacetypemapping_list.html"
 
 
-class InterfaceTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class InterfaceTypeMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """
     Provides a view for creating a new `InterfaceTypeMapping` object.
     """
@@ -78,7 +82,7 @@ class InterfaceTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEdit
 
 
 @register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
-class InterfaceTypeMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+class InterfaceTypeMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """
     Provides a view for bulk importing `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
     Supports three import methods: direct import, file upload, and data file.
@@ -96,7 +100,7 @@ class InterfaceTypeMappingView(LibreNMSPermissionMixin, generic.ObjectView):
     queryset = InterfaceTypeMapping.objects.all()
 
 
-class InterfaceTypeMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class InterfaceTypeMappingEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """
     Provides a view for editing a specific `InterfaceTypeMapping` object.
     """
@@ -105,7 +109,7 @@ class InterfaceTypeMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditVi
     form = InterfaceTypeMappingForm
 
 
-class InterfaceTypeMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+class InterfaceTypeMappingDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
     """
     Provides a view for deleting a specific `InterfaceTypeMapping` object.
     """
@@ -113,7 +117,7 @@ class InterfaceTypeMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDele
     queryset = InterfaceTypeMapping.objects.all()
 
 
-class InterfaceTypeMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+class InterfaceTypeMappingBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
     """
     Provides a view for deleting multiple `InterfaceTypeMapping` objects.
     """
@@ -143,7 +147,7 @@ class DeviceTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView)
     template_name = "netbox_librenms_plugin/devicetypemapping_list.html"
 
 
-class DeviceTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class DeviceTypeMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for creating a new DeviceTypeMapping object."""
 
     queryset = DeviceTypeMapping.objects.all()
@@ -151,7 +155,7 @@ class DeviceTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditVie
 
 
 @register_model_view(DeviceTypeMapping, "bulk_import", path="import", detail=False)
-class DeviceTypeMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+class DeviceTypeMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing DeviceTypeMapping objects."""
 
     queryset = DeviceTypeMapping.objects.all()
@@ -164,20 +168,20 @@ class DeviceTypeMappingView(LibreNMSPermissionMixin, generic.ObjectView):
     queryset = DeviceTypeMapping.objects.all()
 
 
-class DeviceTypeMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class DeviceTypeMappingEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for editing a specific DeviceTypeMapping object."""
 
     queryset = DeviceTypeMapping.objects.all()
     form = DeviceTypeMappingForm
 
 
-class DeviceTypeMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+class DeviceTypeMappingDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
     """Provides a view for deleting a specific DeviceTypeMapping object."""
 
     queryset = DeviceTypeMapping.objects.all()
 
 
-class DeviceTypeMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+class DeviceTypeMappingBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
     """Provides a view for deleting multiple DeviceTypeMapping objects."""
 
     queryset = DeviceTypeMapping.objects.all()
@@ -203,7 +207,7 @@ class ModuleTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView)
     template_name = "netbox_librenms_plugin/moduletypemapping_list.html"
 
 
-class ModuleTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class ModuleTypeMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for creating a new ModuleTypeMapping object."""
 
     queryset = ModuleTypeMapping.objects.all()
@@ -211,7 +215,7 @@ class ModuleTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditVie
 
 
 @register_model_view(ModuleTypeMapping, "bulk_import", path="import", detail=False)
-class ModuleTypeMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+class ModuleTypeMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing ModuleTypeMapping objects."""
 
     queryset = ModuleTypeMapping.objects.all()
@@ -224,20 +228,20 @@ class ModuleTypeMappingView(LibreNMSPermissionMixin, generic.ObjectView):
     queryset = ModuleTypeMapping.objects.all()
 
 
-class ModuleTypeMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class ModuleTypeMappingEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for editing a specific ModuleTypeMapping object."""
 
     queryset = ModuleTypeMapping.objects.all()
     form = ModuleTypeMappingForm
 
 
-class ModuleTypeMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+class ModuleTypeMappingDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
     """Provides a view for deleting a specific ModuleTypeMapping object."""
 
     queryset = ModuleTypeMapping.objects.all()
 
 
-class ModuleTypeMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+class ModuleTypeMappingBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
     """Provides a view for deleting multiple ModuleTypeMapping objects."""
 
     queryset = ModuleTypeMapping.objects.all()
@@ -263,7 +267,7 @@ class ModuleBayMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
     template_name = "netbox_librenms_plugin/modulebaymapping_list.html"
 
 
-class ModuleBayMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class ModuleBayMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for creating a new ModuleBayMapping object."""
 
     queryset = ModuleBayMapping.objects.all()
@@ -271,7 +275,7 @@ class ModuleBayMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView
 
 
 @register_model_view(ModuleBayMapping, "bulk_import", path="import", detail=False)
-class ModuleBayMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+class ModuleBayMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing ModuleBayMapping objects."""
 
     queryset = ModuleBayMapping.objects.all()
@@ -284,20 +288,20 @@ class ModuleBayMappingView(LibreNMSPermissionMixin, generic.ObjectView):
     queryset = ModuleBayMapping.objects.all()
 
 
-class ModuleBayMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class ModuleBayMappingEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for editing a specific ModuleBayMapping object."""
 
     queryset = ModuleBayMapping.objects.all()
     form = ModuleBayMappingForm
 
 
-class ModuleBayMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+class ModuleBayMappingDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
     """Provides a view for deleting a specific ModuleBayMapping object."""
 
     queryset = ModuleBayMapping.objects.all()
 
 
-class ModuleBayMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+class ModuleBayMappingBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
     """Provides a view for deleting multiple ModuleBayMapping objects."""
 
     queryset = ModuleBayMapping.objects.all()
@@ -323,7 +327,7 @@ class NormalizationRuleListView(LibreNMSPermissionMixin, generic.ObjectListView)
     template_name = "netbox_librenms_plugin/normalizationrule_list.html"
 
 
-class NormalizationRuleCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class NormalizationRuleCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for creating a new NormalizationRule object."""
 
     queryset = NormalizationRule.objects.all()
@@ -331,7 +335,7 @@ class NormalizationRuleCreateView(LibreNMSPermissionMixin, generic.ObjectEditVie
 
 
 @register_model_view(NormalizationRule, "bulk_import", path="import", detail=False)
-class NormalizationRuleBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+class NormalizationRuleBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing NormalizationRule objects."""
 
     queryset = NormalizationRule.objects.all()
@@ -344,20 +348,20 @@ class NormalizationRuleView(LibreNMSPermissionMixin, generic.ObjectView):
     queryset = NormalizationRule.objects.all()
 
 
-class NormalizationRuleEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class NormalizationRuleEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for editing a specific NormalizationRule object."""
 
     queryset = NormalizationRule.objects.all()
     form = NormalizationRuleForm
 
 
-class NormalizationRuleDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+class NormalizationRuleDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
     """Provides a view for deleting a specific NormalizationRule object."""
 
     queryset = NormalizationRule.objects.all()
 
 
-class NormalizationRuleBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+class NormalizationRuleBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
     """Provides a view for deleting multiple NormalizationRule objects."""
 
     queryset = NormalizationRule.objects.all()
@@ -383,7 +387,7 @@ class InventoryIgnoreRuleListView(LibreNMSPermissionMixin, generic.ObjectListVie
     template_name = "netbox_librenms_plugin/inventoryignorerule_list.html"
 
 
-class InventoryIgnoreRuleCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class InventoryIgnoreRuleCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for creating a new InventoryIgnoreRule object."""
 
     queryset = InventoryIgnoreRule.objects.all()
@@ -391,7 +395,7 @@ class InventoryIgnoreRuleCreateView(LibreNMSPermissionMixin, generic.ObjectEditV
 
 
 @register_model_view(InventoryIgnoreRule, "bulk_import", path="import", detail=False)
-class InventoryIgnoreRuleBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+class InventoryIgnoreRuleBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing InventoryIgnoreRule objects."""
 
     queryset = InventoryIgnoreRule.objects.all()
@@ -404,20 +408,20 @@ class InventoryIgnoreRuleView(LibreNMSPermissionMixin, generic.ObjectView):
     queryset = InventoryIgnoreRule.objects.all()
 
 
-class InventoryIgnoreRuleEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class InventoryIgnoreRuleEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for editing a specific InventoryIgnoreRule object."""
 
     queryset = InventoryIgnoreRule.objects.all()
     form = InventoryIgnoreRuleForm
 
 
-class InventoryIgnoreRuleDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+class InventoryIgnoreRuleDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
     """Provides a view for deleting a specific InventoryIgnoreRule object."""
 
     queryset = InventoryIgnoreRule.objects.all()
 
 
-class InventoryIgnoreRuleBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+class InventoryIgnoreRuleBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
     """Provides a view for deleting multiple InventoryIgnoreRule objects."""
 
     queryset = InventoryIgnoreRule.objects.all()
@@ -499,7 +503,7 @@ class PlatformMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
     template_name = "netbox_librenms_plugin/platformmapping_list.html"
 
 
-class PlatformMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class PlatformMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for creating a new PlatformMapping object."""
 
     queryset = PlatformMapping.objects.all()
@@ -507,7 +511,7 @@ class PlatformMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView)
 
 
 @register_model_view(PlatformMapping, "bulk_import", path="import", detail=False)
-class PlatformMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+class PlatformMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
     """Provides a view for bulk importing PlatformMapping objects."""
 
     queryset = PlatformMapping.objects.all()
@@ -520,20 +524,20 @@ class PlatformMappingView(LibreNMSPermissionMixin, generic.ObjectView):
     queryset = PlatformMapping.objects.all()
 
 
-class PlatformMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+class PlatformMappingEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
     """Provides a view for editing a specific PlatformMapping object."""
 
     queryset = PlatformMapping.objects.all()
     form = PlatformMappingForm
 
 
-class PlatformMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+class PlatformMappingDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
     """Provides a view for deleting a specific PlatformMapping object."""
 
     queryset = PlatformMapping.objects.all()
 
 
-class PlatformMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+class PlatformMappingBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
     """Provides a view for deleting multiple PlatformMapping objects."""
 
     queryset = PlatformMapping.objects.all()
