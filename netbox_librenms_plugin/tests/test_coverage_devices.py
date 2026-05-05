@@ -52,7 +52,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert result == mock_ctx
         assert mock_get_context.called
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request is request
+        assert child_instance.request == request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 
@@ -73,7 +73,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert result == mock_ctx
         assert mock_get_context.called
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request is request
+        assert child_instance.request == request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 
@@ -96,7 +96,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request is request
+        assert child_instance.request == request
 
     def test_get_vlan_context_delegates_to_vlan_view(self):
         """get_vlan_context() creates DeviceVLANTableView, copies request, and calls get_vlan_context."""
@@ -115,7 +115,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert result == mock_ctx
         assert mock_get_context.called
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request is request
+        assert child_instance.request == request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 
@@ -136,7 +136,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert result == mock_ctx
         assert mock_get_context.called
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request is request
+        assert child_instance.request == request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 

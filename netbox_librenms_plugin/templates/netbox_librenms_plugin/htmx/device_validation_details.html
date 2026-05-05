@@ -224,7 +224,10 @@
                                  class="dropdown-menu w-100 shadow"
                                  style="z-index:1050; max-height:200px; overflow-y:auto; display:none;"></div>
                           </div>
-                          <button type="submit" class="btn btn-sm btn-primary mt-1 w-100">Add Mapping</button>
+                          <button type="submit"
+                                  id="dt-submit-{{ libre_device.device_id }}"
+                                  class="btn btn-sm btn-primary mt-1 w-100"
+                                  disabled>Add Mapping</button>
                         </form>
                       </div>
                       <script>
@@ -232,6 +235,7 @@
                           var searchEl = document.getElementById("dt-search-{{ libre_device.device_id }}");
                           var dropdownEl = document.getElementById("dt-dropdown-{{ libre_device.device_id }}");
                           var hiddenEl = document.getElementById("dt-id-{{ libre_device.device_id }}");
+                          var submitBtn = document.getElementById("dt-submit-{{ libre_device.device_id }}");
                           if (!searchEl) return;
                           var timer = null;
                           var requestSeq = 0;
@@ -239,6 +243,7 @@
                           searchEl.addEventListener("input", function () {
                             clearTimeout(timer);
                             hiddenEl.value = "";
+                            submitBtn.disabled = true;
                             var q = this.value.trim();
                             if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
                             timer = setTimeout(function () {
@@ -260,6 +265,7 @@
                                         e.preventDefault();
                                         searchEl.value = (dt.manufacturer ? dt.manufacturer.display + " — " : "") + dt.display;
                                         hiddenEl.value = dt.id;
+                                        submitBtn.disabled = false;
                                         dropdownEl.style.display = "none";
                                       });
                                       dropdownEl.appendChild(a);

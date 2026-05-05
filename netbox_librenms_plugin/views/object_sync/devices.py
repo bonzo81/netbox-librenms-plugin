@@ -1,3 +1,4 @@
+import copy
 import json
 
 from dcim.models import Device
@@ -48,30 +49,30 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
         """Return interface sync context for the device."""
         interface_name_field = get_interface_name_field(request)
         interface_table_view = DeviceInterfaceTableView()
-        interface_table_view.request = request
+        interface_table_view.request = copy.copy(request)
         return interface_table_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
         """Return cable sync context for the device."""
         cable_table_view = DeviceCableTableView()
-        cable_table_view.request = request
+        cable_table_view.request = copy.copy(request)
         return cable_table_view.get_context_data(request, obj)
 
     def get_ip_context(self, request, obj):
         """Return IP address sync context for the device."""
         ipaddress_table_view = DeviceIPAddressTableView()
-        ipaddress_table_view.request = request
+        ipaddress_table_view.request = copy.copy(request)
         return ipaddress_table_view.get_context_data(request, obj)
 
     def get_vlan_context(self, request, obj):
         vlan_table_view = DeviceVLANTableView()
-        vlan_table_view.request = request
+        vlan_table_view.request = copy.copy(request)
         return vlan_table_view.get_vlan_context(request, obj)
 
     def get_module_context(self, request, obj):
         """Return module sync context for the device."""
         module_table_view = DeviceModuleTableView()
-        module_table_view.request = request
+        module_table_view.request = copy.copy(request)
         return module_table_view.get_context_data(request, obj)
 
 
