@@ -454,7 +454,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
                 apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:
-                validation["device_role"] = {"found": False, "role": None}
+                validation["device_role"] = {
+                    "found": False,
+                    "role": None,
+                    "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                }
             recalculate_validation_status(validation, is_vm=actual_is_vm)
             # Re-assert non-importable: recalculate sets can_import from issues list,
             # but a late-found existing match must never be import-ready.

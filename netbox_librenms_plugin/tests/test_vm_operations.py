@@ -472,36 +472,6 @@ class TestBulkImportVms:
         # VMs 1-4 added to failed; 5th cancelled before processing
         assert len(result["failed"]) == 4
 
-    def test_job_cancellation_with_errored_status(self):
-        """Loop also exits when _is_job_cancelled returns True (rq_job.is_failed)."""
-        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
-
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-
-        mock_job = MagicMock()
-        mock_job.logger = MagicMock()
-
-        cancel_calls = [0]
-
-        def _cancelled(job):
-            cancel_calls[0] += 1
-            return cancel_calls[0] >= 2
-
-        vm_imports = {i: {} for i in range(1, 6)}
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
-            patch("netbox_librenms_plugin.import_utils.vm_operations._is_job_cancelled", side_effect=_cancelled),
-            patch(
-                "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
-                return_value=None,
-            ),
-        ):
-            result = bulk_import_vms(vm_imports, mock_api, job=mock_job)
-
-        assert len(result["failed"]) == 4
-
     def test_user_extracted_from_job_when_not_provided(self):
         """User is extracted from job.job.user when the user param is None."""
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
@@ -663,8 +633,9 @@ class TestBulkImportVms:
         ):
             bulk_import_vms(vm_imports, mock_api, job=mock_job)
 
-        # log.info called at each non-cancelled iteration
-        mock_job.logger.info.assert_called()
+        # log.info called for non-cancelled checkpoint iterations
+        mock_job.logger.info.assert_any_call("Processing VM 1 of 10")
+        mock_job.logger.info.assert_any_call("Processing VM 5 of 10")
 
 
 # ===========================================================================

@@ -1319,7 +1319,7 @@ function updateInterfaceNameField() {
             // Persist to user preferences via API
             const savePrefUrl = this.closest('[data-save-pref-url]')?.dataset.savePrefUrl;
             if (savePrefUrl) {
-                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
                 if (csrfToken) {
                     fetch(savePrefUrl, {
                         method: 'POST',
@@ -1611,7 +1611,7 @@ function initializeModuleReplaceButtons() {
             showModal(document.getElementById('htmx-modal'));
 
             // Fetch preview content and inject into modal body
-            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
             const fetchHeaders = {};
             if (csrfToken) {
                 fetchHeaders['X-CSRFToken'] = csrfToken;
