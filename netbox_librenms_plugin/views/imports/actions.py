@@ -1484,6 +1484,12 @@ class AddDeviceTypeMappingView(
                     self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
                     if error := self.require_object_permissions("POST"):
                         return error
+                if existing_mapping and not locked:
+                    # The mapping was deleted between our upfront read and the lock.
+                    # We are about to CREATE a new row, so require add permission.
+                    self.required_object_permissions = {"POST": [("add", DeviceTypeMapping)]}
+                    if error := self.require_object_permissions("POST"):
+                        return error
                 if locked:
                     if locked.netbox_device_type_id != device_type_id:
                         locked.netbox_device_type = device_type
