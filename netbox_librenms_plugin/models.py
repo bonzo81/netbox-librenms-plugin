@@ -139,7 +139,13 @@ class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
         constraints = [
             models.UniqueConstraint(
                 fields=["librenms_type", "librenms_speed"],
+                condition=models.Q(librenms_speed__isnull=False),
                 name="unique_interface_type_mapping",
+            ),
+            models.UniqueConstraint(
+                fields=["librenms_type"],
+                condition=models.Q(librenms_speed__isnull=True),
+                name="unique_interface_type_mapping_wildcard",
             ),
         ]
         ordering = ["librenms_type", "librenms_speed"]

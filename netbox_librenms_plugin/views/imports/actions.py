@@ -1279,9 +1279,13 @@ class DeviceConflictActionView(
                         return err
                     logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
                 elif match_result.get("match_type") == "ambiguous":
+                    ambiguity_source = match_result.get("ambiguity_source", "mapping")
+                    if ambiguity_source == "platform":
+                        target = "Platforms"
+                    else:
+                        target = "Platform Mappings"
                     return HttpResponse(
-                        f"Multiple platform mappings match OS '{escape(librenms_os)}' — "
-                        "resolve the conflict in Platform Mappings",
+                        f"Multiple {target} match OS '{escape(librenms_os)}' — resolve the conflict in {target}",
                         status=400,
                     )
                 else:
@@ -1407,8 +1411,8 @@ class AddDeviceTypeMappingView(
         """Create a DeviceTypeMapping linking the LibreNMS hardware string to a NetBox DeviceType."""
         from netbox_librenms_plugin.models import DeviceTypeMapping
 
-        self.required_object_permissions = {"POST": [("add", DeviceTypeMapping), ("change", DeviceTypeMapping)]}
-        if error := self.require_all_permissions("POST"):
+        # Check plugin write permission early (cheap, no API call needed).
+        if error := self.require_write_permission():
             return error
 
         post_server_key = (request.POST.get("server_key") or "").strip()
@@ -1455,6 +1459,16 @@ class AddDeviceTypeMappingView(
                 '<span class="text-danger small">Selected device type not found.</span>',
                 status=404,
             )
+
+        # Resolve the existing mapping first so we only require the permission
+        # actually needed: "add" for a new mapping, "change" for an update.
+        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware=hardware.lower()).first()
+        if existing_mapping:
+            self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+        else:
+            self.required_object_permissions = {"POST": [("add", DeviceTypeMapping)]}
+        if error := self.require_object_permissions("POST"):
+            return error
 
         try:
             with transaction.atomic():
