@@ -615,17 +615,6 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             return pat in name_up
         return False
 
-    def check_match(self, item_name: str, item_serial: str, device_serial: str) -> bool:
-        """
-        Return True if this rule matches the given inventory item.
-
-        For ``serial_matches_device``: compares *item_serial* to *device_serial*.
-        For all other match types: delegates to :meth:`matches_name`.
-        """
-        if self.match_type == self.MATCH_SERIAL_DEVICE:
-            return bool(item_serial and device_serial and item_serial == device_serial)
-        return self.matches_name(item_name)
-
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""
         return reverse("plugins:netbox_librenms_plugin:inventoryignorerule_detail", args=[self.pk])

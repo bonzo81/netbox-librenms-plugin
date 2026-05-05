@@ -1472,13 +1472,27 @@ class AddDeviceTypeMappingView(
 
         try:
             with transaction.atomic():
-                mapping, created = DeviceTypeMapping.objects.get_or_create(
-                    librenms_hardware=hardware.lower(),
-                    defaults={"netbox_device_type": device_type},
+                # Lock the row to close the window between the upfront permission
+                # check and the actual write (select_for_update prevents a concurrent
+                # INSERT from slipping through undetected).
+                locked = (
+                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware=hardware.lower()).first()
                 )
-                if not created and mapping.netbox_device_type_id != device_type_id:
-                    mapping.netbox_device_type = device_type
-                    mapping.save()
+                if locked and not existing_mapping:
+                    # A concurrent request created the mapping after our upfront read.
+                    # Re-check that this user has change permission before overwriting.
+                    self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+                    if error := self.require_object_permissions("POST"):
+                        return error
+                if locked:
+                    if locked.netbox_device_type_id != device_type_id:
+                        locked.netbox_device_type = device_type
+                        locked.save()
+                else:
+                    DeviceTypeMapping.objects.create(
+                        librenms_hardware=hardware.lower(),
+                        netbox_device_type=device_type,
+                    )
         except Exception as exc:
             logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
             return HttpResponse(

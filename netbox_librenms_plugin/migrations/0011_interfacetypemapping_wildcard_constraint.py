@@ -10,10 +10,13 @@ def remove_wildcard_duplicates(apps, schema_editor):
     applied migration 0010 and then hit the race condition before 0011 was available.
     """
     InterfaceTypeMapping = apps.get_model("netbox_librenms_plugin", "InterfaceTypeMapping")
+    db_alias = schema_editor.connection.alias
     seen = set()
-    for row in InterfaceTypeMapping.objects.filter(librenms_speed__isnull=True).order_by("id"):
+    for row in (
+        InterfaceTypeMapping.objects.using(db_alias).filter(librenms_speed__isnull=True).order_by("id").iterator()
+    ):
         if row.librenms_type in seen:
-            row.delete()
+            row.delete(using=db_alias)
         else:
             seen.add(row.librenms_type)
 
