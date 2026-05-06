@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
@@ -99,8 +99,6 @@ def _resolve_vc_detection_enabled(request) -> bool:
 
 def _save_device(device) -> HttpResponse | None:
     """Call full_clean() then save(). Return an HttpResponse on failure, None on success."""
-    from django.db import IntegrityError
-
     try:
         device.full_clean()
     except ValidationError as exc:
@@ -1495,10 +1493,20 @@ class AddDeviceTypeMappingView(
                         locked.netbox_device_type = device_type
                         locked.save()
                 else:
-                    DeviceTypeMapping.objects.create(
-                        librenms_hardware=hardware.lower(),
-                        netbox_device_type=device_type,
-                    )
+                    try:
+                        DeviceTypeMapping.objects.create(
+                            librenms_hardware=hardware.lower(),
+                            netbox_device_type=device_type,
+                        )
+                    except IntegrityError:
+                        # Two concurrent requests both saw no existing mapping and
+                        # both attempted create(); select_for_update() cannot lock
+                        # absent rows. Return 409 so the client retries (the
+                        # second attempt will find the row and take the update path).
+                        return HttpResponse(
+                            '<span class="text-danger small">Mapping was created concurrently. Please try again.</span>',
+                            status=409,
+                        )
         except Exception as exc:
             logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
             return HttpResponse(
