@@ -1530,6 +1530,12 @@ class AddDeviceTypeMappingView(
         if libre_device is not None and validation is not None:
             row_response = self.render_device_row(request, libre_device, validation, selections)
             row_html = row_response.content.decode("utf-8")
+            # Inject hx-swap-oob so HTMX replaces the background row in place.
+            row_html = row_html.replace(
+                f'<tr id="device-row-{device_id}"',
+                f'<tr id="device-row-{device_id}" hx-swap-oob="outerHTML"',
+                1,
+            )
             # A <tr> following a <div> is invalid HTML and gets silently dropped by the browser
             # parser when HTMX wraps the combined response in a <template> for parsing. Wrapping
             # in <table><tbody> keeps the <tr> in a valid table context so HTMX finds and applies
