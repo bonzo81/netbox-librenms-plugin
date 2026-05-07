@@ -27,7 +27,7 @@
 - librenms_name: "^Port Container (\\d+)/(\\d+)$"
   netbox_bay_name: "X2 Port \\2"
   is_regex: true
-  description: "Cisco X2 Port Container → X2 Port N"
+  description: "Cisco X2 Port Container slot/N → X2 Port N (also matches CVR-X2-SFP sub-ports via ancestor lookup)"
 
 # Cisco modules: Linecard/Supervisor(slot N) → Slot N
 - librenms_name: "^Linecard\\(slot (\\d+)\\)$"
