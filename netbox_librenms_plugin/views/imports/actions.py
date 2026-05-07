@@ -11,7 +11,8 @@ from django.db import IntegrityError, transaction
 
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
-from django.utils.html import escape
+from django.utils.html import escape, format_html
+from django.utils.safestring import mark_safe
 from django.views import View
 
 from netbox_librenms_plugin.import_utils import (
@@ -1518,11 +1519,17 @@ class AddDeviceTypeMappingView(
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)
 
-        # Re-render the modal content as an OOB swap so it updates in place
+        # Re-render the modal content as an OOB swap so it updates in place.
+        # The inner views render via Django templates (auto-escaped), so the
+        # decoded content is already safe HTML; wrap with format_html + mark_safe
+        # to compose the OOB envelope without introducing new escape boundaries.
         detail_view = DeviceValidationDetailsView()
         detail_view._librenms_api = self._librenms_api
         modal_html = detail_view.get(request, device_id).content.decode("utf-8")
-        oob_modal = f'<div id="htmx-modal-content" hx-swap-oob="innerHTML">{modal_html}</div>'
+        oob_modal = format_html(
+            '<div id="htmx-modal-content" hx-swap-oob="innerHTML">{}</div>',
+            mark_safe(modal_html),
+        )
 
         # Re-validate and include the background table row as a second OOB swap so the
         # row reflects the new mapping immediately without a secondary JS-triggered request.
@@ -1530,7 +1537,8 @@ class AddDeviceTypeMappingView(
         if libre_device is not None and validation is not None:
             row_response = self.render_device_row(request, libre_device, validation, selections)
             row_html = row_response.content.decode("utf-8")
-            # Inject hx-swap-oob so HTMX replaces the background row in place.
+            # device_id is an int (URL converter <int:device_id>), so the f-string
+            # interpolation cannot inject HTML metacharacters.
             row_html = row_html.replace(
                 f'<tr id="device-row-{device_id}"',
                 f'<tr id="device-row-{device_id}" hx-swap-oob="outerHTML"',
@@ -1541,15 +1549,11 @@ class AddDeviceTypeMappingView(
             # in <table><tbody> keeps the <tr> in a valid table context so HTMX finds and applies
             # the OOB swap. The <div id="django-messages"> inside is foster-parented outside the
             # table by the parser, so both OOB elements are preserved.
-            row_html = f"<table><tbody>{row_html}</tbody></table>"
+            row_html = format_html("<table><tbody>{}</tbody></table>", mark_safe(row_html))
         else:
-            row_html = ""
+            row_html = mark_safe("")
 
-        # Both oob_modal and row_html are produced by Django template rendering,
-        # which auto-escapes all user-supplied values. CodeQL cannot model
-        # Django's template-engine escaping as a sanitizer and flags the
-        # request → template-render → response chain as reflected XSS.
-        return HttpResponse(oob_modal + row_html, content_type="text/html")  # lgtm[py/reflected-xss]
+        return HttpResponse(oob_modal + row_html, content_type="text/html")
 
 
 class SaveUserPrefView(LibreNMSPermissionMixin, View):
