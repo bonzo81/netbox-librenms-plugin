@@ -463,30 +463,35 @@ class TestMatchBayByPosition:
         parent_item = {
             "entPhysicalIndex": 1,
             "entPhysicalModelName": "CONVERTER",
+            "entPhysicalClass": "module",
             "entPhysicalContainedIn": 0,
             "entPhysicalParentRelPos": 0,
         }
         container1 = {
             "entPhysicalIndex": 2,
             "entPhysicalModelName": "",
+            "entPhysicalClass": "container",
             "entPhysicalContainedIn": 1,
             "entPhysicalParentRelPos": 1,
         }
         container2 = {
             "entPhysicalIndex": 3,
             "entPhysicalModelName": "",
+            "entPhysicalClass": "container",
             "entPhysicalContainedIn": 1,
             "entPhysicalParentRelPos": 2,
         }
         sfp1 = {
             "entPhysicalIndex": 4,
             "entPhysicalModelName": "SFP-10G-LR",
+            "entPhysicalClass": "module",
             "entPhysicalContainedIn": 2,
             "entPhysicalParentRelPos": 1,
         }
         sfp2 = {
             "entPhysicalIndex": 5,
             "entPhysicalModelName": "SFP-10G-SR",
+            "entPhysicalClass": "module",
             "entPhysicalContainedIn": 3,
             "entPhysicalParentRelPos": 1,
         }
@@ -518,18 +523,21 @@ class TestMatchBayByPosition:
         parent = {
             "entPhysicalIndex": 1,
             "entPhysicalModelName": "M",
+            "entPhysicalClass": "module",
             "entPhysicalContainedIn": 0,
             "entPhysicalParentRelPos": 0,
         }
         container = {
             "entPhysicalIndex": 2,
             "entPhysicalModelName": "",
+            "entPhysicalClass": "container",
             "entPhysicalContainedIn": 1,
             "entPhysicalParentRelPos": 1,
         }
         item = {
             "entPhysicalIndex": 3,
             "entPhysicalModelName": "X",
+            "entPhysicalClass": "module",
             "entPhysicalContainedIn": 2,
             "entPhysicalParentRelPos": 1,
         }

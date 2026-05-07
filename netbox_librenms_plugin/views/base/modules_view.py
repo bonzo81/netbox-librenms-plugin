@@ -1180,6 +1180,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """
         # Walk up through containers with placeholder/empty models to find the
         # parent with a real hardware model.  Use a visited set to detect cycles.
+        #
+        # Only walk through ENTITY-MIB containers (entPhysicalClass="container").
+        # A modelless ancestor of any other class (e.g. class="module" with
+        # model="N/A" — Cisco IOS-XR uses these for motherboard/slice/EZChip
+        # scaffolding under a linecard) is hierarchical scaffolding, not a bay
+        # position; walking past it would silently align all deeply nested
+        # siblings to the same bay slot on the parent module.  Bail in that case.
         current_idx = item.get("entPhysicalContainedIn", 0)
         container_idx = None
         visited = set()
@@ -1190,6 +1197,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 # Found the parent with a real model; container_idx is the intermediate container
                 break
+            cls = ancestor.get("entPhysicalClass") or ""
+            if cls != "container":
+                return None
             container_idx = current_idx
             current_idx = ancestor.get("entPhysicalContainedIn", 0)
         else:

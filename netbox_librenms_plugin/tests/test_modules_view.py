@@ -825,6 +825,260 @@ class TestProdShapeWS4908Matching:
         )
 
 
+class TestPositionalMatchScaffoldingChain:
+    """
+    Regression coverage for `_match_bay_by_position` walking through deep
+    Cisco IOS-XR scaffolding (module ancestors with model="N/A").
+
+    Captured shape from a Cisco ASR-9904 (NetBox device prod-lab03d-ra1.lab,
+    LibreNMS production:30) — TenGigE ports inside a 24x10GE linecard:
+
+        chassis "Rack 0"                        [ASR-9904]
+          container "Rack 0-Line Card Slot 0"   [no model]
+            module "0/0"                        [A9K-24X10GE-1G-TR]
+              module "0/0-Motherboard"          [N/A]
+                module "0/0-Slice 0"            [N/A]
+                  module "0/0-Slice 0 EZChip"   [N/A]
+                    module "Slice 0 SFP Port Module #N"  [N/A]
+                      container "0/0-SFP+ bay N"        [N/A]
+                        module "TenGigE0/0/0/N"          [SFP-10G-SR]
+
+    The 0/0 linecard's serial accidentally matches the device serial
+    (LibreNMS reports it that way for some IOS-XR units), which fires the
+    `Embedded RP / fixed-chassis system board` ignore rule with
+    action=transparent.  As a result the linecard is hidden and every
+    TenGigE port is promoted to top-level — matched against the device's
+    bays {Slot 0, Slot 1, Slot 2, Slot 3}.
+
+    Bug pre-fix: the positional walk in `_match_bay_by_position` skipped
+    every modelless ancestor regardless of class, eventually landing
+    container_idx on `Motherboard` (the deepest item before the real-model
+    `0/0`).  Every TenGigE port walked to the same Motherboard, took
+    position=1 inside `0/0`'s children, and matched `Slot 1` on the chassis
+    — the bay where the RSP0 line card belongs.  Clicking install would
+    place SFP transceivers into the chassis line-card slots.
+
+    Fix: stop the walk on a non-container ancestor without a real model.
+    Modelless modules ("Motherboard", "Slice 0", "EZChip" et al.) are
+    scaffolding, not bay positions; treating them as walk-through containers
+    silently collapses sibling counts.  After the fix the positional matcher
+    returns None and the row shows "No Bay".
+    """
+
+    def _scaffolding_inventory(self):
+        return [
+            {
+                "entPhysicalIndex": 8384513,
+                "entPhysicalName": "Rack 0",
+                "entPhysicalModelName": "ASR-9904",
+                "entPhysicalClass": "chassis",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "FOX2128PLQ8",
+                "entPhysicalParentRelPos": -1,
+            },
+            {
+                "entPhysicalIndex": 8384552,
+                "entPhysicalName": "Rack 0-Line Card Slot 0",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalClass": "container",
+                "entPhysicalContainedIn": 8384513,
+                "entPhysicalParentRelPos": 3,
+            },
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "0/0",
+                "entPhysicalModelName": "A9K-24X10GE-1G-TR",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 8384552,
+                "entPhysicalSerialNum": "DEVICE_SERIAL",  # matches device serial below
+                "entPhysicalParentRelPos": 0,
+            },
+            {
+                "entPhysicalIndex": 30,
+                "entPhysicalName": "0/0-Motherboard",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalParentRelPos": 0,
+            },
+            {
+                "entPhysicalIndex": 35,
+                "entPhysicalName": "0/0-Slice 0",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 30,
+                "entPhysicalParentRelPos": 4,
+            },
+            {
+                "entPhysicalIndex": 330,
+                "entPhysicalName": "0/0-Slice 0 EZChip",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 35,
+                "entPhysicalParentRelPos": 0,
+            },
+            {
+                "entPhysicalIndex": 601,
+                "entPhysicalName": "0/0-Slice 0 SFP Port Module #0",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 330,
+                "entPhysicalParentRelPos": 0,
+            },
+            {
+                "entPhysicalIndex": 801,
+                "entPhysicalName": "0/0-SFP+ bay 0",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalClass": "container",
+                "entPhysicalContainedIn": 601,
+                "entPhysicalParentRelPos": 0,
+            },
+            {
+                "entPhysicalIndex": 409601,
+                "entPhysicalName": "TenGigE0/0/0/0",
+                "entPhysicalModelName": "SFP-10G-SR",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 801,
+                "entPhysicalSerialNum": "SFP_SERIAL_0",
+                "entPhysicalParentRelPos": 0,
+            },
+            {
+                "entPhysicalIndex": 602,
+                "entPhysicalName": "0/0-Slice 0 SFP Port Module #1",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 330,
+                "entPhysicalParentRelPos": 1,
+            },
+            {
+                "entPhysicalIndex": 802,
+                "entPhysicalName": "0/0-SFP+ bay 1",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalClass": "container",
+                "entPhysicalContainedIn": 602,
+                "entPhysicalParentRelPos": 0,
+            },
+            {
+                "entPhysicalIndex": 413697,
+                "entPhysicalName": "TenGigE0/0/0/1",
+                "entPhysicalModelName": "SFP-10G-SR",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 802,
+                "entPhysicalSerialNum": "SFP_SERIAL_1",
+                "entPhysicalParentRelPos": 0,
+            },
+        ]
+
+    def _device_bays(self):
+        bays = {}
+        for n in range(0, 4):
+            b = MagicMock()
+            b.name = f"Slot {n}"
+            b.installed_module = None
+            b.get_absolute_url.return_value = f"/bay/slot-{n}"
+            bays[f"Slot {n}"] = b
+        return bays
+
+    def _module_types(self):
+        mt = MagicMock()
+        mt.pk = 50
+        mt.model = "SFP-10G-SR"
+        mt.get_absolute_url.return_value = "/mt/sfp"
+        return {"SFP-10G-SR": mt}
+
+    def _build_rows(self, device_serial="DEVICE_SERIAL"):
+        view = _make_view()
+        # Need a transparent rule that fires on serial_matches_device, like prod
+        from netbox_librenms_plugin.tests.test_modules_view import _make_view as _mv  # noqa: F401
+
+        rows_store = _captured_table_view(view)
+        view._get_module_bays = MagicMock(return_value=(self._device_bays(), {}))
+        view._get_module_types = MagicMock(return_value=self._module_types())
+
+        # Device-serial matches the linecard's serial → linecard becomes transparent
+        device = MagicMock()
+        device.serial = device_serial
+        device.virtual_chassis = None
+        device.id = 1
+        device_type = MagicMock()
+        device_type.manufacturer = None
+        device.device_type = device_type
+
+        # Build a fake "transparent" ignore rule matching serial_matches_device
+        transparent_rule = MagicMock()
+        transparent_rule.match_type = "serial_matches_device"
+        transparent_rule.action = "transparent"
+        transparent_rule.require_serial_match_parent = False
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[transparent_rule]),
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
+        ):
+            mock_cache.ttl = MagicMock(return_value=None)
+            view._build_context(MagicMock(), device, self._scaffolding_inventory())
+        return rows_store.get("rows", [])
+
+    def _row(self, rows, name):
+        for r in rows:
+            if r.get("name") == name:
+                return r
+        return None
+
+    def test_tengig_does_not_match_chassis_slot_via_scaffolding_walk(self):
+        """
+        TenGigE ports at the bottom of a model="N/A" module chain must NOT be
+        positional-matched to a chassis bay.  Pre-fix, every TenGigE walked
+        through Motherboard/Slice/EZChip and landed on Slot 1 (the RSP bay).
+        """
+        rows = self._build_rows()
+        for name in ("TenGigE0/0/0/0", "TenGigE0/0/0/1"):
+            row = self._row(rows, name)
+            assert row is not None, f"{name} row not found"
+            assert row["module_bay"] != "Slot 1", (
+                f"{name} matched 'Slot 1' on the chassis — that bay holds the "
+                "RSP line card, not a transceiver.  Positional fallback walked "
+                "through model-less module-class scaffolding (Motherboard, "
+                "Slice 0, EZChip, SFP Port Module) before stopping at the "
+                "0/0 linecard, conflating every TenGigE to position=1."
+            )
+
+    def test_tengig_shows_no_bay_when_only_scaffolding_above(self):
+        """
+        With no real position-container chain and no bay templates on the
+        scaffolding modules' types, transceivers should resolve to 'No Bay'.
+        """
+        rows = self._build_rows()
+        row = self._row(rows, "TenGigE0/0/0/0")
+        assert row is not None
+        assert row["status"] == "No Bay", (
+            f"Expected 'No Bay' but got {row['status']!r}.  With only chassis "
+            "Slot 0..3 bays in scope and modelless module scaffolding above the "
+            "transceiver, the positional fallback should bail rather than "
+            "confidently mismatching."
+        )
+
+    def test_tengig_siblings_resolve_independently(self):
+        """
+        Each TenGigE port must be evaluated independently.  Pre-fix all ports
+        collapsed to the same `container_idx` and got identical (wrong) bays.
+        """
+        rows = self._build_rows()
+        bays = {r.get("name"): r.get("module_bay") for r in rows if r.get("name", "").startswith("TenGigE")}
+        # Either both resolve to "-" (no bay) or to distinct bays.  They must
+        # NOT all share the same chassis bay.
+        non_dash = [b for b in bays.values() if b and b != "-"]
+        assert len(set(non_dash)) == len(non_dash), (
+            f"TenGigE ports collapsed to duplicate bay assignments: {bays}.  "
+            "Positional fallback walked through scaffolding and produced the "
+            "same container_idx for siblings that have different physical positions."
+        )
+
+
 class TestCollectDescendants:
     """Tests for _collect_descendants depth tracking."""
 
