@@ -1545,7 +1545,11 @@ class AddDeviceTypeMappingView(
         else:
             row_html = ""
 
-        return HttpResponse(oob_modal + row_html, content_type="text/html")
+        # Both oob_modal and row_html are produced by Django template rendering,
+        # which auto-escapes all user-supplied values. CodeQL cannot model
+        # Django's template-engine escaping as a sanitizer and flags the
+        # request → template-render → response chain as reflected XSS.
+        return HttpResponse(oob_modal + row_html, content_type="text/html")  # lgtm[py/reflected-xss]
 
 
 class SaveUserPrefView(LibreNMSPermissionMixin, View):
