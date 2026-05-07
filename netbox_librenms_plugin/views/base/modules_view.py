@@ -983,17 +983,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return get_module_types_indexed()
 
-    def _find_all_ancestor_names(self, item, index_map):
+    def _find_parent_container_name(self, item, index_map):
         """
-        Return all named ancestors up the containment chain, nearest first.
+        Resolve the nearest ancestor container name by walking up the containment chain.
 
-        Collects every non-empty entPhysicalName along the full chain.  The full
-        list is used as regex-mapping candidates so that patterns matching a more distant
-        ancestor (e.g. "Port Container 3/2" for GigabitEthernet3/11 inside a CVR-X2-SFP)
-        are also tried.  The first entry is equivalent to what the former
-        _find_parent_container_name returned.
+        Skips ancestors with an empty entPhysicalName and continues upward until a
+        non-empty name is found or the chain is exhausted.
         """
-        names: list[str] = []
         contained_in = item.get("entPhysicalContainedIn", 0)
         visited: set = set()
         while contained_in and contained_in in index_map and contained_in not in visited:
@@ -1001,9 +997,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             parent = index_map[contained_in]
             name = (parent.get("entPhysicalName") or "").strip()
             if name:
-                names.append(name)
+                return name
             contained_in = parent.get("entPhysicalContainedIn", 0)
-        return names
+        return None
 
     def _match_module_bay(self, item, index_map, module_bays):
         """
@@ -1011,20 +1007,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Checks ModuleBayMapping table first (exact then regex), then falls back
         to exact parent name match, then positional matching.
         """
-        ancestor_names = self._find_all_ancestor_names(item, index_map)
-        parent_name = ancestor_names[0] if ancestor_names else None
+        parent_name = self._find_parent_container_name(item, index_map)
         item_name = (item.get("entPhysicalName") or "").strip()
         item_descr = (item.get("entPhysicalDescr") or "").strip()
         phys_class = (item.get("entPhysicalClass") or "").strip()
 
-        # Build candidate names: nearest ancestor first, then item name, item description,
-        # then further ancestors.  Further ancestors allow a single regex (e.g.
-        # "^Port Container (\d+)/(\d+)$" → "X2 Port \2") to match deeply nested ports
-        # via a grandparent container even when the immediate parent name doesn't match.
+        # Build candidate names: parent, item name, item description
         candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
-        for name in ancestor_names[1:]:
-            if name not in candidate_names:
-                candidate_names.append(name)
 
         from netbox_librenms_plugin.utils import apply_normalization_rules
 
