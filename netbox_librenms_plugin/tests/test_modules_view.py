@@ -38,15 +38,23 @@ def _captured_table_view(view):
     return rows_store
 
 
-def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, module_types):
-    """Call _build_context with all DB-accessing calls mocked out."""
+def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, module_types, bay_mappings=None):
+    """Call _build_context with all DB-accessing calls mocked out.
+
+    `bay_mappings` is an optional (exact_list, regex_list) tuple of ModuleBayMapping-like
+    objects.  When None, mappings are empty and matching exercises only direct-name
+    and positional fallbacks.
+    """
     rows_store = _captured_table_view(view)
     view._get_module_bays = MagicMock(return_value=(device_bays, module_scoped_bays))
     view._get_module_types = MagicMock(return_value=module_types)
 
+    if bay_mappings is None:
+        bay_mappings = ([], [])
+
     with (
         patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-        patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+        patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=bay_mappings),
         patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
         patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
         patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
@@ -60,6 +68,36 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
         view._build_context(MagicMock(), MagicMock(), inventory_data)
 
     return rows_store.get("rows", [])
+
+
+def _load_contrib_bay_mappings():
+    """Load contrib bay mappings as fake ModuleBayMapping objects (no DB)."""
+    import re as _re
+    from pathlib import Path
+
+    import yaml
+
+    contrib_path = Path(__file__).resolve().parents[2] / "contrib" / "module_bay_mappings.yaml"
+    with open(contrib_path) as f:
+        data = yaml.safe_load(f)
+
+    class _FakeMap:
+        def __init__(self, **kw):
+            self.librenms_name = kw["librenms_name"]
+            self.librenms_class = kw.get("librenms_class") or ""
+            self.netbox_bay_name = kw["netbox_bay_name"]
+            self.is_regex = kw.get("is_regex", False)
+            self._compiled_pattern = None
+            if self.is_regex:
+                try:
+                    self._compiled_pattern = _re.compile(self.librenms_name)
+                except _re.error:
+                    pass
+
+    mappings = [_FakeMap(**m) for m in data]
+    exact = [m for m in mappings if not m.is_regex]
+    regex = [m for m in mappings if m.is_regex]
+    return exact, regex
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +439,390 @@ class TestBayDepthScopeWithUninstalledParent:
         # And GE3/15 under the uninstalled converter is still No Bay
         row15 = _row("GigabitEthernet3/15")
         assert row15["status"] == "No Bay", f"GigabitEthernet3/15 status {row15['status']!r} — should still be No Bay"
+
+
+# ---------------------------------------------------------------------------
+# Production-shape inventory factories
+# ---------------------------------------------------------------------------
+
+
+def _prod_inventory_ws_x4908():
+    """
+    Inventory shape captured from a live Cisco WS-X4908-10GE linecard
+    (NetBox device prod-lab03-sw4 / LibreNMS production:7).
+
+    Real LibreNMS naming with anonymized indices:
+        chassis "Switch System"
+          container "Slot 3"               [no model]
+            module "Linecard(slot 3)"      [WS-X4908-10GE]
+              container "Port Container 3/2"   [no model, relPos=3]
+                other "Converter 3/2"          [CVR-X2-SFP, relPos=1]
+                  container "Port Container 3/11" [no model, relPos=9]
+                    port "GigabitEthernet3/11"   [GLC-TE, relPos=1]
+                  container "Port Container 3/12" [no model, relPos=10]
+                    port "GigabitEthernet3/12"   [GLC-T, relPos=1]
+
+    Distinct from `_linecard_inventory` whose container names ("Slot 3",
+    "X2 Port 2", "SFP slot") match NetBox bays directly and never exercise
+    the contrib regex paths.  This fixture forces matching through:
+      - `^Linecard\\(slot (\\d+)\\)$` regex for the linecard itself
+      - `^Port Container (\\d+)/(\\d+)$` regex for X2 slot resolution
+      - positional fallback for SFP transceivers inside the CVR
+    """
+    return [
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalName": "Switch System",
+            "entPhysicalModelName": "MIDPLANE",
+            "entPhysicalClass": "chassis",
+            "entPhysicalContainedIn": 0,
+            "entPhysicalSerialNum": "S_CHASSIS",
+            "entPhysicalParentRelPos": 1,
+        },
+        {
+            "entPhysicalIndex": 4,
+            "entPhysicalName": "Slot 3",
+            "entPhysicalModelName": "",
+            "entPhysicalClass": "container",
+            "entPhysicalContainedIn": 1,
+            "entPhysicalSerialNum": "",
+            "entPhysicalParentRelPos": 3,
+        },
+        {
+            "entPhysicalIndex": 3000,
+            "entPhysicalName": "Linecard(slot 3)",
+            "entPhysicalModelName": "WS-X4908-10GE",
+            "entPhysicalClass": "module",
+            "entPhysicalContainedIn": 4,
+            "entPhysicalSerialNum": "S_LINECARD",
+            "entPhysicalParentRelPos": 1,
+        },
+        {
+            "entPhysicalIndex": 3003,
+            "entPhysicalName": "Port Container 3/2",
+            "entPhysicalDescr": "Port Container",
+            "entPhysicalModelName": "",
+            "entPhysicalClass": "container",
+            "entPhysicalContainedIn": 3000,
+            "entPhysicalSerialNum": "",
+            "entPhysicalParentRelPos": 3,
+        },
+        {
+            "entPhysicalIndex": 3019,
+            "entPhysicalName": "Converter 3/2",
+            "entPhysicalDescr": "Converter Module",
+            "entPhysicalModelName": "CVR-X2-SFP",
+            "entPhysicalClass": "other",
+            "entPhysicalContainedIn": 3003,
+            "entPhysicalSerialNum": "S_CVR2",
+            "entPhysicalParentRelPos": 1,
+        },
+        {
+            "entPhysicalIndex": 3028,
+            "entPhysicalName": "Port Container 3/11",
+            "entPhysicalDescr": "Port Container",
+            "entPhysicalModelName": "",
+            "entPhysicalClass": "container",
+            "entPhysicalContainedIn": 3019,
+            "entPhysicalSerialNum": "",
+            "entPhysicalParentRelPos": 9,
+        },
+        {
+            "entPhysicalIndex": 3044,
+            "entPhysicalName": "GigabitEthernet3/11",
+            "entPhysicalDescr": "1000BaseT",
+            "entPhysicalModelName": "GLC-TE",
+            "entPhysicalClass": "port",
+            "entPhysicalContainedIn": 3028,
+            "entPhysicalSerialNum": "MTC213403BB",
+            "entPhysicalParentRelPos": 1,
+        },
+        {
+            "entPhysicalIndex": 3029,
+            "entPhysicalName": "Port Container 3/12",
+            "entPhysicalDescr": "Port Container",
+            "entPhysicalModelName": "",
+            "entPhysicalClass": "container",
+            "entPhysicalContainedIn": 3019,
+            "entPhysicalSerialNum": "",
+            "entPhysicalParentRelPos": 10,
+        },
+        {
+            "entPhysicalIndex": 3045,
+            "entPhysicalName": "GigabitEthernet3/12",
+            "entPhysicalDescr": "1000BaseT",
+            "entPhysicalModelName": "GLC-T",
+            "entPhysicalClass": "port",
+            "entPhysicalContainedIn": 3029,
+            "entPhysicalSerialNum": "GE12_SERIAL",
+            "entPhysicalParentRelPos": 1,
+        },
+    ]
+
+
+def _prod_bay_setup_ws_x4908(cvr_installed=True):
+    """
+    NetBox bay structure mirroring prod-lab03-sw4:
+        Device-bays: Slot 3 (linecard installed)
+        WS-X4908-10GE bays: X2 Port 1..8 (X2 Port 2 holds CVR if cvr_installed)
+        CVR-X2-SFP bays: SFP 1, SFP 2 (none installed)
+    """
+    linecard_module = MagicMock()
+    linecard_module.pk = 100
+    linecard_module.serial = "S_LINECARD"
+    linecard_module.module_type_id = 10
+
+    cvr2_module = MagicMock()
+    cvr2_module.pk = 200
+    cvr2_module.serial = "S_CVR2"
+    cvr2_module.module_type_id = 20
+
+    slot3_bay = MagicMock()
+    slot3_bay.name = "Slot 3"
+    slot3_bay.installed_module = linecard_module
+    slot3_bay.get_absolute_url.return_value = "/bay/slot3"
+    device_bays = {"Slot 3": slot3_bay}
+
+    linecard_bays = {}
+    for n in range(1, 9):
+        b = MagicMock()
+        b.name = f"X2 Port {n}"
+        b.installed_module = cvr2_module if (n == 2 and cvr_installed) else None
+        b.get_absolute_url.return_value = f"/bay/x2-{n}"
+        linecard_bays[f"X2 Port {n}"] = b
+
+    module_scoped_bays = {100: linecard_bays}
+
+    if cvr_installed:
+        cvr_bays = {}
+        for n in range(1, 3):
+            b = MagicMock()
+            b.name = f"SFP {n}"
+            b.installed_module = None
+            b.get_absolute_url.return_value = f"/bay/sfp-{n}"
+            cvr_bays[f"SFP {n}"] = b
+        module_scoped_bays[200] = cvr_bays
+
+    return device_bays, module_scoped_bays
+
+
+def _prod_module_types():
+    mt_lc = MagicMock()
+    mt_lc.pk = 10
+    mt_lc.model = "WS-X4908-10GE"
+    mt_lc.get_absolute_url.return_value = "/mt/lc"
+    mt_cvr = MagicMock()
+    mt_cvr.pk = 20
+    mt_cvr.model = "CVR-X2-SFP"
+    mt_cvr.get_absolute_url.return_value = "/mt/cvr"
+    mt_glc_te = MagicMock()
+    mt_glc_te.pk = 30
+    mt_glc_te.model = "GLC-TE"
+    mt_glc_te.get_absolute_url.return_value = "/mt/glc-te"
+    mt_glc_t = MagicMock()
+    mt_glc_t.pk = 40
+    mt_glc_t.model = "GLC-T"
+    mt_glc_t.get_absolute_url.return_value = "/mt/glc-t"
+    return {
+        "WS-X4908-10GE": mt_lc,
+        "CVR-X2-SFP": mt_cvr,
+        "GLC-TE": mt_glc_te,
+        "GLC-T": mt_glc_t,
+    }
+
+
+class TestProdShapeWS4908Matching:
+    """
+    Bay matching against real production data shape from a Cisco WS-X4908-10GE.
+
+    Distinct from `TestBayDepthScopeWithUninstalledParent`, whose synthetic
+    container names match bay names directly without exercising the contrib
+    regex paths.  This class loads the contrib YAML and asserts each level
+    of the chain — linecard regex, X2 slot regex, and CVR-internal positional
+    fallback — actually does what the contrib mappings claim.
+    """
+
+    def _build_rows(self, cvr_installed=True):
+        view = _make_view()
+        device_bays, module_scoped_bays = _prod_bay_setup_ws_x4908(cvr_installed=cvr_installed)
+        return _run_build_context(
+            view,
+            _prod_inventory_ws_x4908(),
+            device_bays,
+            module_scoped_bays,
+            _prod_module_types(),
+            bay_mappings=_load_contrib_bay_mappings(),
+        )
+
+    def _row(self, rows, name):
+        for r in rows:
+            if r.get("name") == name:
+                return r
+        return None
+
+    def test_linecard_matches_slot_via_regex(self):
+        """`Linecard(slot 3)` resolves to device-bay `Slot 3` via the Linecard regex."""
+        rows = self._build_rows()
+        row = self._row(rows, "Linecard(slot 3)")
+        assert row is not None, "Linecard(slot 3) row not found"
+        assert row["module_bay"] == "Slot 3", (
+            f"Expected module_bay='Slot 3' but got {row['module_bay']!r} — "
+            r"the `^Linecard\(slot (\d+)\)$` regex should resolve to `Slot N`"
+        )
+
+    def test_converter_matches_x2_port_via_parent_regex(self):
+        """`Converter 3/2`'s parent `Port Container 3/2` resolves to `X2 Port 2`."""
+        rows = self._build_rows()
+        row = self._row(rows, "Converter 3/2")
+        assert row is not None, "Converter 3/2 row not found"
+        assert row["module_bay"] == "X2 Port 2", (
+            f"Expected module_bay='X2 Port 2' but got {row['module_bay']!r} — "
+            r"parent name `Port Container 3/2` should regex-resolve to `X2 Port \2` = X2 Port 2"
+        )
+
+    def test_ge_matches_sfp1_via_positional_fallback(self):
+        """
+        `GigabitEthernet3/11` (first port-container child of Converter 3/2) matches
+        `SFP 1` on the CVR module via positional fallback.
+
+        The positional fallback indexes by **sibling order within the parent CVR**,
+        not by global port number — `Port Container 3/11` is the 1st child of
+        Converter 3/2, so it maps to `SFP 1`.
+        """
+        rows = self._build_rows()
+        row = self._row(rows, "GigabitEthernet3/11")
+        assert row is not None, "GigabitEthernet3/11 row not found"
+        assert row["module_bay"] == "SFP 1", (
+            f"Expected module_bay='SFP 1' but got {row['module_bay']!r} — "
+            "positional fallback should map the 1st port-container child of CVR-X2-SFP to SFP 1"
+        )
+
+    def test_ge_second_port_matches_sfp2_via_positional_fallback(self):
+        """`GigabitEthernet3/12` (2nd port-container child of CVR) matches `SFP 2`."""
+        rows = self._build_rows()
+        row = self._row(rows, "GigabitEthernet3/12")
+        assert row is not None, "GigabitEthernet3/12 row not found"
+        assert row["module_bay"] == "SFP 2", (
+            f"Expected module_bay='SFP 2' but got {row['module_bay']!r} — "
+            "positional fallback should map the 2nd port-container child of CVR-X2-SFP to SFP 2"
+        )
+
+    def test_ge_no_bay_when_cvr_not_installed_in_netbox(self):
+        """
+        When the CVR is matched (X2 Port 2) but no module is installed there in
+        NetBox, the deeper SFP scope is empty and GE inside the CVR shows 'No Bay'.
+
+        This is the original confusion that triggered the reverted commit
+        (216fb84): 'GE3/11 doesn't match a bay' was actually 'CVR module not
+        installed in NetBox' — the fix is to install the module, not to walk
+        ancestor names looking for a wrong bay to land on.
+        """
+        rows = self._build_rows(cvr_installed=False)
+        row = self._row(rows, "GigabitEthernet3/11")
+        assert row is not None, "GigabitEthernet3/11 row not found"
+        assert row["module_bay"] == "-", (
+            f"Expected no bay match (got {row['module_bay']!r}) — "
+            "without an installed CVR there is no SFP scope for positional fallback"
+        )
+        assert row["status"] == "No Bay", f"Expected status='No Bay' but got {row['status']!r}"
+
+    def test_no_cvr_entry_does_not_match_via_grandparent_walking(self):
+        """
+        Regression guard for reverted commit 216fb84.
+
+        Some Cisco devices expose only the Port-Container chain in ENTITY-MIB
+        (no Converter entry between linecard and port).  The hierarchy is:
+
+            Linecard(slot 3)
+              Port Container 3/2          [no model — skipped, no row]
+                Port Container 3/11       [no model — skipped, no row]
+                  GigabitEthernet3/11     [GLC-TE]
+
+        Because both intermediate containers are model-less, no row updates the
+        bay scope and GE3/11 inherits the linecard's bays as scope.  In this
+        scope:
+          - immediate-parent regex `Port Container 3/11` → `X2 Port 11` (no such bay)
+          - grandparent regex `Port Container 3/2` → `X2 Port 2` (the bay holding
+            the CVR module, not a transceiver bay)
+
+        Correct behavior: no bay match.  The reverted commit's "walk all
+        ancestors" logic resolved GE3/11 to `X2 Port 2`, semantically landing
+        the transceiver in the parent module's slot.
+        """
+        no_cvr_inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Switch System",
+                "entPhysicalModelName": "MIDPLANE",
+                "entPhysicalClass": "chassis",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "S_CHASSIS",
+                "entPhysicalParentRelPos": 1,
+            },
+            {
+                "entPhysicalIndex": 4,
+                "entPhysicalName": "Slot 3",
+                "entPhysicalModelName": "",
+                "entPhysicalClass": "container",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalSerialNum": "",
+                "entPhysicalParentRelPos": 3,
+            },
+            {
+                "entPhysicalIndex": 3000,
+                "entPhysicalName": "Linecard(slot 3)",
+                "entPhysicalModelName": "WS-X4908-10GE",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 4,
+                "entPhysicalSerialNum": "S_LINECARD",
+                "entPhysicalParentRelPos": 1,
+            },
+            {
+                "entPhysicalIndex": 3003,
+                "entPhysicalName": "Port Container 3/2",
+                "entPhysicalModelName": "",
+                "entPhysicalClass": "container",
+                "entPhysicalContainedIn": 3000,
+                "entPhysicalSerialNum": "",
+                "entPhysicalParentRelPos": 3,
+            },
+            {
+                "entPhysicalIndex": 3028,
+                "entPhysicalName": "Port Container 3/11",
+                "entPhysicalModelName": "",
+                "entPhysicalClass": "container",
+                "entPhysicalContainedIn": 3003,
+                "entPhysicalSerialNum": "",
+                "entPhysicalParentRelPos": 9,
+            },
+            {
+                "entPhysicalIndex": 3044,
+                "entPhysicalName": "GigabitEthernet3/11",
+                "entPhysicalModelName": "GLC-TE",
+                "entPhysicalClass": "port",
+                "entPhysicalContainedIn": 3028,
+                "entPhysicalSerialNum": "MTC213403BB",
+                "entPhysicalParentRelPos": 1,
+            },
+        ]
+        view = _make_view()
+        device_bays, module_scoped_bays = _prod_bay_setup_ws_x4908(cvr_installed=True)
+        rows = _run_build_context(
+            view,
+            no_cvr_inventory,
+            device_bays,
+            module_scoped_bays,
+            _prod_module_types(),
+            bay_mappings=_load_contrib_bay_mappings(),
+        )
+        row = self._row(rows, "GigabitEthernet3/11")
+        assert row is not None, "GigabitEthernet3/11 row not found"
+        assert row["module_bay"] != "X2 Port 2", (
+            "GE3/11 matched X2 Port 2 — that bay holds the parent CVR module, "
+            "not a transceiver.  An ancestor-walking matcher (reverted 216fb84) "
+            "would resolve `Port Container 3/2` (grandparent) to `X2 Port 2` "
+            "and incorrectly land the transceiver in the CVR's own bay."
+        )
 
 
 class TestCollectDescendants:
