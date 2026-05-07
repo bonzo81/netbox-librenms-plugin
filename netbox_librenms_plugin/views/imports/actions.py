@@ -1479,10 +1479,13 @@ class AddDeviceTypeMappingView(
                 )
                 if locked and not existing_mapping:
                     # A concurrent request created the mapping after our upfront read.
-                    # Re-check that this user has change permission before overwriting.
-                    self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
-                    if error := self.require_object_permissions("POST"):
-                        return error
+                    # Only escalate to change permission if we would actually mutate the row;
+                    # if the locked row already maps to the same device type this is a no-op
+                    # and the caller needs only the add permission they already passed above.
+                    if locked.netbox_device_type_id != device_type_id:
+                        self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
+                        if error := self.require_object_permissions("POST"):
+                            return error
                 if existing_mapping and not locked:
                     # The mapping was deleted between our upfront read and the lock.
                     # We are about to CREATE a new row, so require add permission.
