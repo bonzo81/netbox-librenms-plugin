@@ -4,6 +4,7 @@ from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.utils.text import slugify
 
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
@@ -331,6 +332,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             try:
                 platform = Platform(
                     name=platform_name,
+                    slug=slugify(platform_name),
                     manufacturer=manufacturer,
                 )
                 platform.full_clean()
