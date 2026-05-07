@@ -7,6 +7,7 @@ from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
 
+from netbox_librenms_plugin.utils import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -150,13 +151,92 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """Returns the table class. Subclasses should override."""
         raise NotImplementedError("Subclasses must implement get_table()")
 
+    def _get_sync_device(self, obj):
+        """Resolve the LibreNMS sync device for cache reads/writes in VC contexts."""
+        sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
+        return sync_device or obj
+
+    @staticmethod
+    def _normalize_serial(value):
+        """Normalize serial values for reliable cross-source comparison."""
+        serial = (value or "").strip()
+        if serial.lower() in _PLACEHOLDER_VALUES:
+            return ""
+        return serial
+
+    def _infer_vc_member_for_item(self, obj, item, index_map, vc_members):
+        """
+        Infer VC member ownership for an inventory item using LibreNMS ENTITY data.
+
+        Returns:
+            tuple: (Device, source) where source is a short reason string.
+        """
+        if not vc_members:
+            return obj, "default"
+
+        member_by_serial = {
+            self._normalize_serial(getattr(member, "serial", "")): member
+            for member in vc_members
+            if self._normalize_serial(getattr(member, "serial", ""))
+        }
+
+        item_serial = self._normalize_serial(item.get("entPhysicalSerialNum"))
+        if item_serial and item_serial in member_by_serial:
+            return member_by_serial[item_serial], "serial"
+
+        # Walk ancestors to find a serial tied to a VC member.
+        parent_idx = item.get("entPhysicalContainedIn", 0)
+        visited = set()
+        while parent_idx and parent_idx in index_map and parent_idx not in visited:
+            visited.add(parent_idx)
+            parent = index_map[parent_idx]
+            parent_serial = self._normalize_serial(parent.get("entPhysicalSerialNum"))
+            if parent_serial and parent_serial in member_by_serial:
+                return member_by_serial[parent_serial], "ancestor-serial"
+            parent_idx = parent.get("entPhysicalContainedIn", 0)
+
+        # Position-based fallback from ENTITY parentRelPos.
+        rel_pos = item.get("entPhysicalParentRelPos")
+        try:
+            rel_pos = int(rel_pos)
+        except (TypeError, ValueError):
+            rel_pos = None
+
+        if rel_pos:
+            for member in vc_members:
+                if getattr(member, "vc_position", None) == rel_pos:
+                    return member, "position"
+
+        # Name/model hint fallback: common "<position>/..." prefixes.
+        hints = [
+            (item.get("entPhysicalName") or "").strip(),
+            (item.get("entPhysicalDescr") or "").strip(),
+            (item.get("entPhysicalModelName") or "").strip(),
+        ]
+        for hint in hints:
+            if not hint:
+                continue
+            match = re.match(r"^\D*([1-9]\d*)[/:\-].*", hint)
+            if not match:
+                continue
+            try:
+                hinted_pos = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            for member in vc_members:
+                if getattr(member, "vc_position", None) == hinted_pos:
+                    return member, "name-hint"
+
+        return obj, "default"
+
     def post(self, request, pk):
         """Fetch inventory from LibreNMS, cache it, and render the module sync table."""
         obj = self.get_object(pk)
+        sync_device = self._get_sync_device(obj)
 
-        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        self.librenms_id = self.librenms_api.get_librenms_id(sync_device)
         if not self.librenms_id:
-            cache.delete(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key))
             messages.error(request, "Device not found in LibreNMS.")
             return render(
                 request,
@@ -175,7 +255,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
 
         if not success:
-            cache.delete(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key))
             messages.error(request, f"Failed to fetch inventory from LibreNMS: {inventory_data}")
             return render(
                 request,
@@ -196,7 +276,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Cache the merged inventory data, namespaced by server and librenms_id to detect remapping
         cache.set(
-            self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key),
+            self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key),
             {"inventory": inventory_data, "librenms_id": self.librenms_id},
             timeout=self.librenms_api.cache_timeout,
         )
@@ -214,14 +294,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def get_context_data(self, request, obj):
         """Get context from cache (used by the main sync view on initial page load)."""
-        cache_key = self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key)
+        sync_device = self._get_sync_device(obj)
+        cache_key = self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key)
         cached_payload = cache.get(cache_key)
         if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
-        current_librenms_id = self.librenms_api.get_librenms_id(obj)
+        current_librenms_id = self.librenms_api.get_librenms_id(sync_device)
         if cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
@@ -278,8 +359,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if item.get("entPhysicalIndex") is not None
         }
 
-        # Get NetBox module bays and modules for this device
-        device_bays, module_scoped_bays = self._get_module_bays(obj)
         module_types = self._get_module_types()
 
         transparent_indices = self._find_transparent_indices(inventory_data, ignore_cache)
@@ -287,13 +366,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             inventory_data, index_map, ignore_rules, device_serial, transparent_indices, ignore_cache
         )
         table_data = self._build_table_rows(
+            obj,
             top_items,
             index_map,
             children_by_parent,
             ignore_rules,
             device_serial,
-            device_bays,
-            module_scoped_bays,
             module_types,
             manufacturer=manufacturer,
         )
@@ -307,8 +385,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         table = self.get_table(table_data, obj)
         table.configure(request)
 
+        sync_device = self._get_sync_device(obj)
         cache_ttl = getattr(cache, "ttl", lambda k: None)(
-            self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key)
+            self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key)
         )
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
@@ -439,99 +518,193 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _build_table_rows(
         self,
+        obj,
         top_items,
         index_map,
         children_by_parent,
         ignore_rules,
         device_serial,
-        device_bays,
-        module_scoped_bays,
         module_types,
         manufacturer=None,
     ):
         """Build table rows from top-level items and their sub-components."""
-        all_bays = self._compute_all_bays(device_bays, module_scoped_bays)
-        # Precompute per-module sibling bay counts to avoid N+1 in has_nested_name_conflict.
-        sibling_counts = {mid: len(bays) for mid, bays in module_scoped_bays.items()}
+        vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
+
+        member_contexts = self._build_member_contexts(obj, vc_members)
+
         table_data = []
 
         for item in top_items:
-            item_bays = all_bays if item.get("_from_transceiver_api") else device_bays
-            row = self._build_row(
-                item,
-                index_map,
-                item_bays,
-                module_types,
-                depth=0,
-                manufacturer=manufacturer,
-                sibling_counts=sibling_counts,
-            )
-            parent_row_idx = len(table_data)
-            table_data.append(row)
-
-            # Determine child bay scope based on parent match state
-            parent_module_id = None
-            parent_bay_matched_but_uninstalled = False
-            if row.get("module_bay_id"):
-                matched_bay = item_bays.get(row["module_bay"])
-                if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
-                    parent_module_id = matched_bay.installed_module.pk
-                else:
-                    parent_bay_matched_but_uninstalled = True
-
-            if parent_bay_matched_but_uninstalled:
-                child_bays = {}
-            elif parent_module_id:
-                child_bays = module_scoped_bays.get(parent_module_id, {})
-            else:
-                child_bays = device_bays
-
-            # Process sub-components with depth-tracked bay scoping
-            bays_by_depth = {0: child_bays}
-            parent_ent_idx = item.get("entPhysicalIndex")
-            if parent_ent_idx is None:
+            target_device, resolution_source = self._infer_vc_member_for_item(obj, item, index_map, vc_members)
+            target_context = member_contexts.get(target_device.id) or member_contexts.get(obj.id)
+            if target_context is None:
                 continue
-            sub_items = self._get_sub_components(
-                parent_ent_idx, children_by_parent, index_map, ignore_rules, device_serial
+            self._append_rows_for_item_context(
+                table_data,
+                item,
+                target_context,
+                index_map,
+                children_by_parent,
+                ignore_rules,
+                device_serial,
+                module_types,
+                manufacturer=manufacturer,
+                selected_device=target_device,
+                resolution_source=resolution_source,
             )
-            for depth, sub_item in sub_items:
-                scope_bays = bays_by_depth.get(depth, child_bays)
-                sub_row = self._build_row(
-                    sub_item,
-                    index_map,
-                    scope_bays,
-                    module_types,
-                    depth=depth,
-                    manufacturer=manufacturer,
-                    sibling_counts=sibling_counts,
-                )
-                table_data.append(sub_row)
-
-                # Update bay scope for children of this sub-item.
-                if sub_row.get("module_bay_id"):
-                    matched_sub_bay = scope_bays.get(sub_row["module_bay"])
-                    if (
-                        matched_sub_bay
-                        and hasattr(matched_sub_bay, "installed_module")
-                        and matched_sub_bay.installed_module
-                    ):
-                        sub_module_id = matched_sub_bay.installed_module.pk
-                        bays_by_depth[depth + 1] = module_scoped_bays.get(sub_module_id, {})
-                    else:
-                        bays_by_depth[depth + 1] = {}
-                else:
-                    # Preserve parent scope for unmatched intermediate containers
-                    bays_by_depth[depth + 1] = scope_bays
-
-                if sub_row.get("can_install"):
-                    table_data[parent_row_idx]["has_installable_children"] = True
-                # When parent bay is uninstalled, sub-rows have empty bays so
-                # can_install is False, but module_type_id is still resolved.
-                # Use it to enable "Install Branch" without a second resolve pass.
-                elif parent_bay_matched_but_uninstalled and sub_row.get("module_type_id"):
-                    table_data[parent_row_idx]["has_installable_children"] = True
 
         return table_data
+
+    def _build_table_rows_for_member(
+        self,
+        member,
+        top_items,
+        index_map,
+        children_by_parent,
+        ignore_rules,
+        device_serial,
+        module_types,
+        manufacturer=None,
+    ):
+        """Build rows using a fixed target member for every inventory item."""
+        member_contexts = self._build_member_contexts(member, vc_members=[])
+        target_context = member_contexts.get(member.id)
+        if target_context is None:
+            return []
+
+        table_data = []
+        for item in top_items:
+            self._append_rows_for_item_context(
+                table_data,
+                item,
+                target_context,
+                index_map,
+                children_by_parent,
+                ignore_rules,
+                device_serial,
+                module_types,
+                manufacturer=manufacturer,
+                selected_device=member,
+                resolution_source="manual",
+            )
+
+        return table_data
+
+    def _build_member_contexts(self, obj, vc_members):
+        """Build per-member bay context data used for row resolution."""
+        member_contexts = {}
+        context_members = vc_members if vc_members else [obj]
+        for member in context_members:
+            device_bays, module_scoped_bays = self._get_module_bays(member)
+            member_contexts[member.id] = {
+                "device": member,
+                "device_bays": device_bays,
+                "module_scoped_bays": module_scoped_bays,
+                "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
+                "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
+            }
+        return member_contexts
+
+    def _append_rows_for_item_context(
+        self,
+        table_data,
+        item,
+        target_context,
+        index_map,
+        children_by_parent,
+        ignore_rules,
+        device_serial,
+        module_types,
+        manufacturer,
+        selected_device,
+        resolution_source,
+    ):
+        """Append one top-level item and descendants using one target device context."""
+        item_bays = target_context["all_bays"] if item.get("_from_transceiver_api") else target_context["device_bays"]
+        row = self._build_row(
+            item,
+            index_map,
+            item_bays,
+            module_types,
+            depth=0,
+            manufacturer=manufacturer,
+            sibling_counts=target_context["sibling_counts"],
+        )
+        row["selected_device_id"] = selected_device.id
+        row["selected_device_name"] = selected_device.name
+        row["member_resolution_source"] = resolution_source
+        parent_row_idx = len(table_data)
+        table_data.append(row)
+
+        # Determine child bay scope based on parent match state
+        parent_module_id = None
+        parent_bay_matched_but_uninstalled = False
+        if row.get("module_bay_id"):
+            matched_bay = item_bays.get(row["module_bay"])
+            if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
+                parent_module_id = matched_bay.installed_module.pk
+            else:
+                parent_bay_matched_but_uninstalled = True
+
+        if parent_bay_matched_but_uninstalled:
+            child_bays = {}
+        elif parent_module_id:
+            child_bays = target_context["module_scoped_bays"].get(parent_module_id, {})
+        else:
+            child_bays = target_context["device_bays"]
+
+        # Process sub-components with depth-tracked bay scoping
+        bays_by_depth = {0: child_bays}
+        parent_ent_idx = item.get("entPhysicalIndex")
+        if parent_ent_idx is None:
+            return
+
+        sub_items = self._get_sub_components(
+            parent_ent_idx,
+            children_by_parent,
+            index_map,
+            ignore_rules,
+            device_serial,
+        )
+        for depth, sub_item in sub_items:
+            scope_bays = bays_by_depth.get(depth, child_bays)
+            sub_row = self._build_row(
+                sub_item,
+                index_map,
+                scope_bays,
+                module_types,
+                depth=depth,
+                manufacturer=manufacturer,
+                sibling_counts=target_context["sibling_counts"],
+            )
+            sub_row["selected_device_id"] = selected_device.id
+            sub_row["selected_device_name"] = selected_device.name
+            sub_row["member_resolution_source"] = resolution_source
+            table_data.append(sub_row)
+
+            # Update bay scope for children of this sub-item.
+            if sub_row.get("module_bay_id"):
+                matched_sub_bay = scope_bays.get(sub_row["module_bay"])
+                if (
+                    matched_sub_bay
+                    and hasattr(matched_sub_bay, "installed_module")
+                    and matched_sub_bay.installed_module
+                ):
+                    sub_module_id = matched_sub_bay.installed_module.pk
+                    bays_by_depth[depth + 1] = target_context["module_scoped_bays"].get(sub_module_id, {})
+                else:
+                    bays_by_depth[depth + 1] = {}
+            else:
+                # Preserve parent scope for unmatched intermediate containers
+                bays_by_depth[depth + 1] = scope_bays
+
+            if sub_row.get("can_install"):
+                table_data[parent_row_idx]["has_installable_children"] = True
+            # When parent bay is uninstalled, sub-rows have empty bays so
+            # can_install is False, but module_type_id is still resolved.
+            # Use it to enable "Install Branch" without a second resolve pass.
+            elif parent_bay_matched_but_uninstalled and sub_row.get("module_type_id"):
+                table_data[parent_row_idx]["has_installable_children"] = True
 
     def _merge_transceiver_data(self, inventory_data):
         """

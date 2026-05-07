@@ -107,6 +107,7 @@ from .object_sync import (  # noqa: F401
     DeviceVLANTableView,
     SaveVlanGroupOverridesView,
     SingleInterfaceVerifyView,
+    SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
     VerifyVlanSyncGroupView,
     VMInterfaceTableView,

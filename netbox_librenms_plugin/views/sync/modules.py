@@ -11,7 +11,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views import View
 
-from netbox_librenms_plugin.utils import get_module_types_indexed
+from netbox_librenms_plugin.utils import get_librenms_sync_device, get_module_types_indexed
 from netbox_librenms_plugin.views.base.modules_view import _PLACEHOLDER_VALUES
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -42,6 +42,28 @@ def _report_install_results(request, installed, skipped, failed):
         messages.warning(request, f"Failed {len(failed)}: {'; '.join(failed)}")
 
 
+def _resolve_target_device(page_device, selected_device_id):
+    """Resolve and validate a target device from row-level VC selection."""
+    if not selected_device_id:
+        return page_device
+
+    try:
+        selected_device_id = int(selected_device_id)
+    except (TypeError, ValueError):
+        return page_device
+
+    if not getattr(page_device, "virtual_chassis", None):
+        return page_device
+
+    member = page_device.virtual_chassis.members.filter(pk=selected_device_id).first()
+    return member or page_device
+
+
+def _get_sync_device_for_inventory(device, server_key):
+    """Return the VC sync device used for module inventory cache keys."""
+    return get_librenms_sync_device(device, server_key=server_key) or device
+
+
 class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
 
@@ -52,7 +74,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        page_device = get_object_or_404(Device, pk=pk)
+        target_device = _resolve_target_device(page_device, request.POST.get("selected_device_id"))
         serial = request.POST.get("serial", "").strip()
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
@@ -65,7 +88,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             messages.error(request, "Missing or invalid module bay/module type ID.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        get_object_or_404(ModuleBay, pk=module_bay_id, device=device)  # verify bay belongs to device
+        get_object_or_404(ModuleBay, pk=module_bay_id, device=target_device)  # verify bay belongs to selected device
         module_type = get_object_or_404(ModuleType, pk=module_type_id)
 
         try:
@@ -76,7 +99,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
                     return redirect(f"{sync_url}?tab=modules#librenms-module-table")
                 module = Module(
-                    device=device,
+                    device=target_device,
                     module_bay=locked_bay,
                     module_type=module_type,
                     serial=serial,
@@ -104,7 +127,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        page_device = get_object_or_404(Device, pk=pk)
+        target_device = _resolve_target_device(page_device, request.POST.get("selected_device_id"))
         parent_index = request.POST.get("parent_index")
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
@@ -120,7 +144,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Get cached inventory data
-        cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        sync_device = _get_sync_device_for_inventory(target_device, server_key)
+        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
         cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
@@ -130,7 +155,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
         ignore_rules = get_enabled_ignore_rules()
-        device_serial = (getattr(device, "serial", None) or "").strip()
+        device_serial = (getattr(target_device, "serial", None) or "").strip()
 
         # Build index map and collect the branch to install
         index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
@@ -157,7 +182,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             with transaction.atomic():
                 for item in branch_items:
                     result = self._install_single(
-                        device,
+                        target_device,
                         item,
                         index_map,
                         module_types,
@@ -512,7 +537,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        page_device = get_object_or_404(Device, pk=pk)
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
@@ -521,7 +546,8 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.warning(request, "No modules selected.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        sync_device = _get_sync_device_for_inventory(page_device, server_key)
+        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
         cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
@@ -546,7 +572,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
         ignore_rules = get_enabled_ignore_rules()
-        device_serial = (getattr(device, "serial", None) or "").strip()
+        device_serial = (getattr(page_device, "serial", None) or "").strip()
         if ignore_rules:
             items = [
                 item
@@ -572,8 +598,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             with transaction.atomic():
                 for item in items:
+                    ent_index = item.get("entPhysicalIndex")
+                    selected_device_id = request.POST.get(f"device_selection_{ent_index}")
+                    target_device = _resolve_target_device(page_device, selected_device_id)
                     result = InstallBranchView._install_single(
-                        device,
+                        target_device,
                         item,
                         index_map,
                         module_types,
@@ -607,7 +636,8 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        page_device = get_object_or_404(Device, pk=pk)
+        target_device = _resolve_target_device(page_device, request.POST.get("selected_device_id"))
         serial = request.POST.get("serial", "").strip()
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
@@ -624,7 +654,7 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 module = (
                     Module.objects.select_for_update()
                     .select_related("module_type", "module_bay")
-                    .filter(pk=module_id, device=device)
+                    .filter(pk=module_id, device=target_device)
                     .first()
                 )
                 if not module:
@@ -662,7 +692,8 @@ class ModuleMismatchPreviewView(
         if error := self.require_object_permissions("GET"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        page_device = get_object_or_404(Device, pk=pk)
+        target_device = _resolve_target_device(page_device, request.GET.get("selected_device_id"))
         server_key = request.GET.get("server_key") or self.librenms_api.server_key
 
         try:
@@ -674,10 +705,11 @@ class ModuleMismatchPreviewView(
         installed_module = get_object_or_404(
             Module.objects.select_related("module_type", "module_bay", "device"),
             pk=module_id,
-            device=device,
+            device=target_device,
         )
 
-        cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        sync_device = _get_sync_device_for_inventory(target_device, server_key)
+        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
         cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             return HttpResponse("No cached inventory data. Please refresh modules first.", status=400)
@@ -698,7 +730,7 @@ class ModuleMismatchPreviewView(
         from netbox_librenms_plugin.utils import resolve_module_type
 
         module_types = get_module_types_indexed()
-        manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(
             librenms_model if librenms_model != "-" else "", module_types, manufacturer=manufacturer
         )
@@ -743,6 +775,7 @@ class ModuleMismatchPreviewView(
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "ent_index": ent_index_int,
                 "server_key": server_key or "",
+                "selected_device_id": target_device.pk,
             },
         )
 
@@ -763,7 +796,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        page_device = get_object_or_404(Device, pk=pk)
+        target_device = _resolve_target_device(page_device, request.POST.get("selected_device_id"))
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
@@ -777,10 +811,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         installed_module = get_object_or_404(
             Module.objects.select_related("module_type", "module_bay"),
             pk=module_id,
-            device=device,
+            device=target_device,
         )
 
-        cached_payload = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        sync_device = _get_sync_device_for_inventory(target_device, server_key)
+        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
         cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
@@ -822,7 +857,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         module_types = get_module_types_indexed()
         from netbox_librenms_plugin.utils import resolve_module_type
 
-        manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
 
         if not matched_type:
@@ -835,7 +870,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # Re-fetch with row lock to prevent concurrent modifications
                 installed_module = (
                     Module.objects.select_for_update()
-                    .filter(pk=module_id, device=device)
+                    .filter(pk=module_id, device=target_device)
                     .select_related("module_type", "module_bay")
                     .first()
                 )
@@ -869,7 +904,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
                 # Install fresh module from LibreNMS data
                 new_module = Module(
-                    device=device,
+                    device=target_device,
                     module_bay=target_bay,
                     module_type=matched_type,
                     serial=serial,
@@ -909,7 +944,8 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        page_device = get_object_or_404(Device, pk=pk)
+        target_device = _resolve_target_device(page_device, request.POST.get("selected_device_id"))
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         try:
@@ -926,13 +962,13 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         except (TypeError, ValueError):
             module_id = None
 
-        get_object_or_404(ModuleBay, pk=target_bay_id, device=device)
+        get_object_or_404(ModuleBay, pk=target_bay_id, device=target_device)
 
         try:
             occupant_removed_msg = None
             with transaction.atomic():
                 # Lock target bay to prevent concurrent modifications
-                target_bay = ModuleBay.objects.select_for_update().get(pk=target_bay_id, device=device)
+                target_bay = ModuleBay.objects.select_for_update().get(pk=target_bay_id, device=target_device)
 
                 # Re-fetch with row lock to prevent concurrent modifications
                 conflict_module = (
@@ -949,7 +985,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 if module_id:
                     occupant = (
                         Module.objects.select_for_update()
-                        .filter(pk=module_id, device=device, module_bay=target_bay)
+                        .filter(pk=module_id, device=target_device, module_bay=target_bay)
                         .first()
                     )
                     if occupant and occupant.pk != conflict_module.pk:
@@ -960,14 +996,14 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 from_bay = conflict_module.module_bay.name
                 from_device = conflict_module.device.name
                 conflict_module.module_bay = target_bay
-                conflict_module.device = device
+                conflict_module.device = target_device
                 conflict_module.full_clean()
                 conflict_module.save()
 
             if occupant_removed_msg:
                 messages.info(request, occupant_removed_msg)
             moved_msg = f"Moved {conflict_module.module_type.model}"
-            if from_device != device.name:
+            if from_device != target_device.name:
                 moved_msg += f" from {from_device}"
             moved_msg += f"/{from_bay} to {target_bay.name}."
             messages.success(request, moved_msg)

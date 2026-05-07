@@ -78,6 +78,7 @@
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
         <input type="hidden" name="serial" value="{{ librenms_serial }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">
+        <input type="hidden" name="selected_device_id" value="{{ selected_device_id }}">
         <button type="submit" class="btn btn-warning">
             <i class="mdi mdi-sync me-1"></i>Update Serial Only
         </button>
@@ -94,6 +95,7 @@
         <input type="hidden" name="conflict_module_id" value="{{ serial_conflict.pk }}">
         <input type="hidden" name="target_bay_id" value="{{ target_bay_id }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">
+        <input type="hidden" name="selected_device_id" value="{{ selected_device_id }}">
         <button type="submit" class="btn btn-info">
             <i class="mdi mdi-arrow-right me-1"></i>Move from {{ serial_conflict.module_bay.name }}
         </button>
@@ -109,6 +111,7 @@
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
         <input type="hidden" name="ent_index" value="{{ ent_index }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">
+        <input type="hidden" name="selected_device_id" value="{{ selected_device_id }}">
         {% if serial_conflict %}
         <input type="hidden" name="conflict_module_id" value="{{ serial_conflict.pk }}">
         {% endif %}

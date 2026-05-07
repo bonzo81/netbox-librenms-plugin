@@ -1,6 +1,6 @@
 import django_tables2 as tables
 from django.urls import reverse
-from django.utils.html import format_html, mark_safe
+from django.utils.html import escape, format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
@@ -186,6 +186,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<form method="post" action="{}" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
+                    '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_bay_id" value="{}">'
                     '<input type="hidden" name="module_type_id" value="{}">'
                     '<input type="hidden" name="serial" value="{}">'
@@ -195,6 +196,7 @@ class LibreNMSModuleTable(tables.Table):
                     url,
                     self.csrf_token,
                     self.server_key,
+                    record.get("selected_device_id") or self.device.pk,
                     record.get("module_bay_id", ""),
                     record.get("module_type_id", ""),
                     record.get("serial") or "",
@@ -209,6 +211,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<form method="post" action="{}" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
+                    '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="parent_index" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-primary ms-1"'
                     ' title="Install this module and all installable children">'
@@ -217,6 +220,7 @@ class LibreNMSModuleTable(tables.Table):
                     url,
                     self.csrf_token,
                     self.server_key,
+                    record.get("selected_device_id") or self.device.pk,
                     record.get("ent_physical_index", ""),
                 )
             )
@@ -229,6 +233,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<form method="post" action="{}" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
+                    '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="serial" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-warning ms-1"'
@@ -238,6 +243,7 @@ class LibreNMSModuleTable(tables.Table):
                     url,
                     self.csrf_token,
                     self.server_key,
+                    record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
                     record.get("serial") or "",
                 )
@@ -258,6 +264,7 @@ class LibreNMSModuleTable(tables.Table):
                 format_html(
                     '<button type="button" class="btn btn-sm btn-danger ms-1 module-replace-btn"'
                     ' data-module-id="{}" data-ent-index="{}" data-server-key="{}"'
+                    ' data-selected-device-id="{}"'
                     ' data-preview-url="{}"'
                     ' title="Replace module — opens comparison dialog">'
                     '<i class="mdi mdi-swap-horizontal"></i> Replace'
@@ -265,6 +272,7 @@ class LibreNMSModuleTable(tables.Table):
                     record["installed_module_id"],
                     record.get("ent_physical_index", ""),
                     self.server_key or "",
+                    record.get("selected_device_id") or self.device.pk,
                     preview_url,
                 )
             )
@@ -284,6 +292,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<form method="post" action="{}" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
+                    '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="conflict_module_id" value="{}">'
                     '<input type="hidden" name="target_bay_id" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-info ms-1"'
@@ -293,6 +302,7 @@ class LibreNMSModuleTable(tables.Table):
                     move_url,
                     self.csrf_token,
                     self.server_key,
+                    record.get("selected_device_id") or self.device.pk,
                     conflict_module.pk,
                     record["module_bay_id"],
                     conflict_module.device.name,
@@ -301,3 +311,76 @@ class LibreNMSModuleTable(tables.Table):
             )
 
         return mark_safe("".join(buttons)) if buttons else ""
+
+    def format_module_data(self, record):
+        """Format a module row for verify endpoint partial updates."""
+        return {
+            "name": str(self.render_name(record.get("name"), record)),
+            "model": str(self.render_model(record.get("model"), record)),
+            "serial": str(self.render_serial(record.get("serial"), record)),
+            "description": str(self.render_description(record.get("description"), record)),
+            "item_class": str(self.render_item_class(record.get("item_class"), record)),
+            "module_bay": str(self.render_module_bay(record.get("module_bay"), record)),
+            "module_type": str(self.render_module_type(record.get("module_type"), record)),
+            "status": str(self.render_status(record.get("status"), record)),
+            "actions": str(self.render_actions(None, record)),
+        }
+
+
+class VCModuleTable(LibreNMSModuleTable):
+    """Module sync table variant with virtual chassis member selection."""
+
+    device_selection = tables.Column(
+        verbose_name="Virtual Chassis Member",
+        accessor="selected_device_id",
+        orderable=False,
+        empty_values=(),
+        attrs={"td": {"data-col": "device_selection"}},
+    )
+
+    def __init__(self, *args, device=None, **kwargs):
+        super().__init__(*args, device=device, **kwargs)
+        if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
+            self.columns.show("device_selection")
+
+    def render_device_selection(self, value, record):
+        members = self.device.virtual_chassis.members.all()
+        selected_device_id = record.get("selected_device_id") or self.device.id
+        ent_index = record.get("ent_physical_index", "")
+
+        options = [
+            (
+                f'<option value="{member.id}"'
+                f"{' selected' if str(member.id) == str(selected_device_id) else ''}>"
+                f"{escape(member.name)}"
+                "</option>"
+            )
+            for member in members
+        ]
+
+        return format_html(
+            '<select name="device_selection_{0}" id="device_selection_{0}" '
+            'class="form-select vc-member-select" data-module="{0}" data-row-id="{0}">{1}</select>',
+            ent_index,
+            mark_safe("".join(options)),
+        )
+
+    def format_module_data(self, record):
+        formatted = super().format_module_data(record)
+        formatted["device_selection"] = str(self.render_device_selection(record.get("selected_device_id"), record))
+        return formatted
+
+    class Meta(LibreNMSModuleTable.Meta):
+        sequence = [
+            "selection",
+            "device_selection",
+            "name",
+            "model",
+            "serial",
+            "description",
+            "item_class",
+            "module_bay",
+            "module_type",
+            "status",
+            "actions",
+        ]

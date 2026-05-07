@@ -349,6 +349,7 @@ function initializeVCMemberSelect() {
     setTimeout(() => {
         const interfaceTable = document.getElementById('librenms-interface-table');
         const cableTable = document.getElementById('librenms-cable-table-vc');
+        const moduleTable = document.getElementById('librenms-module-table');
 
         if (interfaceTable) {
             // Only target VC member selects, exclude VLAN group selects
@@ -370,6 +371,23 @@ function initializeVCMemberSelect() {
                     select.dataset.cableSelectInitialized = 'true';
                     select.tomselect.on('change', function (value) {
                         handleCableChange(select, value);
+                    });
+                }
+            });
+        }
+
+        if (moduleTable) {
+            const moduleSelects = moduleTable.querySelectorAll('.vc-member-select');
+            moduleSelects.forEach(select => {
+                if (select.tomselect && !select.dataset.moduleSelectInitialized) {
+                    select.dataset.moduleSelectInitialized = 'true';
+                    select.tomselect.on('change', function (value) {
+                        handleModuleChange(select, value);
+                    });
+                } else if (!select.tomselect && !select.dataset.moduleSelectInitialized) {
+                    select.dataset.moduleSelectInitialized = 'true';
+                    select.addEventListener('change', function () {
+                        handleModuleChange(select, this.value);
                     });
                 }
             });
@@ -1022,6 +1040,62 @@ function handleCableChange(select, value) {
 }
 
 /**
+ * Handle VC member selection change for module verification.
+ * Fetches recalculated matching status for one module row and updates cells inline.
+ *
+ * @param {HTMLSelectElement} select - VC member dropdown for a module row
+ * @param {string} value - Selected NetBox device ID
+ */
+function handleModuleChange(select, value) {
+    const row = document.querySelector(`tr[data-ent-index="${select.dataset.rowId}"]`);
+    const rowDepth = row?.dataset?.depth || 0;
+
+    fetch('/plugins/librenms_plugin/verify-module/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+        },
+        body: JSON.stringify({
+            device_id: value,
+            ent_physical_index: select.dataset.module,
+            depth: rowDepth,
+            server_key: document.querySelector('input[name="server_key"]')?.value || null
+        })
+    })
+        .then(response => {
+            if (!response.ok) {
+                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (!row || data.status !== 'success' || !data.formatted_row) return;
+
+            const formattedRow = data.formatted_row;
+            if (formattedRow.device_selection && row.querySelector('td[data-col="device_selection"]')) {
+                row.querySelector('td[data-col="device_selection"]').innerHTML = formattedRow.device_selection;
+            }
+            row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
+            row.querySelector('td[data-col="model"]').innerHTML = formattedRow.model;
+            row.querySelector('td[data-col="serial"]').innerHTML = formattedRow.serial;
+            row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
+            row.querySelector('td[data-col="item_class"]').innerHTML = formattedRow.item_class;
+            row.querySelector('td[data-col="module_bay"]').innerHTML = formattedRow.module_bay;
+            row.querySelector('td[data-col="module_type"]').innerHTML = formattedRow.module_type;
+            row.querySelector('td[data-col="status"]').innerHTML = formattedRow.status;
+            row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
+
+            // Re-bind listeners because row controls (select/buttons/forms) were replaced.
+            initializeVCMemberSelect();
+            initializeModuleReplaceButtons();
+        })
+        .catch(error => {
+            console.error('Error verifying module:', error.message);
+        });
+}
+
+/**
  * Initialize bulk VC member assignment functionality.
  * Applies selected VC member to all checked interfaces.
  */
@@ -1548,6 +1622,16 @@ function handleInstallSelectedSubmit() {
         hidden.value = cb.value;
         hidden.dataset.injectedSelect = '1';
         form.appendChild(hidden);
+
+        const selectedDevice = table.querySelector(`#device_selection_${cb.value}`);
+        if (selectedDevice) {
+            const hiddenDevice = document.createElement('input');
+            hiddenDevice.type = 'hidden';
+            hiddenDevice.name = `device_selection_${cb.value}`;
+            hiddenDevice.value = selectedDevice.value;
+            hiddenDevice.dataset.injectedSelect = '1';
+            form.appendChild(hiddenDevice);
+        }
     });
 }
 
@@ -1587,11 +1671,13 @@ function initializeModuleReplaceButtons() {
             const moduleId = this.dataset.moduleId;
             const entIndex = this.dataset.entIndex;
             const serverKey = this.dataset.serverKey;
+            const selectedDeviceId = this.dataset.selectedDeviceId;
 
             const params = new URLSearchParams({
                 module_id: moduleId,
                 ent_index: entIndex,
                 server_key: serverKey,
+                selected_device_id: selectedDeviceId,
             });
 
             // Show shared HTMX modal with loading state

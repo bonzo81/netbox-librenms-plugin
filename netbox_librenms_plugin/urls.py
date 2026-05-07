@@ -106,6 +106,7 @@ from .views import (
     SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
+    SingleModuleVerifyView,
     SingleIPAddressVerifyView,
     SaveVlanGroupOverridesView,
     SingleVlanGroupVerifyView,
@@ -200,6 +201,11 @@ urlpatterns = [
         "verify-cable/",
         SingleCableVerifyView.as_view(),
         name="verify_cable",
+    ),
+    path(
+        "verify-module/",
+        SingleModuleVerifyView.as_view(),
+        name="verify_module",
     ),
     # Path for single IP address verify javascript call
     path(
