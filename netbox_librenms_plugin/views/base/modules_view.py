@@ -68,8 +68,16 @@ def _check_ignore_rules(
 
     **serial_matches_device**
         Matches when the item's ``entPhysicalSerialNum`` equals *device_serial*
-        (the NetBox ``Device.serial`` value).  No name pattern is used.
+        (the NetBox ``Device.serial`` value) **and** the item sits at chassis
+        level — i.e. has no parent (top-level entity) or its direct parent has
+        ``entPhysicalClass="chassis"``.  No name pattern is used.
         ``require_serial_match_parent`` is ignored for this type.
+
+        The chassis-level requirement prevents the rule from misfiring on
+        chassis-based devices whose line cards happen to share a serial with
+        the device record (e.g. Cisco ASR-9904 with ``Device.serial`` set to
+        the linecard's serial — without the guard, the linecard becomes
+        transparent and its sub-ports collapse to chassis-level bay matching).
 
     **Name-based types** (ends_with / starts_with / contains / regex):
         Matches on ``entPhysicalName``.  When ``require_serial_match_parent``
@@ -94,9 +102,16 @@ def _check_ignore_rules(
     for rule in rules:
         # --- serial_matches_device: no name match, just compare serials ---
         if rule.match_type == "serial_matches_device":
-            if item_serial and device_serial and item_serial == device_serial:
-                return rule.action
-            continue
+            if not (item_serial and device_serial and item_serial == device_serial):
+                continue
+            # Restrict to chassis-level entries.  The rule targets fixed-form
+            # routers' system board (top-level or direct child of the chassis
+            # entity); on chassis devices a linecard sharing the device serial
+            # is *not* a system board, and marking it transparent silently
+            # promotes its sub-ports to chassis bay-matching.
+            if parent_item is not None and parent_item.get("entPhysicalClass") != "chassis":
+                continue
+            return rule.action
 
         # --- name-based rules ---
         if not rule.matches_name(name):

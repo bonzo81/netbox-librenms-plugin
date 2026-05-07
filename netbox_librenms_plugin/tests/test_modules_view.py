@@ -1776,6 +1776,33 @@ class TestCheckIgnoreRules:
         item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": ""}
         assert self._check(item, None, [rule], device_serial="FOC2418NHRK") is None
 
+    def test_serial_matches_device_fires_when_parent_is_chassis(self):
+        """serial_matches_device: matches when direct parent has class='chassis'."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
+        chassis = {"entPhysicalName": "Rack 0", "entPhysicalClass": "chassis"}
+        assert self._check(item, chassis, [rule], device_serial="FOC2418NHRK") == "transparent"
+
+    def test_serial_matches_device_skipped_when_parent_is_container(self):
+        """
+        serial_matches_device: does NOT match when parent is a container
+        (e.g. ASR-9904 line card whose serial happens to equal the device
+        serial — the linecard is contained in a 'Line Card Slot N' container,
+        not the chassis).  Treating it as transparent would silently promote
+        its TenGigE children to chassis-level bay matching.
+        """
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/0", "entPhysicalSerialNum": "FOC2349N4UN"}
+        slot_container = {"entPhysicalName": "Rack 0-Line Card Slot 0", "entPhysicalClass": "container"}
+        assert self._check(item, slot_container, [rule], device_serial="FOC2349N4UN") is None
+
+    def test_serial_matches_device_skipped_when_parent_is_module(self):
+        """serial_matches_device: does NOT match when parent is a module."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "Submodule", "entPhysicalSerialNum": "ABC123"}
+        parent_module = {"entPhysicalName": "Parent", "entPhysicalClass": "module"}
+        assert self._check(item, parent_module, [rule], device_serial="ABC123") is None
+
     def test_transparent_action_returned_for_name_rule(self):
         """A name-based rule with action=transparent returns 'transparent'."""
         rule = self._rule(match_type="ends_with", pattern="IDPROM", require_serial=False, action="transparent")
