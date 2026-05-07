@@ -900,6 +900,7 @@ class TestDeviceModuleTableView:
         """get_table() returns LibreNMSModuleTable with device and server_key."""
         view = self._make_view()
         obj = MagicMock()
+        obj.virtual_chassis = None
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSModuleTable") as mock_table_cls:
             mock_table = MagicMock()
@@ -921,6 +922,7 @@ class TestDeviceModuleTableView:
         """get_table() sets htmx_url with modules tab."""
         view = self._make_view()
         obj = MagicMock()
+        obj.virtual_chassis = None
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSModuleTable") as mock_table_cls:
             mock_table = MagicMock()

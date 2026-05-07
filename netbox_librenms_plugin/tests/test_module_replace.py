@@ -264,6 +264,7 @@ class TestReplaceModuleView:
         """POST with valid data deletes old module and creates new one."""
         view = self._view()
         device = _make_device()
+        sync_device = _make_device(pk=999, name="vc-sync-device")
         installed = _make_module(serial="OLD", type_id=5)
         request = _make_request("POST", data={"module_id": "42", "ent_index": "100", "server_key": "prod"})
         cached = [{"entPhysicalIndex": 100, "entPhysicalModelName": "XCM-7s", "entPhysicalSerialNum": "NEW"}]
@@ -276,6 +277,10 @@ class TestReplaceModuleView:
             patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, installed]),
             patch.object(view, "require_all_permissions", return_value=None),
             patch.object(view, "get_cache_key", return_value="ck") as mock_get_cache_key,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._get_sync_device_for_inventory",
+                return_value=sync_device,
+            ) as mock_get_sync_device,
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
             patch(
@@ -307,7 +312,8 @@ class TestReplaceModuleView:
         new_module.save.assert_called_once()
         mock_msg.success.assert_called_once()
         # server_key from POST must be forwarded to the cache key lookup
-        mock_get_cache_key.assert_called_with(device, "inventory", server_key="prod")
+        mock_get_sync_device.assert_called_with(device, "prod")
+        mock_get_cache_key.assert_called_with(sync_device, "inventory", server_key="prod")
 
     def test_replace_removes_serial_conflict_from_db(self):
         """POST re-derives the conflicting module from serial, not from conflict_module_id."""
