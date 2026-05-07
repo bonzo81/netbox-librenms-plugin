@@ -75,7 +75,8 @@
 ### Clearing CodeQL `py/reflected-xss` false positives
 When a view builds an `HttpResponse` from Django-template-rendered HTML (decoded via `.content.decode()`), CodeQL traces `request → template-render → HttpResponse` as reflected XSS even though Django templates auto-escape all user values.
 
-**Correct fix:** wrap the rendered HTML with `format_html()` + `mark_safe()` — both are recognised as sanitizers in CodeQL's Django taint model:
+**Correct fix:** use `format_html()` to compose the envelope and `mark_safe()` as a **trust assertion** on the inner HTML — CodeQL's Django taint model recognises this pattern and stops tracking the taint:
+
 ```python
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
@@ -84,6 +85,9 @@ modal_html = some_view.get(request, pk).content.decode("utf-8")
 oob = format_html('<div id="target" hx-swap-oob="innerHTML">{}</div>', mark_safe(modal_html))
 return HttpResponse(oob, content_type="text/html")
 ```
+
+> **Important:** `mark_safe()` is a trust assertion, not a sanitizer — it tells Django "I guarantee this string is already safe HTML." Only use it when `modal_html` comes from a server-rendered Django view (whose templates auto-escape all user values). Never pass untrusted user input to `mark_safe()` — that would introduce real XSS.
+
 **Do NOT** use `# lgtm[py/reflected-xss]` — that is LGTM.com legacy syntax and is **not** honoured by GitHub's modern CodeQL Action.
 
 ### URL converters
