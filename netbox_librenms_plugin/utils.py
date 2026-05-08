@@ -1038,7 +1038,7 @@ def load_bay_mappings() -> tuple:
     """
     from netbox_librenms_plugin.models import ModuleBayMapping
 
-    all_mappings = list(ModuleBayMapping.objects.all())
+    all_mappings = list(ModuleBayMapping.objects.order_by("is_regex", "librenms_name", "id"))
     exact = [m for m in all_mappings if not m.is_regex]
     regex = [m for m in all_mappings if m.is_regex]
     return exact, regex

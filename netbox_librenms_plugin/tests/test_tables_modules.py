@@ -667,6 +667,7 @@ class TestLibreNMSModuleTable:
             table = LibreNMSModuleTable()
 
         request = MagicMock()
+        request.headers.get.return_value = ""  # no HX-Current-URL header
         mock_rc_instance = MagicMock()
 
         with (

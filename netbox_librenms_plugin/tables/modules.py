@@ -1,4 +1,4 @@
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import django_tables2 as tables
 from django.urls import reverse
@@ -79,9 +79,25 @@ class LibreNMSModuleTable(tables.Table):
         from django.middleware.csrf import get_token
 
         self.csrf_token = get_token(request)
-        # Save the current path so the "Add Mapping" button can pass it as
-        # return_url and bring the user back to the modules tab after save.
-        self.return_url = request.get_full_path() if request else ""
+        # Use HX-Current-URL (the real browser URL) when available so that
+        # after saving a mapping the redirect lands on the browsable tab page
+        # (which handles GET) rather than the HTMX-only POST endpoint.
+        if request:
+            # HX-Current-URL is the real browser URL (full absolute URL).
+            # Extract only the path+query so return_url stays relative, which
+            # is what NetBox's ObjectEditView expects.  Fall back to the HTMX
+            # endpoint path when the header is absent (non-HTMX requests).
+            htmx_current = request.headers.get("HX-Current-URL", "")
+            if htmx_current:
+                parsed = urlparse(htmx_current)
+                relative = parsed.path
+                if parsed.query:
+                    relative = f"{relative}?{parsed.query}"
+                self.return_url = relative
+            else:
+                self.return_url = request.get_full_path()
+        else:
+            self.return_url = ""
         paginate = {"paginator_class": EnhancedPaginator, "per_page": get_table_paginate_count(request, self.prefix)}
         tables.RequestConfig(request, paginate).configure(self)
 
@@ -162,16 +178,63 @@ class LibreNMSModuleTable(tables.Table):
         }
         badge_class = badge_classes.get(value, "bg-secondary text-white")
         warning = record.get("name_conflict_warning") or record.get("model_warning")
+
+        # More descriptive label when the parent module type simply has no bay templates.
+        display_text = "No Bay on Parent" if record.get("no_bay_reason") == "empty_parent_bays" else value
+
         if warning:
-            return format_html(
+            status_html = format_html(
                 '<span class="badge {}" title="{}">{}</span>'
                 ' <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
                 badge_class,
                 warning,
-                value,
+                display_text,
                 warning,
             )
-        return format_html('<span class="badge {}">{}</span>', badge_class, value)
+        else:
+            status_html = format_html('<span class="badge {}">{}</span>', badge_class, display_text)
+
+        # "Fix Model" badge on the parent row when its installed module type is missing bay templates.
+        if record.get("model_incomplete"):
+            url = record.get("model_incomplete_url", "")
+            name = record.get("model_incomplete_name", "module type")
+            title = f"Module type '{name}' has no bay templates — click to add them so sub-components can be installed"
+            if url:
+                fix_html = format_html(
+                    ' <a href="{}" class="badge bg-warning text-dark" title="{}">'
+                    '<i class="mdi mdi-wrench-outline"></i> Fix Model</a>',
+                    url,
+                    title,
+                )
+            else:
+                fix_html = format_html(
+                    ' <span class="badge bg-warning text-dark" title="{}">'
+                    '<i class="mdi mdi-wrench-outline"></i> Fix Model</span>',
+                    title,
+                )
+            return status_html + fix_html
+
+        # "Fix Device Type" badge when the device type is missing bay templates for this component.
+        if record.get("device_type_incomplete"):
+            url = record.get("device_type_incomplete_url", "")
+            name = record.get("device_type_incomplete_name", "device type")
+            title = f"Device type '{name}' is missing bay templates for this component — click to add them"
+            if url:
+                fix_html = format_html(
+                    ' <a href="{}" class="badge bg-warning text-dark" title="{}">'
+                    '<i class="mdi mdi-wrench-outline"></i> Fix Device Type</a>',
+                    url,
+                    title,
+                )
+            else:
+                fix_html = format_html(
+                    ' <span class="badge bg-warning text-dark" title="{}">'
+                    '<i class="mdi mdi-wrench-outline"></i> Fix Device Type</span>',
+                    title,
+                )
+            return status_html + fix_html
+
+        return status_html
 
     def render_actions(self, value, record):
         """Render install button for matched modules and install branch for parents."""
@@ -374,6 +437,7 @@ class VCModuleTable(LibreNMSModuleTable):
         orderable=False,
         empty_values=(),
         attrs={"td": {"data-col": "device_selection"}},
+        visible=False,
     )
 
     def __init__(self, *args, device=None, **kwargs):
@@ -405,7 +469,8 @@ class VCModuleTable(LibreNMSModuleTable):
 
     def format_module_data(self, record):
         formatted = super().format_module_data(record)
-        formatted["device_selection"] = str(self.render_device_selection(record.get("selected_device_id"), record))
+        if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
+            formatted["device_selection"] = str(self.render_device_selection(record.get("selected_device_id"), record))
         return formatted
 
     class Meta(LibreNMSModuleTable.Meta):

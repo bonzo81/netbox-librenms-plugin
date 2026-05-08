@@ -679,6 +679,7 @@ class TestMissingFKWarnings:
                 return_value={
                     "can_import": True,
                     "is_ready": True,
+                    "existing_device": None,
                     "cluster": {"cluster": MagicMock()},
                     "platform": {"platform": None},
                     "device_role": {"role": None},

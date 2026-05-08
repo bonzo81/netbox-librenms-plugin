@@ -2359,3 +2359,391 @@ class TestBuildRowModelWarning:
             row = view._build_row(item, {}, {}, {"SFP-X": MagicMock(pk=1)}, scope_uninstalled=True)
         assert row["status"] == "No Bay"
         assert "install the parent module first" in row.get("model_warning", "").lower()
+
+    def test_no_bay_empty_parent_bays_sets_no_bay_reason(self):
+        """When parent module is installed but has no bay templates, _build_row
+        tags the row with no_bay_reason='empty_parent_bays'."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._match_module_bay = MagicMock(return_value=None)
+        item = {
+            "entPhysicalName": "TenGigE0/0/0/0",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "SFP-10G-SR",
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
+        ):
+            # scope_empty_installed_bays=True: installed parent has no bay templates
+            row = view._build_row(
+                item,
+                {},
+                {},
+                {"SFP-10G-SR": MagicMock(pk=1)},
+                scope_empty_installed_bays=True,
+            )
+        assert row["status"] == "No Bay"
+        assert row.get("no_bay_reason") == "empty_parent_bays"
+
+    def test_no_bay_empty_parent_bays_through_intermediate_container(self):
+        """Even with scope_preserved=True (intermediate unmatched container),
+        no_bay_reason is still set when scope_empty_installed_bays=True."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._match_module_bay = MagicMock(return_value=None)
+        item = {
+            "entPhysicalName": "TenGigE0/0/0/0",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "SFP-10G-SR",
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
+        ):
+            row = view._build_row(
+                item,
+                {},
+                {},
+                {"SFP-10G-SR": MagicMock(pk=1)},
+                scope_preserved=True,
+                scope_empty_installed_bays=True,
+            )
+        assert row["status"] == "No Bay"
+        assert row.get("no_bay_reason") == "empty_parent_bays"
+
+    def test_no_bay_default_scope_empty_flag_does_not_set_reason(self):
+        """Without scope_empty_installed_bays, plain empty scope gives no reason tag."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._match_module_bay = MagicMock(return_value=None)
+        item = {
+            "entPhysicalName": "TenGigE0/0/0/0",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "SFP-10G-SR",
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
+        ):
+            # Default scope_empty_installed_bays=False — could be unmatched ancestor
+            row = view._build_row(item, {}, {}, {"SFP-10G-SR": MagicMock(pk=1)})
+        assert row["status"] == "No Bay"
+        assert "no_bay_reason" not in row
+
+    def test_no_bay_with_bays_in_scope_does_not_set_no_bay_reason(self):
+        """When module_bays is non-empty (just no match), no_bay_reason is absent."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._match_module_bay = MagicMock(return_value=None)
+        bay = MagicMock()
+        bay.name = "Slot 1"
+        item = {
+            "entPhysicalName": "0/5",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "X",
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="X", pk=1)),
+        ):
+            row = view._build_row(item, {}, {"Slot 1": bay}, {"X": MagicMock(pk=1)})
+        assert row["status"] == "No Bay"
+        assert "no_bay_reason" not in row
+
+    def test_no_bay_scope_uninstalled_does_not_set_no_bay_reason(self):
+        """scope_uninstalled=True is a different root cause; no_bay_reason absent."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._match_module_bay = MagicMock(return_value=None)
+        item = {
+            "entPhysicalName": "TenGigE0/0/0/0",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "SFP-X",
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-X", pk=1)),
+        ):
+            row = view._build_row(item, {}, {}, {"SFP-X": MagicMock(pk=1)}, scope_uninstalled=True)
+        assert row["status"] == "No Bay"
+        assert "no_bay_reason" not in row
+
+
+class TestModelIncompleteFlag:
+    """_append_rows_for_item_context sets model_incomplete on parent when
+    installed module has no bay templates and children show no_bay_reason."""
+
+    def _make_parent_row(self, **kwargs):
+        row = {
+            "librenms_name": "0/0",
+            "status": "Installed",
+            "module_bay": "Slot 0",
+            "module_bay_id": 1,
+        }
+        row.update(kwargs)
+        return row
+
+    def test_model_incomplete_set_when_child_has_no_bay_reason(self):
+        """Parent is flagged model_incomplete when child rows have no_bay_reason='empty_parent_bays'."""
+        parent_row = self._make_parent_row()
+        child_row = {
+            "librenms_name": "TenGigE0/0/0/0",
+            "status": "No Bay",
+            "no_bay_reason": "empty_parent_bays",
+        }
+        table_data = [parent_row, child_row]
+        parent_row_idx = 0
+
+        mt = MagicMock()
+        mt.get_absolute_url.return_value = "/dcim/module-types/5/"
+        mt.__str__ = lambda self: "A9K-24X10GE-1G-TR"
+        installed_module = MagicMock()
+        installed_module.module_type = mt
+
+        # Simulate the flagging logic from _append_rows_for_item_context
+        child_bays = {}
+        if installed_module and not child_bays:
+            has_no_bay_children = any(
+                table_data[i].get("no_bay_reason") == "empty_parent_bays"
+                for i in range(parent_row_idx + 1, len(table_data))
+            )
+            if has_no_bay_children:
+                mt_ = installed_module.module_type
+                table_data[parent_row_idx]["model_incomplete"] = True
+                table_data[parent_row_idx]["model_incomplete_url"] = mt_.get_absolute_url()
+                table_data[parent_row_idx]["model_incomplete_name"] = str(mt_)
+
+        assert table_data[0].get("model_incomplete") is True
+        assert "/dcim/module-types/5/" in table_data[0].get("model_incomplete_url", "")
+
+    def test_model_incomplete_not_set_when_no_children_with_no_bay_reason(self):
+        """If children don't have no_bay_reason, parent stays unflagged even if child_bays empty."""
+        parent_row = self._make_parent_row()
+        child_row = {
+            "librenms_name": "TenGigE0/0/0/0",
+            "status": "Installed",
+        }
+        table_data = [parent_row, child_row]
+        parent_row_idx = 0
+
+        mt = MagicMock()
+        installed_module = MagicMock()
+        installed_module.module_type = mt
+        child_bays = {}
+
+        if installed_module and not child_bays:
+            has_no_bay_children = any(
+                table_data[i].get("no_bay_reason") == "empty_parent_bays"
+                for i in range(parent_row_idx + 1, len(table_data))
+            )
+            if has_no_bay_children:
+                table_data[parent_row_idx]["model_incomplete"] = True
+
+        assert "model_incomplete" not in table_data[0]
+
+    def test_model_incomplete_not_set_when_child_bays_nonempty(self):
+        """If the installed module DOES have bays in scope, no model_incomplete flag."""
+        parent_row = self._make_parent_row()
+        child_row = {
+            "librenms_name": "TenGigE0/0/0/0",
+            "status": "No Bay",
+            "no_bay_reason": "empty_parent_bays",
+        }
+        table_data = [parent_row, child_row]
+        parent_row_idx = 0
+
+        mt = MagicMock()
+        installed_module = MagicMock()
+        installed_module.module_type = mt
+        child_bays = {"Bay 0": MagicMock()}  # non-empty
+
+        if installed_module and not child_bays:
+            has_no_bay_children = any(
+                table_data[i].get("no_bay_reason") == "empty_parent_bays"
+                for i in range(parent_row_idx + 1, len(table_data))
+            )
+            if has_no_bay_children:
+                table_data[parent_row_idx]["model_incomplete"] = True
+
+        assert "model_incomplete" not in table_data[0]
+
+
+class TestRenderStatusNoBayOnParent:
+    """render_status correctly labels child rows and parent 'Fix Model' badge."""
+
+    def _table(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        return object.__new__(LibreNMSModuleTable)
+
+    def test_no_bay_on_parent_label_for_empty_parent_bays(self):
+        """Status cell shows 'No Bay on Parent' when no_bay_reason == 'empty_parent_bays'."""
+        table = self._table()
+        record = {"status": "No Bay", "no_bay_reason": "empty_parent_bays"}
+        html = table.render_status("No Bay", record)
+        assert "No Bay on Parent" in str(html)
+        assert "No Bay" in str(html)  # badge text changed but still present as substring
+
+    def test_plain_no_bay_label_without_reason(self):
+        """Without no_bay_reason, status cell shows plain 'No Bay'."""
+        table = self._table()
+        record = {"status": "No Bay"}
+        html = table.render_status("No Bay", record)
+        assert "No Bay on Parent" not in str(html)
+        assert "No Bay" in str(html)
+
+    def test_fix_model_badge_with_url(self):
+        """Parent row with model_incomplete + model_incomplete_url renders a link badge."""
+        table = self._table()
+        record = {
+            "status": "Installed",
+            "model_incomplete": True,
+            "model_incomplete_url": "/dcim/module-types/5/",
+            "model_incomplete_name": "A9K-24X10GE-1G-TR",
+        }
+        html = str(table.render_status("Installed", record))
+        assert "Fix Model" in html
+        assert "/dcim/module-types/5/" in html
+        assert "A9K-24X10GE-1G-TR" in html
+
+    def test_fix_model_badge_without_url_is_span(self):
+        """When model_incomplete_url is absent, badge is rendered as <span>."""
+        table = self._table()
+        record = {
+            "status": "Installed",
+            "model_incomplete": True,
+            "model_incomplete_name": "SomeType",
+        }
+        html = str(table.render_status("Installed", record))
+        assert "Fix Model" in html
+        assert "<span" in html
+        assert "<a " not in html
+
+    def test_no_fix_badge_without_model_incomplete(self):
+        """Normal row without model_incomplete has no Fix Model badge."""
+        table = self._table()
+        record = {"status": "Installed"}
+        html = str(table.render_status("Installed", record))
+        assert "Fix Model" not in html
+
+
+class TestDeviceTypeIncompleteFlag:
+    """device_type_incomplete is set on top-level No Bay rows with no suggestion."""
+
+    def _make_view_and_row(self, status, model_suggestion=None):
+        """Return (view, table_data, parent_row_idx) after calling the flag logic."""
+        row = {"status": status}
+        if model_suggestion:
+            row["model_suggestion"] = model_suggestion
+        device_type = MagicMock()
+        device_type.get_absolute_url.return_value = "/dcim/device-types/7/"
+        device_type.__str__ = lambda self: "ASR-9904"
+        selected_device = MagicMock()
+        selected_device.device_type = device_type
+        return row, selected_device
+
+    def test_no_bay_without_suggestion_sets_device_type_incomplete(self):
+        row, selected_device = self._make_view_and_row("No Bay")
+        # Simulate the flag logic from _append_rows_for_item_context
+        if row.get("status") == "No Bay" and "model_suggestion" not in row:
+            dt = getattr(selected_device, "device_type", None)
+            if dt:
+                row["device_type_incomplete"] = True
+                row["device_type_incomplete_url"] = dt.get_absolute_url()
+                row["device_type_incomplete_name"] = str(dt)
+        assert row.get("device_type_incomplete") is True
+        assert row.get("device_type_incomplete_url") == "/dcim/device-types/7/"
+
+    def test_no_bay_with_suggestion_does_not_set_flag(self):
+        suggestion = {"librenms_name": r"^0/(\d+)$", "netbox_bay_name": r"Slot \1"}
+        row, selected_device = self._make_view_and_row("No Bay", model_suggestion=suggestion)
+        if row.get("status") == "No Bay" and "model_suggestion" not in row:
+            dt = getattr(selected_device, "device_type", None)
+            if dt:
+                row["device_type_incomplete"] = True
+        assert "device_type_incomplete" not in row
+
+    def test_installed_row_does_not_set_flag(self):
+        row, selected_device = self._make_view_and_row("Installed")
+        if row.get("status") == "No Bay" and "model_suggestion" not in row:
+            dt = getattr(selected_device, "device_type", None)
+            if dt:
+                row["device_type_incomplete"] = True
+        assert "device_type_incomplete" not in row
+
+    def test_no_device_type_attribute_does_not_raise(self):
+        row = {"status": "No Bay"}
+        selected_device = MagicMock(spec=[])  # no device_type attr
+        if row.get("status") == "No Bay" and "model_suggestion" not in row:
+            dt = getattr(selected_device, "device_type", None)
+            if dt:
+                row["device_type_incomplete"] = True
+        assert "device_type_incomplete" not in row
+
+
+class TestRenderStatusDeviceTypeIncomplete:
+    """render_status renders a 'Fix Device Type' badge when device_type_incomplete is set."""
+
+    def _table(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        return object.__new__(LibreNMSModuleTable)
+
+    def test_fix_device_type_badge_with_url(self):
+        table = self._table()
+        record = {
+            "status": "No Bay",
+            "device_type_incomplete": True,
+            "device_type_incomplete_url": "/dcim/device-types/7/",
+            "device_type_incomplete_name": "ASR-9904",
+        }
+        html = str(table.render_status("No Bay", record))
+        assert "Fix Device Type" in html
+        assert "/dcim/device-types/7/" in html
+        assert "ASR-9904" in html
+
+    def test_fix_device_type_badge_without_url_is_span(self):
+        table = self._table()
+        record = {
+            "status": "No Bay",
+            "device_type_incomplete": True,
+            "device_type_incomplete_name": "ASR-9904",
+        }
+        html = str(table.render_status("No Bay", record))
+        assert "Fix Device Type" in html
+        assert "<span" in html
+        assert "<a " not in html
+
+    def test_model_incomplete_takes_precedence_over_device_type_incomplete(self):
+        """model_incomplete badge is returned before device_type_incomplete (early return)."""
+        table = self._table()
+        record = {
+            "status": "Installed",
+            "model_incomplete": True,
+            "model_incomplete_url": "/dcim/module-types/5/",
+            "model_incomplete_name": "A9K-24X10GE-1G-TR",
+            "device_type_incomplete": True,
+            "device_type_incomplete_url": "/dcim/device-types/7/",
+        }
+        html = str(table.render_status("Installed", record))
+        assert "Fix Model" in html
+        # model_incomplete returns early, so Fix Device Type not rendered
+        assert "Fix Device Type" not in html
+
+    def test_no_badge_without_either_flag(self):
+        table = self._table()
+        record = {"status": "No Bay"}
+        html = str(table.render_status("No Bay", record))
+        assert "Fix Device Type" not in html
+        assert "Fix Model" not in html

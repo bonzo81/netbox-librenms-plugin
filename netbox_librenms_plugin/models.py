@@ -117,9 +117,13 @@ class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
         from django.core.exceptions import ValidationError
 
         super().clean()
+        normalized_type = (self.librenms_type or "").strip()
+        if not normalized_type:
+            raise ValidationError({"librenms_type": "LibreNMS type must not be blank or whitespace-only."})
+        self.librenms_type = normalized_type
         if self.librenms_speed is None:
             qs = InterfaceTypeMapping.objects.filter(
-                librenms_type=self.librenms_type,
+                librenms_type=normalized_type,
                 librenms_speed__isnull=True,
             )
             if self.pk:

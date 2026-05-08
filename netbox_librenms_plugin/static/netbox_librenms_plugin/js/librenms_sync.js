@@ -1073,8 +1073,9 @@ function handleModuleChange(select, value) {
             if (!row || data.status !== 'success' || !data.formatted_row) return;
 
             const formattedRow = data.formatted_row;
-            if (formattedRow.device_selection && row.querySelector('td[data-col="device_selection"]')) {
-                row.querySelector('td[data-col="device_selection"]').innerHTML = formattedRow.device_selection;
+            const deviceSelCell = row.querySelector('td[data-col="device_selection"]');
+            if (deviceSelCell) {
+                deviceSelCell.innerHTML = formattedRow.device_selection || '';
             }
             row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
             row.querySelector('td[data-col="model"]').innerHTML = formattedRow.model;

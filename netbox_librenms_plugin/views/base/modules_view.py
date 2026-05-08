@@ -271,7 +271,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         if not success:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key))
-            messages.error(request, f"Failed to fetch inventory from LibreNMS: {inventory_data}")
+            logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
+            messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
             return render(
                 request,
                 self.partial_template_name,
@@ -298,7 +299,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         context = self._build_context(request, obj, inventory_data)
         if txr_error:
-            messages.warning(request, f"Inventory refreshed, but transceiver fetch failed: {txr_error}")
+            logger.warning("Transceiver fetch failed for device %s: %s", self.librenms_id, txr_error)
+            messages.warning(request, "Inventory refreshed, but transceiver fetch failed; see server logs for details.")
         else:
             messages.success(request, "Inventory data refreshed successfully.")
         return render(
@@ -651,13 +653,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         parent_row_idx = len(table_data)
         table_data.append(row)
 
+        # Flag device type as incomplete when a top-level item has no bay and
+        # no mapping suggestion — the device type is likely missing bay templates
+        # for that class of component (fan tray, PSU, etc.).
+        if row.get("status") == "No Bay" and "model_suggestion" not in row:
+            device_type = getattr(selected_device, "device_type", None)
+            if device_type:
+                row["device_type_incomplete"] = True
+                row["device_type_incomplete_url"] = device_type.get_absolute_url()
+                row["device_type_incomplete_name"] = str(device_type)
+
         # Determine child bay scope based on parent match state
         parent_module_id = None
         parent_bay_matched_but_uninstalled = False
+        parent_installed_module = None
         if row.get("module_bay_id"):
             matched_bay = item_bays.get(row["module_bay"])
             if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
                 parent_module_id = matched_bay.installed_module.pk
+                parent_installed_module = matched_bay.installed_module
             else:
                 parent_bay_matched_but_uninstalled = True
 
@@ -680,6 +694,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # the wrong physical level.
         scope_preserved_init = not (parent_module_id or parent_bay_matched_but_uninstalled)
         scope_preserved_by_depth = {0: scope_preserved_init}
+        # Parallel state: is the empty scope specifically because an installed
+        # module's type has no bay templates defined?  Distinct from
+        # scope_preserved (unmatched ancestor) and scope_uninstalled (bay
+        # matched but no module installed).  Propagates through intermediate
+        # unmatched containers so deeply-nested items still show the right hint.
+        scope_empty_installed_bays_init = bool(parent_module_id) and not child_bays
+        scope_empty_installed_bays_by_depth = {0: scope_empty_installed_bays_init}
         parent_ent_idx = item.get("entPhysicalIndex")
         if parent_ent_idx is None:
             return
@@ -698,6 +719,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             scope_bays = bays_by_depth.get(depth, child_bays)
             scope_uninstalled = scope_uninstalled_by_depth.get(depth, scope_uninstalled_init)
             scope_preserved = scope_preserved_by_depth.get(depth, scope_preserved_init)
+            scope_empty_installed_bays = scope_empty_installed_bays_by_depth.get(depth, scope_empty_installed_bays_init)
             sub_row = self._build_row(
                 sub_item,
                 index_map,
@@ -708,6 +730,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 sibling_counts=target_context["sibling_counts"],
                 scope_uninstalled=scope_uninstalled,
                 scope_preserved=scope_preserved,
+                scope_empty_installed_bays=scope_empty_installed_bays,
             )
             sub_row["selected_device_id"] = selected_device.id
             sub_row["selected_device_name"] = selected_device.name
@@ -723,18 +746,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     and matched_sub_bay.installed_module
                 ):
                     sub_module_id = matched_sub_bay.installed_module.pk
-                    bays_by_depth[depth + 1] = target_context["module_scoped_bays"].get(sub_module_id, {})
+                    sub_bays = target_context["module_scoped_bays"].get(sub_module_id, {})
+                    bays_by_depth[depth + 1] = sub_bays
                     scope_uninstalled_by_depth[depth + 1] = False
                     scope_preserved_by_depth[depth + 1] = False
+                    scope_empty_installed_bays_by_depth[depth + 1] = not sub_bays
                 else:
                     bays_by_depth[depth + 1] = {}
                     scope_uninstalled_by_depth[depth + 1] = True
                     scope_preserved_by_depth[depth + 1] = False
+                    scope_empty_installed_bays_by_depth[depth + 1] = False
             else:
                 # Preserve parent scope for unmatched intermediate containers
                 bays_by_depth[depth + 1] = scope_bays
                 scope_uninstalled_by_depth[depth + 1] = scope_uninstalled
                 scope_preserved_by_depth[depth + 1] = True
+                scope_empty_installed_bays_by_depth[depth + 1] = scope_empty_installed_bays
 
             if sub_row.get("can_install"):
                 table_data[parent_row_idx]["has_installable_children"] = True
@@ -743,6 +770,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # Use it to enable "Install Branch" without a second resolve pass.
             elif parent_bay_matched_but_uninstalled and sub_row.get("module_type_id"):
                 table_data[parent_row_idx]["has_installable_children"] = True
+
+        # If the installed module's type has no bay templates but has LibreNMS
+        # sub-items, flag the parent row so the table can render a "Fix Model"
+        # badge linking directly to the module type for quick editing.
+        if parent_installed_module and not child_bays:
+            has_no_bay_children = any(
+                table_data[i].get("no_bay_reason") == "empty_parent_bays"
+                for i in range(parent_row_idx + 1, len(table_data))
+            )
+            if has_no_bay_children:
+                mt = parent_installed_module.module_type
+                table_data[parent_row_idx]["model_incomplete"] = True
+                table_data[parent_row_idx]["model_incomplete_url"] = mt.get_absolute_url()
+                table_data[parent_row_idx]["model_incomplete_name"] = str(mt)
 
     def _merge_transceiver_data(self, inventory_data):
         """
@@ -1312,6 +1353,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         sibling_counts=None,
         scope_uninstalled=False,
         scope_preserved=False,
+        scope_empty_installed_bays=False,
     ):
         """Build a single table row from a LibreNMS inventory item.
 
@@ -1325,7 +1367,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         ancestor that didn't match a bay (so the bays in scope don't
         accurately reflect the item's nesting level).  Used to suppress
         misleading mapping suggestions that would land deeply-nested
-        items in chassis-level bays."""
+        items in chassis-level bays.
+
+        ``scope_empty_installed_bays`` indicates the empty scope is because
+        the nearest installed module ancestor's type has no bay templates
+        defined.  Propagates through intermediate unmatched containers so
+        deeply-nested items (e.g. SFPs nested under a transceiver carrier)
+        still show "No Bay on Parent" rather than plain "No Bay"."""
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
             resolve_module_type,
@@ -1387,6 +1435,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             )
             if suggestion:
                 row["model_suggestion"] = suggestion
+            # Tag the root cause so the table can render a more specific status
+            # badge: installed parent module has no bay templates at all.
+            if scope_empty_installed_bays and not scope_uninstalled:
+                row["no_bay_reason"] = "empty_parent_bays"
         elif status == "No Type":
             row["model_warning"] = self._build_no_type_warning(item)
 

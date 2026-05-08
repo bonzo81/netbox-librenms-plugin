@@ -29,6 +29,8 @@ description: Testing patterns and conventions for the NetBox LibreNMS plugin
 - `librenms_api.py` → `test_librenms_api.py`, `test_librenms_api_helpers.py`
 - `import_utils/` package (`filters.py`, `device_operations.py`, `vm_operations.py`, `cache.py`, `permissions.py`, `virtual_chassis.py`), `import_validation_helpers.py`, `utils.py` → `test_import_utils.py`, `test_import_validation_helpers.py`, `test_utils.py`
 - `jobs.py`, `views/imports/list.py` → `test_background_jobs.py`
+- `import_utils/bulk_import.py` → `test_coverage_bulk_import.py`
+- Utility helpers (`utils.py` coverage tests) → `test_coverage_utils.py`
 - Permission mixins, API permissions, constants → `test_permissions.py`
 - VLAN API, mode detection, comparison, sync → `test_vlan_sync.py`
 - `VlanAssignmentMixin`, VLAN enrichment → `test_interface_vlan_sync.py`

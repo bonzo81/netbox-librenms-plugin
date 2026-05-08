@@ -1040,6 +1040,7 @@ class TestParentRowIdxVsEntityIndex:
             sibling_counts=None,
             scope_uninstalled=False,
             scope_preserved=False,
+            scope_empty_installed_bays=False,
         ):
             if item.get("entPhysicalIndex") == LARGE_IDX:
                 return {"ent_physical_index": LARGE_IDX, "can_install": False, "depth": 0}
