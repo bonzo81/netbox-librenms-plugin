@@ -1248,8 +1248,31 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if slot_num is None:
             return None
 
-        # Try common bay naming patterns
-        for pattern in [f"SFP {slot_num}", f"Slot {slot_num}", f"Bay {slot_num}", f"Port {slot_num}"]:
+        # Pick patterns appropriate for the item's hardware class.  Without this,
+        # a fan or power-supply lands in a module/line-card "Slot N" bay because
+        # `Slot N` is in every chassis device — silently mis-installing the wrong
+        # hardware class.  When NetBox lacks bays named for the item's class
+        # (e.g. no "Fan Tray N" / "PSU N" defined on the device type), we
+        # surface "No Bay" and let the user fix the model rather than guess.
+        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+        if phys_class == "fan":
+            patterns = [f"Fan Tray {slot_num}", f"Fan {slot_num}", f"FT {slot_num}", f"FT{slot_num}"]
+        elif phys_class == "powersupply":
+            patterns = [
+                f"Power Supply {slot_num}",
+                f"PSU {slot_num}",
+                f"PSU{slot_num}",
+                f"PS{slot_num}",
+                f"PEM {slot_num}",
+                f"PM {slot_num}",
+                f"PM{slot_num}",
+            ]
+        elif phys_class in {"module", "port", "iomodule", "cpmmodule", "mdamodule", "fabricmodule", "xiomodule"}:
+            patterns = [f"SFP {slot_num}", f"Slot {slot_num}", f"Bay {slot_num}", f"Port {slot_num}"]
+        else:
+            return None
+
+        for pattern in patterns:
             if pattern in module_bays:
                 return module_bays[pattern]
 
@@ -1309,6 +1332,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "An interface naming plugin with a rewrite rule for this module type can resolve this."
             )
 
+        # Surface NetBox-model gaps that produced No Bay / No Type so the user
+        # can fix the model rather than wonder why nothing matched.
+        if status == "No Bay":
+            row["model_warning"] = self._build_no_bay_warning(item, module_bays)
+        elif status == "No Type":
+            row["model_warning"] = self._build_no_type_warning(item)
+
         # Add URLs for matched objects
         if matched_bay:
             row["module_bay_url"] = matched_bay.get_absolute_url()
@@ -1358,6 +1388,49 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not matched_type:
             return "No Type"
         return "Unmatched"
+
+    @staticmethod
+    def _build_no_bay_warning(item, module_bays):
+        """
+        Hint the user toward the missing piece of the NetBox model when bay
+        matching produces "No Bay".
+
+        Distinguishes three causes:
+          - empty scope -> the parent module type has no bay templates
+          - hardware-class scope (fan / powerSupply) -> add fan/PSU bay templates
+          - generic module/port -> add Slot/SFP/Bay/Port templates
+        """
+        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+        class_hints = {
+            "fan": "Fan Tray N or Fan N",
+            "powersupply": "Power Supply N, PSU N, or PEM N",
+        }
+        module_classes = {"module", "port", "iomodule", "cpmmodule", "mdamodule", "fabricmodule", "xiomodule"}
+
+        if phys_class in class_hints:
+            class_part = f"No bay defined for class={phys_class}; add {class_hints[phys_class]} bay templates"
+        elif phys_class in module_classes:
+            class_part = "No matching bay; add Slot N / SFP N / Bay N / Port N bay templates"
+        else:
+            class_part = "No matching bay; verify NetBox bay templates"
+
+        if not module_bays:
+            return (
+                f"Parent module type has no bay templates defined in NetBox. {class_part} "
+                "to the parent module/device type, or add a ModuleBayMapping."
+            )
+        return f"{class_part} on the NetBox device or parent module type, or add a ModuleBayMapping."
+
+    @staticmethod
+    def _build_no_type_warning(item):
+        """Hint when LibreNMS reports a model that NetBox doesn't define."""
+        model = (item.get("entPhysicalModelName") or "").strip()
+        if not model:
+            return "LibreNMS did not report a model name for this item; cannot match to a NetBox ModuleType."
+        return (
+            f"No NetBox ModuleType matches '{model}'. Create a ModuleType for this "
+            "model (or add a ModuleTypeMapping) so the row becomes installable."
+        )
 
     def _detect_serial_conflicts(self, table_data):
         """

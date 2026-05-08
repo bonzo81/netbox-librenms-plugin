@@ -314,6 +314,30 @@ class TestLibreNMSModuleTable:
         assert "mdi-alert-outline" in result
         assert "Name already used by another module" in result
 
+    def test_render_status_no_bay_with_model_warning_adds_alert_icon(self):
+        """model_warning on a No Bay row surfaces the NetBox-model hint as a tooltip."""
+        table = self._make_table()
+        result = str(
+            table.render_status(
+                "No Bay",
+                {"model_warning": "No bay defined for class=fan; add Fan Tray N or Fan N bay templates"},
+            )
+        )
+        assert "mdi-alert-outline" in result
+        assert "Fan Tray N or Fan N" in result
+
+    def test_render_status_no_type_with_model_warning_adds_alert_icon(self):
+        """model_warning on a No Type row surfaces the missing-ModuleType hint."""
+        table = self._make_table()
+        result = str(
+            table.render_status(
+                "No Type",
+                {"model_warning": "No NetBox ModuleType matches 'ASR-9904-FAN'."},
+            )
+        )
+        assert "mdi-alert-outline" in result
+        assert "ASR-9904-FAN" in result
+
     # ------------------------------------------------------------------
     # render_actions
     # ------------------------------------------------------------------

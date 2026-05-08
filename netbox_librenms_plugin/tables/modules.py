@@ -156,7 +156,8 @@ class LibreNMSModuleTable(tables.Table):
             "Type Mismatch": "bg-warning text-dark",
         }
         badge_class = badge_classes.get(value, "bg-secondary text-white")
-        if warning := record.get("name_conflict_warning"):
+        warning = record.get("name_conflict_warning") or record.get("model_warning")
+        if warning:
             return format_html(
                 '<span class="badge {}" title="{}">{}</span>'
                 ' <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',

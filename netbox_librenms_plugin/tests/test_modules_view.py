@@ -2010,3 +2010,200 @@ class TestCollectDescendantsIgnoreRules:
         results = []
         view._collect_descendants(0, children_by_parent, index_map, [rule], depth=1, results=results)
         assert results == []
+
+
+class TestPositionalMatchClassAware:
+    """
+    Positional fallback only tries bay-name patterns appropriate for the item's
+    hardware class.  Without this, items like fans and PSUs land in chassis
+    line-card "Slot N" bays just because the slot number happens to align.
+    """
+
+    @staticmethod
+    def _walk(item_class, slot_num, bays):
+        """Drive _match_bay_by_position via a minimal inventory: chassis -> container -> item."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalModelName": "REAL-CHASSIS",
+                "entPhysicalClass": "chassis",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalParentRelPos": 0,
+            },
+        ]
+        # Add slot_num sibling containers under chassis so positional finds slot=slot_num
+        for n in range(1, slot_num + 1):
+            inventory.append(
+                {
+                    "entPhysicalIndex": 100 + n,
+                    "entPhysicalModelName": "",
+                    "entPhysicalClass": "container",
+                    "entPhysicalContainedIn": 1,
+                    "entPhysicalParentRelPos": n,
+                }
+            )
+        item = {
+            "entPhysicalIndex": 999,
+            "entPhysicalModelName": "X",
+            "entPhysicalClass": item_class,
+            "entPhysicalContainedIn": 100 + slot_num,
+            "entPhysicalParentRelPos": 0,
+        }
+        inventory.append(item)
+        index_map = {i["entPhysicalIndex"]: i for i in inventory}
+        return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
+
+    @staticmethod
+    def _bay(name):
+        b = MagicMock()
+        b.name = name
+        return b
+
+    def test_fan_does_not_match_slot_bay(self):
+        """A fan (class=fan) must not land in a 'Slot 1' bay even when positional says slot 1."""
+        bays = {"Slot 1": self._bay("Slot 1"), "Slot 2": self._bay("Slot 2")}
+        result = self._walk("fan", 1, bays)
+        assert result is None, (
+            "Fan was matched to a chassis 'Slot N' bay.  Positional patterns must be "
+            "class-aware: fans only match Fan / Fan Tray / FT N bays."
+        )
+
+    def test_fan_matches_fan_tray_bay(self):
+        """A fan matches a 'Fan Tray N' or 'Fan N' bay."""
+        bays = {"Fan Tray 1": self._bay("Fan Tray 1"), "Slot 1": self._bay("Slot 1")}
+        result = self._walk("fan", 1, bays)
+        assert result is bays["Fan Tray 1"]
+
+    def test_powersupply_does_not_match_slot_bay(self):
+        """A power supply must not match a 'Slot N' bay."""
+        bays = {"Slot 2": self._bay("Slot 2"), "Slot 3": self._bay("Slot 3")}
+        result = self._walk("powerSupply", 2, bays)
+        assert result is None
+
+    def test_powersupply_matches_psu_bay(self):
+        """A PSU matches Power Supply / PSU / PEM patterns."""
+        bays = {"PSU 1": self._bay("PSU 1"), "Slot 1": self._bay("Slot 1")}
+        result = self._walk("powerSupply", 1, bays)
+        assert result is bays["PSU 1"]
+
+    def test_module_still_matches_slot_bay(self):
+        """A module continues to match Slot/SFP/Bay/Port patterns."""
+        bays = {"Slot 1": self._bay("Slot 1")}
+        result = self._walk("module", 1, bays)
+        assert result is bays["Slot 1"]
+
+    def test_unknown_class_returns_none(self):
+        """An item with an unknown / empty class doesn't get a positional guess."""
+        bays = {"Slot 1": self._bay("Slot 1")}
+        result = self._walk("sensor", 1, bays)
+        assert result is None
+
+
+class TestNoBayWarningHints:
+    """`_build_no_bay_warning` distinguishes the three common 'No Bay' causes."""
+
+    def test_empty_scope_mentions_missing_templates(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalClass": "module", "entPhysicalModelName": "X"}
+        msg = BaseModuleTableView._build_no_bay_warning(item, {})
+        assert "no bay templates defined" in msg.lower()
+
+    def test_fan_class_hint_names_fan_bays(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalClass": "fan"}
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        assert "Fan" in msg
+
+    def test_powersupply_class_hint_names_psu_bays(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalClass": "powerSupply"}
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        assert "PSU" in msg or "Power Supply" in msg or "PEM" in msg
+
+    def test_module_class_hint_names_slot_bays(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalClass": "module"}
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        assert "Slot" in msg or "SFP" in msg
+
+
+class TestNoTypeWarningHints:
+    """`_build_no_type_warning` mentions the missing model name."""
+
+    def test_includes_model_name(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        msg = BaseModuleTableView._build_no_type_warning({"entPhysicalModelName": "ASR-9904-FAN"})
+        assert "ASR-9904-FAN" in msg
+        assert "ModuleType" in msg
+
+    def test_handles_missing_model_name(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        msg = BaseModuleTableView._build_no_type_warning({"entPhysicalModelName": ""})
+        assert msg  # non-empty string
+
+
+class TestBuildRowModelWarning:
+    """`_build_row` populates `model_warning` for No Bay / No Type rows."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        v = object.__new__(BaseModuleTableView)
+        v._device_manufacturer = None
+        return v
+
+    def test_no_bay_row_gets_model_warning(self):
+        view = self._view()
+        view._match_module_bay = MagicMock(return_value=None)
+        item = {"entPhysicalName": "0/FT0", "entPhysicalClass": "fan", "entPhysicalModelName": "ASR-FAN"}
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="ASR-FAN", pk=1)),
+        ):
+            row = view._build_row(item, {}, {"Slot 1": MagicMock()}, {"ASR-FAN": MagicMock(pk=1)})
+        assert row["status"] == "No Bay"
+        assert "model_warning" in row
+        assert row["model_warning"], "expected non-empty hint"
+
+    def test_no_type_row_gets_model_warning(self):
+        view = self._view()
+        bay = MagicMock()
+        bay.name = "Slot 1"
+        bay.installed_module = None
+        bay.get_absolute_url.return_value = "/b"
+        view._match_module_bay = MagicMock(return_value=bay)
+        item = {"entPhysicalName": "X", "entPhysicalClass": "module", "entPhysicalModelName": "UNKNOWN-MODEL"}
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
+        ):
+            row = view._build_row(item, {}, {}, {})
+        assert row["status"] == "No Type"
+        assert "UNKNOWN-MODEL" in row.get("model_warning", "")
+
+    def test_matched_row_has_no_model_warning(self):
+        view = self._view()
+        bay = MagicMock()
+        bay.name = "Slot 1"
+        bay.installed_module = None
+        bay.get_absolute_url.return_value = "/b"
+        view._match_module_bay = MagicMock(return_value=bay)
+        mt = MagicMock(pk=10)
+        mt.model = "M"
+        mt.get_absolute_url.return_value = "/mt"
+        item = {"entPhysicalName": "X", "entPhysicalClass": "module", "entPhysicalModelName": "M"}
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=mt),
+        ):
+            row = view._build_row(item, {}, {"Slot 1": bay}, {"M": mt})
+        assert row["status"] == "Matched"
+        assert "model_warning" not in row
