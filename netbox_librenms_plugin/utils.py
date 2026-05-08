@@ -818,52 +818,6 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     return True
 
 
-def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
-    """
-    Check if installing this module type in a nested bay would cause a name conflict.
-
-    Returns True when ALL of the following are true:
-    - The module type has interface templates using ``{module}``
-    - The bay is nested (its parent is owned by an installed module)
-    - There is at least one sibling bay under the same parent
-
-    In this situation NetBox's ``resolve_name()`` replaces ``{module}`` with the
-    root ancestor's bay position, producing the same interface name for every
-    sibling at this nesting level.
-
-    Args:
-        module_type: The ModuleType to install.
-        module_bay: The ModuleBay target.
-        sibling_counts: Optional precomputed dict mapping module_id → bay count.
-            When provided, avoids a per-call DB query.  Pass
-            ``{mid: len(bays) for mid, bays in module_scoped_bays.items()}`` from
-            the caller that already has the bay maps loaded.
-    """
-    from dcim.constants import MODULE_TOKEN
-
-    if not module_bay or not module_bay.module_id:
-        return False  # Top-level bay — no conflict
-
-    templates = list(module_type.interfacetemplates.all())
-    if not templates:
-        return False  # No interface templates
-
-    if not any(MODULE_TOKEN in t.name for t in templates):
-        return False  # Template doesn't use {module}
-
-    if sibling_counts is not None:
-        sibling_count = sibling_counts.get(module_bay.module_id, 0)
-    else:
-        from dcim.models import ModuleBay as ModuleBayModel
-
-        sibling_count = ModuleBayModel.objects.filter(
-            device=module_bay.device,
-            module_id=module_bay.module_id,
-        ).count()
-
-    return sibling_count > 1
-
-
 def get_module_types_indexed() -> dict:
     """
     Return all NetBox module types indexed by model (and part_number), with ModuleTypeMapping applied.
@@ -906,6 +860,28 @@ def get_module_types_indexed() -> dict:
         else:
             mapping_seen.add(key)
             result[key] = mapping.netbox_module_type
+    return result
+
+
+def get_generic_module_types_indexed() -> dict:
+    """
+    Return NetBox module types from the 'Generic' manufacturer, indexed by model and part_number.
+
+    Used as a secondary fallback in :func:`resolve_module_type` when the primary look-up
+    (which excludes ambiguous names) fails.  This lets common SFP/optic models that exist
+    under both a vendor-specific and a Generic entry still be matched via the Generic type.
+    """
+    from dcim.models import ModuleType
+
+    result: dict = {}
+    for mt in (
+        ModuleType.objects.filter(manufacturer__name__iexact="Generic")
+        .select_related("manufacturer")
+        .prefetch_related("interfacetemplates")
+    ):
+        for key in (mt.model, mt.part_number):
+            if key and key not in result:
+                result[key] = mt
     return result
 
 
@@ -1001,12 +977,24 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     return value
 
 
-def resolve_module_type(model_name: str, module_types: dict, manufacturer=None, *, norm_rules: dict | None = None):
+def resolve_module_type(
+    model_name: str,
+    module_types: dict,
+    manufacturer=None,
+    *,
+    norm_rules: dict | None = None,
+    generic_fallback: dict | None = None,
+):
     """
     Resolve a LibreNMS model name to a NetBox ModuleType via direct lookup then normalization.
 
     Pass ``norm_rules`` (from :func:`preload_normalization_rules`) to avoid
     repeated DB queries when called in a loop.
+
+    Pass ``generic_fallback`` (from :func:`get_generic_module_types_indexed`) to enable
+    a secondary look-up in the 'Generic' manufacturer when the primary index has no match
+    (e.g. because the same model name is used by multiple manufacturers, making it
+    ambiguous in the primary index).
 
     Returns the matched ModuleType or None.
     """
@@ -1019,6 +1007,14 @@ def resolve_module_type(model_name: str, module_types: dict, manufacturer=None, 
         )
         if normalized != model_name:
             matched = module_types.get(normalized)
+    if not matched and generic_fallback:
+        matched = generic_fallback.get(model_name)
+        if not matched:
+            normalized = apply_normalization_rules(
+                model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
+            )
+            if normalized != model_name:
+                matched = generic_fallback.get(normalized)
     return matched
 
 

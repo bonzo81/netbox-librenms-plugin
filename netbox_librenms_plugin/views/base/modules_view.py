@@ -377,6 +377,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         }
 
         module_types = self._get_module_types()
+        self._generic_module_types = self._get_generic_module_types()
 
         transparent_indices = self._find_transparent_indices(inventory_data, ignore_cache)
         top_items = self._collect_top_items(
@@ -618,7 +619,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "device_bays": device_bays,
                 "module_scoped_bays": module_scoped_bays,
                 "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
-                "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
             }
         return member_contexts
 
@@ -645,7 +645,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             module_types,
             depth=0,
             manufacturer=manufacturer,
-            sibling_counts=target_context["sibling_counts"],
         )
         row["selected_device_id"] = selected_device.id
         row["selected_device_name"] = selected_device.name
@@ -727,7 +726,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 module_types,
                 depth=depth,
                 manufacturer=manufacturer,
-                sibling_counts=target_context["sibling_counts"],
                 scope_uninstalled=scope_uninstalled,
                 scope_preserved=scope_preserved,
                 scope_empty_installed_bays=scope_empty_installed_bays,
@@ -1062,6 +1060,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return get_module_types_indexed()
 
+    def _get_generic_module_types(self):
+        """Get module types from the 'Generic' manufacturer for secondary fallback matching."""
+        from netbox_librenms_plugin.utils import get_generic_module_types_indexed
+
+        return get_generic_module_types_indexed()
+
     def _find_parent_container_name(self, item, index_map):
         """
         Resolve the nearest ancestor container name by walking up the containment chain.
@@ -1350,7 +1354,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         module_types,
         depth=0,
         manufacturer=None,
-        sibling_counts=None,
         scope_uninstalled=False,
         scope_preserved=False,
         scope_empty_installed_bays=False,
@@ -1374,10 +1377,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         defined.  Propagates through intermediate unmatched containers so
         deeply-nested items (e.g. SFPs nested under a transceiver carrier)
         still show "No Bay on Parent" rather than plain "No Bay"."""
-        from netbox_librenms_plugin.utils import (
-            has_nested_name_conflict,
-            resolve_module_type,
-        )
+        from netbox_librenms_plugin.utils import resolve_module_type
 
         model_name = (item.get("entPhysicalModelName", "") or "").strip()
         serial = (item.get("entPhysicalSerialNum", "") or "").strip()
@@ -1388,15 +1388,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
-        # Match to NetBox module type (direct lookup, then normalization fallback)
+        # Match to NetBox module type (direct lookup, normalization fallback, then Generic fallback)
         norm_rules_type = getattr(self, "_norm_rules_type", None)
+        generic_module_types = getattr(self, "_generic_module_types", None)
         matched_type = resolve_module_type(
-            model_name, module_types, manufacturer=manufacturer, norm_rules=norm_rules_type
-        )
-
-        # Check for nested module naming conflicts
-        name_conflict = (
-            matched_type and matched_bay and has_nested_name_conflict(matched_type, matched_bay, sibling_counts)
+            model_name,
+            module_types,
+            manufacturer=manufacturer,
+            norm_rules=norm_rules_type,
+            generic_fallback=generic_module_types,
         )
 
         # Determine status
@@ -1418,13 +1418,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "ent_physical_index": item.get("entPhysicalIndex"),
             "has_installable_children": False,
         }
-
-        if name_conflict:
-            row["name_conflict_warning"] = (
-                "This module type uses {module} in its interface template. "
-                "Installing multiple siblings will create duplicate interface names. "
-                "An interface naming plugin with a rewrite rule for this module type can resolve this."
-            )
 
         # Surface NetBox-model gaps that produced No Bay / No Type so the user
         # can fix the model rather than wonder why nothing matched.

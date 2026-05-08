@@ -18,7 +18,6 @@ def _patch_build_row_deps(view, match_bay_return=None):
     with (
         patch.object(view, "_match_module_bay", return_value=match_bay_return),
         patch(f"{_utils}.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)),
-        patch(f"{_utils}.has_nested_name_conflict", return_value=False),
     ):
         yield
 
@@ -1037,7 +1036,6 @@ class TestParentRowIdxVsEntityIndex:
             module_types,
             depth=0,
             manufacturer=None,
-            sibling_counts=None,
             scope_uninstalled=False,
             scope_preserved=False,
             scope_empty_installed_bays=False,
@@ -1062,14 +1060,15 @@ class TestParentRowIdxVsEntityIndex:
                 with patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}):
                     with patch.object(view, "_get_module_bays", return_value=({}, {})):
                         with patch.object(view, "_get_module_types", return_value={}):
-                            with patch.object(view, "_build_row", side_effect=fake_build_row):
-                                with patch.object(view, "get_table", side_effect=fake_get_table):
-                                    with patch.object(view, "_sort_with_hierarchy", side_effect=lambda x: x):
-                                        with patch(
-                                            "netbox_librenms_plugin.views.base.modules_view.cache"
-                                        ) as mock_cache:
-                                            mock_cache.ttl = lambda k: None
-                                            # Old bug: IndexError when large entity index used as list index
+                            with patch.object(view, "_get_generic_module_types", return_value={}):
+                                with patch.object(view, "_build_row", side_effect=fake_build_row):
+                                    with patch.object(view, "get_table", side_effect=fake_get_table):
+                                        with patch.object(view, "_sort_with_hierarchy", side_effect=lambda x: x):
+                                            with patch(
+                                                "netbox_librenms_plugin.views.base.modules_view.cache"
+                                            ) as mock_cache:
+                                                mock_cache.ttl = lambda k: None
+                                                # Old bug: IndexError when large entity index used as list index
                                             view._build_context(request, obj, inventory)
 
         assert len(captured_table_data) >= 1, "table_data must contain the parent row"

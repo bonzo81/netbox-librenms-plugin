@@ -305,15 +305,6 @@ class TestLibreNMSModuleTable:
         result = str(table.render_status("Weird Status", {}))
         assert "bg-secondary" in result
 
-    def test_render_status_with_name_conflict_warning_adds_alert_icon(self):
-        """name_conflict_warning adds an mdi-alert-outline icon with the warning text."""
-        table = self._make_table()
-        result = str(
-            table.render_status("Name Conflict", {"name_conflict_warning": "Name already used by another module"})
-        )
-        assert "mdi-alert-outline" in result
-        assert "Name already used by another module" in result
-
     def test_render_status_no_bay_with_model_warning_adds_alert_icon(self):
         """model_warning on a No Bay row surfaces the NetBox-model hint as a tooltip."""
         table = self._make_table()
