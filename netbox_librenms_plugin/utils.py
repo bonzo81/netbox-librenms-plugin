@@ -818,6 +818,61 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     return True
 
 
+def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
+    """
+    Check if installing this module type in a nested bay would cause a name conflict.
+
+    Returns a non-empty reason string when ALL of the following are true:
+    - The module type has interface templates using ``{module}``
+    - The bay is nested (its parent is owned by an installed module)
+    - There is at least one sibling bay under the same parent
+
+    In this situation NetBox's ``resolve_name()`` replaces ``{module}`` with the
+    root ancestor's bay position, producing the same interface name for every
+    sibling at this nesting level.
+
+    Returns an empty string (falsy) when no conflict is detected.
+
+    Args:
+        module_type: The ModuleType to install.
+        module_bay: The ModuleBay target.
+        sibling_counts: Optional precomputed dict mapping module_id → bay count.
+            When provided, avoids a per-call DB query.  Pass
+            ``{mid: len(bays) for mid, bays in module_scoped_bays.items()}`` from
+            the caller that already has the bay maps loaded.
+    """
+    from dcim.constants import MODULE_TOKEN
+
+    if not module_bay or not module_bay.module_id:
+        return ""  # Top-level bay — no conflict
+
+    templates = list(module_type.interfacetemplates.all())
+    if not templates:
+        return ""  # No interface templates
+
+    if not any(MODULE_TOKEN in t.name for t in templates):
+        return ""  # Template doesn't use {module}
+
+    if sibling_counts is not None:
+        sibling_count = sibling_counts.get(module_bay.module_id, 0)
+    else:
+        from dcim.models import ModuleBay as ModuleBayModel
+
+        sibling_count = ModuleBayModel.objects.filter(
+            device=module_bay.device,
+            module_id=module_bay.module_id,
+        ).count()
+
+    if sibling_count <= 1:
+        return ""
+
+    return (
+        f"Interface templates for '{module_type.model}' use {{module}}, which resolves to "
+        f"the same root bay name for all {sibling_count} sibling bays — "
+        "installing here would create duplicate interface names."
+    )
+
+
 def get_module_types_indexed() -> dict:
     """
     Return all NetBox module types indexed by model (and part_number), with ModuleTypeMapping applied.
