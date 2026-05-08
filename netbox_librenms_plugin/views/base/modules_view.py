@@ -670,6 +670,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Process sub-components with depth-tracked bay scoping
         bays_by_depth = {0: child_bays}
+        # Parallel state: at each depth, is the (empty) scope a result of an
+        # uninstalled ancestor bay match?  Used to drive the "install parent
+        # first" hint on No Bay rows.
+        scope_uninstalled_init = parent_bay_matched_but_uninstalled
+        scope_uninstalled_by_depth = {0: scope_uninstalled_init}
+        # Parallel state: was the scope inherited from an unmatched ancestor?
+        # Used to suppress mapping suggestions whose target bays would be at
+        # the wrong physical level.
+        scope_preserved_init = not (parent_module_id or parent_bay_matched_but_uninstalled)
+        scope_preserved_by_depth = {0: scope_preserved_init}
         parent_ent_idx = item.get("entPhysicalIndex")
         if parent_ent_idx is None:
             return
@@ -682,7 +692,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             device_serial,
         )
         for depth, sub_item in sub_items:
+            # Fallbacks return the top-level state so the first iteration
+            # (typically depth=1) inherits the right scope semantics rather
+            # than silently defaulting to False.
             scope_bays = bays_by_depth.get(depth, child_bays)
+            scope_uninstalled = scope_uninstalled_by_depth.get(depth, scope_uninstalled_init)
+            scope_preserved = scope_preserved_by_depth.get(depth, scope_preserved_init)
             sub_row = self._build_row(
                 sub_item,
                 index_map,
@@ -691,6 +706,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 depth=depth,
                 manufacturer=manufacturer,
                 sibling_counts=target_context["sibling_counts"],
+                scope_uninstalled=scope_uninstalled,
+                scope_preserved=scope_preserved,
             )
             sub_row["selected_device_id"] = selected_device.id
             sub_row["selected_device_name"] = selected_device.name
@@ -707,11 +724,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 ):
                     sub_module_id = matched_sub_bay.installed_module.pk
                     bays_by_depth[depth + 1] = target_context["module_scoped_bays"].get(sub_module_id, {})
+                    scope_uninstalled_by_depth[depth + 1] = False
+                    scope_preserved_by_depth[depth + 1] = False
                 else:
                     bays_by_depth[depth + 1] = {}
+                    scope_uninstalled_by_depth[depth + 1] = True
+                    scope_preserved_by_depth[depth + 1] = False
             else:
                 # Preserve parent scope for unmatched intermediate containers
                 bays_by_depth[depth + 1] = scope_bays
+                scope_uninstalled_by_depth[depth + 1] = scope_uninstalled
+                scope_preserved_by_depth[depth + 1] = True
 
             if sub_row.get("can_install"):
                 table_data[parent_row_idx]["has_installable_children"] = True
@@ -1278,8 +1301,31 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return None
 
-    def _build_row(self, item, index_map, module_bays, module_types, depth=0, manufacturer=None, sibling_counts=None):
-        """Build a single table row from a LibreNMS inventory item."""
+    def _build_row(
+        self,
+        item,
+        index_map,
+        module_bays,
+        module_types,
+        depth=0,
+        manufacturer=None,
+        sibling_counts=None,
+        scope_uninstalled=False,
+        scope_preserved=False,
+    ):
+        """Build a single table row from a LibreNMS inventory item.
+
+        ``scope_uninstalled`` (caller-provided) indicates the empty bay scope
+        is empty because some ancestor's bay matched but has no installed
+        module — the user can fix the row by installing the ancestor first
+        (which materialises the bay templates) rather than by editing the
+        device/module-type templates.
+
+        ``scope_preserved`` indicates the scope was inherited from an
+        ancestor that didn't match a bay (so the bays in scope don't
+        accurately reflect the item's nesting level).  Used to suppress
+        misleading mapping suggestions that would land deeply-nested
+        items in chassis-level bays."""
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
             resolve_module_type,
@@ -1335,7 +1381,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Surface NetBox-model gaps that produced No Bay / No Type so the user
         # can fix the model rather than wonder why nothing matched.
         if status == "No Bay":
-            row["model_warning"] = self._build_no_bay_warning(item, module_bays)
+            suggestion = self._suggest_bay_mapping(item, module_bays, scope_preserved=scope_preserved)
+            row["model_warning"] = self._build_no_bay_warning(
+                item, module_bays, suggestion, scope_uninstalled=scope_uninstalled
+            )
+            if suggestion:
+                row["model_suggestion"] = suggestion
         elif status == "No Type":
             row["model_warning"] = self._build_no_type_warning(item)
 
@@ -1390,15 +1441,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return "Unmatched"
 
     @staticmethod
-    def _build_no_bay_warning(item, module_bays):
+    def _build_no_bay_warning(item, module_bays, suggestion=None, scope_uninstalled=False):
         """
         Hint the user toward the missing piece of the NetBox model when bay
         matching produces "No Bay".
 
-        Distinguishes three causes:
-          - empty scope -> the parent module type has no bay templates
-          - hardware-class scope (fan / powerSupply) -> add fan/PSU bay templates
-          - generic module/port -> add Slot/SFP/Bay/Port templates
+        Distinguishes:
+          - empty scope due to an uninstalled ancestor -> install the ancestor
+            module first (its bay templates will then be available)
+          - empty scope due to no bay templates -> add bay templates to the
+            parent module/device type
+          - non-empty scope, hardware-class mismatch (fan / powerSupply) ->
+            add the appropriate class bay templates
+          - non-empty scope, generic module/port -> add Slot/SFP/Bay/Port
+            templates or a ModuleBayMapping
+
+        When a `suggestion` dict is provided (from `_suggest_bay_mapping`),
+        appends the proposed regex/target so the user sees a concrete fix
+        alongside the diagnosis.
         """
         phys_class = (item.get("entPhysicalClass") or "").strip().lower()
         class_hints = {
@@ -1415,11 +1475,114 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             class_part = "No matching bay; verify NetBox bay templates"
 
         if not module_bays:
-            return (
-                f"Parent module type has no bay templates defined in NetBox. {class_part} "
-                "to the parent module/device type, or add a ModuleBayMapping."
+            if scope_uninstalled:
+                base = (
+                    "An ancestor module bay matched but has no module installed in NetBox; "
+                    "install the parent module first so its bay templates become available, "
+                    "then refresh this tab."
+                )
+            else:
+                base = (
+                    f"Parent module type has no bay templates defined in NetBox. {class_part} "
+                    "to the parent module/device type, or add a ModuleBayMapping."
+                )
+        else:
+            base = f"{class_part} on the NetBox device or parent module type, or add a ModuleBayMapping."
+
+        if suggestion:
+            base += (
+                f" Suggested mapping: librenms_name='{suggestion['librenms_name']}' "
+                f"(regex), librenms_class='{suggestion.get('librenms_class') or ''}', "
+                f"netbox_bay_name='{suggestion['netbox_bay_name']}' "
+                f"— would map '{suggestion['example_item']}' to '{suggestion['example_bay']}' "
+                "and any sibling with the same trailing-number pattern."
             )
-        return f"{class_part} on the NetBox device or parent module type, or add a ModuleBayMapping."
+        return base
+
+    @staticmethod
+    def _suggest_bay_mapping(item, module_bays, scope_preserved=False):
+        """
+        Suggest a ModuleBayMapping that would resolve a No Bay row.
+
+        Heuristic: when the item's name ends with a number and a bay in scope
+        ends with the same number, propose a regex that captures the trailing
+        number and maps it to the corresponding bay.  Example: item "0/0" with
+        bay "Slot 0" in scope yields ``^0/(\\d+)$`` -> ``Slot \\1``, which
+        generalises to all sibling slots without needing one mapping per slot.
+
+        Suppressed in two cases to avoid wrong suggestions:
+
+        * **scope_preserved=True**: the bay scope was inherited from a
+          higher ancestor that didn't match a bay, so the item is at a
+          deeper hierarchical level than ``module_bays`` represents.
+          Suggesting "0/0/0 -> Slot 0" when "Slot 0" is actually a chassis
+          line-card bay would invite installing a transceiver into a
+          line-card slot.
+
+        * **Class-bay mismatch**: the item's hardware class disagrees with
+          every bay in scope.  A fan only proposes mappings to Fan/Fan
+          Tray/FT named bays; a power supply only to Power Supply / PSU /
+          PEM / PM bays.  Module/port classes accept Slot/SFP/Bay/Port.
+
+        Returns a dict with the suggested mapping fields, or None when no
+        plausible mapping can be derived.
+        """
+        if scope_preserved:
+            return None
+        item_name = (item.get("entPhysicalName") or "").strip()
+        if not item_name or not module_bays:
+            return None
+
+        m = re.search(r"\d+$", item_name)
+        if not m:
+            return None
+        item_trail = m.group(0)
+        item_prefix = item_name[: m.start()]
+        item_class = (item.get("entPhysicalClass") or "").strip()
+
+        # Filter bays by hardware class so transceivers don't propose chassis
+        # line-card bays as targets, fans don't propose Slot N, etc.
+        class_keywords = {
+            "fan": ("fan", "ft"),
+            "powersupply": ("psu", "power supply", "pem", "pm"),
+        }
+        module_classes = {"module", "port", "iomodule", "cpmmodule", "mdamodule", "fabricmodule", "xiomodule"}
+        phys_class = item_class.lower()
+        if phys_class in class_keywords:
+            keywords = class_keywords[phys_class]
+            candidate_names = [n for n in module_bays if any(k in n.lower() for k in keywords)]
+        elif phys_class in module_classes:
+            candidate_names = list(module_bays)
+        else:
+            return None
+
+        candidate_bay = None
+        bay_prefix = None
+        for bay_name in candidate_names:
+            bm = re.search(r"\d+$", bay_name)
+            if bm and bm.group(0) == item_trail:
+                candidate_bay = bay_name
+                bay_prefix = bay_name[: bm.start()]
+                break
+
+        if candidate_bay is None:
+            return None
+
+        librenms_pattern = "^" + re.escape(item_prefix) + r"(\d+)$"
+        netbox_target = bay_prefix + r"\1"
+
+        return {
+            "librenms_name": librenms_pattern,
+            "netbox_bay_name": netbox_target,
+            "is_regex": True,
+            "librenms_class": item_class,
+            "description": (
+                f"Auto-suggested from device modules tab: maps LibreNMS '{item_name}' "
+                f"and similar trailing-number names to NetBox bay '{candidate_bay}'."
+            ),
+            "example_item": item_name,
+            "example_bay": candidate_bay,
+        }
 
     @staticmethod
     def _build_no_type_warning(item):

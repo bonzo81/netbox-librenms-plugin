@@ -2102,7 +2102,7 @@ class TestPositionalMatchClassAware:
 
 
 class TestNoBayWarningHints:
-    """`_build_no_bay_warning` distinguishes the three common 'No Bay' causes."""
+    """`_build_no_bay_warning` distinguishes the common 'No Bay' causes."""
 
     def test_empty_scope_mentions_missing_templates(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -2110,6 +2110,32 @@ class TestNoBayWarningHints:
         item = {"entPhysicalClass": "module", "entPhysicalModelName": "X"}
         msg = BaseModuleTableView._build_no_bay_warning(item, {})
         assert "no bay templates defined" in msg.lower()
+
+    def test_scope_uninstalled_recommends_install_parent(self):
+        """Empty scope due to an uninstalled ancestor -> hint to install parent first."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalClass": "module", "entPhysicalModelName": "X"}
+        msg = BaseModuleTableView._build_no_bay_warning(item, {}, scope_uninstalled=True)
+        assert "install the parent module first" in msg.lower()
+
+    def test_suggestion_appended_when_provided(self):
+        """`_build_no_bay_warning` includes the suggested mapping when one is provided."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalClass": "module"}
+        suggestion = {
+            "librenms_name": r"^0/(\d+)$",
+            "librenms_class": "module",
+            "netbox_bay_name": r"Slot \1",
+            "is_regex": True,
+            "example_item": "0/0",
+            "example_bay": "Slot 0",
+        }
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 0": MagicMock()}, suggestion)
+        assert "0/(\\d+)" in msg
+        assert "Slot \\1" in msg
+        assert "0/0" in msg and "Slot 0" in msg
 
     def test_fan_class_hint_names_fan_bays(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -2131,6 +2157,92 @@ class TestNoBayWarningHints:
         item = {"entPhysicalClass": "module"}
         msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
         assert "Slot" in msg or "SFP" in msg
+
+
+class TestSuggestBayMapping:
+    """`_suggest_bay_mapping` produces a regex mapping when a trailing-number bay is in scope."""
+
+    def test_suggests_regex_when_trailing_number_matches_bay(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "0/0", "entPhysicalClass": "module"}
+        bay = MagicMock()
+        bay.name = "Slot 0"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
+        assert sug is not None
+        assert sug["is_regex"] is True
+        assert sug["librenms_name"] == r"^0/(\d+)$"
+        assert sug["netbox_bay_name"] == r"Slot \1"
+        assert sug["librenms_class"] == "module"
+        assert sug["example_item"] == "0/0"
+        assert sug["example_bay"] == "Slot 0"
+
+    def test_no_suggestion_when_no_bay_with_matching_trailing_number(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "0/0", "entPhysicalClass": "module"}
+        bay = MagicMock()
+        bay.name = "Slot 7"  # trailing 7, not 0
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 7": bay})
+        assert sug is None
+
+    def test_no_suggestion_when_item_has_no_trailing_number(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "Mainboard", "entPhysicalClass": "module"}
+        bay = MagicMock()
+        bay.name = "Slot 0"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
+        assert sug is None
+
+    def test_no_suggestion_when_module_bays_empty(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "0/0", "entPhysicalClass": "module"}
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {})
+        assert sug is None
+
+    def test_no_suggestion_when_scope_preserved(self):
+        """Suppress suggestions for sub-items whose scope was inherited from
+        an unmatched ancestor — the bays in scope are at the wrong level."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "TenGigE0/0/0/0", "entPhysicalClass": "module"}
+        bay = MagicMock()
+        bay.name = "Slot 0"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay}, scope_preserved=True)
+        assert sug is None
+
+    def test_no_suggestion_for_fan_when_only_slot_bays_exist(self):
+        """A fan must not be suggested into a chassis line-card slot bay."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "0/FT0", "entPhysicalClass": "fan"}
+        bay = MagicMock()
+        bay.name = "Slot 0"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
+        assert sug is None
+
+    def test_suggestion_for_fan_when_fan_named_bay_exists(self):
+        """A fan with a fan-named bay in scope yields a fan-targeted suggestion."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "0/FT0", "entPhysicalClass": "fan"}
+        bay = MagicMock()
+        bay.name = "Fan Tray 0"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Fan Tray 0": bay})
+        assert sug is not None
+        assert "Fan Tray" in sug["netbox_bay_name"]
+
+    def test_no_suggestion_for_powersupply_when_only_slot_bays_exist(self):
+        """A power supply must not be suggested into a chassis line-card slot bay."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "0/PT0-PM0", "entPhysicalClass": "powerSupply"}
+        bay = MagicMock()
+        bay.name = "Slot 0"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
+        assert sug is None
 
 
 class TestNoTypeWarningHints:
@@ -2207,3 +2319,43 @@ class TestBuildRowModelWarning:
             row = view._build_row(item, {}, {"Slot 1": bay}, {"M": mt})
         assert row["status"] == "Matched"
         assert "model_warning" not in row
+
+    def test_no_bay_row_carries_model_suggestion_when_trailing_number_matches(self):
+        """A No Bay row whose item name shares a trailing number with a bay
+        in scope gets a `model_suggestion` field consumable by the table."""
+        view = self._view()
+        view._match_module_bay = MagicMock(return_value=None)
+        bay = MagicMock()
+        bay.name = "Slot 0"
+        item = {"entPhysicalName": "0/0", "entPhysicalClass": "module", "entPhysicalModelName": "X"}
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="X", pk=1)),
+        ):
+            row = view._build_row(item, {}, {"Slot 0": bay}, {"X": MagicMock(pk=1)})
+        assert row["status"] == "No Bay"
+        sug = row.get("model_suggestion")
+        assert sug is not None
+        assert sug["librenms_name"] == r"^0/(\d+)$"
+        assert sug["netbox_bay_name"] == r"Slot \1"
+
+    def test_scope_uninstalled_no_bay_row_recommends_install_parent(self):
+        """When scope is empty due to an uninstalled ancestor, the warning
+        text instructs the user to install the parent module first."""
+        view = self._view()
+        view._match_module_bay = MagicMock(return_value=None)
+        item = {
+            "entPhysicalName": "TenGigE0/0/0/0",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "SFP-X",
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch(
+                "netbox_librenms_plugin.utils.resolve_module_type",
+                return_value=MagicMock(model="SFP-X", pk=1),
+            ),
+        ):
+            row = view._build_row(item, {}, {}, {"SFP-X": MagicMock(pk=1)}, scope_uninstalled=True)
+        assert row["status"] == "No Bay"
+        assert "install the parent module first" in row.get("model_warning", "").lower()

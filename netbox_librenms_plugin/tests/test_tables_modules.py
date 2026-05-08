@@ -679,3 +679,66 @@ class TestLibreNMSModuleTable:
         assert table.csrf_token == "csrf-abc"
         mock_rc_cls.assert_called_once()
         mock_rc_instance.configure.assert_called_once_with(table)
+
+    def test_render_actions_no_bay_with_suggestion_renders_add_mapping_button(self):
+        """A No Bay row with a model_suggestion gets an "Add Mapping" link."""
+        device = MagicMock()
+        device.pk = 54
+        table = self._make_table(device=device)
+        table.server_key = "production"
+        table.return_url = "/dcim/devices/54/librenms-sync/?tab=modules"
+        record = {
+            "status": "No Bay",
+            "model_suggestion": {
+                "librenms_name": r"^0/(\d+)$",
+                "librenms_class": "module",
+                "netbox_bay_name": r"Slot \1",
+                "is_regex": True,
+                "description": "Suggested mapping",
+                "example_item": "0/0",
+                "example_bay": "Slot 0",
+            },
+        }
+        with patch(
+            "netbox_librenms_plugin.tables.modules.reverse", return_value="/plugins/librenms/module-bay-mappings/add/"
+        ):
+            result = str(table.render_actions("", record))
+        assert "Add Mapping" in result
+        # The link must include the suggestion as querystring
+        assert "librenms_name=" in result
+        assert "is_regex=true" in result
+        assert "netbox_bay_name=" in result
+        # return_url must round-trip back to the modules tab
+        assert "return_url=" in result
+
+    def test_render_actions_no_bay_without_suggestion_omits_button(self):
+        """No suggestion -> no "Add Mapping" button."""
+        device = MagicMock()
+        device.pk = 54
+        table = self._make_table(device=device)
+        table.server_key = "production"
+        record = {"status": "No Bay"}
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):
+            result = str(table.render_actions("", record))
+        assert "Add Mapping" not in result
+
+    def test_render_actions_matched_row_does_not_render_add_mapping(self):
+        """`Matched` rows must not render the Add Mapping button even with a suggestion key."""
+        device = MagicMock()
+        device.pk = 54
+        table = self._make_table(device=device)
+        table.server_key = "production"
+        record = {
+            "status": "Matched",
+            "model_suggestion": {
+                "librenms_name": r"^0/(\d+)$",
+                "librenms_class": "module",
+                "netbox_bay_name": r"Slot \1",
+                "is_regex": True,
+                "example_item": "0/0",
+                "example_bay": "Slot 0",
+            },
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):
+            result = str(table.render_actions("", record))
+        assert "Add Mapping" not in result

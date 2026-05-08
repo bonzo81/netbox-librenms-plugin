@@ -1,3 +1,5 @@
+from urllib.parse import urlencode
+
 import django_tables2 as tables
 from django.urls import reverse
 from django.utils.html import escape, format_html, mark_safe
@@ -77,6 +79,9 @@ class LibreNMSModuleTable(tables.Table):
         from django.middleware.csrf import get_token
 
         self.csrf_token = get_token(request)
+        # Save the current path so the "Add Mapping" button can pass it as
+        # return_url and bring the user back to the modules tab after save.
+        self.return_url = request.get_full_path() if request else ""
         paginate = {"paginator_class": EnhancedPaginator, "per_page": get_table_paginate_count(request, self.prefix)}
         tables.RequestConfig(request, paginate).configure(self)
 
@@ -308,6 +313,38 @@ class LibreNMSModuleTable(tables.Table):
                     record["module_bay_id"],
                     conflict_module.device.name,
                     conflict_module.module_bay.name,
+                )
+            )
+
+        # "Add mapping" button for No Bay rows where we can suggest a mapping.
+        # Opens the ModuleBayMapping create form pre-filled with the regex
+        # capturing the trailing-number pattern (e.g. ^0/(\d+)$ -> Slot \1),
+        # so one entry covers the whole device-type slot family rather than
+        # one mapping per slot.
+        if record.get("status") == "No Bay" and record.get("model_suggestion"):
+            sug = record["model_suggestion"]
+            base_url = reverse("plugins:netbox_librenms_plugin:modulebaymapping_add")
+            return_url = getattr(self, "return_url", "") or ""
+            qs = urlencode(
+                {
+                    "librenms_name": sug["librenms_name"],
+                    "librenms_class": sug.get("librenms_class") or "",
+                    "netbox_bay_name": sug["netbox_bay_name"],
+                    "is_regex": "true" if sug.get("is_regex") else "false",
+                    "description": sug.get("description") or "",
+                    **({"return_url": return_url} if return_url else {}),
+                }
+            )
+            buttons.append(
+                format_html(
+                    '<a href="{}?{}" class="btn btn-sm btn-outline-primary ms-1"'
+                    ' title="Open the ModuleBayMapping create form pre-filled with a suggested regex'
+                    " mapping that covers this slot family"
+                    '">'
+                    '<i class="mdi mdi-plus-box-outline"></i> Add Mapping'
+                    "</a>",
+                    base_url,
+                    qs,
                 )
             )
 
