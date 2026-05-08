@@ -59,7 +59,6 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
         patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
         patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
         patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
-        patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         # _detect_serial_conflicts makes a real DB query; mock it out for unit tests
         patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
     ):
@@ -1018,7 +1017,6 @@ class TestPositionalMatchScaffoldingChain:
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[transparent_rule]),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
             patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
         ):
             mock_cache.ttl = MagicMock(return_value=None)
@@ -1214,7 +1212,6 @@ class TestBuildRowSerialMismatch:
         with (
             patch.object(view, "_match_module_bay", return_value=bay),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         ):
             row = view._build_row(
                 self._make_item(serial="NS225161205"),
@@ -1239,7 +1236,6 @@ class TestBuildRowSerialMismatch:
         with (
             patch.object(view, "_match_module_bay", return_value=bay),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         ):
             row = view._build_row(
                 self._make_item(serial="NS225161205"),
@@ -1265,7 +1261,6 @@ class TestBuildRowSerialMismatch:
         with (
             patch.object(view, "_match_module_bay", return_value=bay),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         ):
             row = view._build_row(
                 self._make_item(serial="NS225161205"),
@@ -1285,7 +1280,6 @@ class TestBuildRowSerialMismatch:
         return [
             patch.object(view, "_match_module_bay", return_value=bay),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value=matched_type_name),
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         ]
 
     def _make_matched_type(self, model_name, pk=5):
@@ -2333,7 +2327,6 @@ class TestBuildRowModelWarning:
         view._match_module_bay = MagicMock(return_value=None)
         item = {"entPhysicalName": "0/FT0", "entPhysicalClass": "fan", "entPhysicalModelName": "ASR-FAN"}
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="ASR-FAN", pk=1)),
         ):
             row = view._build_row(item, {}, {"Slot 1": MagicMock()}, {"ASR-FAN": MagicMock(pk=1)})
@@ -2350,7 +2343,6 @@ class TestBuildRowModelWarning:
         view._match_module_bay = MagicMock(return_value=bay)
         item = {"entPhysicalName": "X", "entPhysicalClass": "module", "entPhysicalModelName": "UNKNOWN-MODEL"}
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
         ):
             row = view._build_row(item, {}, {}, {})
@@ -2369,7 +2361,6 @@ class TestBuildRowModelWarning:
         mt.get_absolute_url.return_value = "/mt"
         item = {"entPhysicalName": "X", "entPhysicalClass": "module", "entPhysicalModelName": "M"}
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=mt),
         ):
             row = view._build_row(item, {}, {"Slot 1": bay}, {"M": mt})
@@ -2385,7 +2376,6 @@ class TestBuildRowModelWarning:
         bay.name = "Slot 0"
         item = {"entPhysicalName": "0/0", "entPhysicalClass": "module", "entPhysicalModelName": "X"}
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="X", pk=1)),
         ):
             row = view._build_row(item, {}, {"Slot 0": bay}, {"X": MagicMock(pk=1)})
@@ -2406,7 +2396,6 @@ class TestBuildRowModelWarning:
             "entPhysicalModelName": "SFP-X",
         }
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch(
                 "netbox_librenms_plugin.utils.resolve_module_type",
                 return_value=MagicMock(model="SFP-X", pk=1),
@@ -2430,7 +2419,6 @@ class TestBuildRowModelWarning:
             "entPhysicalModelName": "SFP-10G-SR",
         }
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
         ):
             # scope_empty_installed_bays=True: installed parent has no bay templates
@@ -2458,7 +2446,6 @@ class TestBuildRowModelWarning:
             "entPhysicalModelName": "SFP-10G-SR",
         }
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
         ):
             row = view._build_row(
@@ -2485,7 +2472,6 @@ class TestBuildRowModelWarning:
             "entPhysicalModelName": "SFP-10G-SR",
         }
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
         ):
             # Default scope_empty_installed_bays=False — could be unmatched ancestor
@@ -2508,7 +2494,6 @@ class TestBuildRowModelWarning:
             "entPhysicalModelName": "X",
         }
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="X", pk=1)),
         ):
             row = view._build_row(item, {}, {"Slot 1": bay}, {"X": MagicMock(pk=1)})
@@ -2528,7 +2513,6 @@ class TestBuildRowModelWarning:
             "entPhysicalModelName": "SFP-X",
         }
         with (
-            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-X", pk=1)),
         ):
             row = view._build_row(item, {}, {}, {"SFP-X": MagicMock(pk=1)}, scope_uninstalled=True)

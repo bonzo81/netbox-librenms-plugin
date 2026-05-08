@@ -619,7 +619,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "device_bays": device_bays,
                 "module_scoped_bays": module_scoped_bays,
                 "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
-                "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
             }
         return member_contexts
 
@@ -646,7 +645,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             module_types,
             depth=0,
             manufacturer=manufacturer,
-            sibling_counts=target_context["sibling_counts"],
         )
         row["selected_device_id"] = selected_device.id
         row["selected_device_name"] = selected_device.name
@@ -728,7 +726,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 module_types,
                 depth=depth,
                 manufacturer=manufacturer,
-                sibling_counts=target_context["sibling_counts"],
                 scope_uninstalled=scope_uninstalled,
                 scope_preserved=scope_preserved,
                 scope_empty_installed_bays=scope_empty_installed_bays,
@@ -1357,7 +1354,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         module_types,
         depth=0,
         manufacturer=None,
-        sibling_counts=None,
         scope_uninstalled=False,
         scope_preserved=False,
         scope_empty_installed_bays=False,
@@ -1382,7 +1378,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         deeply-nested items (e.g. SFPs nested under a transceiver carrier)
         still show "No Bay on Parent" rather than plain "No Bay"."""
         from netbox_librenms_plugin.utils import (
-            has_nested_name_conflict,
             resolve_module_type,
         )
 
@@ -1406,15 +1401,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             generic_fallback=generic_module_types,
         )
 
-        # Determine status; override to "Name Conflict" when the matched module
-        # type uses {module} in interface templates and has sibling bays (which
-        # would produce duplicate interface names on install).
         status = self._determine_status(matched_bay, matched_type, serial)
-        name_conflict_reason = ""
-        if matched_type and matched_bay:
-            name_conflict_reason = has_nested_name_conflict(matched_type, matched_bay, sibling_counts)
-            if name_conflict_reason:
-                status = "Name Conflict"
 
         row = {
             "name": name,
@@ -1432,8 +1419,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "ent_physical_index": item.get("entPhysicalIndex"),
             "has_installable_children": False,
         }
-        if name_conflict_reason:
-            row["name_conflict_reason"] = name_conflict_reason
 
         # Surface NetBox-model gaps that produced No Bay / No Type so the user
         # can fix the model rather than wonder why nothing matched.
@@ -1470,11 +1455,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         if matched_type:
             row["module_type_url"] = matched_type.get_absolute_url()
-
-        # Re-apply "Name Conflict" last — _apply_installed_status may have
-        # overwritten it with "Installed" / "Serial Mismatch" / "Type Mismatch".
-        if name_conflict_reason:
-            row["status"] = "Name Conflict"
 
         return row
 
