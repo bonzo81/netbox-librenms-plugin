@@ -173,6 +173,7 @@ class LibreNMSModuleTable(tables.Table):
             "No Type": "bg-warning text-dark",
             "Unmatched": "bg-secondary text-white",
             "Serial Mismatch": "bg-danger text-white",
+            "Name Conflict": "bg-warning text-dark",
             "Type Mismatch": "bg-warning text-dark",
         }
         badge_class = badge_classes.get(value, "bg-secondary text-white")

@@ -619,6 +619,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "device_bays": device_bays,
                 "module_scoped_bays": module_scoped_bays,
                 "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
+                "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
             }
         return member_contexts
 
@@ -645,6 +646,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             module_types,
             depth=0,
             manufacturer=manufacturer,
+            sibling_counts=target_context["sibling_counts"],
         )
         row["selected_device_id"] = selected_device.id
         row["selected_device_name"] = selected_device.name
@@ -726,6 +728,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 module_types,
                 depth=depth,
                 manufacturer=manufacturer,
+                sibling_counts=target_context["sibling_counts"],
                 scope_uninstalled=scope_uninstalled,
                 scope_preserved=scope_preserved,
                 scope_empty_installed_bays=scope_empty_installed_bays,
@@ -1354,6 +1357,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         module_types,
         depth=0,
         manufacturer=None,
+        sibling_counts=None,
         scope_uninstalled=False,
         scope_preserved=False,
         scope_empty_installed_bays=False,
@@ -1377,7 +1381,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         defined.  Propagates through intermediate unmatched containers so
         deeply-nested items (e.g. SFPs nested under a transceiver carrier)
         still show "No Bay on Parent" rather than plain "No Bay"."""
-        from netbox_librenms_plugin.utils import resolve_module_type
+        from netbox_librenms_plugin.utils import (
+            has_nested_name_conflict,
+            resolve_module_type,
+        )
 
         model_name = (item.get("entPhysicalModelName", "") or "").strip()
         serial = (item.get("entPhysicalSerialNum", "") or "").strip()
@@ -1399,8 +1406,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             generic_fallback=generic_module_types,
         )
 
-        # Determine status
+        # Determine status; override to "Name Conflict" when the matched module
+        # type uses {module} in interface templates and has sibling bays (which
+        # would produce duplicate interface names on install).
         status = self._determine_status(matched_bay, matched_type, serial)
+        if matched_type and matched_bay and has_nested_name_conflict(matched_type, matched_bay, sibling_counts):
+            status = "Name Conflict"
 
         row = {
             "name": name,

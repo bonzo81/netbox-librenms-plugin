@@ -18,6 +18,7 @@ def _patch_build_row_deps(view, match_bay_return=None):
     with (
         patch.object(view, "_match_module_bay", return_value=match_bay_return),
         patch(f"{_utils}.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)),
+        patch(f"{_utils}.has_nested_name_conflict", return_value=False),
     ):
         yield
 
@@ -1036,6 +1037,7 @@ class TestParentRowIdxVsEntityIndex:
             module_types,
             depth=0,
             manufacturer=None,
+            sibling_counts=None,
             scope_uninstalled=False,
             scope_preserved=False,
             scope_empty_installed_bays=False,

@@ -299,6 +299,14 @@ class TestLibreNMSModuleTable:
         assert "bg-danger" in result
         assert "Serial Mismatch" in result
 
+    def test_render_status_name_conflict_uses_warning_badge(self):
+        """'Name Conflict' status renders a bg-warning text-dark badge."""
+        table = self._make_table()
+        result = str(table.render_status("Name Conflict", {}))
+        assert "bg-warning" in result
+        assert "text-dark" in result
+        assert "Name Conflict" in result
+
     def test_render_status_unknown_value_uses_secondary_badge(self):
         """Unknown status value falls back to bg-secondary."""
         table = self._make_table()
