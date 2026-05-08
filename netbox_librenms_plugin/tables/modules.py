@@ -184,10 +184,10 @@ class LibreNMSModuleTable(tables.Table):
 
         if value == "Name Conflict" and (conflict_reason := record.get("name_conflict_reason")):
             status_html = format_html(
-                '<span class="badge {} cursor-help" title="{}">{}</span>',
+                '<span class="badge {}">{}</span> <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
                 badge_class,
-                conflict_reason,
                 display_text,
+                conflict_reason,
             )
         elif warning:
             status_html = format_html(
@@ -410,6 +410,34 @@ class LibreNMSModuleTable(tables.Table):
                     '<a href="{}?{}" class="btn btn-sm btn-outline-primary ms-1"'
                     ' title="Open the ModuleBayMapping create form pre-filled with a suggested regex'
                     " mapping that covers this slot family"
+                    '">'
+                    '<i class="mdi mdi-plus-box-outline"></i> Add Mapping'
+                    "</a>",
+                    base_url,
+                    qs,
+                )
+            )
+
+        # "Add mapping" button for No Type rows where we can suggest a mapping.
+        # Opens the ModuleTypeMapping create form pre-filled with the LibreNMS
+        # model name and a helpful description so the user only needs to pick
+        # or create the matching NetBox ModuleType.
+        if record.get("status") == "No Type" and record.get("type_suggestion"):
+            sug = record["type_suggestion"]
+            base_url = reverse("plugins:netbox_librenms_plugin:moduletypemapping_add")
+            return_url = getattr(self, "return_url", "") or ""
+            qs = urlencode(
+                {
+                    "librenms_model": sug["librenms_model"],
+                    "description": sug.get("description") or "",
+                    **({"return_url": return_url} if return_url else {}),
+                }
+            )
+            buttons.append(
+                format_html(
+                    '<a href="{}?{}" class="btn btn-sm btn-outline-primary ms-1"'
+                    ' title="Open the ModuleTypeMapping create form pre-filled with the LibreNMS'
+                    " model name; select or create the matching NetBox ModuleType to complete the mapping"
                     '">'
                     '<i class="mdi mdi-plus-box-outline"></i> Add Mapping'
                     "</a>",

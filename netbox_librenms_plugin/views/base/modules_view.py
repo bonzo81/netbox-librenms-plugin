@@ -1450,6 +1450,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 row["no_bay_reason"] = "empty_parent_bays"
         elif status == "No Type":
             row["model_warning"] = self._build_no_type_warning(item)
+            type_suggestion = self._suggest_type_mapping(item, matched_bay)
+            if type_suggestion:
+                row["type_suggestion"] = type_suggestion
 
         # Add URLs for matched objects
         if matched_bay:
@@ -1648,6 +1651,37 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ),
             "example_item": item_name,
             "example_bay": candidate_bay,
+        }
+
+    @staticmethod
+    def _suggest_type_mapping(item, matched_bay):
+        """
+        Suggest a ModuleTypeMapping that would resolve a No Type row.
+
+        Uses the LibreNMS model name as ``librenms_model`` and builds a helpful
+        ``description`` from the physical description and bay context so the
+        create form arrives pre-filled for the user.  The user still needs to
+        select or create the matching NetBox ModuleType.
+
+        Returns None when the model name is blank — no meaningful mapping can
+        be created without at least a model name to key on.
+        """
+        model = (item.get("entPhysicalModelName") or "").strip()
+        if not model:
+            return None
+
+        parts = [f"Auto-suggested: maps LibreNMS model '{model}'"]
+        phys_descr = (item.get("entPhysicalDescr") or "").strip()
+        if phys_descr:
+            parts.append(f"described as '{phys_descr}'")
+        if matched_bay:
+            parts.append(f"fitted in bay '{matched_bay.name}'")
+        parts.append("to a NetBox ModuleType.")
+        description = " ".join(parts)
+
+        return {
+            "librenms_model": model,
+            "description": description,
         }
 
     @staticmethod

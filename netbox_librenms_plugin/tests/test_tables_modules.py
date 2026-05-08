@@ -308,12 +308,13 @@ class TestLibreNMSModuleTable:
         assert "Name Conflict" in result
 
     def test_render_status_name_conflict_shows_reason_tooltip(self):
-        """'Name Conflict' with a name_conflict_reason shows it as a title tooltip."""
+        """'Name Conflict' with a name_conflict_reason shows the reason on a warning icon."""
         table = self._make_table()
-        reason = "Interface templates use {module}, causing duplicate names."
+        reason = "Duplicate interface names detected due to sibling bays."
         result = str(table.render_status("Name Conflict", {"name_conflict_reason": reason}))
         assert "bg-warning" in result
-        assert "cursor-help" in result
+        assert "mdi-alert-outline" in result
+        assert "cursor-help" not in result
         assert reason in result
 
     def test_render_status_unknown_value_uses_secondary_badge(self):
@@ -746,6 +747,55 @@ class TestLibreNMSModuleTable:
                 "is_regex": True,
                 "example_item": "0/0",
                 "example_bay": "Slot 0",
+            },
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):
+            result = str(table.render_actions("", record))
+        assert "Add Mapping" not in result
+
+    def test_render_actions_no_type_with_suggestion_renders_add_mapping_button(self):
+        """A No Type row with a type_suggestion gets an "Add Mapping" link to moduletypemapping_add."""
+        device = MagicMock()
+        device.pk = 55
+        table = self._make_table(device=device)
+        table.server_key = "production"
+        table.return_url = "/dcim/devices/55/librenms-sync/?tab=modules"
+        record = {
+            "status": "No Type",
+            "type_suggestion": {
+                "librenms_model": "SFP-10G-SR",
+                "description": "Auto-suggested: maps LibreNMS model 'SFP-10G-SR' to a NetBox ModuleType.",
+            },
+        }
+        with patch(
+            "netbox_librenms_plugin.tables.modules.reverse",
+            return_value="/plugins/librenms/module-type-mappings/add/",
+        ):
+            result = str(table.render_actions("", record))
+        assert "Add Mapping" in result
+        assert "librenms_model=" in result
+        assert "return_url=" in result
+
+    def test_render_actions_no_type_without_suggestion_omits_add_mapping_button(self):
+        """No type_suggestion on a No Type row → no "Add Mapping" button."""
+        device = MagicMock()
+        device.pk = 56
+        table = self._make_table(device=device)
+        record = {"status": "No Type"}
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):
+            result = str(table.render_actions("", record))
+        assert "Add Mapping" not in result
+
+    def test_render_actions_no_type_add_mapping_not_shown_for_other_statuses(self):
+        """type_suggestion on a non-No-Type row must not render the Add Mapping button."""
+        device = MagicMock()
+        device.pk = 57
+        table = self._make_table(device=device)
+        record = {
+            "status": "Matched",
+            "type_suggestion": {
+                "librenms_model": "SFP-10G-SR",
+                "description": "should be ignored",
             },
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):

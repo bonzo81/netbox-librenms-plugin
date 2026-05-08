@@ -2247,6 +2247,60 @@ class TestSuggestBayMapping:
         assert sug is None
 
 
+class TestSuggestTypeMapping:
+    """`_suggest_type_mapping` produces a prefill dict for the ModuleTypeMapping form."""
+
+    def test_returns_none_when_model_blank(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        assert BaseModuleTableView._suggest_type_mapping({"entPhysicalModelName": ""}, None) is None
+        assert BaseModuleTableView._suggest_type_mapping({}, None) is None
+
+    def test_returns_dict_with_librenms_model(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalModelName": "SFP-10G-SR", "entPhysicalDescr": "10GBASE-SR"}
+        sug = BaseModuleTableView._suggest_type_mapping(item, None)
+        assert sug is not None
+        assert sug["librenms_model"] == "SFP-10G-SR"
+
+    def test_description_includes_physical_descr(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalModelName": "SFP-10G-SR", "entPhysicalDescr": "10GBASE-SR SFP+"}
+        sug = BaseModuleTableView._suggest_type_mapping(item, None)
+        assert "10GBASE-SR SFP+" in sug["description"]
+
+    def test_description_includes_bay_name_when_bay_available(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = MagicMock()
+        bay.name = "SFP 1"
+        item = {"entPhysicalModelName": "SFP-10G-SR", "entPhysicalDescr": "10GBASE-SR"}
+        sug = BaseModuleTableView._suggest_type_mapping(item, bay)
+        assert "SFP 1" in sug["description"]
+
+    def test_description_omits_bay_name_when_no_bay(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalModelName": "GLC-TE", "entPhysicalDescr": "1000BaseT"}
+        sug = BaseModuleTableView._suggest_type_mapping(item, None)
+        assert sug is not None
+        assert "bay" not in sug["description"].lower() or "fitted" not in sug["description"]
+
+    def test_unspecified_model_produces_suggestion(self):
+        """'Unspecified' is a valid librenms_model — a mapping can still be created."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bay = MagicMock()
+        bay.name = "SFP 2"
+        item = {"entPhysicalModelName": "Unspecified", "entPhysicalDescr": "1000BaseT"}
+        sug = BaseModuleTableView._suggest_type_mapping(item, bay)
+        assert sug is not None
+        assert sug["librenms_model"] == "Unspecified"
+        assert "SFP 2" in sug["description"]
+
+
 class TestNoTypeWarningHints:
     """`_build_no_type_warning` mentions the missing model name."""
 
