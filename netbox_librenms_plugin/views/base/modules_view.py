@@ -1468,6 +1468,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if matched_type:
             row["module_type_url"] = matched_type.get_absolute_url()
 
+        # Re-apply "Name Conflict" last — _apply_installed_status may have
+        # overwritten it with "Installed" / "Serial Mismatch" / "Type Mismatch".
+        if name_conflict_reason:
+            row["status"] = "Name Conflict"
+
         return row
 
     @staticmethod
