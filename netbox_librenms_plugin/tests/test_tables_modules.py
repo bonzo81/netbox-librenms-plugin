@@ -307,6 +307,15 @@ class TestLibreNMSModuleTable:
         assert "text-dark" in result
         assert "Name Conflict" in result
 
+    def test_render_status_name_conflict_shows_reason_tooltip(self):
+        """'Name Conflict' with a name_conflict_reason shows it as a title tooltip."""
+        table = self._make_table()
+        reason = "Interface templates use {module}, causing duplicate names."
+        result = str(table.render_status("Name Conflict", {"name_conflict_reason": reason}))
+        assert "bg-warning" in result
+        assert "cursor-help" in result
+        assert reason in result
+
     def test_render_status_unknown_value_uses_secondary_badge(self):
         """Unknown status value falls back to bg-secondary."""
         table = self._make_table()

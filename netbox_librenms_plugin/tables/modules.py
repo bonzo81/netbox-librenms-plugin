@@ -182,7 +182,14 @@ class LibreNMSModuleTable(tables.Table):
         # More descriptive label when the parent module type simply has no bay templates.
         display_text = "No Bay on Parent" if record.get("no_bay_reason") == "empty_parent_bays" else value
 
-        if warning:
+        if value == "Name Conflict" and (conflict_reason := record.get("name_conflict_reason")):
+            status_html = format_html(
+                '<span class="badge {} cursor-help" title="{}">{}</span>',
+                badge_class,
+                conflict_reason,
+                display_text,
+            )
+        elif warning:
             status_html = format_html(
                 '<span class="badge {}" title="{}">{}</span>'
                 ' <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',

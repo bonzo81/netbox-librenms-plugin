@@ -1410,8 +1410,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # type uses {module} in interface templates and has sibling bays (which
         # would produce duplicate interface names on install).
         status = self._determine_status(matched_bay, matched_type, serial)
-        if matched_type and matched_bay and has_nested_name_conflict(matched_type, matched_bay, sibling_counts):
-            status = "Name Conflict"
+        name_conflict_reason = ""
+        if matched_type and matched_bay:
+            name_conflict_reason = has_nested_name_conflict(matched_type, matched_bay, sibling_counts)
+            if name_conflict_reason:
+                status = "Name Conflict"
 
         row = {
             "name": name,
@@ -1429,6 +1432,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "ent_physical_index": item.get("entPhysicalIndex"),
             "has_installable_children": False,
         }
+        if name_conflict_reason:
+            row["name_conflict_reason"] = name_conflict_reason
 
         # Surface NetBox-model gaps that produced No Bay / No Type so the user
         # can fix the model rather than wonder why nothing matched.

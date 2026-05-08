@@ -822,7 +822,7 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
     """
     Check if installing this module type in a nested bay would cause a name conflict.
 
-    Returns True when ALL of the following are true:
+    Returns a non-empty reason string when ALL of the following are true:
     - The module type has interface templates using ``{module}``
     - The bay is nested (its parent is owned by an installed module)
     - There is at least one sibling bay under the same parent
@@ -830,6 +830,8 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
     In this situation NetBox's ``resolve_name()`` replaces ``{module}`` with the
     root ancestor's bay position, producing the same interface name for every
     sibling at this nesting level.
+
+    Returns an empty string (falsy) when no conflict is detected.
 
     Args:
         module_type: The ModuleType to install.
@@ -842,14 +844,14 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
     from dcim.constants import MODULE_TOKEN
 
     if not module_bay or not module_bay.module_id:
-        return False  # Top-level bay — no conflict
+        return ""  # Top-level bay — no conflict
 
     templates = list(module_type.interfacetemplates.all())
     if not templates:
-        return False  # No interface templates
+        return ""  # No interface templates
 
     if not any(MODULE_TOKEN in t.name for t in templates):
-        return False  # Template doesn't use {module}
+        return ""  # Template doesn't use {module}
 
     if sibling_counts is not None:
         sibling_count = sibling_counts.get(module_bay.module_id, 0)
@@ -861,7 +863,14 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
             module_id=module_bay.module_id,
         ).count()
 
-    return sibling_count > 1
+    if sibling_count <= 1:
+        return ""
+
+    return (
+        f"Interface templates for '{module_type.model}' use {{module}}, which resolves to "
+        f"the same root bay name for all {sibling_count} sibling bays — "
+        "installing here would create duplicate interface names."
+    )
 
 
 def get_module_types_indexed() -> dict:
