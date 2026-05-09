@@ -1082,10 +1082,22 @@ function handleModuleChange(select, value) {
             row.querySelector('td[data-col="serial"]').innerHTML = formattedRow.serial;
             row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
             row.querySelector('td[data-col="item_class"]').innerHTML = formattedRow.item_class;
-            row.querySelector('td[data-col="module_bay"]').innerHTML = formattedRow.module_bay;
-            row.querySelector('td[data-col="module_type"]').innerHTML = formattedRow.module_type;
-            row.querySelector('td[data-col="status"]').innerHTML = formattedRow.status;
-            row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
+            // Replace each cell content if present. Defensive null-checks keep this
+            // resilient if the row markup ever drops one of these data-col cells.
+            const cellMap = {
+                module_bay: formattedRow.module_bay,
+                module_type: formattedRow.module_type,
+                status: formattedRow.status,
+                actions: formattedRow.actions,
+            };
+            for (const [col, html] of Object.entries(cellMap)) {
+                const cell = row.querySelector(`td[data-col="${col}"]`);
+                if (cell) {
+                    cell.innerHTML = html;
+                } else {
+                    console.warn(`Module row missing data-col="${col}" cell — skipping update`);
+                }
+            }
 
             // Re-bind listeners because row controls (select/buttons/forms) were replaced.
             initializeVCMemberSelect();

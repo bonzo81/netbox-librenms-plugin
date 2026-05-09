@@ -582,8 +582,6 @@ class TestMatchModuleBayExactFallback:
         ):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mbm:
                 mock_mbm.objects.filter.return_value.first.return_value = None
-                mock_mbm.objects.filter.return_value = MagicMock()
-                mock_mbm.objects.filter.return_value.first.return_value = None
 
                 # Also patch _lookup_regex_bay_mapping to return None
                 with patch.object(BaseModuleTableView, "_lookup_regex_bay_mapping", return_value=None):
@@ -1193,7 +1191,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
-            mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            mock_tx.atomic = lambda *a, **kw: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
             view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -1240,7 +1238,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
         ):
             mock_cache.get.return_value = {"inventory": cached_inventory, "librenms_id": "test"}
-            mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            mock_tx.atomic = lambda *a, **kw: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
             view.post(request, pk=24)
 
         mock_messages.success.assert_called_once()
@@ -1780,6 +1778,12 @@ class TestLookupRegexBayMappingStaleResolvedBay:
         # Mapping B: matches, but expand raises IndexError (bad backreference)
         mapping_b = self._make_mapping(r"Port-\d+", r"Bay-\2")  # \2 doesn't exist
 
+        # Wrap mapping_b's compiled pattern so we can confirm the loop actually
+        # reached mapping_b (and it wasn't short-circuited by a stale match from A).
+        original_fullmatch = mapping_b._compiled_pattern.fullmatch
+        mapping_b._compiled_pattern = MagicMock()
+        mapping_b._compiled_pattern.fullmatch.side_effect = original_fullmatch
+
         stale_bay = MagicMock()
         stale_bay.name = "Bay-5"
         module_bays = {"Bay-5": stale_bay}
@@ -1796,6 +1800,9 @@ class TestLookupRegexBayMappingStaleResolvedBay:
             )
 
         assert result is None, "Failed expand() must not fall through to stale resolved_bay"
+        # Confirm the loop actually iterated to mapping_b — otherwise the regression
+        # test would silently pass even if the bug were re-introduced via short-circuit.
+        mapping_b._compiled_pattern.fullmatch.assert_called_once_with("Port-5")
 
     def test_successful_expand_matches_bay(self):
         """Happy path: expand succeeds and bay exists."""

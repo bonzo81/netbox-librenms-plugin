@@ -17,7 +17,7 @@ class TestCreateVmFromLibrenms:
         from contextlib import contextmanager
 
         @contextmanager
-        def noop_atomic():
+        def noop_atomic(*args, **kwargs):
             yield
 
         with patch("netbox_librenms_plugin.import_utils.vm_operations.transaction.atomic", noop_atomic):

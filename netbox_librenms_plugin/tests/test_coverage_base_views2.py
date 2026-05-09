@@ -1625,6 +1625,11 @@ class TestSingleIPAddressVerifyViewPost:
         assert response.status_code == 200
         # Cache entry found but has no port_id → first device interface used
         mock_obj.interfaces.first.assert_called_once()
+        # And that interface's name/url must actually flow into the rendered record,
+        # not just be queried.
+        rendered_record = mock_table_instance.render_status.call_args[0][1]
+        assert rendered_record["interface_name"] == "eth0"
+        assert rendered_record["interface_url"] == "/interface/1/"
 
     def test_verify_with_non_default_server_key(self):
         """server_key='secondary' propagates to get_cache_key call."""
