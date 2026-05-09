@@ -828,7 +828,7 @@ def _get_netbox_version_tuple():
         from netbox.settings import RELEASE
 
         version = getattr(RELEASE, "version", "") or ""
-    except Exception:
+    except (ImportError, ModuleNotFoundError, AttributeError):
         return None
     parts = version.split("-", 1)[0].split(".")
     if len(parts) < 3:

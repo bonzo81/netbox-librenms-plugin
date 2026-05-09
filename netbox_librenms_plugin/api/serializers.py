@@ -49,7 +49,15 @@ class ModuleBayMappingSerializer(NetBoxModelSerializer):
         """Meta options for ModuleBayMappingSerializer."""
 
         model = ModuleBayMapping
-        fields = ["id", "librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+        fields = [
+            "id",
+            "librenms_name",
+            "librenms_class",
+            "netbox_bay_name",
+            "is_regex",
+            "manufacturer",
+            "description",
+        ]
 
 
 class NormalizationRuleSerializer(NetBoxModelSerializer):

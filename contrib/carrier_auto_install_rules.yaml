@@ -23,7 +23,7 @@
 # Nokia 7750 SR-s chassis (e.g. SR-7s, SR-14s) report CPM cards in slots A/B
 # but the physical CMA carrier that holds them is invisible to LibreNMS.
 - manufacturer: Nokia
-  device_type_pattern: '^7750 SR-'
+  device_type_pattern: '^7750 SR-.*$'
   librenms_child_class: cpmModule
   librenms_child_name_pattern: '^Slot [AB]$'
   netbox_bay_name_pattern: '^CMA$'
