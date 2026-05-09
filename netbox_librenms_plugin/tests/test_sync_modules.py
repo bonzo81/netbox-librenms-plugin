@@ -2322,3 +2322,31 @@ class TestBuildTableRowsBayCollisionDetection:
             view._compute_all_bays(device_bays, module_scoped_bays)
 
         assert any("Slot 1" in msg for msg in caplog.messages)
+
+
+class TestModulesRedirectResponse:
+    """_modules_redirect_response: HX-Request → HX-Redirect; classic → redirect()."""
+
+    def test_classic_request_uses_redirect(self):
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+
+        req = MagicMock()
+        req.headers = {}
+        with patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect:
+            mock_redirect.return_value = "REDIRECT"
+            result = _modules_redirect_response(req, "/sync/")
+        mock_redirect.assert_called_once_with("/sync/?tab=modules#librenms-module-table")
+        assert result == "REDIRECT"
+
+    def test_htmx_request_returns_hx_redirect_header(self):
+        from unittest.mock import MagicMock
+
+        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+
+        req = MagicMock()
+        req.headers = {"HX-Request": "true"}
+        response = _modules_redirect_response(req, "/sync/")
+        assert response.status_code == 204
+        assert response["HX-Redirect"] == "/sync/?tab=modules#librenms-module-table"

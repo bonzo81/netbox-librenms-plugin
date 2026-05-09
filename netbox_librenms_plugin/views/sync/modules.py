@@ -21,6 +21,22 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 
+def _modules_redirect_response(request, sync_url):
+    """Return a redirect response that works for both classic and HTMX form posts.
+
+    For HTMX requests (those carrying ``HX-Request: true``) we return an empty
+    200 response with an ``HX-Redirect`` header so the browser performs a full
+    navigation that picks up Django messages and refreshes the modules table.
+    For non-HTMX requests we return a normal Django redirect.
+    """
+    target = f"{sync_url}?tab=modules#librenms-module-table"
+    if request.headers.get("HX-Request") == "true":
+        response = HttpResponse(status=204)
+        response["HX-Redirect"] = target
+        return response
+    return redirect(target)
+
+
 def _extract_inventory_list(cached_payload):
     """Extract the inventory row list from a cached payload.
 
@@ -632,10 +648,10 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         failed.append(f"{result['name']}: {result['reason']}")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Install failed: {e}")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url)
 
         _report_install_results(request, installed, skipped, failed)
-        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+        return _modules_redirect_response(request, sync_url)
 
 
 class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -659,7 +675,7 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module ID.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url)
 
         try:
             with transaction.atomic():
@@ -671,7 +687,7 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 )
                 if not module:
                     messages.error(request, "Module no longer exists.")
-                    return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+                    return _modules_redirect_response(request, sync_url)
                 module.serial = serial
                 module.full_clean()
                 module.save()
@@ -682,7 +698,7 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to update serial: {e}")
 
-        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+        return _modules_redirect_response(request, sync_url)
 
 
 class ModuleMismatchPreviewView(
@@ -818,7 +834,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             ent_index_int = int(request.POST.get("ent_index"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module_id/ent_index.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url)
 
         installed_module = get_object_or_404(
             Module.objects.select_related("module_type", "module_bay"),
@@ -831,7 +847,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url)
 
         librenms_item = next(
             (item for item in cached_data if item.get("entPhysicalIndex") == ent_index_int),
@@ -839,7 +855,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         )
         if not librenms_item:
             messages.error(request, "Inventory item not found in cache.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url)
 
         model_name = (librenms_item.get("entPhysicalModelName") or "").strip()
         serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
@@ -862,7 +878,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     f"Serial '{serial}' is assigned to multiple modules; cannot determine which to remove. "
                     "Please resolve the conflict manually.",
                 )
-                return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+                return _modules_redirect_response(request, sync_url)
             if conflict_count == 1:
                 conflict_module = conflict_qs.first()
 
@@ -874,7 +890,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         if not matched_type:
             messages.error(request, f"No matching module type found for '{model_name}'.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url)
 
         try:
             conflict_removed_msg = None
@@ -888,7 +904,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
                 if not installed_module:
                     messages.error(request, "Module no longer exists.")
-                    return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+                    return _modules_redirect_response(request, sync_url)
 
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
@@ -936,7 +952,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Replace failed: {e}")
 
-        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+        return _modules_redirect_response(request, sync_url)
 
 
 class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -965,7 +981,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
             target_bay_id = int(request.POST.get("target_bay_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid conflict_module_id/target_bay_id.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url)
 
         # Optional: current occupant of target bay
         raw_module_id = request.POST.get("module_id")
@@ -991,7 +1007,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 )
                 if not conflict_module:
                     messages.error(request, "Module no longer exists.")
-                    return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+                    return _modules_redirect_response(request, sync_url)
 
                 # Remove whatever is currently in the target bay (if provided and different)
                 if module_id:
@@ -1022,4 +1038,4 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Move failed: {e}")
 
-        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+        return _modules_redirect_response(request, sync_url)

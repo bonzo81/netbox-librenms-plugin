@@ -73,6 +73,9 @@
     {# Quick serial-only update — no delete/recreate needed #}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"
+          hx-post="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"
+          hx-disabled-elt="find button[type=submit]"
+          hx-swap="none"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
@@ -89,6 +92,9 @@
     {# Move the existing module here rather than creating a new entry #}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:move_module' pk=device_pk %}"
+          hx-post="{% url 'plugins:netbox_librenms_plugin:move_module' pk=device_pk %}"
+          hx-disabled-elt="find button[type=submit]"
+          hx-swap="none"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk|default:'' }}">
@@ -106,6 +112,9 @@
     {% if installed_module and not serial_conflict_ambiguous %}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
+          hx-post="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
+          hx-disabled-elt="find button[type=submit]"
+          hx-swap="none"
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk }}">
