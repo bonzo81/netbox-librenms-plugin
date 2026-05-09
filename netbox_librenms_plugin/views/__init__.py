@@ -33,6 +33,15 @@ from .imports import (  # noqa: F401
     SaveUserPrefView,
 )
 from .mapping_views import (  # noqa: F401
+    CarrierAutoInstallRuleBulkDeleteView,
+    CarrierAutoInstallRuleBulkExportYAMLView,
+    CarrierAutoInstallRuleBulkImportView,
+    CarrierAutoInstallRuleChangeLogView,
+    CarrierAutoInstallRuleCreateView,
+    CarrierAutoInstallRuleDeleteView,
+    CarrierAutoInstallRuleEditView,
+    CarrierAutoInstallRuleListView,
+    CarrierAutoInstallRuleView,
     DeviceTypeMappingBulkDeleteView,
     DeviceTypeMappingBulkImportView,
     DeviceTypeMappingChangeLogView,

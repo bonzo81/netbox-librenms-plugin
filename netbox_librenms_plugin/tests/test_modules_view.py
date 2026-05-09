@@ -49,6 +49,8 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
     view._get_module_bays = MagicMock(return_value=(device_bays, module_scoped_bays))
     view._get_module_types = MagicMock(return_value=module_types)
     view._get_generic_module_types = MagicMock(return_value={})
+    view._get_module_type_ambiguities = MagicMock(return_value={})
+    view._get_carrier_install_rules = MagicMock(return_value=[])
 
     if bay_mappings is None:
         bay_mappings = ([], [])
@@ -996,6 +998,8 @@ class TestPositionalMatchScaffoldingChain:
         view._get_module_bays = MagicMock(return_value=(self._device_bays(), {}))
         view._get_module_types = MagicMock(return_value=self._module_types())
         view._get_generic_module_types = MagicMock(return_value={})
+        view._get_module_type_ambiguities = MagicMock(return_value={})
+        view._get_carrier_install_rules = MagicMock(return_value=[])
 
         # Device-serial matches the linecard's serial → linecard becomes transparent
         device = MagicMock()
@@ -2246,6 +2250,35 @@ class TestSuggestBayMapping:
         sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
         assert sug is None
 
+    def test_suggests_letter_trail_for_carrier_child_bays(self):
+        """`Slot A` should map to `CPM A` via a letter-capturing regex even
+        when prefix tokens differ (`Slot` vs `CPM`). This is the common
+        follow-up after the user installs a controller-card carrier whose
+        empty child bays are letter-named."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "Slot A", "entPhysicalClass": "cpmModule"}
+        bay = MagicMock()
+        bay.name = "CPM A"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"CPM A": bay})
+        assert sug is not None
+        assert sug["is_regex"] is True
+        assert sug["librenms_name"] == r"^Slot\ ([A-Za-z]+)$"
+        assert sug["netbox_bay_name"] == r"CPM \1"
+        assert sug["librenms_class"] == "cpmModule"
+        assert sug["example_item"] == "Slot A"
+        assert sug["example_bay"] == "CPM A"
+
+    def test_no_letter_trail_suggestion_when_no_letter_bay(self):
+        """`Slot A` should NOT match `Slot 0` — bay trail must be of same kind."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "Slot A", "entPhysicalClass": "cpmModule"}
+        bay = MagicMock()
+        bay.name = "Slot 0"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
+        assert sug is None
+
 
 class TestSuggestTypeMapping:
     """`_suggest_type_mapping` produces a prefill dict for the ModuleTypeMapping form."""
@@ -2299,6 +2332,62 @@ class TestSuggestTypeMapping:
         assert sug is not None
         assert sug["librenms_model"] == "Unspecified"
         assert "SFP 2" in sug["description"]
+
+
+class TestSuggestModuleTypeCreate:
+    """`_suggest_module_type_create` produces a prefill dict for NetBox's native ModuleType create form."""
+
+    def test_returns_none_when_model_blank(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        assert BaseModuleTableView._suggest_module_type_create({"entPhysicalModelName": ""}, None) is None
+        assert BaseModuleTableView._suggest_module_type_create({}, None) is None
+
+    def test_prefills_model_and_part_number(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalModelName": "X2-10GB-LR", "entPhysicalDescr": "10Gbase-LR"}
+        sug = BaseModuleTableView._suggest_module_type_create(item, None)
+        assert sug["model"] == "X2-10GB-LR"
+        assert sug["part_number"] == "X2-10GB-LR"
+        assert sug["description"] == "10Gbase-LR"
+        assert "manufacturer" not in sug
+        assert "comments" not in sug
+
+    def test_prefills_manufacturer_pk(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        manufacturer = MagicMock()
+        manufacturer.pk = 42
+        item = {"entPhysicalModelName": "X2-10GB-LR"}
+        sug = BaseModuleTableView._suggest_module_type_create(item, manufacturer)
+        assert sug["manufacturer"] == 42
+
+    def test_truncates_long_model_to_100_and_part_number_to_50(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        long_model = "M" * 150
+        item = {"entPhysicalModelName": long_model}
+        sug = BaseModuleTableView._suggest_module_type_create(item, None)
+        assert len(sug["model"]) == 100
+        assert len(sug["part_number"]) == 50
+
+    def test_truncates_description_to_200_and_overflow_into_comments(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        long_desc = "D" * 250
+        item = {"entPhysicalModelName": "M", "entPhysicalDescr": long_desc}
+        sug = BaseModuleTableView._suggest_module_type_create(item, None)
+        assert len(sug["description"]) == 200
+        assert sug["comments"] == long_desc
+
+    def test_short_description_does_not_set_comments(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalModelName": "M", "entPhysicalDescr": "short"}
+        sug = BaseModuleTableView._suggest_module_type_create(item, None)
+        assert sug["description"] == "short"
+        assert "comments" not in sug
 
 
 class TestNoTypeWarningHints:
@@ -2356,6 +2445,36 @@ class TestBuildRowModelWarning:
             row = view._build_row(item, {}, {}, {})
         assert row["status"] == "No Type"
         assert "UNKNOWN-MODEL" in row.get("model_warning", "")
+
+    def test_no_type_row_carries_module_type_create_prefill(self):
+        """A No Type row exposes a `module_type_create` dict so the table can
+        render the "Add Module Type" button linking to NetBox's native form."""
+        view = self._view()
+        bay = MagicMock()
+        bay.name = "Slot 1"
+        bay.installed_module = None
+        bay.get_absolute_url.return_value = "/b"
+        view._match_module_bay = MagicMock(return_value=bay)
+        manufacturer = MagicMock()
+        manufacturer.pk = 99
+        item = {
+            "entPhysicalName": "X",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "X2-10GB-LR",
+            "entPhysicalDescr": "10Gbase-LR",
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
+        ):
+            row = view._build_row(item, {}, {}, {}, manufacturer=manufacturer)
+        assert row["status"] == "No Type"
+        create = row.get("module_type_create")
+        assert create is not None
+        assert create["model"] == "X2-10GB-LR"
+        assert create["part_number"] == "X2-10GB-LR"
+        assert create["manufacturer"] == 99
+        assert create["description"] == "10Gbase-LR"
 
     def test_matched_row_has_no_model_warning(self):
         view = self._view()
@@ -2803,3 +2922,623 @@ class TestRenderStatusDeviceTypeIncomplete:
         html = str(table.render_status("No Bay", record))
         assert "Fix Device Type" not in html
         assert "Fix Model" not in html
+
+
+# ---------------------------------------------------------------------------
+# Integrated-in-parent dedupe (Nokia XIOM + integrated MDA pattern)
+# ---------------------------------------------------------------------------
+
+
+class TestFindIntegratingAncestor:
+    """Same-serial-and-model child detection for fixed/integrated cards."""
+
+    def _index(self, items):
+        return {i["entPhysicalIndex"]: i for i in items}
+
+    def test_finds_xiom_when_mda_shares_serial_and_model(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalName": "XIOM 2/x1",
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 50,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalName": "MDA 2/x1/1",
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 100,
+        }
+        idx = self._index([xiom, mda])
+        ancestor = BaseModuleTableView._find_integrating_ancestor(mda, idx)
+        assert ancestor is xiom
+
+    def test_returns_none_when_serial_differs(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "AAA",
+            "entPhysicalModelName": "M",
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "BBB",
+            "entPhysicalModelName": "M",
+            "entPhysicalContainedIn": 100,
+        }
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
+
+    def test_returns_none_when_model_differs(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": "X",
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": "Y",
+            "entPhysicalContainedIn": 100,
+        }
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
+
+    def test_returns_none_for_placeholder_serial(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        for placeholder in ("", "N/A", "Unknown", "-"):
+            xiom = {
+                "entPhysicalIndex": 100,
+                "entPhysicalClass": "xioModule",
+                "entPhysicalSerialNum": placeholder,
+                "entPhysicalModelName": "M",
+                "entPhysicalContainedIn": 0,
+            }
+            mda = {
+                "entPhysicalIndex": 200,
+                "entPhysicalClass": "mdaModule",
+                "entPhysicalSerialNum": placeholder,
+                "entPhysicalModelName": "M",
+                "entPhysicalContainedIn": 100,
+            }
+            assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None, placeholder
+
+    def test_skips_chassis_ancestor(self):
+        """A chassis ancestor sharing serial (the device serial!) must NEVER be matched."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        chassis = {
+            "entPhysicalIndex": 1,
+            "entPhysicalClass": "chassis",
+            "entPhysicalSerialNum": "CHASSIS-SERIAL",
+            "entPhysicalModelName": "M",
+            "entPhysicalContainedIn": 0,
+        }
+        # Module sharing chassis serial (broken vendor data) — must not be deduped.
+        mod = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalSerialNum": "CHASSIS-SERIAL",
+            "entPhysicalModelName": "M",
+            "entPhysicalContainedIn": 1,
+        }
+        assert BaseModuleTableView._find_integrating_ancestor(mod, self._index([chassis, mod])) is None
+
+    def test_walks_through_container(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": "M",
+            "entPhysicalContainedIn": 0,
+        }
+        container = {
+            "entPhysicalIndex": 150,
+            "entPhysicalClass": "container",
+            "entPhysicalSerialNum": "",
+            "entPhysicalModelName": "",
+            "entPhysicalContainedIn": 100,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": "M",
+            "entPhysicalContainedIn": 150,
+        }
+        ancestor = BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, container, mda]))
+        assert ancestor is xiom
+
+    def test_skips_non_module_classes(self):
+        """Fan / PowerSupply rows sharing serial must not be deduped — surface as-is."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        chassis = {
+            "entPhysicalIndex": 1,
+            "entPhysicalClass": "chassis",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": "M",
+            "entPhysicalContainedIn": 0,
+        }
+        fan = {
+            "entPhysicalIndex": 10,
+            "entPhysicalClass": "fan",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": "M",
+            "entPhysicalContainedIn": 1,
+        }
+        assert BaseModuleTableView._find_integrating_ancestor(fan, self._index([chassis, fan])) is None
+
+
+class TestBuildRowIntegratedDedupe:
+    """_build_row short-circuits to status='Integrated' when an integrating ancestor exists."""
+
+    def test_mda_under_xiom_becomes_integrated(self):
+        view = _make_view()
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalName": "XIOM 2/x1",
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalName": "MDA 2/x1/1",
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 100,
+        }
+        index_map = {100: xiom, 200: mda}
+        row = view._build_row(mda, index_map, {}, {})
+        assert row["status"] == "Integrated"
+        assert row["integrated_in_name"] == "XIOM 2/x1"
+        assert row["integrated_in_index"] == 100
+        # Ensure it does not carry warnings or actionable suggestions
+        assert "model_warning" not in row
+        assert "module_type_create" not in row
+        assert "type_suggestion" not in row
+        assert row["can_install"] is False
+
+    def test_independent_module_still_evaluated_normally(self):
+        """A module with its own serial (not matching any ancestor) takes the normal path."""
+        view = _make_view()
+        view._match_module_bay = MagicMock(return_value=None)
+        item = {
+            "entPhysicalIndex": 200,
+            "entPhysicalName": "X",
+            "entPhysicalClass": "module",
+            "entPhysicalSerialNum": "UNIQUE",
+            "entPhysicalModelName": "MOD",
+            "entPhysicalContainedIn": 100,
+        }
+        parent = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalSerialNum": "PARENT-SERIAL",
+            "entPhysicalModelName": "PARENT-MOD",
+            "entPhysicalContainedIn": 0,
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
+        ):
+            row = view._build_row(item, {100: parent, 200: item}, {}, {})
+        assert row["status"] != "Integrated"
+
+
+# ---------------------------------------------------------------------------
+# Ambiguous part_number / model surfacing in the No Type warning
+# ---------------------------------------------------------------------------
+
+
+class TestModuleTypeAmbiguityWarning:
+    def _candidate(self, model, mfg_name, pk=1, url="/dcim/module-types/1/"):
+        mt = MagicMock()
+        mt.pk = pk
+        mt.model = model
+        mt.manufacturer.name = mfg_name
+        mt.get_absolute_url.return_value = url
+        return mt
+
+    def test_warning_lists_candidates_when_ambiguous(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        a = self._candidate("XIOM-x2-s36-800g-qsfpdd", "Nokia", pk=1)
+        b = self._candidate("XMA2-s", "Nokia", pk=2)
+        msg = BaseModuleTableView._build_no_type_warning(
+            {"entPhysicalModelName": "3HE18883AARB01"}, ambiguity_candidates=[a, b]
+        )
+        assert "3HE18883AARB01" in msg
+        assert "2 ModuleTypes" in msg
+        assert "Nokia / XIOM-x2-s36-800g-qsfpdd" in msg
+        assert "Nokia / XMA2-s" in msg
+
+    def test_warning_unchanged_when_no_ambiguity(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        msg = BaseModuleTableView._build_no_type_warning({"entPhysicalModelName": "X"}, ambiguity_candidates=[])
+        assert "ModuleTypes sharing" not in msg
+        assert "No NetBox ModuleType matches 'X'" in msg
+
+    def test_find_ambiguity_candidates_matches_normalized_key(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        a = self._candidate("XIOM-x2-s36-800g-qsfpdd", "Nokia", pk=1)
+        b = self._candidate("XMA2-s", "Nokia", pk=2)
+        ambiguities = {"3HE18883AA": [a, b]}
+        with patch(
+            "netbox_librenms_plugin.utils.apply_normalization_rules",
+            return_value="3HE18883AA",
+        ):
+            cands = BaseModuleTableView._find_ambiguity_candidates(
+                "3HE18883AARB01", ambiguities, manufacturer=None, norm_rules=None
+            )
+        assert cands == [a, b]
+
+    def test_find_ambiguity_candidates_returns_empty_when_no_collision(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="X"):
+            cands = BaseModuleTableView._find_ambiguity_candidates("X", {"OTHER": []}, None, None)
+        assert cands == []
+
+
+class TestBuildRowAmbiguityWiring:
+    """_build_row populates module_type_ambiguity and suppresses module_type_create when ambiguous."""
+
+    def test_no_type_with_ambiguity_carries_candidates_and_omits_create_button(self):
+        view = _make_view()
+        bay = MagicMock()
+        bay.name = "Slot 2"
+        bay.installed_module = None
+        bay.get_absolute_url.return_value = "/b"
+        view._match_module_bay = MagicMock(return_value=bay)
+        view._norm_rules_type = {}
+        # Ambiguity preloaded on the view
+        a = MagicMock()
+        a.pk = 1
+        a.model = "XIOM-x2-s36-800g-qsfpdd"
+        a.manufacturer.name = "Nokia"
+        a.get_absolute_url.return_value = "/dcim/module-types/1/"
+        b = MagicMock()
+        b.pk = 2
+        b.model = "XMA2-s"
+        b.manufacturer.name = "Nokia"
+        b.get_absolute_url.return_value = "/dcim/module-types/2/"
+        view._module_type_ambiguities = {"3HE18883AARB01": [a, b]}
+        item = {
+            "entPhysicalName": "XIOM 2/x1",
+            "entPhysicalClass": "xioModule",
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalSerialNum": "S1",
+            "entPhysicalContainedIn": 0,
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
+        ):
+            row = view._build_row(item, {}, {}, {})
+        assert row["status"] == "No Type"
+        assert "ModuleTypes sharing" in row["model_warning"]
+        assert len(row["module_type_ambiguity"]) == 2
+        assert row["module_type_ambiguity"][0]["model"] == "XIOM-x2-s36-800g-qsfpdd"
+        assert row["module_type_ambiguity"][0]["url"] == "/dcim/module-types/1/"
+        # When ambiguous we must NOT offer to create yet another duplicate.
+        assert "module_type_create" not in row
+        assert "type_suggestion" not in row
+
+    def test_no_type_without_ambiguity_keeps_existing_buttons(self):
+        view = _make_view()
+        bay = MagicMock()
+        bay.name = "Slot 2"
+        bay.installed_module = None
+        bay.get_absolute_url.return_value = "/b"
+        view._match_module_bay = MagicMock(return_value=bay)
+        view._module_type_ambiguities = {}
+        manufacturer = MagicMock()
+        manufacturer.pk = 7
+        item = {
+            "entPhysicalName": "X",
+            "entPhysicalClass": "module",
+            "entPhysicalModelName": "BRAND-NEW",
+            "entPhysicalSerialNum": "S1",
+            "entPhysicalContainedIn": 0,
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
+        ):
+            row = view._build_row(item, {}, {}, {}, manufacturer=manufacturer)
+        assert row["status"] == "No Type"
+        assert "module_type_ambiguity" not in row
+        assert row["module_type_create"]["model"] == "BRAND-NEW"
+
+
+# ---------------------------------------------------------------------------
+# get_module_type_ambiguities helper
+# ---------------------------------------------------------------------------
+
+
+class TestGetModuleTypeAmbiguities:
+    def test_collects_keys_shared_by_two_or_more_module_types(self):
+        from netbox_librenms_plugin.utils import get_module_type_ambiguities
+
+        a = MagicMock()
+        a.model = "XIOM-x2-s36-800g-qsfpdd"
+        a.part_number = "3HE18883AA"
+        a.manufacturer.name = "Nokia"
+        b = MagicMock()
+        b.model = "XMA2-s"
+        b.part_number = "3HE18883AA"
+        b.manufacturer.name = "Nokia"
+        c = MagicMock()
+        c.model = "OTHER"
+        c.part_number = "3HE99999AA"
+        c.manufacturer.name = "Nokia"
+
+        qs = MagicMock()
+        qs.select_related.return_value = [a, b, c]
+        with patch("dcim.models.ModuleType.objects.all", return_value=qs):
+            amb = get_module_type_ambiguities()
+
+        assert "3HE18883AA" in amb
+        assert set(amb["3HE18883AA"]) == {a, b}
+        assert "3HE99999AA" not in amb
+        assert "OTHER" not in amb
+
+
+# ---------------------------------------------------------------------------
+# Holder-install hint + tightened SFM mapping suggestion
+# ---------------------------------------------------------------------------
+
+
+class TestBuildHolderInstallHint:
+    """`_build_holder_install_hint` surfaces empty device bays as candidate carriers."""
+
+    def _bay(self, name, installed=None):
+        b = MagicMock()
+        b.name = name
+        b.installed_module = installed
+        return b
+
+    def test_returns_none_for_non_module_class(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bays = {"Slot A": self._bay("Slot A")}
+        assert BaseModuleTableView._build_holder_install_hint({}, "fan", bays) is None
+        assert BaseModuleTableView._build_holder_install_hint({}, "powersupply", bays) is None
+
+    def test_returns_none_when_no_device_bays(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        assert BaseModuleTableView._build_holder_install_hint({}, "module", {}) is None
+        assert BaseModuleTableView._build_holder_install_hint({}, "module", None) is None
+
+    def test_returns_none_when_no_empty_bays(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bays = {"Slot A": self._bay("Slot A", installed=MagicMock())}
+        assert BaseModuleTableView._build_holder_install_hint({}, "module", bays) is None
+
+    def test_returns_none_when_more_specific_hint_in_play(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bays = {"Slot A": self._bay("Slot A")}
+        assert BaseModuleTableView._build_holder_install_hint({}, "module", bays, scope_uninstalled=True) is None
+        assert (
+            BaseModuleTableView._build_holder_install_hint({}, "module", bays, scope_empty_installed_bays=True) is None
+        )
+
+    def test_lists_empty_bay_names_for_module_class_item(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bays = {
+            "Slot A": self._bay("Slot A"),
+            "Slot B": self._bay("Slot B"),
+            "Slot C": self._bay("Slot C", installed=MagicMock()),
+        }
+        msg = BaseModuleTableView._build_holder_install_hint({"entPhysicalName": "CPM A"}, "cpmmodule", bays)
+        assert msg is not None
+        assert "'Slot A'" in msg
+        assert "'Slot B'" in msg
+        assert "'Slot C'" not in msg
+        assert "holder/carrier" in msg.lower() or "carrier" in msg.lower()
+
+    def test_caps_long_bay_lists(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bays = {f"Slot {i}": self._bay(f"Slot {i}") for i in range(8)}
+        msg = BaseModuleTableView._build_holder_install_hint({}, "module", bays)
+        assert msg is not None
+        assert "+3 more" in msg
+
+
+class TestSuggestBayMappingTokenOverlap:
+    """`_suggest_bay_mapping` rejects mismatched-prefix bays for module-class items."""
+
+    def test_sfm_does_not_collapse_onto_card(self):
+        """The original bug: 'Sfm 1' was being suggested into 'Card 1' just because both end in 1."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "Sfm 1", "entPhysicalClass": "fabricModule"}
+        bay = MagicMock()
+        bay.name = "Card 1"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Card 1": bay})
+        assert sug is None
+
+    def test_sfm_matches_sfm_named_bay(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "Sfm 1", "entPhysicalClass": "fabricModule"}
+        bay = MagicMock()
+        bay.name = "SFM 1"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"SFM 1": bay})
+        assert sug is not None
+        assert sug["example_bay"] == "SFM 1"
+
+    def test_sfm_picks_sfm_bay_over_card_when_both_present(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "Sfm 1", "entPhysicalClass": "fabricModule"}
+        sfm_bay = MagicMock()
+        sfm_bay.name = "SFM 1"
+        card_bay = MagicMock()
+        card_bay.name = "Card 1"
+        # Card listed first in dict insertion order — ensures token overlap, not
+        # iteration order, drives the choice.
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Card 1": card_bay, "SFM 1": sfm_bay})
+        assert sug is not None
+        assert sug["example_bay"] == "SFM 1"
+
+    def test_numeric_only_item_still_matches_slot_bay(self):
+        """Items with no alphabetic prefix (e.g. '0/0') keep the previous numeric-only behaviour."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalName": "0/0", "entPhysicalClass": "module"}
+        bay = MagicMock()
+        bay.name = "Slot 0"
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"Slot 0": bay})
+        assert sug is not None
+        assert sug["example_bay"] == "Slot 0"
+
+
+class TestBuildNoBayWarningHolderHint:
+    def test_warning_appends_holder_hint_when_provided(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        msg = BaseModuleTableView._build_no_bay_warning(
+            {}, {"Slot 1": MagicMock()}, holder_hint="Tip: empty bays exist."
+        )
+        assert "Tip: empty bays exist." in msg
+
+
+class TestBuildHolderInstallHintNarrowing:
+    """Tightened holder hint: skip plain 'port' class and path-style names."""
+
+    def _bay(self, name):
+        b = MagicMock()
+        b.name = name
+        b.installed_module = None
+        return b
+
+    def test_returns_none_for_plain_port_class(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bays = {"Slot A": self._bay("Slot A")}
+        msg = BaseModuleTableView._build_holder_install_hint({"entPhysicalName": "1/1/c1"}, "port", bays)
+        assert msg is None
+
+    def test_returns_none_when_item_name_contains_slash(self):
+        """LibreNMS hierarchical names like '1/1/c1' indicate the user already knows the parent path."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bays = {"Slot A": self._bay("Slot A")}
+        msg = BaseModuleTableView._build_holder_install_hint({"entPhysicalName": "1/1/c1"}, "module", bays)
+        assert msg is None
+
+    def test_still_emits_for_simple_named_module_class_item(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        bays = {"CMA": self._bay("CMA")}
+        msg = BaseModuleTableView._build_holder_install_hint({"entPhysicalName": "Slot A"}, "cpmmodule", bays)
+        assert msg is not None
+        assert "'CMA'" in msg
+
+
+class TestNestSyntheticTransceivers:
+    def test_nests_under_parent_with_path_suffix(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        inv = [
+            {"entPhysicalIndex": 100, "entPhysicalName": "MDA 1/1", "entPhysicalContainedIn": 50},
+            {"entPhysicalIndex": 200, "entPhysicalName": "MDA 2/x1/1", "entPhysicalContainedIn": 60},
+            {
+                "entPhysicalIndex": 1001,
+                "entPhysicalName": "1/1/c1",
+                "entPhysicalContainedIn": 0,
+                "_from_transceiver_api": True,
+            },
+            {
+                "entPhysicalIndex": 1002,
+                "entPhysicalName": "2/x1/1/c2",
+                "entPhysicalContainedIn": 0,
+                "_from_transceiver_api": True,
+            },
+        ]
+        BaseModuleTableView._nest_synthetic_transceivers(inv)
+        assert inv[2]["entPhysicalContainedIn"] == 100
+        assert inv[3]["entPhysicalContainedIn"] == 200
+
+    def test_leaves_top_level_when_no_parent_match(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        inv = [
+            {
+                "entPhysicalIndex": 1001,
+                "entPhysicalName": "9/9/c1",
+                "entPhysicalContainedIn": 0,
+                "_from_transceiver_api": True,
+            },
+        ]
+        BaseModuleTableView._nest_synthetic_transceivers(inv)
+        assert inv[0]["entPhysicalContainedIn"] == 0
+
+    def test_skips_non_synthetic_items(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        inv = [
+            {"entPhysicalIndex": 100, "entPhysicalName": "MDA 1/1", "entPhysicalContainedIn": 0},
+            {"entPhysicalIndex": 1001, "entPhysicalName": "1/1/c1", "entPhysicalContainedIn": 0},
+        ]
+        BaseModuleTableView._nest_synthetic_transceivers(inv)
+        assert inv[1]["entPhysicalContainedIn"] == 0
+
+    def test_skips_already_nested_synthetic(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        inv = [
+            {"entPhysicalIndex": 100, "entPhysicalName": "MDA 1/1", "entPhysicalContainedIn": 50},
+            {
+                "entPhysicalIndex": 1001,
+                "entPhysicalName": "1/1/c1",
+                "entPhysicalContainedIn": 999,
+                "_from_transceiver_api": True,
+            },
+        ]
+        BaseModuleTableView._nest_synthetic_transceivers(inv)
+        assert inv[1]["entPhysicalContainedIn"] == 999
+
+    def test_falls_back_to_shorter_prefix(self):
+        """If MDA 1/1 doesn't exist, a 1/1/c1 transceiver should match Slot 1."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        inv = [
+            {"entPhysicalIndex": 50, "entPhysicalName": "Slot 1", "entPhysicalContainedIn": 1},
+            {
+                "entPhysicalIndex": 1001,
+                "entPhysicalName": "1/1/c1",
+                "entPhysicalContainedIn": 0,
+                "_from_transceiver_api": True,
+            },
+        ]
+        BaseModuleTableView._nest_synthetic_transceivers(inv)
+        # No parent name ends with '/1/1' or ' 1/1', but 'Slot 1' ends with ' 1'
+        assert inv[1]["entPhysicalContainedIn"] == 50

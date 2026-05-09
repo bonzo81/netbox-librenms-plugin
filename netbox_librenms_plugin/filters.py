@@ -2,6 +2,7 @@ import django_filters
 from dcim.models import Manufacturer
 
 from .models import (
+    CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
@@ -60,12 +61,17 @@ class ModuleBayMappingFilterSet(django_filters.FilterSet):
     librenms_name = django_filters.CharFilter(lookup_expr="icontains")
     librenms_class = django_filters.CharFilter(lookup_expr="icontains")
     netbox_bay_name = django_filters.CharFilter(lookup_expr="icontains")
+    manufacturer_id = django_filters.ModelChoiceFilter(
+        field_name="manufacturer",
+        queryset=Manufacturer.objects.all(),
+        label="Manufacturer",
+    )
 
     class Meta:
         """Meta options for ModuleBayMappingFilterSet."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "manufacturer_id"]
 
 
 class NormalizationRuleFilterSet(django_filters.FilterSet):
@@ -107,3 +113,28 @@ class PlatformMappingFilterSet(django_filters.FilterSet):
 
         model = PlatformMapping
         fields = ["librenms_os", "description"]
+
+
+class CarrierAutoInstallRuleFilterSet(django_filters.FilterSet):
+    """Filter set for CarrierAutoInstallRule model."""
+
+    manufacturer_id = django_filters.ModelChoiceFilter(
+        field_name="manufacturer",
+        queryset=Manufacturer.objects.all(),
+        label="Manufacturer",
+    )
+    librenms_child_class = django_filters.CharFilter(lookup_expr="icontains")
+    librenms_child_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    netbox_bay_name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
+    class Meta:
+        """Meta options for CarrierAutoInstallRuleFilterSet."""
+
+        model = CarrierAutoInstallRule
+        fields = [
+            "manufacturer_id",
+            "librenms_child_class",
+            "librenms_child_name_pattern",
+            "netbox_bay_name_pattern",
+        ]

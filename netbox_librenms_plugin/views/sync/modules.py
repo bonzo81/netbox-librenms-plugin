@@ -168,10 +168,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Load module types (with mappings)
         module_types = get_module_types_indexed()
 
-        # Preload all ModuleBayMappings once to avoid N+1 per-item queries
+        # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
+        # Filter by device manufacturer so vendor-scoped mappings only apply to
+        # matching vendors and mismatched ones are skipped.
         from netbox_librenms_plugin.utils import load_bay_mappings
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         exact_mappings, regex_mappings = load_bay_mappings()
+        mfr_id = getattr(getattr(target_device, "device_type", None), "manufacturer_id", None)
+        exact_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(exact_mappings, mfr_id)
+        regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(regex_mappings, mfr_id)
 
         # Install top-down: each install may create new child bays
         installed = []
@@ -587,11 +593,14 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 not in {"skip", "transparent"}
             ]
 
-        # Preload all ModuleBayMappings once to avoid N+1 per-item queries
+        # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
+        # Manufacturer-scoping happens per-iteration since target_device may
+        # differ across rows (VC members can have different device types).
         from netbox_librenms_plugin.utils import load_bay_mappings
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         module_types = get_module_types_indexed()
-        exact_mappings, regex_mappings = load_bay_mappings()
+        all_exact, all_regex = load_bay_mappings()
 
         installed, skipped, failed = [], [], []
 
@@ -601,6 +610,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     ent_index = item.get("entPhysicalIndex")
                     selected_device_id = request.POST.get(f"device_selection_{ent_index}")
                     target_device = _resolve_target_device(page_device, selected_device_id)
+                    mfr_id = getattr(getattr(target_device, "device_type", None), "manufacturer_id", None)
+                    exact_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(all_exact, mfr_id)
+                    regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(all_regex, mfr_id)
                     result = InstallBranchView._install_single(
                         target_device,
                         item,

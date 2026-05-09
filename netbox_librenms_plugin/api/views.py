@@ -13,6 +13,7 @@ from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.filters import (
+    CarrierAutoInstallRuleFilterSet,
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
     InventoryIgnoreRuleFilterSet,
@@ -23,6 +24,7 @@ from netbox_librenms_plugin.filters import (
 )
 from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
 from netbox_librenms_plugin.models import (
+    CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
@@ -33,6 +35,7 @@ from netbox_librenms_plugin.models import (
 )
 
 from .serializers import (
+    CarrierAutoInstallRuleSerializer,
     DeviceTypeMappingSerializer,
     InterfaceTypeMappingSerializer,
     InventoryIgnoreRuleSerializer,
@@ -129,6 +132,16 @@ class PlatformMappingViewSet(NetBoxModelViewSet):
 
     queryset = PlatformMapping.objects.select_related("netbox_platform")
     serializer_class = PlatformMappingSerializer
+
+
+class CarrierAutoInstallRuleViewSet(NetBoxModelViewSet):
+    """API viewset for CarrierAutoInstallRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = CarrierAutoInstallRuleFilterSet
+
+    queryset = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")
+    serializer_class = CarrierAutoInstallRuleSerializer
 
 
 @api_view(["POST"])

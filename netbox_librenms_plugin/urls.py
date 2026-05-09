@@ -1,6 +1,7 @@
 from django.urls import include, path
 
 from .models import (
+    CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
@@ -15,6 +16,15 @@ from .views import (
     AssignVCSerialView,
     BulkImportConfirmView,
     BulkImportDevicesView,
+    CarrierAutoInstallRuleBulkDeleteView,
+    CarrierAutoInstallRuleBulkExportYAMLView,
+    CarrierAutoInstallRuleBulkImportView,
+    CarrierAutoInstallRuleChangeLogView,
+    CarrierAutoInstallRuleCreateView,
+    CarrierAutoInstallRuleDeleteView,
+    CarrierAutoInstallRuleEditView,
+    CarrierAutoInstallRuleListView,
+    CarrierAutoInstallRuleView,
     CreateAndAssignPlatformView,
     DeleteNetBoxInterfacesView,
     DeviceCableTableView,
@@ -757,6 +767,53 @@ urlpatterns = [
         "platform-mappings/export-yaml/",
         PlatformMappingBulkExportYAMLView.as_view(),
         name="platformmapping_bulk_export_yaml",
+    ),
+    # Carrier Auto-Install Rule URLs
+    path(
+        "carrier-auto-install-rules/",
+        CarrierAutoInstallRuleListView.as_view(),
+        name="carrierautoinstallrule_list",
+    ),
+    path(
+        "carrier-auto-install-rules/<int:pk>/",
+        CarrierAutoInstallRuleView.as_view(),
+        name="carrierautoinstallrule_detail",
+    ),
+    path(
+        "carrier-auto-install-rules/add/",
+        CarrierAutoInstallRuleCreateView.as_view(),
+        name="carrierautoinstallrule_add",
+    ),
+    path(
+        "carrier-auto-install-rules/import/",
+        CarrierAutoInstallRuleBulkImportView.as_view(),
+        name="carrierautoinstallrule_bulk_import",
+    ),
+    path(
+        "carrier-auto-install-rules/<int:pk>/delete/",
+        CarrierAutoInstallRuleDeleteView.as_view(),
+        name="carrierautoinstallrule_delete",
+    ),
+    path(
+        "carrier-auto-install-rules/<int:pk>/edit/",
+        CarrierAutoInstallRuleEditView.as_view(),
+        name="carrierautoinstallrule_edit",
+    ),
+    path(
+        "carrier-auto-install-rules/<int:pk>/changelog/",
+        CarrierAutoInstallRuleChangeLogView.as_view(),
+        name="carrierautoinstallrule_changelog",
+        kwargs={"model": CarrierAutoInstallRule},
+    ),
+    path(
+        "carrier-auto-install-rules/delete/",
+        CarrierAutoInstallRuleBulkDeleteView.as_view(),
+        name="carrierautoinstallrule_bulk_delete",
+    ),
+    path(
+        "carrier-auto-install-rules/export-yaml/",
+        CarrierAutoInstallRuleBulkExportYAMLView.as_view(),
+        name="carrierautoinstallrule_bulk_export_yaml",
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

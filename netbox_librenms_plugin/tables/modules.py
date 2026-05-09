@@ -1,5 +1,7 @@
 from urllib.parse import urlencode, urlparse
 
+import re
+
 import django_tables2 as tables
 from django.urls import reverse
 from django.utils.html import escape, format_html, mark_safe
@@ -166,21 +168,56 @@ class LibreNMSModuleTable(tables.Table):
 
     def render_status(self, value, record):
         """Render sync status with badge."""
+        # Promote No Bay → Missing Carrier when concrete carrier-install rules
+        # produced suggestions for this row (one-click install offered below).
+        carrier_options = record.get("carrier_install_options")
+        if value == "No Bay" and carrier_options:
+            value = "Missing Carrier"
+
         badge_classes = {
             "Installed": "bg-success text-white",
             "Matched": "bg-info text-white",
             "No Bay": "bg-warning text-dark",
             "No Type": "bg-warning text-dark",
+            "Missing Carrier": "bg-warning text-dark",
             "Unmatched": "bg-secondary text-white",
             "Serial Mismatch": "bg-danger text-white",
             "Name Conflict": "bg-warning text-dark",
             "Type Mismatch": "bg-warning text-dark",
+            "Integrated": "bg-light text-muted border",
         }
         badge_class = badge_classes.get(value, "bg-secondary text-white")
         warning = record.get("model_warning")
 
         # More descriptive label when the parent module type simply has no bay templates.
         display_text = "No Bay on Parent" if record.get("no_bay_reason") == "empty_parent_bays" else value
+
+        # Small "Possible Carrier?" hint badge: holder hint fired but no
+        # concrete CarrierAutoInstallRule matched. Encourages the user to add
+        # a rule (button rendered in the actions column). Built upfront so
+        # every return path below can append it.
+        if record.get("holder_hint_present") and not record.get("carrier_install_options"):
+            possible_carrier_html = mark_safe(
+                ' <span class="badge bg-info text-white"'
+                ' title="Possible missing carrier/holder module — see actions to add a rule">'
+                '<i class="mdi mdi-puzzle-outline"></i> Possible Carrier?</span>'
+            )
+        else:
+            possible_carrier_html = mark_safe("")
+
+        if value == "Integrated":
+            parent_name = record.get("integrated_in_name") or "parent module"
+            tooltip = (
+                f"Duplicate SNMP entry for the same physical card as '{parent_name}' "
+                f"(matching entPhysicalSerialNum + entPhysicalModelName). "
+                "No separate NetBox bay/type is needed — this row is informational."
+            )
+            return format_html(
+                '<span class="badge {}" title="{}">Integrated in {}</span>',
+                badge_class,
+                tooltip,
+                parent_name,
+            )
 
         if value == "Name Conflict" and (conflict_reason := record.get("name_conflict_reason")):
             status_html = format_html(
@@ -219,7 +256,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<i class="mdi mdi-wrench-outline"></i> Fix Model</span>',
                     title,
                 )
-            return status_html + fix_html
+            return status_html + fix_html + possible_carrier_html
 
         # "Fix Device Type" badge when the device type is missing bay templates for this component.
         if record.get("device_type_incomplete"):
@@ -239,9 +276,9 @@ class LibreNMSModuleTable(tables.Table):
                     '<i class="mdi mdi-wrench-outline"></i> Fix Device Type</span>',
                     title,
                 )
-            return status_html + fix_html
+            return status_html + fix_html + possible_carrier_html
 
-        return status_html
+        return status_html + possible_carrier_html
 
     def render_actions(self, value, record):
         """Render install button for matched modules and install branch for parents."""
@@ -250,6 +287,11 @@ class LibreNMSModuleTable(tables.Table):
         if not self.has_write_permission:
             return ""
         if not self.can_add_module and not self.can_change_module:
+            return ""
+        # "Integrated" rows are duplicate SNMP entries for a single physical
+        # card (parent + integrated child sharing serial+model) — there's
+        # nothing to install, so no actions.
+        if record.get("status") == "Integrated":
             return ""
 
         buttons = []
@@ -386,6 +428,80 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        # "Install Carrier" buttons for No Bay rows where one or more
+        # CarrierAutoInstallRule rows match. One button per (rule, empty bay)
+        # candidate. Suggest-only — the user clicks to install.
+        if self.can_add_module and record.get("carrier_install_options"):
+            install_url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
+            for opt in record["carrier_install_options"]:
+                buttons.append(
+                    format_html(
+                        '<form method="post" action="{}" style="display:inline">'
+                        '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                        '<input type="hidden" name="server_key" value="{}">'
+                        '<input type="hidden" name="selected_device_id" value="{}">'
+                        '<input type="hidden" name="module_bay_id" value="{}">'
+                        '<input type="hidden" name="module_type_id" value="{}">'
+                        '<input type="hidden" name="serial" value="">'
+                        '<button type="submit" class="btn btn-sm btn-success ms-1"'
+                        " title=\"Install carrier {} into empty bay '{}'\">"
+                        '<i class="mdi mdi-puzzle-plus-outline"></i> Install {} into &#39;{}&#39;'
+                        "</button></form>",
+                        install_url,
+                        self.csrf_token,
+                        self.server_key,
+                        record.get("selected_device_id") or self.device.pk,
+                        opt["bay_id"],
+                        opt["module_type_id"],
+                        opt["module_type_name"],
+                        opt["bay_name"],
+                        opt["module_type_name"],
+                        opt["bay_name"],
+                    )
+                )
+
+        # "Add Carrier Rule" prefilled link when the holder hint fires but no
+        # concrete CarrierAutoInstallRule matched. Pre-fills the form with
+        # manufacturer / class / regex for the orphan child name and a regex
+        # alternation across the device's empty bay names so the user only
+        # needs to pick the carrier ModuleType.
+        if (
+            record.get("status") == "No Bay"
+            and record.get("holder_hint_present")
+            and not record.get("carrier_install_options")
+        ):
+            base_url = reverse("plugins:netbox_librenms_plugin:carrierautoinstallrule_add")
+            return_url = getattr(self, "return_url", "") or ""
+            params = {}
+            mfr = getattr(getattr(self.device, "device_type", None), "manufacturer", None)
+            if mfr is not None:
+                params["manufacturer"] = mfr.pk
+            phys_class = (record.get("item_class") or "").strip()
+            if phys_class:
+                params["librenms_child_class"] = phys_class
+            child_name = (record.get("name") or "").strip()
+            if child_name:
+                params["librenms_child_name_pattern"] = "^" + re.escape(child_name) + "$"
+            empty_names = sorted(record.get("device_empty_bay_names") or [])
+            if empty_names:
+                params["netbox_bay_name_pattern"] = "^(" + "|".join(re.escape(n) for n in empty_names) + ")$"
+            if return_url:
+                params["return_url"] = return_url
+            qs = urlencode(params)
+            buttons.append(
+                format_html(
+                    '<a href="{}?{}" class="btn btn-sm btn-outline-info ms-1"'
+                    ' title="Open the Carrier Auto-Install Rule create form pre-filled'
+                    " with this device's manufacturer, the orphan child class/name"
+                    " and the device's empty bay names so you only need to pick the"
+                    ' carrier ModuleType">'
+                    '<i class="mdi mdi-puzzle-plus-outline"></i> Add Carrier Rule'
+                    "</a>",
+                    base_url,
+                    qs,
+                )
+            )
+
         # "Add mapping" button for No Bay rows where we can suggest a mapping.
         # Opens the ModuleBayMapping create form pre-filled with the regex
         # capturing the trailing-number pattern (e.g. ^0/(\d+)$ -> Slot \1),
@@ -395,16 +511,20 @@ class LibreNMSModuleTable(tables.Table):
             sug = record["model_suggestion"]
             base_url = reverse("plugins:netbox_librenms_plugin:modulebaymapping_add")
             return_url = getattr(self, "return_url", "") or ""
-            qs = urlencode(
-                {
-                    "librenms_name": sug["librenms_name"],
-                    "librenms_class": sug.get("librenms_class") or "",
-                    "netbox_bay_name": sug["netbox_bay_name"],
-                    "is_regex": "true" if sug.get("is_regex") else "false",
-                    "description": sug.get("description") or "",
-                    **({"return_url": return_url} if return_url else {}),
-                }
-            )
+            params = {
+                "librenms_name": sug["librenms_name"],
+                "librenms_class": sug.get("librenms_class") or "",
+                "netbox_bay_name": sug["netbox_bay_name"],
+                "is_regex": "true" if sug.get("is_regex") else "false",
+                "description": sug.get("description") or "",
+            }
+            # Pre-fill manufacturer FK so the new mapping is auto-scoped to the
+            # device's vendor; user can clear it in the form to make it global.
+            if sug.get("manufacturer"):
+                params["manufacturer"] = sug["manufacturer"]
+            if return_url:
+                params["return_url"] = return_url
+            qs = urlencode(params)
             buttons.append(
                 format_html(
                     '<a href="{}?{}" class="btn btn-sm btn-outline-primary ms-1"'
@@ -440,6 +560,33 @@ class LibreNMSModuleTable(tables.Table):
                     " model name; select or create the matching NetBox ModuleType to complete the mapping"
                     '">'
                     '<i class="mdi mdi-plus-box-outline"></i> Add Mapping'
+                    "</a>",
+                    base_url,
+                    qs,
+                )
+            )
+
+        # "Add Module Type" button for No Type rows — opens NetBox's native
+        # ModuleType create form pre-filled with details we know from LibreNMS
+        # (manufacturer, model, part number, description). This is the
+        # alternative to "Add Mapping": rather than aliasing the LibreNMS
+        # model string to an existing NetBox type, the user creates the
+        # missing ModuleType directly so subsequent matches work natively.
+        if record.get("status") == "No Type" and record.get("module_type_create"):
+            create = record["module_type_create"]
+            base_url = reverse("dcim:moduletype_add")
+            return_url = getattr(self, "return_url", "") or ""
+            params = {k: v for k, v in create.items() if v not in ("", None)}
+            if return_url:
+                params["return_url"] = return_url
+            qs = urlencode(params)
+            buttons.append(
+                format_html(
+                    '<a href="{}?{}" class="btn btn-sm btn-outline-success ms-1"'
+                    ' title="Open the NetBox ModuleType create form pre-filled with the LibreNMS'
+                    " model, part number, manufacturer and description so the missing type can be"
+                    ' created in one step">'
+                    '<i class="mdi mdi-plus-circle-outline"></i> Add Module Type'
                     "</a>",
                     base_url,
                     qs,

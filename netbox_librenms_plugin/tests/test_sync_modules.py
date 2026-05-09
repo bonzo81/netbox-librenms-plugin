@@ -1063,15 +1063,19 @@ class TestParentRowIdxVsEntityIndex:
                     with patch.object(view, "_get_module_bays", return_value=({}, {})):
                         with patch.object(view, "_get_module_types", return_value={}):
                             with patch.object(view, "_get_generic_module_types", return_value={}):
-                                with patch.object(view, "_build_row", side_effect=fake_build_row):
-                                    with patch.object(view, "get_table", side_effect=fake_get_table):
-                                        with patch.object(view, "_sort_with_hierarchy", side_effect=lambda x: x):
-                                            with patch(
-                                                "netbox_librenms_plugin.views.base.modules_view.cache"
-                                            ) as mock_cache:
-                                                mock_cache.ttl = lambda k: None
-                                                # Old bug: IndexError when large entity index used as list index
-                                            view._build_context(request, obj, inventory)
+                                with patch.object(view, "_get_module_type_ambiguities", return_value={}):
+                                    with patch.object(view, "_get_carrier_install_rules", return_value=[]):
+                                        with patch.object(view, "_build_row", side_effect=fake_build_row):
+                                            with patch.object(view, "get_table", side_effect=fake_get_table):
+                                                with patch.object(
+                                                    view, "_sort_with_hierarchy", side_effect=lambda x: x
+                                                ):
+                                                    with patch(
+                                                        "netbox_librenms_plugin.views.base.modules_view.cache"
+                                                    ) as mock_cache:
+                                                        mock_cache.ttl = lambda k: None
+                                                        # Old bug: IndexError when large entity index used as list index
+                                                        view._build_context(request, obj, inventory)
 
         assert len(captured_table_data) >= 1, "table_data must contain the parent row"
         assert captured_table_data[0].get("has_installable_children") is True, (
@@ -1587,6 +1591,7 @@ class TestMatchBayLogic:
         m.librenms_name = librenms_name
         m.netbox_bay_name = netbox_bay_name
         m.librenms_class = librenms_class
+        m.manufacturer_id = None
         return m
 
     def _make_regex_mapping(self, pattern, netbox_bay_name, librenms_class=""):
@@ -1598,6 +1603,7 @@ class TestMatchBayLogic:
         m.netbox_bay_name = netbox_bay_name
         m.librenms_class = librenms_class
         m._compiled_pattern = re.compile(pattern)
+        m.manufacturer_id = None
         return m
 
     def test_exact_mapping_matches_parent_name(self):
@@ -1762,6 +1768,7 @@ class TestLookupRegexBayMappingStaleResolvedBay:
         m._compiled_pattern = re.compile(pattern)
         m.netbox_bay_name = netbox_bay_name
         m.librenms_class = ""
+        m.manufacturer_id = None
         return m
 
     def test_failed_expand_does_not_match_stale_bay(self):
@@ -1831,6 +1838,40 @@ class TestLookupRegexBayMappingStaleResolvedBay:
             result = BaseModuleTableView._lookup_regex_bay_mapping("Fan-3", "fan", module_bays, [m_generic, m_class])
 
         assert result is fan_bay
+
+
+class TestFilterMappingsByManufacturer:
+    """_filter_mappings_by_manufacturer scopes ModuleBayMapping entries by vendor."""
+
+    @staticmethod
+    def _mk(manufacturer_id):
+        m = MagicMock()
+        m.manufacturer_id = manufacturer_id
+        return m
+
+    def test_global_mapping_used_when_device_has_no_manufacturer(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        glob = self._mk(None)
+        scoped = self._mk(7)
+        result = BaseModuleTableView._filter_mappings_by_manufacturer([glob, scoped], None)
+        assert result == [glob]
+
+    def test_scoped_mapping_preferred_over_global_for_matching_vendor(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        glob = self._mk(None)
+        scoped = self._mk(7)
+        result = BaseModuleTableView._filter_mappings_by_manufacturer([glob, scoped], 7)
+        assert result == [scoped, glob]
+
+    def test_other_vendor_scoped_mapping_skipped(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        glob = self._mk(None)
+        other = self._mk(99)
+        result = BaseModuleTableView._filter_mappings_by_manufacturer([glob, other], 7)
+        assert result == [glob]
 
 
 # ---------------------------------------------------------------------------

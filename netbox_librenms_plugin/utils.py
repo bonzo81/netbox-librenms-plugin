@@ -818,18 +818,62 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     return True
 
 
+_MODULE_TOKEN_LEAF_FIX_VERSION = (4, 5, 6)
+
+
+def _get_netbox_version_tuple():
+    """Return the running NetBox version as a (major, minor, patch) int tuple,
+    or ``None`` when it cannot be determined."""
+    try:
+        from netbox.settings import RELEASE
+
+        version = getattr(RELEASE, "version", "") or ""
+    except Exception:
+        return None
+    parts = version.split("-", 1)[0].split(".")
+    if len(parts) < 3:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return None
+
+
+def netbox_resolves_module_token_per_leaf():
+    """Return True when the running NetBox resolves a single ``{module}`` token
+    in a modular component template to the leaf module bay's position.
+
+    NetBox 4.5.6 (issue #20467) changed single-token resolution to use the
+    leaf bay's position instead of the root ancestor's. With that fix in
+    place, sibling bays under the same parent always produce unique
+    interface names, so the plugin's nested-name-conflict check no longer
+    applies.
+
+    When the version cannot be detected we assume the fix is present
+    (permissive default) — the plugin pins NetBox >= 4.4 and we don't want
+    to surface false positives on releases newer than this code knows about.
+    """
+    version = _get_netbox_version_tuple()
+    if version is None:
+        return True
+    return version >= _MODULE_TOKEN_LEAF_FIX_VERSION
+
+
 def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
     """
     Check if installing this module type in a nested bay would cause a name conflict.
 
     Returns a non-empty reason string when ALL of the following are true:
+    - The running NetBox version is older than 4.5.6 (issue #20467 fix)
     - The module type has interface templates using ``{module}``
     - The bay is nested (its parent is owned by an installed module)
     - There is at least one sibling bay under the same parent
 
-    In this situation NetBox's ``resolve_name()`` replaces ``{module}`` with the
-    root ancestor's bay position, producing the same interface name for every
-    sibling at this nesting level.
+    On NetBox < 4.5.6, ``resolve_name()`` replaces a single ``{module}`` token
+    with the root ancestor's bay position, producing the same interface name
+    for every sibling at this nesting level. NetBox 4.5.6+ resolves the token
+    to the leaf bay's position, so siblings get unique names and no conflict
+    can arise — in that case this function always returns an empty string.
 
     Returns an empty string (falsy) when no conflict is detected.
 
@@ -842,6 +886,9 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
             the caller that already has the bay maps loaded.
     """
     from dcim.constants import MODULE_TOKEN
+
+    if netbox_resolves_module_token_per_leaf():
+        return ""  # NetBox 4.5.6+ resolves {module} to the leaf bay's position
 
     if not module_bay or not module_bay.module_id:
         return ""  # Top-level bay — no conflict
@@ -868,8 +915,10 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
 
     return (
         f"Interface templates for '{module_type.model}' use {{module}}, which resolves to "
-        f"the same root bay name for all {sibling_count} sibling bays — "
-        "installing here would create duplicate interface names."
+        f"the same root bay name for all {sibling_count} sibling bays on this NetBox "
+        "version — installing here would create duplicate interface names. "
+        "Upgrade NetBox to 4.5.6 or later (issue #20467) to resolve this — the "
+        "{module} token will then resolve to each leaf bay's position."
     )
 
 
@@ -916,6 +965,34 @@ def get_module_types_indexed() -> dict:
             mapping_seen.add(key)
             result[key] = mapping.netbox_module_type
     return result
+
+
+def get_module_type_ambiguities() -> dict:
+    """
+    Return part_number/model strings that map to multiple NetBox ModuleTypes.
+
+    Returns a dict mapping ``key`` (a model or part_number string that collides
+    across two or more ModuleType rows) → list of ``ModuleType`` instances that
+    share that key.  ``get_module_types_indexed`` deliberately drops these keys
+    from its lookup index (fail-closed safety), so callers wanting to *report*
+    why a LibreNMS string can't be matched to a single NetBox ModuleType use
+    this helper to surface the conflicting candidates to the user.
+
+    Manufacturer is intentionally **not** restricted: a key that collides
+    across vendors is just as ambiguous as one that collides within a vendor,
+    and the underlying index ignores manufacturer too.
+    """
+    from dcim.models import ModuleType
+
+    candidates: dict = {}
+    for mt in ModuleType.objects.all().select_related("manufacturer"):
+        seen_this_entry: set = set()
+        for key in (mt.model, mt.part_number):
+            if not key or key in seen_this_entry:
+                continue
+            seen_this_entry.add(key)
+            candidates.setdefault(key, []).append(mt)
+    return {key: mts for key, mts in candidates.items() if len(mts) > 1}
 
 
 def get_generic_module_types_indexed() -> dict:

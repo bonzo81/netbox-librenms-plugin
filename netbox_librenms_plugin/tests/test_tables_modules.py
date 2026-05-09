@@ -334,6 +334,24 @@ class TestLibreNMSModuleTable:
         )
         assert "mdi-alert-outline" in result
         assert "Fan Tray N or Fan N" in result
+        # The status cell must be returned as already-marked-safe HTML (not an
+        # auto-escaped plain string). Regression guard against `SafeString + ""`
+        # collapsing to a regular `str` and getting escaped on render.
+        assert "<span" in result
+        assert "&lt;span" not in result
+
+    def test_render_status_no_bay_with_holder_hint_adds_possible_carrier_badge(self):
+        """holder_hint_present (and no concrete options) appends the Possible Carrier? hint."""
+        table = self._make_table()
+        result = str(
+            table.render_status(
+                "No Bay",
+                {"holder_hint_present": True},
+            )
+        )
+        assert "Possible Carrier?" in result
+        # Must NOT be HTML-escaped.
+        assert "&lt;span" not in result
 
     def test_render_status_no_type_with_model_warning_adds_alert_icon(self):
         """model_warning on a No Type row surfaces the missing-ModuleType hint."""
@@ -801,3 +819,114 @@ class TestLibreNMSModuleTable:
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):
             result = str(table.render_actions("", record))
         assert "Add Mapping" not in result
+
+    def test_render_actions_no_type_with_module_type_create_renders_add_module_type_button(self):
+        """A No Type row with a `module_type_create` prefill gets an "Add Module Type" link to dcim:moduletype_add."""
+        device = MagicMock()
+        device.pk = 58
+        table = self._make_table(device=device)
+        table.return_url = "/dcim/devices/58/librenms-sync/?tab=modules"
+        record = {
+            "status": "No Type",
+            "module_type_create": {
+                "manufacturer": 7,
+                "model": "X2-10GB-LR",
+                "part_number": "X2-10GB-LR",
+                "description": "10Gbase-LR",
+            },
+        }
+
+        def _reverse(name):
+            return {
+                "plugins:netbox_librenms_plugin:moduletypemapping_add": "/plugins/librenms/module-type-mappings/add/",
+                "dcim:moduletype_add": "/dcim/module-types/add/",
+            }[name]
+
+        with patch("netbox_librenms_plugin.tables.modules.reverse", side_effect=_reverse):
+            result = str(table.render_actions("", record))
+        assert "Add Module Type" in result
+        assert "/dcim/module-types/add/" in result
+        assert "manufacturer=7" in result
+        assert "model=X2-10GB-LR" in result
+        assert "part_number=X2-10GB-LR" in result
+        assert "description=10Gbase-LR" in result
+        assert "return_url=" in result
+
+    def test_render_actions_no_type_omits_module_type_button_when_no_prefill(self):
+        """Without a `module_type_create` prefill, the Add Module Type button must not render."""
+        device = MagicMock()
+        device.pk = 59
+        table = self._make_table(device=device)
+        record = {"status": "No Type"}
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):
+            result = str(table.render_actions("", record))
+        assert "Add Module Type" not in result
+
+    def test_render_actions_module_type_button_skipped_for_other_statuses(self):
+        """`module_type_create` on a non-No-Type row must not produce the button."""
+        device = MagicMock()
+        device.pk = 60
+        table = self._make_table(device=device)
+        record = {
+            "status": "Matched",
+            "module_type_create": {"model": "X", "part_number": "X"},
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):
+            result = str(table.render_actions("", record))
+        assert "Add Module Type" not in result
+
+    def test_render_actions_module_type_button_skips_blank_prefill_values(self):
+        """Empty prefill values must be dropped from the querystring (no `=&` artefacts)."""
+        device = MagicMock()
+        device.pk = 61
+        table = self._make_table(device=device)
+        record = {
+            "status": "No Type",
+            "module_type_create": {
+                "model": "GLC-T",
+                "part_number": "GLC-T",
+                "description": "",
+                "manufacturer": None,
+            },
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/dcim/module-types/add/"):
+            result = str(table.render_actions("", record))
+        assert "Add Module Type" in result
+        assert "description=" not in result
+        assert "manufacturer=" not in result
+        assert "model=GLC-T" in result
+
+
+# ---------------------------------------------------------------------------
+# Integrated badge + action gating
+# ---------------------------------------------------------------------------
+
+
+class TestRenderIntegrated(TestLibreNMSModuleTable):
+    def test_render_status_integrated_uses_muted_badge_with_parent_name(self):
+        table = self._make_table()
+        record = {
+            "status": "Integrated",
+            "integrated_in_name": "XIOM 2/x1",
+        }
+        html = str(table.render_status("Integrated", record))
+        assert "Integrated in XIOM 2/x1" in html
+        # muted styling
+        assert "text-muted" in html or "bg-light" in html
+        # tooltip explains the dedupe
+        assert "Duplicate SNMP entry" in html
+
+    def test_render_actions_integrated_returns_empty(self):
+        device = MagicMock()
+        device.pk = 99
+        table = self._make_table(device=device)
+        record = {
+            "status": "Integrated",
+            "integrated_in_name": "XIOM 2/x1",
+            # Even if a stale type_suggestion / module_type_create slipped in,
+            # actions must still be empty for Integrated rows.
+            "type_suggestion": {"librenms_model": "X", "description": "y"},
+            "module_type_create": {"model": "X", "part_number": "X"},
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/x/"):
+            assert table.render_actions("", record) == ""

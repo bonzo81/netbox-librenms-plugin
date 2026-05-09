@@ -13,6 +13,7 @@
             <th>LibreNMS Class</th>
             <th>NetBox Bay Name</th>
             <th>Regex?</th>
+            <th>Manufacturer</th>
             <th>Description</th>
           </tr>
         </thead>
@@ -22,6 +23,7 @@
             <td>{{ object.librenms_class|default:"—" }}</td>
             <td>{{ object.netbox_bay_name }}</td>
             <td>{{ object.is_regex|yesno:"Yes,No" }}</td>
+            <td>{% if object.manufacturer %}<a href="{{ object.manufacturer.get_absolute_url }}">{{ object.manufacturer.name }}</a>{% else %}—{% endif %}</td>
             <td>{{ object.description|default:"—" }}</td>
           </tr>
         </tbody>

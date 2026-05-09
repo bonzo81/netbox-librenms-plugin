@@ -258,6 +258,8 @@ class TestToYamlOnAllMappingModels:
         mapping.librenms_class = "container"
         mapping.netbox_bay_name = "Slot 1"
         mapping.is_regex = False
+        mapping.manufacturer_id = None
+        _set_fk_cache(mapping, "manufacturer", None)
         mapping.description = ""
 
         result = mapping.to_yaml()

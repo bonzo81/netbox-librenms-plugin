@@ -290,6 +290,16 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
         default=False,
         help_text="Treat LibreNMS Name as a regex pattern with backreferences in NetBox Bay Name",
     )
+    manufacturer = models.ForeignKey(
+        Manufacturer,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="librenms_module_bay_mappings",
+        help_text="Optional: scope this mapping to one manufacturer (matches the device's "
+        "device_type.manufacturer). Leave blank to apply across vendors. When both a "
+        "vendor-scoped and a global mapping match, the vendor-scoped one wins.",
+    )
     description = models.TextField(
         blank=True,
         help_text="Optional description or notes about this mapping",
@@ -340,7 +350,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
 
         constraints = [
             models.UniqueConstraint(
-                fields=["librenms_name", "librenms_class"],
+                fields=["librenms_name", "librenms_class", "manufacturer"],
                 name="unique_module_bay_mapping",
             ),
         ]
@@ -348,7 +358,8 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
 
     def __str__(self):
         cls = f" [{self.librenms_class}]" if self.librenms_class else ""
-        return f"{self.librenms_name}{cls} -> {self.netbox_bay_name}"
+        mfr = f" ({self.manufacturer.name})" if self.manufacturer_id else ""
+        return f"{self.librenms_name}{cls}{mfr} -> {self.netbox_bay_name}"
 
     def to_yaml(self):
         data = {
@@ -356,6 +367,7 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
             "librenms_class": self.librenms_class,
             "netbox_bay_name": self.netbox_bay_name,
             "is_regex": self.is_regex,
+            "manufacturer": self.manufacturer.name if self.manufacturer_id else "",
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)
@@ -689,6 +701,167 @@ class PlatformMapping(FullCleanOnSaveMixin, NetBoxModel):
         data = {
             "librenms_os": self.librenms_os,
             "netbox_platform": str(self.netbox_platform),
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+
+class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    User-configurable suggestion rule for missing holder/carrier modules.
+
+    Some chassis (e.g. Nokia 7750 SR-s with CMA controller carriers, mezzanine
+    carriers, line-card cassettes) expose a holder bay at the chassis level
+    whose nested child bays only become available once the carrier ModuleType
+    is installed in NetBox. LibreNMS does not report the carrier itself, only
+    its children (CPMs, MDAs, mezzanines), so they appear as orphan "No Bay"
+    rows. A rule lets the user say: "for Nokia 7750 SR chassis, when LibreNMS
+    reports a cpmModule named '^Slot [AB]$' and the chassis has an empty bay
+    named '^CMA$', suggest installing carrier_module_type into that bay."
+
+    Suggest-only — the user clicks an Install button to apply. No vendor data
+    ships with the plugin; rules are loaded from the UI or contrib YAML.
+    """
+
+    manufacturer = models.ForeignKey(
+        Manufacturer,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="librenms_carrier_install_rules",
+        help_text="Optional: scope this rule to one manufacturer (matches the device's "
+        "device_type.manufacturer). Leave blank to apply across vendors.",
+    )
+    device_type_pattern = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Optional regex (Python re.fullmatch) on the device_type model name. "
+        "Leave blank to apply to all device types of the selected manufacturer.",
+    )
+    librenms_child_class = models.CharField(
+        max_length=50,
+        help_text="Exact entPhysicalClass match for the orphan child reported by LibreNMS "
+        "(e.g. cpmModule, mdaModule, fabricModule).",
+    )
+    librenms_child_name_pattern = models.CharField(
+        max_length=255,
+        help_text="Regex (Python re.fullmatch) on the orphan child's entPhysicalName (e.g. '^Slot [AB]$').",
+    )
+    netbox_bay_name_pattern = models.CharField(
+        max_length=255,
+        help_text="Regex (Python re.fullmatch) on the chassis-level empty module bay name "
+        "where the carrier should be installed (e.g. '^CMA$' or '^Carrier \\d+$'). "
+        "All matching empty bays will be offered as install targets.",
+    )
+    carrier_module_type = models.ForeignKey(
+        ModuleType,
+        on_delete=models.PROTECT,
+        related_name="librenms_carrier_install_rules",
+        help_text="The NetBox ModuleType to suggest installing into the matching empty bay.",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional notes about this rule.",
+    )
+
+    @functools.cached_property
+    def _compiled_device_type_pattern(self):
+        if not self.device_type_pattern:
+            return None
+        try:
+            return re.compile(self.device_type_pattern)
+        except re.error:
+            return None
+
+    @functools.cached_property
+    def _compiled_child_name_pattern(self):
+        if not self.librenms_child_name_pattern:
+            return None
+        try:
+            return re.compile(self.librenms_child_name_pattern)
+        except re.error:
+            return None
+
+    @functools.cached_property
+    def _compiled_bay_name_pattern(self):
+        if not self.netbox_bay_name_pattern:
+            return None
+        try:
+            return re.compile(self.netbox_bay_name_pattern)
+        except re.error:
+            return None
+
+    def clean(self):
+        super().clean()
+        # Invalidate cached compiled patterns so they recompute from new values.
+        self.__dict__.pop("_compiled_device_type_pattern", None)
+        self.__dict__.pop("_compiled_child_name_pattern", None)
+        self.__dict__.pop("_compiled_bay_name_pattern", None)
+
+        self.device_type_pattern = (self.device_type_pattern or "").strip()
+        self.librenms_child_class = (self.librenms_child_class or "").strip()
+        self.librenms_child_name_pattern = (self.librenms_child_name_pattern or "").strip()
+        self.netbox_bay_name_pattern = (self.netbox_bay_name_pattern or "").strip()
+
+        if not self.librenms_child_class:
+            raise ValidationError({"librenms_child_class": "This field is required."})
+        if not self.librenms_child_name_pattern:
+            raise ValidationError({"librenms_child_name_pattern": "This field is required."})
+        if not self.netbox_bay_name_pattern:
+            raise ValidationError({"netbox_bay_name_pattern": "This field is required."})
+
+        for field, value in (
+            ("device_type_pattern", self.device_type_pattern),
+            ("librenms_child_name_pattern", self.librenms_child_name_pattern),
+            ("netbox_bay_name_pattern", self.netbox_bay_name_pattern),
+        ):
+            if not value:
+                continue
+            try:
+                re.compile(value)
+            except re.error as e:
+                raise ValidationError({field: f"Invalid regex: {e}"})
+
+    def get_absolute_url(self):
+        return reverse(
+            "plugins:netbox_librenms_plugin:carrierautoinstallrule_detail",
+            args=[self.pk],
+        )
+
+    class Meta:
+        """Meta options for CarrierAutoInstallRule."""
+
+        ordering = ["manufacturer__name", "librenms_child_class", "librenms_child_name_pattern"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "manufacturer",
+                    "device_type_pattern",
+                    "librenms_child_class",
+                    "librenms_child_name_pattern",
+                    "netbox_bay_name_pattern",
+                ],
+                name="unique_carrier_auto_install_rule",
+            ),
+        ]
+
+    def __str__(self):
+        scope = self.manufacturer.name if self.manufacturer else "*"
+        if self.device_type_pattern:
+            scope = f"{scope}/{self.device_type_pattern}"
+        return (
+            f"{scope}: {self.librenms_child_class} '{self.librenms_child_name_pattern}'"
+            f" -> install {self.carrier_module_type} into '{self.netbox_bay_name_pattern}'"
+        )
+
+    def to_yaml(self):
+        data = {
+            "manufacturer": self.manufacturer.name if self.manufacturer else "",
+            "device_type_pattern": self.device_type_pattern,
+            "librenms_child_class": self.librenms_child_class,
+            "librenms_child_name_pattern": self.librenms_child_name_pattern,
+            "netbox_bay_name_pattern": self.netbox_bay_name_pattern,
+            "carrier_module_type": str(self.carrier_module_type),
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)

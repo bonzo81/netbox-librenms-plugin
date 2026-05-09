@@ -1,6 +1,7 @@
 from netbox.api.serializers import NetBoxModelSerializer
 
 from netbox_librenms_plugin.models import (
+    CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
@@ -99,5 +100,24 @@ class PlatformMappingSerializer(NetBoxModelSerializer):
             "id",
             "librenms_os",
             "netbox_platform",
+            "description",
+        ]
+
+
+class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
+    """Serialize CarrierAutoInstallRule model for REST API."""
+
+    class Meta:
+        """Meta options for CarrierAutoInstallRuleSerializer."""
+
+        model = CarrierAutoInstallRule
+        fields = [
+            "id",
+            "manufacturer",
+            "device_type_pattern",
+            "librenms_child_class",
+            "librenms_child_name_pattern",
+            "netbox_bay_name_pattern",
+            "carrier_module_type",
             "description",
         ]

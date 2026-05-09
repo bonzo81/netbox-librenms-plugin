@@ -3,6 +3,7 @@ from django.utils.html import format_html
 from netbox.tables import NetBoxTable, columns
 
 from netbox_librenms_plugin.models import (
+    CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
@@ -118,6 +119,7 @@ class ModuleBayMappingTable(NetBoxTable):
     librenms_class = tables.Column(verbose_name="LibreNMS Class")
     netbox_bay_name = tables.Column(verbose_name="NetBox Bay Name")
     is_regex = columns.BooleanColumn(verbose_name="Regex")
+    manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
@@ -132,6 +134,7 @@ class ModuleBayMappingTable(NetBoxTable):
             "librenms_class",
             "netbox_bay_name",
             "is_regex",
+            "manufacturer",
             "description",
             "actions",
         )
@@ -142,6 +145,7 @@ class ModuleBayMappingTable(NetBoxTable):
             "librenms_class",
             "netbox_bay_name",
             "is_regex",
+            "manufacturer",
             "description",
             "actions",
         )
@@ -274,6 +278,48 @@ class PlatformMappingTable(NetBoxTable):
             "id",
             "librenms_os",
             "netbox_platform",
+            "description",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class CarrierAutoInstallRuleTable(NetBoxTable):
+    """Table for displaying CarrierAutoInstallRule data."""
+
+    manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
+    device_type_pattern = tables.Column(verbose_name="Device Type Pattern")
+    librenms_child_class = tables.Column(verbose_name="LibreNMS Child Class")
+    librenms_child_name_pattern = tables.Column(verbose_name="LibreNMS Child Name Pattern")
+    netbox_bay_name_pattern = tables.Column(verbose_name="NetBox Bay Name Pattern")
+    carrier_module_type = tables.Column(verbose_name="Carrier Module Type", linkify=True)
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for CarrierAutoInstallRuleTable."""
+
+        model = CarrierAutoInstallRule
+        fields = (
+            "pk",
+            "id",
+            "manufacturer",
+            "device_type_pattern",
+            "librenms_child_class",
+            "librenms_child_name_pattern",
+            "netbox_bay_name_pattern",
+            "carrier_module_type",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "pk",
+            "id",
+            "manufacturer",
+            "librenms_child_class",
+            "librenms_child_name_pattern",
+            "netbox_bay_name_pattern",
+            "carrier_module_type",
             "description",
             "actions",
         )

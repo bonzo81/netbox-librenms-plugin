@@ -23,6 +23,7 @@ from utilities.forms.fields import (
 from virtualization.models import Cluster, VirtualMachine
 
 from .models import (
+    CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
@@ -414,21 +415,34 @@ class ModuleTypeMappingFilterForm(NetBoxModelFilterSetForm):
 class ModuleBayMappingForm(NetBoxModelForm):
     """Form for creating and editing module bay mappings between LibreNMS and NetBox."""
 
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        help_text="Optional: scope this mapping to a single manufacturer.",
+    )
+
     class Meta:
         """Meta options for ModuleBayMappingForm."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "manufacturer", "description"]
 
 
 class ModuleBayMappingImportForm(NetBoxModelImportForm):
     """Form for bulk importing module bay mappings."""
 
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Optional manufacturer name (leave blank for vendor-agnostic mappings).",
+    )
+
     class Meta:
         """Meta options for ModuleBayMappingImportForm."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "manufacturer", "description"]
 
 
 class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
@@ -442,8 +456,97 @@ class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
         widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
         label="Regex",
     )
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
 
     model = ModuleBayMapping
+
+
+class CarrierAutoInstallRuleForm(NetBoxModelForm):
+    """Form for creating and editing carrier auto-install rules."""
+
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        help_text="Optional: scope this rule to a single manufacturer.",
+    )
+    carrier_module_type = DynamicModelChoiceField(
+        queryset=ModuleType.objects.all(),
+        label="Carrier Module Type",
+        query_params={"manufacturer_id": "$manufacturer"},
+    )
+
+    class Meta:
+        """Meta options for CarrierAutoInstallRuleForm."""
+
+        model = CarrierAutoInstallRule
+        fields = [
+            "manufacturer",
+            "device_type_pattern",
+            "librenms_child_class",
+            "librenms_child_name_pattern",
+            "netbox_bay_name_pattern",
+            "carrier_module_type",
+            "description",
+        ]
+
+
+class CarrierAutoInstallRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing carrier auto-install rules."""
+
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Manufacturer name (optional — leave blank for vendor-agnostic rules).",
+    )
+    carrier_module_type = CSVModelChoiceField(
+        queryset=ModuleType.objects.all(),
+        to_field_name="model",
+        help_text="NetBox ModuleType model name to install.",
+    )
+
+    class Meta:
+        """Meta options for CarrierAutoInstallRuleImportForm."""
+
+        model = CarrierAutoInstallRule
+        fields = [
+            "manufacturer",
+            "device_type_pattern",
+            "librenms_child_class",
+            "librenms_child_name_pattern",
+            "netbox_bay_name_pattern",
+            "carrier_module_type",
+            "description",
+        ]
+
+    def __init__(self, data=None, *args, **kwargs):
+        super().__init__(data, *args, **kwargs)
+        if data:
+            mfr_val = (data.get("manufacturer") or "").strip()
+            if mfr_val:
+                mfr_field = self.fields["manufacturer"]
+                params = {f"manufacturer__{mfr_field.to_field_name}": mfr_val}
+                self.fields["carrier_module_type"].queryset = ModuleType.objects.filter(**params)
+
+
+class CarrierAutoInstallRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering carrier auto-install rules."""
+
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
+    librenms_child_class = forms.CharField(required=False, label="LibreNMS Child Class")
+    librenms_child_name_pattern = forms.CharField(required=False, label="LibreNMS Child Name Pattern")
+    netbox_bay_name_pattern = forms.CharField(required=False, label="NetBox Bay Name Pattern")
+    description = forms.CharField(required=False, label="Description")
+
+    model = CarrierAutoInstallRule
 
 
 class NormalizationRuleForm(NetBoxModelForm):

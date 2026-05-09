@@ -4,6 +4,7 @@ from netbox.views import generic
 from utilities.views import register_model_view
 
 from netbox_librenms_plugin.filters import (
+    CarrierAutoInstallRuleFilterSet,
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
     InventoryIgnoreRuleFilterSet,
@@ -13,6 +14,9 @@ from netbox_librenms_plugin.filters import (
     PlatformMappingFilterSet,
 )
 from netbox_librenms_plugin.forms import (
+    CarrierAutoInstallRuleFilterForm,
+    CarrierAutoInstallRuleForm,
+    CarrierAutoInstallRuleImportForm,
     DeviceTypeMappingFilterForm,
     DeviceTypeMappingForm,
     DeviceTypeMappingImportForm,
@@ -36,6 +40,7 @@ from netbox_librenms_plugin.forms import (
     PlatformMappingImportForm,
 )
 from netbox_librenms_plugin.models import (
+    CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
@@ -45,6 +50,7 @@ from netbox_librenms_plugin.models import (
     PlatformMapping,
 )
 from netbox_librenms_plugin.tables.mappings import (
+    CarrierAutoInstallRuleTable,
     DeviceTypeMappingTable,
     InterfaceTypeMappingTable,
     InventoryIgnoreRuleTable,
@@ -548,3 +554,67 @@ class PlatformMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChange
     """Provides a view for displaying the change log of a specific PlatformMapping object."""
 
     queryset = PlatformMapping.objects.all()
+
+
+# --- CarrierAutoInstallRule views ---
+
+
+class CarrierAutoInstallRuleListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all CarrierAutoInstallRule objects."""
+
+    queryset = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")
+    table = CarrierAutoInstallRuleTable
+    filterset = CarrierAutoInstallRuleFilterSet
+    filterset_form = CarrierAutoInstallRuleFilterForm
+    template_name = "netbox_librenms_plugin/carrierautoinstallrule_list.html"
+
+
+class CarrierAutoInstallRuleCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new CarrierAutoInstallRule object."""
+
+    queryset = CarrierAutoInstallRule.objects.all()
+    form = CarrierAutoInstallRuleForm
+
+
+@register_model_view(CarrierAutoInstallRule, "bulk_import", path="import", detail=False)
+class CarrierAutoInstallRuleBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing CarrierAutoInstallRule objects."""
+
+    queryset = CarrierAutoInstallRule.objects.all()
+    model_form = CarrierAutoInstallRuleImportForm
+
+
+class CarrierAutoInstallRuleView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific CarrierAutoInstallRule object."""
+
+    queryset = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")
+
+
+class CarrierAutoInstallRuleEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific CarrierAutoInstallRule object."""
+
+    queryset = CarrierAutoInstallRule.objects.all()
+    form = CarrierAutoInstallRuleForm
+
+
+class CarrierAutoInstallRuleDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific CarrierAutoInstallRule object."""
+
+    queryset = CarrierAutoInstallRule.objects.all()
+
+
+class CarrierAutoInstallRuleBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple CarrierAutoInstallRule objects."""
+
+    queryset = CarrierAutoInstallRule.objects.all()
+    table = CarrierAutoInstallRuleTable
+
+
+class CarrierAutoInstallRuleChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific CarrierAutoInstallRule object."""
+
+    queryset = CarrierAutoInstallRule.objects.all()
+
+
+class CarrierAutoInstallRuleBulkExportYAMLView(BulkExportYAMLView):
+    queryset = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")

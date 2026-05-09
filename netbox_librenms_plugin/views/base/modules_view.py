@@ -378,6 +378,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         module_types = self._get_module_types()
         self._generic_module_types = self._get_generic_module_types()
+        self._module_type_ambiguities = self._get_module_type_ambiguities()
+        self._carrier_install_rules = self._get_carrier_install_rules(manufacturer)
 
         transparent_indices = self._find_transparent_indices(inventory_data, ignore_cache)
         top_items = self._collect_top_items(
@@ -454,6 +456,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     )
                 )
                 if action in ("skip", "transparent"):
+                    continue
+                # If a parent in the inventory was identified (e.g. via
+                # ``_nest_synthetic_transceivers``), let normal hierarchy
+                # walking render this item under that parent instead of at
+                # the top level.
+                parent_idx = item.get("entPhysicalContainedIn")
+                if parent_idx and parent_idx in index_map:
                     continue
                 top_items.append(item)
                 continue
@@ -638,7 +647,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         resolution_source,
     ):
         """Append one top-level item and descendants using one target device context."""
-        item_bays = target_context["all_bays"] if item.get("_from_transceiver_api") else target_context["device_bays"]
+        # Stash full device-level bay set for the holder-install hint in
+        # _build_no_bay_warning. Set per-item-context so virtual-chassis members
+        # see the right device's bays.
+        self._current_device_bays = target_context.get("device_bays") or {}
+        # Manufacturer for ModuleBayMapping vendor-scoping: prefer mappings
+        # whose manufacturer matches this device's manufacturer; fall back to
+        # vendor-agnostic (NULL) mappings; skip mappings scoped to a different
+        # manufacturer. Set per-item-context so VC members resolve correctly.
+        sel_dt = getattr(selected_device, "device_type", None)
+        sel_mfr = getattr(sel_dt, "manufacturer", None)
+        self._current_manufacturer_id = getattr(sel_mfr, "id", None)
+        self._current_manufacturer_name = getattr(sel_mfr, "name", None)
+        # Top-level items match against the full bay set: device-level bays plus
+        # bays exposed by already-installed carriers/modules. This lets a
+        # cpmModule reported by SNMP at the chassis level (e.g. Nokia 'Slot A')
+        # resolve into a carrier-installed child bay (e.g. CMA's 'CPM A') via a
+        # ModuleBayMapping. device_bays takes precedence on key collisions
+        # because all_bays is built as {**module_bay_flat, **device_bays}.
+        item_bays = target_context["all_bays"]
         row = self._build_row(
             item,
             index_map,
@@ -651,6 +678,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         row["selected_device_id"] = selected_device.id
         row["selected_device_name"] = selected_device.name
         row["member_resolution_source"] = resolution_source
+        self._apply_carrier_install_rules(row, item, selected_device)
         parent_row_idx = len(table_data)
         table_data.append(row)
 
@@ -658,11 +686,34 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # no mapping suggestion — the device type is likely missing bay templates
         # for that class of component (fan tray, PSU, etc.).
         if row.get("status") == "No Bay" and "model_suggestion" not in row:
-            device_type = getattr(selected_device, "device_type", None)
-            if device_type:
-                row["device_type_incomplete"] = True
-                row["device_type_incomplete_url"] = device_type.get_absolute_url()
-                row["device_type_incomplete_name"] = str(device_type)
+            # Before flagging device-type as incomplete, check whether any
+            # bay among the carriers already installed at device level (i.e.
+            # module-scoped child bays) would yield a mapping suggestion.
+            # This handles the common "user installed a carrier card whose
+            # children are letter-named (Slot A → CPM A) and now needs a
+            # ModuleBayMapping" follow-up flow.
+            fallback_suggestion = self._suggest_bay_mapping(item, target_context["all_bays"], scope_preserved=False)
+            if fallback_suggestion:
+                # Pre-fill the suggestion with this device's manufacturer so
+                # the new ModuleBayMapping is auto-scoped to the vendor — the
+                # user can clear it in the form to make it global.
+                if self._current_manufacturer_id:
+                    fallback_suggestion.setdefault("manufacturer", self._current_manufacturer_id)
+                    if self._current_manufacturer_name:
+                        fallback_suggestion.setdefault("manufacturer_name", self._current_manufacturer_name)
+                row["model_suggestion"] = fallback_suggestion
+                # Refresh the warning so the tooltip text reflects the new
+                # suggestion instead of the previous "no candidate" message.
+                row["model_warning"] = self._build_no_bay_warning(item, target_context["all_bays"], fallback_suggestion)
+                # Drop the carrier-install hint badge: a concrete mapping
+                # suggestion is more actionable than "Possible Carrier?".
+                row.pop("holder_hint_present", None)
+            else:
+                device_type = getattr(selected_device, "device_type", None)
+                if device_type:
+                    row["device_type_incomplete"] = True
+                    row["device_type_incomplete_url"] = device_type.get_absolute_url()
+                    row["device_type_incomplete_name"] = str(device_type)
 
         # Determine child bay scope based on parent match state
         parent_module_id = None
@@ -736,6 +787,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             sub_row["selected_device_id"] = selected_device.id
             sub_row["selected_device_name"] = selected_device.name
             sub_row["member_resolution_source"] = resolution_source
+            self._apply_carrier_install_rules(sub_row, sub_item, selected_device)
             table_data.append(sub_row)
 
             # Update bay scope for children of this sub-item.
@@ -886,7 +938,56 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 if serial:
                     inv_serials.add(serial)
 
+        # Nest synthetic transceivers under their parent inventory item by
+        # matching the leading slash-separated path components of the synthetic
+        # name (e.g. ``1/1/c1`` or ``2/x1/1/c2``) against existing item
+        # entPhysicalName values. Vendors that name slot/MDA items with the
+        # same path (Nokia: ``MDA 1/1`` / ``MDA 2/x1/1``; Juniper FPC ports;
+        # etc.) get correctly hierarchical rendering instead of a flat list of
+        # orphan transceivers at the top of the modules table.
+        self._nest_synthetic_transceivers(inventory_data)
+
         return inventory_data, None
+
+    @staticmethod
+    def _nest_synthetic_transceivers(inventory_data):
+        """Set ``entPhysicalContainedIn`` on synthetic transceiver items by
+        matching path-prefix in their name against an existing item's name.
+
+        Generic, vendor-agnostic: only relies on the convention that ports
+        are named like ``a/b/c`` and their parent module is named in a way
+        that ends with the path prefix (e.g. ``MDA 1/1`` for ``1/1/c1``,
+        ``XIOM 2/x1`` for ``2/x1/1/c2`` if the MDA is missing). Items
+        already nested by ENTITY-MIB (``entPhysicalContainedIn != 0``) and
+        non-synthetic items are left untouched.
+        """
+        # Build name → index lookup once
+        name_to_index = {}
+        for it in inventory_data:
+            nm = (it.get("entPhysicalName") or "").strip()
+            if nm:
+                name_to_index.setdefault(nm, it.get("entPhysicalIndex"))
+
+        for it in inventory_data:
+            if not it.get("_from_transceiver_api"):
+                continue
+            if it.get("entPhysicalContainedIn"):
+                continue
+            name = (it.get("entPhysicalName") or "").strip()
+            if not name or "/" not in name:
+                continue
+            parts = name.split("/")
+            # Try the longest prefix first, shortening one component at a time
+            for i in range(len(parts) - 1, 0, -1):
+                prefix = "/".join(parts[:i])
+                parent_idx = None
+                for cand_name, cand_idx in name_to_index.items():
+                    if cand_name == prefix or cand_name.endswith(" " + prefix) or cand_name.endswith("/" + prefix):
+                        parent_idx = cand_idx
+                        break
+                if parent_idx and parent_idx != it.get("entPhysicalIndex"):
+                    it["entPhysicalContainedIn"] = parent_idx
+                    break
 
     def _build_port_name_map(self, transceivers):
         """
@@ -1069,6 +1170,91 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return get_generic_module_types_indexed()
 
+    def _get_module_type_ambiguities(self):
+        """Return part_number/model strings that map to multiple NetBox ModuleTypes."""
+        from netbox_librenms_plugin.utils import get_module_type_ambiguities
+
+        return get_module_type_ambiguities()
+
+    def _get_carrier_install_rules(self, manufacturer):
+        """Return CarrierAutoInstallRule rows applicable to this device."""
+        from django.db.models import Q
+        from dcim.models import Manufacturer as _Manufacturer
+
+        from netbox_librenms_plugin.models import CarrierAutoInstallRule
+
+        qs = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")
+        if isinstance(manufacturer, _Manufacturer):
+            qs = qs.filter(Q(manufacturer__isnull=True) | Q(manufacturer=manufacturer))
+        else:
+            qs = qs.filter(manufacturer__isnull=True)
+        return list(qs)
+
+    def _apply_carrier_install_rules(self, row, item, selected_device):
+        """Attach carrier_install_options to a No Bay row when configured rules match.
+
+        Rules match when:
+          * device_type_pattern (if set) fullmatches the selected device's
+            device_type model;
+          * librenms_child_class equals (case-insensitive) the item's
+            entPhysicalClass;
+          * librenms_child_name_pattern fullmatches the item's entPhysicalName;
+          * at least one EMPTY device-level bay's name fullmatches
+            netbox_bay_name_pattern.
+
+        Each matching (rule, empty bay) pair becomes one suggestion. Also
+        attaches ``device_empty_bay_names`` on No Bay rows so the table can
+        pre-fill an "Add Carrier Rule" link.
+        """
+        if row.get("status") != "No Bay":
+            return
+        device_bays = getattr(self, "_current_device_bays", None) or {}
+        if not device_bays:
+            return
+        empty_bays = [(name, bay) for name, bay in device_bays.items() if not getattr(bay, "installed_module", None)]
+        if not empty_bays:
+            return
+        # Always expose empty bay names on No Bay rows so the table can
+        # pre-fill an "Add Carrier Rule" form even when no rule matches.
+        row["device_empty_bay_names"] = [name for name, _ in empty_bays]
+
+        rules = getattr(self, "_carrier_install_rules", None) or []
+        if not rules:
+            return
+        device_type = getattr(selected_device, "device_type", None)
+        device_type_model = getattr(device_type, "model", "") or ""
+        item_class = (item.get("entPhysicalClass") or "").strip().lower() if item else ""
+        item_name = (item.get("entPhysicalName") or "").strip() if item else ""
+
+        options = []
+        for rule in rules:
+            if rule.librenms_child_class.strip().lower() != item_class:
+                continue
+            dt_re = rule._compiled_device_type_pattern
+            if dt_re is not None and not dt_re.fullmatch(device_type_model):
+                continue
+            child_re = rule._compiled_child_name_pattern
+            if child_re is None or not child_re.fullmatch(item_name):
+                continue
+            bay_re = rule._compiled_bay_name_pattern
+            if bay_re is None:
+                continue
+            mt = rule.carrier_module_type
+            for bay_name, bay in empty_bays:
+                if not bay_re.fullmatch(bay_name):
+                    continue
+                options.append(
+                    {
+                        "rule_id": rule.pk,
+                        "module_type_id": mt.pk,
+                        "module_type_name": str(mt),
+                        "bay_id": bay.pk,
+                        "bay_name": bay_name,
+                    }
+                )
+        if options:
+            row["carrier_install_options"] = options
+
     def _find_parent_container_name(self, item, index_map):
         """
         Resolve the nearest ancestor container name by walking up the containment chain.
@@ -1097,6 +1283,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         item_name = (item.get("entPhysicalName") or "").strip()
         item_descr = (item.get("entPhysicalDescr") or "").strip()
         phys_class = (item.get("entPhysicalClass") or "").strip()
+        manufacturer_id = getattr(self, "_current_manufacturer_id", None)
 
         # Build candidate names: parent, item name, item description
         candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
@@ -1120,7 +1307,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Check ModuleBayMapping table for each candidate (exact match)
         for name in all_candidates:
-            bay = self._lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings)
+            bay = self._lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings, manufacturer_id)
             if bay:
                 return bay
 
@@ -1133,7 +1320,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Regex pattern matching on all candidate names
         for name in all_candidates:
-            bay = self._lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings)
+            bay = self._lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings, manufacturer_id)
             if bay:
                 return bay
 
@@ -1185,19 +1372,39 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return False
 
     @staticmethod
-    def _lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings):
+    def _filter_mappings_by_manufacturer(mappings, manufacturer_id):
+        """
+        Order mappings by manufacturer scoping priority:
+        device-manufacturer match first, then vendor-agnostic (NULL), skip
+        mappings scoped to a different manufacturer.
+        """
+        scoped = []
+        global_ = []
+        for m in mappings:
+            mfr = getattr(m, "manufacturer_id", None)
+            if mfr is None:
+                global_.append(m)
+            elif manufacturer_id and mfr == manufacturer_id:
+                scoped.append(m)
+        return scoped + global_
+
+    @staticmethod
+    def _lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings, manufacturer_id=None):
         """
         Try exact ModuleBayMapping entries against a candidate name.
 
         Checks class-scoped mappings first, then falls back to classless mappings.
+        Within each scope, prefers manufacturer-matched mappings over global ones
+        and skips mappings scoped to a different manufacturer.
         Iterates the underlying dict scopes (supports both plain dicts and legacy
         ChainMap instances) so the returned bay is validated via _fpc_slot_matches.
         Returns the matched module bay or None.
         """
         maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
+        scoped_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(exact_mappings, manufacturer_id)
         if phys_class:
             mapping = next(
-                (m for m in exact_mappings if m.librenms_name == name and m.librenms_class == phys_class), None
+                (m for m in scoped_mappings if m.librenms_name == name and m.librenms_class == phys_class), None
             )
             if mapping and mapping.netbox_bay_name in module_bays:
                 for scope_map in maps:
@@ -1205,7 +1412,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         bay = scope_map[mapping.netbox_bay_name]
                         if BaseModuleTableView._fpc_slot_matches(name, bay):
                             return bay
-        mapping = next((m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None)
+        mapping = next((m for m in scoped_mappings if m.librenms_name == name and m.librenms_class == ""), None)
         if mapping and mapping.netbox_bay_name in module_bays:
             for scope_map in maps:
                 if mapping.netbox_bay_name in scope_map:
@@ -1215,22 +1422,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return None
 
     @staticmethod
-    def _lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings):
+    def _lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings, manufacturer_id=None):
         """
         Try regex ModuleBayMapping patterns against a name.
 
         ``regex_mappings`` is a pre-filtered list of is_regex=True ModuleBayMapping
         objects (passed in from the caller to avoid per-item DB queries).
+        Manufacturer-scoped mappings (matching the device's manufacturer) take
+        precedence over vendor-agnostic ones; mappings scoped to a different
+        manufacturer are skipped.
 
         Returns matched module bay or None.
         """
+        scoped_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(regex_mappings, manufacturer_id)
         # Filter preloaded list by class (exact class match, then empty-class fallback)
         if phys_class:
-            exact = [m for m in regex_mappings if m.librenms_class == phys_class]
-            fallback = [m for m in regex_mappings if m.librenms_class == ""]
+            exact = [m for m in scoped_mappings if m.librenms_class == phys_class]
+            fallback = [m for m in scoped_mappings if m.librenms_class == ""]
             candidates = exact + fallback
         else:
-            candidates = [m for m in regex_mappings if m.librenms_class == ""]
+            candidates = [m for m in scoped_mappings if m.librenms_class == ""]
 
         for mapping in candidates:
             compiled = mapping._compiled_pattern
@@ -1392,6 +1603,33 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         name = item.get("entPhysicalName", "") or "-"
         description = item.get("entPhysicalDescr", "") or ""
 
+        # Detect "integrated child" SNMP duplicates (e.g. Nokia XIOM with a
+        # fixed integrated MDA exposed as two ENTITY-MIB rows sharing the
+        # same serial+model).  The child row is informational only — it has
+        # no separate bay/type to match — so render it muted with no
+        # actions and no warnings.
+        integrating_ancestor = self._find_integrating_ancestor(item, index_map)
+        if integrating_ancestor is not None:
+            ancestor_name = (integrating_ancestor.get("entPhysicalName") or "").strip() or "parent module"
+            return {
+                "name": name,
+                "model": model_name or "-",
+                "serial": serial or "-",
+                "description": description,
+                "item_class": phys_class,
+                "module_bay": "-",
+                "module_type": "-",
+                "status": "Integrated",
+                "can_install": False,
+                "module_bay_id": None,
+                "module_type_id": None,
+                "depth": depth,
+                "ent_physical_index": item.get("entPhysicalIndex"),
+                "has_installable_children": False,
+                "integrated_in_name": ancestor_name,
+                "integrated_in_index": integrating_ancestor.get("entPhysicalIndex"),
+            }
+
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
@@ -1439,20 +1677,60 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # can fix the model rather than wonder why nothing matched.
         if status == "No Bay":
             suggestion = self._suggest_bay_mapping(item, module_bays, scope_preserved=scope_preserved)
+            holder_hint = None
+            if suggestion is None:
+                holder_hint = self._build_holder_install_hint(
+                    item,
+                    phys_class,
+                    getattr(self, "_current_device_bays", None),
+                    scope_uninstalled=scope_uninstalled,
+                    scope_empty_installed_bays=scope_empty_installed_bays,
+                )
             row["model_warning"] = self._build_no_bay_warning(
-                item, module_bays, suggestion, scope_uninstalled=scope_uninstalled
+                item, module_bays, suggestion, scope_uninstalled=scope_uninstalled, holder_hint=holder_hint
             )
             if suggestion:
+                # Pre-fill manufacturer from current device so the new mapping
+                # is auto-scoped to the vendor (the user can clear it in the
+                # form to make it global).
+                mfr_id = getattr(self, "_current_manufacturer_id", None)
+                mfr_name = getattr(self, "_current_manufacturer_name", None)
+                if mfr_id:
+                    suggestion.setdefault("manufacturer", mfr_id)
+                    if mfr_name:
+                        suggestion.setdefault("manufacturer_name", mfr_name)
                 row["model_suggestion"] = suggestion
+            if holder_hint:
+                row["holder_hint_present"] = True
             # Tag the root cause so the table can render a more specific status
             # badge: installed parent module has no bay templates at all.
             if scope_empty_installed_bays and not scope_uninstalled:
                 row["no_bay_reason"] = "empty_parent_bays"
         elif status == "No Type":
-            row["model_warning"] = self._build_no_type_warning(item)
-            type_suggestion = self._suggest_type_mapping(item, matched_bay)
-            if type_suggestion:
-                row["type_suggestion"] = type_suggestion
+            ambiguities = getattr(self, "_module_type_ambiguities", None)
+            ambiguity_candidates = self._find_ambiguity_candidates(
+                model_name, ambiguities, manufacturer=manufacturer, norm_rules=norm_rules_type
+            )
+            row["model_warning"] = self._build_no_type_warning(item, ambiguity_candidates=ambiguity_candidates)
+            if ambiguity_candidates:
+                row["module_type_ambiguity"] = [
+                    {
+                        "pk": mt.pk,
+                        "model": mt.model,
+                        "manufacturer": mt.manufacturer.name if getattr(mt, "manufacturer", None) else "",
+                        "url": mt.get_absolute_url() if hasattr(mt, "get_absolute_url") else "",
+                    }
+                    for mt in ambiguity_candidates
+                ]
+                # Don't offer "Add Module Type" or auto-mapping when the user
+                # already has too many — they need to disambiguate first.
+            else:
+                type_suggestion = self._suggest_type_mapping(item, matched_bay)
+                if type_suggestion:
+                    row["type_suggestion"] = type_suggestion
+                module_type_create = self._suggest_module_type_create(item, manufacturer)
+                if module_type_create:
+                    row["module_type_create"] = module_type_create
 
         # Add URLs for matched objects
         if matched_bay:
@@ -1510,7 +1788,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return "Unmatched"
 
     @staticmethod
-    def _build_no_bay_warning(item, module_bays, suggestion=None, scope_uninstalled=False):
+    def _build_no_bay_warning(item, module_bays, suggestion=None, scope_uninstalled=False, holder_hint=None):
         """
         Hint the user toward the missing piece of the NetBox model when bay
         matching produces "No Bay".
@@ -1566,7 +1844,71 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 f"— would map '{suggestion['example_item']}' to '{suggestion['example_bay']}' "
                 "and any sibling with the same trailing-number pattern."
             )
+        if holder_hint:
+            base += f" {holder_hint}"
         return base
+
+    @staticmethod
+    def _build_holder_install_hint(
+        item, phys_class, device_bays, scope_uninstalled=False, scope_empty_installed_bays=False
+    ):
+        """
+        Vendor-agnostic hint that surfaces the "missing holder/carrier module" pattern.
+
+        Some chassis (e.g. Nokia 7750 SR-s with CMA controller carriers, mezzanine
+        carriers, line-card cassettes) expose a holder module bay at the chassis
+        level. Until the holder ModuleType is installed in that bay, NetBox does
+        not expose the holder's nested child bays — so LibreNMS-reported children
+        (CPMs, MDAs, mezzanines) appear with no matching bay.
+
+        Triggers only when:
+          * the unmatched item is a module-class component (not fan/PSU);
+          * we are not already showing a more specific hint
+            (scope_uninstalled / scope_empty_installed_bays);
+          * the device has at least one EMPTY device-level bay.
+
+        The hint is informational only — it lists the empty bay names so the
+        user can recognise the pattern and install the appropriate holder
+        ModuleType themselves. Doing so will expose nested child bays which
+        will then match LibreNMS-reported children automatically.
+        """
+        if scope_uninstalled or scope_empty_installed_bays:
+            return None
+        # Only items that could plausibly be a "card inside a carrier" — i.e.
+        # named module-class items at the top of the SNMP tree. Excludes plain
+        # 'port' (transceivers, where the right fix is line-card bay templates,
+        # not a chassis-level carrier) and items whose name encodes a path
+        # like '1/1/c1' (clearly nested, not a top-level holder child).
+        holder_child_classes = {
+            "module",
+            "iomodule",
+            "cpmmodule",
+            "mdamodule",
+            "fabricmodule",
+            "xiomodule",
+            "container",
+        }
+        if (phys_class or "").strip().lower() not in holder_child_classes:
+            return None
+        item_name = (item.get("entPhysicalName") or "").strip() if item else ""
+        if "/" in item_name:
+            return None
+        if not device_bays:
+            return None
+        empty_names = sorted(name for name, bay in device_bays.items() if not getattr(bay, "installed_module", None))
+        if not empty_names:
+            return None
+        # Cap the listed names to keep the message readable on wide chassis.
+        shown = empty_names[:5]
+        more = "" if len(empty_names) <= 5 else f" (+{len(empty_names) - 5} more)"
+        names_text = ", ".join(f"'{n}'" for n in shown) + more
+        return (
+            f"Tip: device has empty bay(s) [{names_text}]. "
+            "Some chassis require a holder/carrier module (e.g. controller-card "
+            "carrier, mezzanine carrier, line-card cassette) to be installed in "
+            "such a bay before nested child bays become available — install the "
+            "appropriate ModuleType if applicable, then refresh."
+        )
 
     @staticmethod
     def _suggest_bay_mapping(item, module_bays, scope_preserved=False):
@@ -1602,11 +1944,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not item_name or not module_bays:
             return None
 
-        m = re.search(r"\d+$", item_name)
+        # Match either trailing digits (e.g. "Slot 1", "0/0") or a trailing
+        # alphabetic token (e.g. "Slot A", "CMA-A") so chassis that label
+        # carrier-card slots with letters get a mapping suggestion too.
+        m = re.search(r"(\d+|[A-Za-z]+)$", item_name)
         if not m:
             return None
         item_trail = m.group(0)
         item_prefix = item_name[: m.start()]
+        trail_is_digits = item_trail.isdigit()
         item_class = (item.get("entPhysicalClass") or "").strip()
 
         # Filter bays by hardware class so transceivers don't propose chassis
@@ -1625,11 +1971,32 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         else:
             return None
 
+        # Tighten matching for module-class items with an alphabetic prefix
+        # (e.g. "Sfm 1", "Card 1"): require the candidate bay's alphabetic
+        # prefix tokens to share at least one token with the item's prefix,
+        # otherwise we end up suggesting "Sfm 1" -> "Card 1" just because both
+        # end in "1". Items with no alphabetic prefix (e.g. "0/0", "1/1/1")
+        # keep the previous numeric-only behaviour. Skipped for fan/powerSupply
+        # because class_keywords already curates the candidate set for those.
+        # Also skipped for trailing-letter items where the trail itself ("A",
+        # "B") is the discriminator and prefix tokens (e.g. "Slot" vs "CPM")
+        # frequently disagree across vendor naming conventions.
+        require_token_overlap = phys_class in module_classes and trail_is_digits
+        item_alpha_tokens = {t.lower() for t in re.findall(r"[A-Za-z]+", item_prefix)}
+
         candidate_bay = None
         bay_prefix = None
+
+        def _bay_compatible(bay_name: str) -> bool:
+            if not require_token_overlap or not item_alpha_tokens:
+                return True
+            bay_alpha_tokens = {t.lower() for t in re.findall(r"[A-Za-z]+", bay_name)}
+            return bool(item_alpha_tokens & bay_alpha_tokens)
+
+        trail_pattern = r"\d+$" if trail_is_digits else r"[A-Za-z]+$"
         for bay_name in candidate_names:
-            bm = re.search(r"\d+$", bay_name)
-            if bm and bm.group(0) == item_trail:
+            bm = re.search(trail_pattern, bay_name)
+            if bm and bm.group(0) == item_trail and _bay_compatible(bay_name):
                 candidate_bay = bay_name
                 bay_prefix = bay_name[: bm.start()]
                 break
@@ -1637,7 +2004,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if candidate_bay is None:
             return None
 
-        librenms_pattern = "^" + re.escape(item_prefix) + r"(\d+)$"
+        capture_group = r"(\d+)" if trail_is_digits else r"([A-Za-z]+)"
+        librenms_pattern = "^" + re.escape(item_prefix) + capture_group + "$"
         netbox_target = bay_prefix + r"\1"
 
         return {
@@ -1647,7 +2015,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "librenms_class": item_class,
             "description": (
                 f"Auto-suggested from device modules tab: maps LibreNMS '{item_name}' "
-                f"and similar trailing-number names to NetBox bay '{candidate_bay}'."
+                f"and similar names sharing the same prefix to NetBox bay '{candidate_bay}'."
             ),
             "example_item": item_name,
             "example_bay": candidate_bay,
@@ -1685,15 +2053,151 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         }
 
     @staticmethod
-    def _build_no_type_warning(item):
-        """Hint when LibreNMS reports a model that NetBox doesn't define."""
+    def _suggest_module_type_create(item, manufacturer):
+        """
+        Suggest pre-fill values for NetBox's native ModuleType create form.
+
+        Returns a dict suitable for building a querystring against
+        ``/dcim/module-types/add/`` so the user can create the missing
+        ModuleType in one click instead of opening the form blank.
+
+        Pre-filled fields (all derived from the LibreNMS ENTITY-MIB row):
+          * ``manufacturer``  — PK of the device's manufacturer (when known)
+          * ``model``         — entPhysicalModelName (truncated to 100 chars)
+          * ``part_number``   — entPhysicalModelName (truncated to 50 chars)
+          * ``description``   — entPhysicalDescr (truncated to 200 chars)
+          * ``comments``      — full entPhysicalDescr when it had to be
+                                truncated for ``description``
+
+        Returns None when no model name was reported — without a model name
+        there's nothing meaningful to pre-fill and the row can't be made
+        installable by adding a type either.
+        """
+        model = (item.get("entPhysicalModelName") or "").strip()
+        if not model:
+            return None
+
+        suggestion = {
+            "model": model[:100],
+            "part_number": model[:50],
+        }
+        if manufacturer is not None:
+            suggestion["manufacturer"] = manufacturer.pk
+
+        phys_descr = (item.get("entPhysicalDescr") or "").strip()
+        if phys_descr:
+            suggestion["description"] = phys_descr[:200]
+            if len(phys_descr) > 200:
+                suggestion["comments"] = phys_descr
+
+        return suggestion
+
+    @staticmethod
+    def _build_no_type_warning(item, ambiguity_candidates=None):
+        """Hint when LibreNMS reports a model that NetBox doesn't define.
+
+        When ``ambiguity_candidates`` is a non-empty list of ModuleType
+        instances, the warning explains that NetBox has *multiple* types
+        sharing the same model/part_number string, so the plugin refuses to
+        guess.  The message names each conflicting ``manufacturer / model``
+        pair so the user can resolve the data issue in NetBox itself.
+        """
         model = (item.get("entPhysicalModelName") or "").strip()
         if not model:
             return "LibreNMS did not report a model name for this item; cannot match to a NetBox ModuleType."
+        if ambiguity_candidates:
+            names = ", ".join(
+                f"{(mt.manufacturer.name if getattr(mt, 'manufacturer', None) else '?')} / {mt.model}"
+                for mt in ambiguity_candidates
+            )
+            return (
+                f"Cannot match LibreNMS model '{model}': NetBox has "
+                f"{len(ambiguity_candidates)} ModuleTypes sharing this model or part_number "
+                f"({names}). Resolve the duplicate in NetBox (delete one, "
+                "rename, or set distinct part_numbers) so the lookup becomes unambiguous."
+            )
         return (
             f"No NetBox ModuleType matches '{model}'. Create a ModuleType for this "
             "model (or add a ModuleTypeMapping) so the row becomes installable."
         )
+
+    @staticmethod
+    def _find_ambiguity_candidates(model_name, ambiguities, manufacturer=None, norm_rules=None):
+        """
+        Return the list of ModuleType candidates that collide for *model_name*.
+
+        Checks both the raw LibreNMS string and the normalized form (so a
+        Nokia ``3HE18883AARB01`` whose normalized key ``3HE18883AA`` is
+        ambiguous is still detected).  Returns an empty list when there is
+        no collision (or when *ambiguities* is falsy).
+        """
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+
+        if not (model_name and ambiguities):
+            return []
+        if model_name in ambiguities:
+            return list(ambiguities[model_name])
+        normalized = apply_normalization_rules(
+            model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
+        )
+        if normalized != model_name and normalized in ambiguities:
+            return list(ambiguities[normalized])
+        return []
+
+    @staticmethod
+    def _find_integrating_ancestor(item, index_map):
+        """
+        Detect the "integrated child" SNMP pattern (e.g. Nokia XIOM hosting a
+        single fixed MDA).
+
+        Some vendors expose the same physical card as two ENTITY-MIB rows —
+        a parent module and a child module — that share both
+        ``entPhysicalSerialNum`` and ``entPhysicalModelName``.  Returns the
+        ancestor item that matches *item*'s serial+model (so the caller can
+        present the row as ``Integrated in <parent>`` instead of trying to
+        find a bay/type for a card that does not physically exist as a
+        separate entity).
+
+        Returns None when no such ancestor exists, when serial/model are
+        empty/placeholder values, or when *item* is not itself a
+        module-class entry (we don't dedupe chassis / PSU / fan rows
+        because shared serials there usually indicate a real vendor data
+        bug we want to surface).
+        """
+        item_class = (item.get("entPhysicalClass") or "").strip()
+        if item_class not in INVENTORY_CLASSES or item_class in {"container", "powerSupply", "fan"}:
+            return None
+        item_serial = (item.get("entPhysicalSerialNum") or "").strip()
+        if not item_serial or item_serial.lower() in _PLACEHOLDER_VALUES:
+            return None
+        item_model = (item.get("entPhysicalModelName") or "").strip().lower()
+        if not item_model or item_model in _PLACEHOLDER_VALUES:
+            return None
+
+        visited: set = set()
+        current_idx = item.get("entPhysicalContainedIn", 0)
+        while current_idx and current_idx not in visited:
+            visited.add(current_idx)
+            ancestor = index_map.get(current_idx)
+            if ancestor is None:
+                return None
+            anc_class = (ancestor.get("entPhysicalClass") or "").strip()
+            # Stop at chassis — never dedupe against the chassis itself.
+            if anc_class == "chassis":
+                return None
+            if anc_class in INVENTORY_CLASSES and anc_class not in {"container", "powerSupply", "fan"}:
+                anc_serial = (ancestor.get("entPhysicalSerialNum") or "").strip()
+                anc_model = (ancestor.get("entPhysicalModelName") or "").strip().lower()
+                if (
+                    anc_serial
+                    and anc_serial.lower() not in _PLACEHOLDER_VALUES
+                    and anc_serial == item_serial
+                    and anc_model
+                    and anc_model == item_model
+                ):
+                    return ancestor
+            current_idx = ancestor.get("entPhysicalContainedIn", 0)
+        return None
 
     def _detect_serial_conflicts(self, table_data):
         """
