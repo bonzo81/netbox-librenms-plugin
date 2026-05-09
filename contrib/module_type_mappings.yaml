@@ -5,6 +5,8 @@
 #
 # Fields:
 #   librenms_model      — Model name from LibreNMS SNMP inventory
+#   manufacturer        — Optional NetBox Manufacturer name; leave blank for vendor-agnostic
+#                         mappings, set when the same model string is reused across vendors.
 #   netbox_module_type  — NetBox ModuleType (matched by model name or ID)
 #   description         — Optional note
 #
@@ -325,8 +327,13 @@
   description: "Finisar QSFP28 100G-LR4 (A5 customer code)"
 
 # ─── Unknown / Unidentified Part Numbers ─────────────────────────────────────
-# These are mapped based on port context (QSFP28 100G slot) when vendor is unknown.
-
-- librenms_model: "1F3QAA"
-  netbox_module_type: "QSFP-100G-LR4"
-  description: "Unknown QSFP28 100G (mapped by port context)"
+# When LibreNMS reports an opaque vendor part code (no recognisable prefix), the
+# safest pattern is a *manufacturer-scoped* mapping so the same code in a different
+# vendor's inventory doesn't accidentally collide. Leave the example below
+# commented-out as a template — uncomment and fill in your manufacturer/module type
+# only after confirming the part code on real hardware.
+#
+# - librenms_model: "1F3QAA"
+#   manufacturer: "Finisar"          # scope to the actual vendor that ships this code
+#   netbox_module_type: "QSFP-100G-LR4"
+#   description: "Vendor-specific QSFP28 100G mapping — verify before importing"

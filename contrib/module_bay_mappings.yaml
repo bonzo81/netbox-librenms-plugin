@@ -105,7 +105,8 @@
   librenms_class: "port"
   netbox_bay_name: "Transceiver \\1/\\2"
   is_regex: true
-  description: "Juniper MX SFP+ @ fpc/pic/port → Transceiver pic/port"
+  manufacturer: "Juniper"
+  description: "Juniper MX SFP+ @ fpc/pic/port → Transceiver pic/port (vendor-scoped to avoid clashes with other 3-segment naming schemes)"
 
 # ─── Exact Match Entries ─────────────────────────────────────────────────────
 # These are for special cases where names don't follow a regex pattern.
