@@ -950,6 +950,18 @@ def get_module_types_indexed() -> dict:
                 result[key] = mt
     # Mapping ambiguity is tracked separately so that a unique mapping always
     # wins over a base ModuleType entry (explicit overrides take priority).
+    #
+    # NOTE on asymmetry vs ``get_module_type_ambiguities`` (issue #72):
+    # ``ModuleTypeMapping.librenms_model`` carries a DB-level ``unique=True``
+    # constraint, so two mapping rows can never collide on the same key. The
+    # ``mapping_ambiguous`` / ``del result[key]`` branch below is therefore
+    # defensive-only — it can never fire under the current schema. Because of
+    # this, there is no companion ``get_module_type_mapping_ambiguities`` helper:
+    # a mapping-vs-mapping collision is structurally impossible. A *single*
+    # mapping silently winning over a base ModuleType row is the documented
+    # contract ("explicit overrides take priority"), not an ambiguity. If the
+    # uniqueness constraint is ever relaxed (e.g. to scope mappings per
+    # manufacturer), revisit this and add a parallel ambiguity surface.
     mapping_seen: set = set()
     mapping_ambiguous: set = set()
     for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer").prefetch_related(
@@ -981,6 +993,10 @@ def get_module_type_ambiguities() -> dict:
     Manufacturer is intentionally **not** restricted: a key that collides
     across vendors is just as ambiguous as one that collides within a vendor,
     and the underlying index ignores manufacturer too.
+
+    There is no companion ``get_module_type_mapping_ambiguities`` helper: see
+    the note in ``get_module_types_indexed`` — ``ModuleTypeMapping.librenms_model``
+    is DB-unique, so mapping-vs-mapping collisions cannot occur.
     """
     from dcim.models import ModuleType
 
