@@ -813,7 +813,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 # Preserve parent scope for unmatched intermediate containers
                 bays_by_depth[depth + 1] = scope_bays
                 scope_uninstalled_by_depth[depth + 1] = scope_uninstalled
-                scope_preserved_by_depth[depth + 1] = True
+                # Integrated children (e.g. Nokia MDA fused into a XIOM) share
+                # the integrating ancestor's bay scope at the correct hierarchical
+                # level, so propagate the parent's scope_preserved flag rather
+                # than forcing True (which would suppress bay-mapping suggestions
+                # for their grandchildren).
+                if sub_row.get("integrated_in_index"):
+                    scope_preserved_by_depth[depth + 1] = scope_preserved
+                else:
+                    scope_preserved_by_depth[depth + 1] = True
                 scope_empty_installed_bays_by_depth[depth + 1] = scope_empty_installed_bays
 
             if sub_row.get("can_install"):
@@ -1954,6 +1962,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         item_prefix = item_name[: m.start()]
         trail_is_digits = item_trail.isdigit()
         item_class = (item.get("entPhysicalClass") or "").strip()
+        # Description-based fallback: when the item description encodes a
+        # class+slot hint like "MIC: ... @ 0/0/*" (Juniper), try mapping to a
+        # bay named "<CLASS> <slot>" even when the LibreNMS name is just a
+        # model number with no positional info. Runs before the class filter
+        # so 'container' MICs/PICs/etc. still get a suggestion.
+        descr_suggestion = BaseModuleTableView._suggest_bay_mapping_from_descr(item, module_bays, item_name, item_class)
 
         # Filter bays by hardware class so transceivers don't propose chassis
         # line-card bays as targets, fans don't propose Slot N, etc.
@@ -1969,7 +1983,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         elif phys_class in module_classes:
             candidate_names = list(module_bays)
         else:
-            return None
+            return descr_suggestion
 
         # Tighten matching for module-class items with an alphabetic prefix
         # (e.g. "Sfm 1", "Card 1"): require the candidate bay's alphabetic
@@ -2002,7 +2016,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 break
 
         if candidate_bay is None:
-            return None
+            return descr_suggestion
 
         capture_group = r"(\d+)" if trail_is_digits else r"([A-Za-z]+)"
         librenms_pattern = "^" + re.escape(item_prefix) + capture_group + "$"
@@ -2019,6 +2033,45 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ),
             "example_item": item_name,
             "example_bay": candidate_bay,
+        }
+
+    @staticmethod
+    def _suggest_bay_mapping_from_descr(item, module_bays, item_name, item_class):
+        """
+        Derive a ModuleBayMapping suggestion from the item's description when
+        the description encodes a class+slot hint like ``"MIC: ... @ 0/0/*"``
+        (Juniper) — useful when the LibreNMS name is just a model number with
+        no positional info that the name-based heuristic could latch onto.
+
+        Returns the suggestion dict (with a regex matching the description and
+        a target bay name like ``"MIC \\1"``) or None when the description
+        doesn't fit the pattern or the implied bay isn't present in scope.
+        """
+        descr = (item.get("entPhysicalDescr") or "").strip()
+        if not descr or not module_bays:
+            return None
+        dm = re.match(r"^([A-Z][A-Za-z0-9_]{0,15}):\s+.*@\s*(\d+)(?:/|\s|$)", descr)
+        if not dm:
+            return None
+        descr_class = dm.group(1)
+        descr_slot = dm.group(2)
+        expected_bay = f"{descr_class} {descr_slot}"
+        if expected_bay not in module_bays:
+            return None
+        librenms_pattern = "^" + re.escape(descr_class) + r":\s+.*@\s*(\d+)(?:/.*)?$"
+        return {
+            "librenms_name": librenms_pattern,
+            "netbox_bay_name": f"{descr_class} \\1",
+            "is_regex": True,
+            "librenms_class": item_class,
+            "description": (
+                f"Auto-suggested from device modules tab: maps LibreNMS items "
+                f"whose description starts with '{descr_class}:' and includes "
+                f"'@ <slot>/...' to NetBox bay '{descr_class} <slot>' "
+                f"(e.g. '{descr}' → '{expected_bay}')."
+            ),
+            "example_item": item_name,
+            "example_bay": expected_bay,
         }
 
     @staticmethod

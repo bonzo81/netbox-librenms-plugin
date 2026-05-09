@@ -2280,6 +2280,75 @@ class TestSuggestBayMapping:
         assert sug is None
 
 
+class TestSuggestBayMappingFromDescr:
+    """`_suggest_bay_mapping` falls back to a description-based regex when the
+    LibreNMS name is just a model number with no positional info — e.g. Juniper
+    'JNP304-LMIC16-BASE' with description 'MIC: ... @ 0/0/*' should suggest a
+    mapping that targets the existing 'MIC 0' bay."""
+
+    def test_juniper_mic_descr_yields_mapping(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {
+            "entPhysicalName": "JNP304-LMIC16-BASE",
+            "entPhysicalDescr": "MIC: MRATE LMIC 16x100G/4x400G @ 0/0/*",
+            "entPhysicalClass": "container",
+        }
+        bays = {"MIC 0": MagicMock(), "RE 0": MagicMock(), "RE 1": MagicMock()}
+        sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
+        assert sug is not None
+        assert sug["is_regex"] is True
+        assert sug["netbox_bay_name"] == "MIC \\1"
+        assert sug["example_bay"] == "MIC 0"
+        # The pattern must fullmatch the original description (so the saved
+        # mapping actually resolves at lookup time).
+        import re as _re
+
+        m = _re.fullmatch(sug["librenms_name"], item["entPhysicalDescr"])
+        assert m is not None
+        assert m.expand(sug["netbox_bay_name"]) == "MIC 0"
+
+    def test_no_descr_match_returns_none_for_container(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {
+            "entPhysicalName": "X",
+            "entPhysicalDescr": "no class hint here",
+            "entPhysicalClass": "container",
+        }
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"MIC 0": MagicMock()})
+        assert sug is None
+
+    def test_descr_class_with_no_matching_bay_returns_none(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {
+            "entPhysicalName": "X",
+            "entPhysicalDescr": "FPC: line card @ 5/0/*",
+            "entPhysicalClass": "container",
+        }
+        # Device only has MIC 0 — no FPC 5 bay → no suggestion
+        sug = BaseModuleTableView._suggest_bay_mapping(item, {"MIC 0": MagicMock()})
+        assert sug is None
+
+    def test_descr_fallback_preferred_over_none_for_module_class(self):
+        """When name-based heuristic finds no candidate AND the item is a
+        normal module class (not container), descr fallback should still fire
+        — useful for vendor inventories that put the model in entPhysicalName
+        but classify the row as 'module'."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {
+            "entPhysicalName": "JNP304-LMIC16-BASE",
+            "entPhysicalDescr": "MIC: MRATE LMIC 16x100G/4x400G @ 1/0/*",
+            "entPhysicalClass": "module",
+        }
+        bays = {"MIC 0": MagicMock(), "MIC 1": MagicMock()}
+        sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
+        assert sug is not None
+        assert sug["example_bay"] == "MIC 1"
+
+
 class TestSuggestTypeMapping:
     """`_suggest_type_mapping` produces a prefill dict for the ModuleTypeMapping form."""
 
@@ -3142,6 +3211,129 @@ class TestBuildRowIntegratedDedupe:
         ):
             row = view._build_row(item, {100: parent, 200: item}, {}, {})
         assert row["status"] != "Integrated"
+
+
+class TestScopePreservedAcrossIntegratedContainer:
+    """Children of an integrated container (e.g. Nokia MDA inside XIOM) must inherit
+    the integrating ancestor's bay scope WITHOUT being marked scope_preserved=True
+    — otherwise their _build_row call suppresses bay-mapping suggestions even though
+    the scope is at the correct hierarchical level.
+    """
+
+    def test_port_under_integrated_mda_gets_scope_preserved_false(self):
+        """Regression: ports under integrated MDA used to lose mapping suggestions."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = _make_view()
+        view._current_device_bays = {}
+        # Exact mapping so XIOM matches its bay → parent_module_id is set →
+        # MDA at depth=1 sees scope_preserved=False legitimately.
+        xiom_mapping = MagicMock(
+            librenms_name="XIOM 2/x1",
+            librenms_class="xioModule",
+            netbox_bay_name="2/x1",
+            is_regex=False,
+            manufacturer_id=None,
+        )
+        view._exact_bay_mappings = [xiom_mapping]
+        view._regex_bay_mappings = []
+        view._norm_rules_bay = None
+        view._norm_rules_type = None
+        view._generic_module_types = {}
+        view._module_type_ambiguities = {}
+
+        # Top-level XIOM matches a device-level bay whose installed module exposes
+        # port-level child bays (x1/c1...). MDA sharing XIOM's serial+model becomes
+        # integrated. Port under MDA should see scope_preserved=False so its
+        # _build_row call generates a mapping suggestion.
+        xiom_module = MagicMock()
+        xiom_module.pk = 999
+        matched_xiom_bay = MagicMock(name="2/x1")
+        matched_xiom_bay.installed_module = xiom_module
+
+        mda_bays = {f"x1/c{n}": MagicMock() for n in range(1, 5)}
+        device_bays = {"2/x1": matched_xiom_bay}
+        all_bays = dict(device_bays)
+
+        target_context = {
+            "device_bays": device_bays,
+            "all_bays": all_bays,
+            "module_scoped_bays": {999: mda_bays},
+            "sibling_counts": {},
+        }
+
+        xiom_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalName": "XIOM 2/x1",
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 0,
+        }
+        mda_item = {
+            "entPhysicalIndex": 200,
+            "entPhysicalName": "MDA 2/x1/1",
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "NS241462069",
+            "entPhysicalModelName": "3HE18883AARB01",
+            "entPhysicalContainedIn": 100,
+        }
+        port_item = {
+            "entPhysicalIndex": 300,
+            "entPhysicalName": "2/x1/1/c2",
+            "entPhysicalClass": "port",
+            "entPhysicalSerialNum": "PR21",
+            "entPhysicalModelName": "QSFP-DD",
+            "entPhysicalContainedIn": 200,
+        }
+
+        index_map = {100: xiom_item, 200: mda_item, 300: port_item}
+
+        # Capture scope_preserved arg passed to _build_row for each call
+        scope_preserved_seen = []
+        original_build_row = BaseModuleTableView._build_row
+
+        def spy_build_row(self, item, idx_map, mod_bays, mod_types, **kw):
+            scope_preserved_seen.append((item.get("entPhysicalIndex"), kw.get("scope_preserved")))
+            return original_build_row(self, item, idx_map, mod_bays, mod_types, **kw)
+
+        selected_device = MagicMock(id=1, name="dev")
+        selected_device.device_type = MagicMock()
+        selected_device.device_type.manufacturer = MagicMock(id=10, name="Nokia")
+
+        with (
+            patch.object(BaseModuleTableView, "_build_row", spy_build_row),
+            patch.object(BaseModuleTableView, "_apply_carrier_install_rules", lambda *a, **kw: None),
+            patch.object(
+                BaseModuleTableView,
+                "_get_sub_components",
+                return_value=[(1, mda_item), (2, port_item)],
+            ),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None),
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
+        ):
+            view._append_rows_for_item_context(
+                table_data=[],
+                item=xiom_item,
+                target_context=target_context,
+                index_map=index_map,
+                children_by_parent={100: [mda_item], 200: [port_item]},
+                ignore_rules=[],
+                device_serial="",
+                module_types={},
+                manufacturer=None,
+                selected_device=selected_device,
+                resolution_source="direct",
+            )
+
+        # Port (idx 300) under integrated MDA must NOT have scope_preserved=True
+        port_calls = [sp for idx, sp in scope_preserved_seen if idx == 300]
+        assert port_calls, f"Expected port to be processed, saw: {scope_preserved_seen}"
+        assert port_calls[0] is False, (
+            f"Port under integrated MDA should inherit parent scope_preserved=False, "
+            f"got {port_calls[0]}. All calls: {scope_preserved_seen}"
+        )
 
 
 # ---------------------------------------------------------------------------
