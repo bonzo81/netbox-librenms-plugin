@@ -348,10 +348,24 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
     class Meta:
         """Meta options for ModuleBayMapping."""
 
+        # Two conditional UniqueConstraints rather than a single
+        # UniqueConstraint over (librenms_name, librenms_class, manufacturer):
+        # PostgreSQL treats NULL ≠ NULL, so a single constraint that includes
+        # the nullable manufacturer FK lets two "global" rows (manufacturer
+        # IS NULL) with otherwise identical fields slip through. The
+        # cleaner ``nulls_distinct=False`` option requires PostgreSQL 15+
+        # (Django 5.2+), but NetBox 4.2 still supports PostgreSQL 12, so we
+        # split into one constraint per branch instead. Issue #71.
         constraints = [
             models.UniqueConstraint(
                 fields=["librenms_name", "librenms_class", "manufacturer"],
+                condition=models.Q(manufacturer__isnull=False),
                 name="unique_module_bay_mapping",
+            ),
+            models.UniqueConstraint(
+                fields=["librenms_name", "librenms_class"],
+                condition=models.Q(manufacturer__isnull=True),
+                name="unique_module_bay_mapping_global",
             ),
         ]
         ordering = ["librenms_name"]
@@ -832,6 +846,10 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
         """Meta options for CarrierAutoInstallRule."""
 
         ordering = ["manufacturer__name", "librenms_child_class", "librenms_child_name_pattern"]
+        # See ModuleBayMapping.Meta.constraints for the full rationale: the
+        # nullable manufacturer FK forces a pair of conditional
+        # UniqueConstraints because PostgreSQL 12-14 (still supported by
+        # NetBox 4.2) does not honour ``nulls_distinct=False``. Issue #71.
         constraints = [
             models.UniqueConstraint(
                 fields=[
@@ -841,7 +859,18 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
                     "librenms_child_name_pattern",
                     "netbox_bay_name_pattern",
                 ],
+                condition=models.Q(manufacturer__isnull=False),
                 name="unique_carrier_auto_install_rule",
+            ),
+            models.UniqueConstraint(
+                fields=[
+                    "device_type_pattern",
+                    "librenms_child_class",
+                    "librenms_child_name_pattern",
+                    "netbox_bay_name_pattern",
+                ],
+                condition=models.Q(manufacturer__isnull=True),
+                name="unique_carrier_auto_install_rule_global",
             ),
         ]
 
