@@ -1781,6 +1781,49 @@ class TestMatchBayLogic:
 
         assert result is bay
 
+    def test_vendor_two_segment_regex_does_not_grab_three_segment_path(self):
+        """Regression for #59: a narrow 2-segment vendor regex must NOT swallow a 3-segment
+        transceiver name; the more-specific 3-segment generic mapping must win.
+
+        ``_lookup_regex_bay_mapping`` uses ``fullmatch``, so a pattern with only two
+        slash-segments cannot consume a name with three.  Both mappings are passed in
+        together (mirroring real callers that have already merged scoped + global
+        regex mappings via ``_filter_mappings_by_manufacturer``).
+        """
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalName": "Optics 0/0/5",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "module",
+            "entPhysicalContainedIn": 0,
+        }
+        index_map = {2: child}
+
+        # The two-segment bay must NOT be selected for a three-segment LibreNMS name
+        narrow_bay = MagicMock()
+        narrow_bay.name = "Optics0/0"
+        narrow_bay.module = None
+        wide_bay = MagicMock()
+        wide_bay.name = "Optics0/0/5"
+        wide_bay.module = None
+        module_bays = {"Optics0/0": narrow_bay, "Optics0/0/5": wide_bay}
+
+        # Vendor-scoped narrow regex first (would mis-fire if iteration order
+        # alone decided the winner) + generic wider regex second.
+        narrow = self._make_regex_mapping(r"Optics (\d+/\d+)", r"Optics\1")
+        narrow.manufacturer_id = 7  # manufacturer-scoped
+        wide = self._make_regex_mapping(r"Optics (\d+/\d+/\d+)", r"Optics\1")
+        wide.manufacturer_id = None  # global
+
+        with patch(
+            "netbox_librenms_plugin.views.base.modules_view.BaseModuleTableView._fpc_slot_matches", return_value=True
+        ):
+            result = InstallBranchView._match_bay(child, index_map, module_bays, [], [narrow, wide])
+
+        assert result is wide_bay, "narrow 2-segment vendor regex must not grab a 3-segment transceiver path"
+
     def test_fallback_exact_name_match(self):
         """Falls back to direct name-in-bays-dict when no mappings match."""
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView

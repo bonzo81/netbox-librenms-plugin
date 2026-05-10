@@ -1060,17 +1060,30 @@ def get_generic_module_types_indexed() -> dict:
     Used as a secondary fallback in :func:`resolve_module_type` when the primary look-up
     (which excludes ambiguous names) fails.  This lets common SFP/optic models that exist
     under both a vendor-specific and a Generic entry still be matched via the Generic type.
+
+    Mirrors the fail-closed behaviour of :func:`get_module_types_indexed`: if two Generic
+    ModuleTypes share the same ``model``/``part_number`` value the key is dropped from the
+    index so callers cannot auto-pick an arbitrary row. The user must disambiguate via an
+    explicit ``ModuleTypeMapping``.
     """
     from dcim.models import ModuleType
 
     result: dict = {}
+    ambiguous: set = set()
     for mt in (
         ModuleType.objects.filter(manufacturer__name__iexact="Generic")
         .select_related("manufacturer")
         .prefetch_related("interfacetemplates")
     ):
+        seen_this_entry: set = set()
         for key in (mt.model, mt.part_number):
-            if key and key not in result:
+            if not key or key in seen_this_entry or key in ambiguous:
+                continue
+            seen_this_entry.add(key)
+            if key in result:
+                ambiguous.add(key)
+                del result[key]
+            else:
                 result[key] = mt
     return result
 

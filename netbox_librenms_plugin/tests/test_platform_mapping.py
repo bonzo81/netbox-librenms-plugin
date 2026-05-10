@@ -275,7 +275,7 @@ class TestToYamlOnAllMappingModels:
         from netbox_librenms_plugin.models import NormalizationRule
 
         rule = NormalizationRule.__new__(NormalizationRule)
-        rule.scope = "hardware"
+        rule.scope = "device_type"
         _set_fk_cache(rule, "manufacturer", None)
         rule.match_pattern = r"^Cisco\s+"
         rule.replacement = "Cisco"
@@ -413,6 +413,42 @@ class TestFindMatchingPlatformWithMapping:
             result = find_matching_platform("ios")
 
         assert result == {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
+
+    def test_exact_platform_wins_over_existing_mapping(self):
+        """When a single Platform exists for the OS string, the exact match wins even if a PlatformMapping also exists."""
+        from netbox_librenms_plugin.utils import find_matching_platform
+
+        DoesNotExist = type("DoesNotExist", (Exception,), {})
+        MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+
+        # Both an exact Platform and a PlatformMapping exist for "ios" — they would
+        # resolve to *different* Platform objects. Exact match must win; the mapping
+        # branch must never be consulted.
+        exact_platform = MagicMock(name="exact_platform")
+        mapping_platform = MagicMock(name="mapping_platform")
+        mapping = MagicMock(netbox_platform=mapping_platform)
+
+        mock_pm_class = MagicMock()
+        mock_pm_class.DoesNotExist = DoesNotExist
+        mock_pm_class.MultipleObjectsReturned = MultipleObjectsReturned
+        mock_pm_class.objects.get.return_value = mapping
+
+        mock_platform_model = MagicMock()
+        mock_platform_model.DoesNotExist = DoesNotExist
+        mock_platform_model.MultipleObjectsReturned = MultipleObjectsReturned
+        mock_platform_model.objects.get.return_value = exact_platform
+
+        with (
+            patch("netbox_librenms_plugin.models.PlatformMapping", mock_pm_class),
+            patch("dcim.models.Platform", mock_platform_model),
+        ):
+            result = find_matching_platform("ios")
+
+        assert result["found"] is True
+        assert result["platform"] is exact_platform
+        assert result["match_type"] == "exact"
+        # Mapping must not be consulted when exact resolves cleanly.
+        mock_pm_class.objects.get.assert_not_called()
 
 
 # =============================================================================
@@ -699,7 +735,7 @@ class TestReplacementTemplateValidation:
         rule = NormalizationRule.__new__(NormalizationRule)
         rule.match_pattern = r"^(\w+)$"
         rule.replacement = r"\2"  # only 1 group
-        rule.scope = "hardware"
+        rule.scope = "device_type"
         rule.description = ""
         _set_fk_cache(rule, "manufacturer", None)
 
@@ -715,7 +751,7 @@ class TestReplacementTemplateValidation:
         rule = NormalizationRule.__new__(NormalizationRule)
         rule.match_pattern = r"^(\w+)$"
         rule.replacement = r"\1"
-        rule.scope = "hardware"
+        rule.scope = "device_type"
         rule.description = ""
         _set_fk_cache(rule, "manufacturer", None)
 
@@ -729,7 +765,7 @@ class TestReplacementTemplateValidation:
         rule = NormalizationRule.__new__(NormalizationRule)
         rule.match_pattern = r"^(?P<hw>\w+)$"
         rule.replacement = r"\g<hw>"
-        rule.scope = "hardware"
+        rule.scope = "device_type"
         rule.description = ""
         _set_fk_cache(rule, "manufacturer", None)
 
@@ -743,7 +779,7 @@ class TestReplacementTemplateValidation:
         rule = NormalizationRule.__new__(NormalizationRule)
         rule.match_pattern = r"^(\d+)$"
         rule.replacement = ""
-        rule.scope = "hardware"
+        rule.scope = "device_type"
         rule.description = ""
         _set_fk_cache(rule, "manufacturer", None)
 
