@@ -2348,6 +2348,67 @@ class TestSuggestBayMappingFromDescr:
         assert sug is not None
         assert sug["example_bay"] == "MIC 1"
 
+    def test_descr_trail_fallback_for_juniper_fan_tray_controller(self):
+        """Juniper fan trays carry the model in entPhysicalName ('JNP10008-FTC2')
+        and the human-readable position in entPhysicalDescr ('Fan Tray Controller 0').
+        The class+slot descr regex doesn't match, but the trailing-number heuristic
+        on the description should still surface a usable mapping suggestion that
+        targets the existing 'Fan Tray 0' bay (mapping evaluation already considers
+        entPhysicalDescr, so this resolves at lookup time)."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {
+            "entPhysicalName": "JNP10008-FTC2",
+            "entPhysicalDescr": "Fan Tray Controller 0",
+            "entPhysicalClass": "fan",
+            "entPhysicalModelName": "JNP10008-FTC2",
+        }
+        bays = {"Fan Tray 0": MagicMock(), "Fan Tray 1": MagicMock(), "FPC 0": MagicMock()}
+        sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
+        assert sug is not None
+        assert sug["is_regex"] is True
+        assert sug["librenms_class"] == "fan"
+        assert sug["netbox_bay_name"] == "Fan Tray \\1"
+        assert sug["example_bay"] == "Fan Tray 0"
+        assert sug["example_item"] == "Fan Tray Controller 0"
+        # The pattern must fullmatch the descr so the saved mapping resolves at lookup time.
+        import re as _re
+
+        m = _re.fullmatch(sug["librenms_name"], item["entPhysicalDescr"])
+        assert m is not None
+        assert m.expand(sug["netbox_bay_name"]) == "Fan Tray 0"
+
+    def test_descr_trail_fallback_skipped_when_descr_equals_name(self):
+        """If entPhysicalName already carries positional info and the
+        name-based heuristic still failed (e.g. no bay shares the trail),
+        the descr-trail fallback should not produce a suggestion when descr
+        is identical to name — the name-based pass was authoritative."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {
+            "entPhysicalName": "Fan Tray 9",
+            "entPhysicalDescr": "Fan Tray 9",
+            "entPhysicalClass": "fan",
+        }
+        bays = {"Fan Tray 0": MagicMock(), "Fan Tray 1": MagicMock()}
+        sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
+        assert sug is None
+
+    def test_descr_trail_fallback_respects_class_filter(self):
+        """The descr-trail fallback receives the already-class-filtered candidate
+        list, so a fan whose descr ends in '0' must not be mapped onto a 'Slot 0'
+        line-card bay."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {
+            "entPhysicalName": "JNP10008-FTC2",
+            "entPhysicalDescr": "Fan Tray Controller 0",
+            "entPhysicalClass": "fan",
+        }
+        bays = {"Slot 0": MagicMock(), "Slot 1": MagicMock()}  # no fan-named bays
+        sug = BaseModuleTableView._suggest_bay_mapping(item, bays)
+        assert sug is None
+
 
 class TestSuggestTypeMapping:
     """`_suggest_type_mapping` produces a prefill dict for the ModuleTypeMapping form."""

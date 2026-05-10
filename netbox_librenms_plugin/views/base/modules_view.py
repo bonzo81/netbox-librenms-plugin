@@ -2016,7 +2016,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 break
 
         if candidate_bay is None:
-            return descr_suggestion
+            if descr_suggestion is not None:
+                return descr_suggestion
+            # Final fallback: same trail-heuristic but anchored on the
+            # description. Handles entries whose entPhysicalName is the model
+            # string (no positional info) while entPhysicalDescr carries the
+            # human-readable position — e.g. Juniper fan trays where
+            # name='JNP10008-FTC2' and descr='Fan Tray Controller 0' should
+            # map to bay 'Fan Tray 0'. Mapping evaluation already considers
+            # entPhysicalDescr (see _match_module_bay candidate_names), so a
+            # descr-anchored regex resolves at lookup time.
+            return BaseModuleTableView._suggest_bay_mapping_from_descr_trail(
+                item, candidate_names, item_name, item_class
+            )
 
         capture_group = r"(\d+)" if trail_is_digits else r"([A-Za-z]+)"
         librenms_pattern = "^" + re.escape(item_prefix) + capture_group + "$"
@@ -2072,6 +2084,73 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ),
             "example_item": item_name,
             "example_bay": expected_bay,
+        }
+
+    @staticmethod
+    def _suggest_bay_mapping_from_descr_trail(item, candidate_names, item_name, item_class):
+        """
+        Last-chance heuristic: derive a ModuleBayMapping suggestion by applying
+        the trailing-number/letter pattern to ``entPhysicalDescr`` instead of
+        ``entPhysicalName``.
+
+        Useful for vendors that report the model string in entPhysicalName
+        and the human-readable position in entPhysicalDescr (e.g. Juniper
+        fan trays: name='JNP10008-FTC2', descr='Fan Tray Controller 0').
+        Mapping lookup already considers entPhysicalDescr (see
+        ``_match_module_bay`` candidate_names), so a descr-anchored regex
+        such as ``^Fan Tray Controller (\\d+)$`` will resolve correctly at
+        match time.
+
+        ``candidate_names`` should be the bay-name list already filtered by
+        hardware class (the same list ``_suggest_bay_mapping`` built for the
+        name-based pass) so transceivers don't propose chassis line-card
+        bays as targets, fans don't propose Slot N, etc.
+
+        Returns the suggestion dict, or None when no plausible mapping
+        can be derived (no descr, no trailing token, descr same as name,
+        or no bay shares the trailing token).
+        """
+        descr = (item.get("entPhysicalDescr") or "").strip()
+        if not descr or not candidate_names:
+            return None
+        # Skip when descr is identical to the name we already tried — the
+        # name-based heuristic was authoritative for that string.
+        if descr == item_name:
+            return None
+        m = re.search(r"(\d+|[A-Za-z]+)$", descr)
+        if not m:
+            return None
+        descr_trail = m.group(0)
+        descr_prefix = descr[: m.start()]
+        trail_is_digits = descr_trail.isdigit()
+        trail_pattern = r"\d+$" if trail_is_digits else r"[A-Za-z]+$"
+        candidate_bay = None
+        bay_prefix = None
+        for bay_name in candidate_names:
+            bm = re.search(trail_pattern, bay_name)
+            if bm and bm.group(0) == descr_trail:
+                candidate_bay = bay_name
+                bay_prefix = bay_name[: bm.start()]
+                break
+        if candidate_bay is None:
+            return None
+        capture_group = r"(\d+)" if trail_is_digits else r"([A-Za-z]+)"
+        librenms_pattern = "^" + re.escape(descr_prefix) + capture_group + "$"
+        netbox_target = bay_prefix + r"\1"
+        return {
+            "librenms_name": librenms_pattern,
+            "netbox_bay_name": netbox_target,
+            "is_regex": True,
+            "librenms_class": item_class,
+            "description": (
+                f"Auto-suggested from device modules tab: maps LibreNMS items "
+                f"whose description matches '{descr_prefix}<N>' to NetBox bay "
+                f"'{bay_prefix}<N>' (e.g. '{descr}' → '{candidate_bay}'). "
+                f"Triggered because entPhysicalName ('{item_name}') carries "
+                f"no positional token but entPhysicalDescr does."
+            ),
+            "example_item": descr,
+            "example_bay": candidate_bay,
         }
 
     @staticmethod
