@@ -90,7 +90,7 @@ class ModuleTypeMappingViewSet(NetBoxModelViewSet):
     permission_classes = [LibreNMSPluginPermission]
     filterset_class = ModuleTypeMappingFilterSet
 
-    queryset = ModuleTypeMapping.objects.select_related("netbox_module_type")
+    queryset = ModuleTypeMapping.objects.select_related("netbox_module_type", "manufacturer")
     serializer_class = ModuleTypeMappingSerializer
 
 
@@ -100,7 +100,7 @@ class ModuleBayMappingViewSet(NetBoxModelViewSet):
     permission_classes = [LibreNMSPluginPermission]
     filterset_class = ModuleBayMappingFilterSet
 
-    queryset = ModuleBayMapping.objects.all()
+    queryset = ModuleBayMapping.objects.select_related("manufacturer")
     serializer_class = ModuleBayMappingSerializer
 
 

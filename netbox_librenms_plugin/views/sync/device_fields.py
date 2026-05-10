@@ -423,7 +423,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             mapping_error = None
             mapping_existed = False
             if create_mapping and librenms_os:
-                existing = PlatformMapping.objects.filter(librenms_os=librenms_os).first()
+                existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
                 if existing is not None:
                     mapping_existed = True
                 else:

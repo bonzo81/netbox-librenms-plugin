@@ -1461,7 +1461,7 @@ class AddDeviceTypeMappingView(
 
         # Resolve the existing mapping first so we only require the permission
         # actually needed: "add" for a new mapping, "change" for an update.
-        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware=hardware.lower()).first()
+        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware__iexact=hardware).first()
         if existing_mapping:
             self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
         else:
@@ -1475,7 +1475,7 @@ class AddDeviceTypeMappingView(
                 # check and the actual write (select_for_update prevents a concurrent
                 # INSERT from slipping through undetected).
                 locked = (
-                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware=hardware.lower()).first()
+                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware__iexact=hardware).first()
                 )
                 if locked and not existing_mapping:
                     # A concurrent request created the mapping after our upfront read.
@@ -1540,13 +1540,10 @@ class AddDeviceTypeMappingView(
         if libre_device is not None and validation is not None:
             row_response = self.render_device_row(request, libre_device, validation, selections)
             row_html = row_response.content.decode("utf-8")
-            # device_id is an int (URL converter <int:device_id>), so the f-string
-            # interpolation cannot inject HTML metacharacters.
-            row_html = row_html.replace(
-                f'<tr id="device-row-{device_id}"',
-                f'<tr id="device-row-{device_id}" hx-swap-oob="outerHTML"',
-                1,
-            )
+            # The row template already includes hx-swap-oob="true" on the <tr>, so HTMX
+            # will perform an outerHTML swap targeted by the row's id. No further
+            # attribute injection is needed (and adding one would create a duplicate
+            # hx-swap-oob attribute that breaks HTMX OOB parsing).
             # A <tr> following a <div> is invalid HTML and gets silently dropped by the browser
             # parser when HTMX wraps the combined response in a <template> for parsing. Wrapping
             # in <table><tbody> keeps the <tr> in a valid table context so HTMX finds and applies

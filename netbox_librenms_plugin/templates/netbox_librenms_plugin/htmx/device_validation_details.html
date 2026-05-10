@@ -249,7 +249,12 @@
                             timer = setTimeout(function () {
                               var seq = ++requestSeq;
                               fetch("{% url 'dcim-api:devicetype-list' %}?q=" + encodeURIComponent(q) + "&limit=20")
-                                .then(function (r) { return r.json(); })
+                                .then(function (r) {
+                                  if (!r.ok) {
+                                    throw new Error("DeviceType search failed: HTTP " + r.status);
+                                  }
+                                  return r.json();
+                                })
                                 .then(function (data) {
                                   if (seq !== requestSeq) return;
                                   dropdownEl.innerHTML = "";
@@ -273,7 +278,12 @@
                                   }
                                   dropdownEl.style.display = "block";
                                 })
-                                .catch(function () { dropdownEl.style.display = "none"; });
+                                .catch(function (err) {
+                                  if (window.console && console.warn) {
+                                    console.warn("DeviceType autocomplete failed:", err);
+                                  }
+                                  dropdownEl.style.display = "none";
+                                });
                             }, 300);
                           });
 

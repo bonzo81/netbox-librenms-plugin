@@ -618,9 +618,15 @@ def validate_device_for_import(
 
         if not platform_match["found"] and os:
             if platform_match.get("match_type") == "ambiguous":
-                result["warnings"].append(
-                    f"Multiple platform mappings found for OS: '{os}' — resolve the conflict in Platform Mappings"
-                )
+                ambiguity_source = platform_match.get("ambiguity_source", "mapping")
+                if ambiguity_source == "platform":
+                    result["warnings"].append(
+                        f"Multiple Platforms match OS: '{os}' — resolve the duplicate Platform names in NetBox"
+                    )
+                else:
+                    result["warnings"].append(
+                        f"Multiple platform mappings found for OS: '{os}' — resolve the conflict in Platform Mappings"
+                    )
             else:
                 result["warnings"].append(f"No matching platform found for OS: '{os}'")
 

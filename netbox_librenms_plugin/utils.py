@@ -826,24 +826,27 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
 
 
 _MODULE_TOKEN_LEAF_FIX_VERSION = (4, 5, 6)
+_NETBOX_VERSION_PREFIX_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 
 def _get_netbox_version_tuple():
     """Return the running NetBox version as a (major, minor, patch) int tuple,
-    or ``None`` when it cannot be determined."""
+    or ``None`` when it cannot be determined.
+
+    Tolerates trailing build metadata (``-dev``, ``-Docker-3.2.0``, ``+local``,
+    ``.dev1``, etc.) by extracting the leading three numeric components and
+    ignoring anything past them.
+    """
     try:
         from netbox.settings import RELEASE
 
         version = getattr(RELEASE, "version", "") or ""
     except (ImportError, ModuleNotFoundError, AttributeError):
         return None
-    parts = version.split("-", 1)[0].split(".")
-    if len(parts) < 3:
+    match = _NETBOX_VERSION_PREFIX_RE.match(version)
+    if not match:
         return None
-    try:
-        return (int(parts[0]), int(parts[1]), int(parts[2]))
-    except ValueError:
-        return None
+    return tuple(int(part) for part in match.groups())
 
 
 def netbox_resolves_module_token_per_leaf():
@@ -1221,6 +1224,7 @@ def resolve_module_type(
     matched = _lookup_mfr(model_name)
     if not matched:
         matched = module_types.get(model_name)
+    normalized = None
     if not matched:
         normalized = apply_normalization_rules(
             model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
@@ -1230,9 +1234,10 @@ def resolve_module_type(
     if not matched and generic_fallback:
         matched = generic_fallback.get(model_name)
         if not matched:
-            normalized = apply_normalization_rules(
-                model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
-            )
+            if normalized is None:
+                normalized = apply_normalization_rules(
+                    model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
+                )
             if normalized != model_name:
                 matched = generic_fallback.get(normalized)
     return matched
