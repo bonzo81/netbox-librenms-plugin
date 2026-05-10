@@ -9,6 +9,10 @@
 #                   Leave empty for class-independent mappings
 #   netbox_bay_name: Target NetBox module bay name (supports \1, \2 backreferences with regex)
 #   is_regex:       Set to true to treat librenms_name as a Python regex pattern
+#   manufacturer:   Optional NetBox Manufacturer name to scope this mapping to a single
+#                   vendor (matches the device's device_type.manufacturer). Leave empty
+#                   for vendor-independent mappings; manufacturer-scoped rows win over
+#                   global ones for matching devices.
 #   description:    Optional description
 #
 # Regex patterns use Python re.fullmatch() — the pattern must match the entire string.

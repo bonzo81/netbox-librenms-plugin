@@ -139,6 +139,7 @@ class TestGetModuleTypesIndexed:
         mock_mapping = MagicMock()
         mock_mapping.librenms_model = "libre-model-a"
         mock_mapping.netbox_module_type = mt1
+        mock_mapping.manufacturer_id = None
 
         mock_mt_cls = MagicMock()
         mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt1, mt2]
@@ -177,6 +178,7 @@ class TestGetModuleTypesIndexed:
         mock_mapping = MagicMock()
         mock_mapping.librenms_model = "SFP-1G-LX-EXPLICIT"
         mock_mapping.netbox_module_type = mt1
+        mock_mapping.manufacturer_id = None
 
         mock_mt_cls = MagicMock()
         mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt1, mt2]
@@ -196,6 +198,81 @@ class TestGetModuleTypesIndexed:
         # Base key was ambiguous and must be absent; explicit mapping key must be present
         assert "SFP-1G-LX" not in result
         assert result["SFP-1G-LX-EXPLICIT"] is mt1
+
+    def test_manufacturer_scoped_mapping_kept_separate_from_base_index(self):
+        """A manufacturer-scoped ModuleTypeMapping must not pollute the global key space."""
+        from netbox_librenms_plugin.utils import get_module_types_indexed
+
+        mt_juniper = MagicMock()
+        mt_juniper.model = "QSFP-100G-LR4-JUNIPER"
+        mt_juniper.part_number = ""
+
+        mock_mapping = MagicMock()
+        mock_mapping.librenms_model = "1F3QAA"
+        mock_mapping.netbox_module_type = mt_juniper
+        mock_mapping.manufacturer_id = 42  # scoped → must NOT enter the global dict
+
+        mock_mt_cls = MagicMock()
+        mock_mt_cls.objects.all.return_value.select_related.return_value.prefetch_related.return_value = [mt_juniper]
+
+        mock_map_cls = MagicMock()
+        mock_map_cls.objects.select_related.return_value.prefetch_related.return_value = [mock_mapping]
+
+        with patch.dict("sys.modules", {"dcim.models": type("m", (), {"ModuleType": mock_mt_cls})()}):
+            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
+                result = get_module_types_indexed()
+
+        # The vendor-scoped librenms_model must NOT leak into the global lookup
+        assert "1F3QAA" not in result
+        # …but it must be reachable via the per-manufacturer side index
+        assert result.mfr_mappings[(42, "1F3QAA")] is mt_juniper
+
+
+class TestResolveModuleTypeManufacturerScope:
+    """resolve_module_type must prefer manufacturer-scoped mappings when available."""
+
+    def _index(self, base=None, mfr=None):
+        from netbox_librenms_plugin.utils import _ModuleTypeIndex
+
+        return _ModuleTypeIndex(base or {}, mfr_mappings=mfr or {})
+
+    def test_manufacturer_scoped_wins_over_global(self):
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        global_mt = MagicMock(name="global_mt")
+        scoped_mt = MagicMock(name="scoped_mt")
+        idx = self._index(base={"X": global_mt}, mfr={(7, "X"): scoped_mt})
+        manufacturer = MagicMock(pk=7)
+
+        assert resolve_module_type("X", idx, manufacturer=manufacturer) is scoped_mt
+
+    def test_falls_back_to_global_when_no_scoped_match(self):
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        global_mt = MagicMock(name="global_mt")
+        idx = self._index(base={"X": global_mt}, mfr={(7, "OTHER"): MagicMock()})
+        manufacturer = MagicMock(pk=7)
+
+        assert resolve_module_type("X", idx, manufacturer=manufacturer) is global_mt
+
+    def test_other_vendor_does_not_see_scoped_mapping(self):
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        scoped_mt = MagicMock(name="scoped_mt")
+        idx = self._index(base={}, mfr={(7, "X"): scoped_mt})
+        other_mfr = MagicMock(pk=99)
+
+        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **k: v):
+            assert resolve_module_type("X", idx, manufacturer=other_mfr) is None
+
+    def test_no_manufacturer_falls_back_to_global_only(self):
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        scoped_mt = MagicMock(name="scoped_mt")
+        idx = self._index(base={}, mfr={(7, "X"): scoped_mt})
+
+        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **k: v):
+            assert resolve_module_type("X", idx, manufacturer=None) is None
 
 
 class TestInstallModuleViewWiring:

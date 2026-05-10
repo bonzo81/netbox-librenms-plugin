@@ -219,7 +219,6 @@ class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
 
     librenms_model = models.CharField(
         max_length=255,
-        unique=True,
         help_text="Model name from LibreNMS inventory (entPhysicalModelName)",
     )
     netbox_module_type = models.ForeignKey(
@@ -227,6 +226,19 @@ class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
         on_delete=models.CASCADE,
         related_name="librenms_module_type_mappings",
         help_text="The NetBox ModuleType this model name maps to",
+    )
+    manufacturer = models.ForeignKey(
+        Manufacturer,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="librenms_module_type_mappings",
+        help_text=(
+            "Optional: scope this mapping to one manufacturer (matches the device's "
+            "device_type.manufacturer). Leave blank to apply across vendors. When both a "
+            "manufacturer-scoped and a global mapping exist for the same librenms_model, "
+            "the manufacturer-scoped row wins for devices of that vendor."
+        ),
     )
     description = models.TextField(
         blank=True,
@@ -248,13 +260,33 @@ class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
         """Meta options for ModuleTypeMapping."""
 
         ordering = ["librenms_model"]
+        # UniqueConstraint over (librenms_model, manufacturer):
+        # PostgreSQL <13 treats NULL values as distinct in unique indexes, so
+        # the nullable manufacturer FK lets two "global" rows (manufacturer
+        # IS NULL) with the same librenms_model coexist. Splitting into a
+        # conditional pair (NOT NULL + NULL) makes the constraint enforce
+        # uniqueness in both cases on every supported PG version.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["librenms_model", "manufacturer"],
+                condition=models.Q(manufacturer__isnull=False),
+                name="unique_module_type_mapping",
+            ),
+            models.UniqueConstraint(
+                fields=["librenms_model"],
+                condition=models.Q(manufacturer__isnull=True),
+                name="unique_module_type_mapping_global",
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.librenms_model} -> {self.netbox_module_type}"
+        mfr = f" ({self.manufacturer.name})" if self.manufacturer_id else ""
+        return f"{self.librenms_model}{mfr} -> {self.netbox_module_type}"
 
     def to_yaml(self):
         data = {
             "librenms_model": self.librenms_model,
+            "manufacturer": self.manufacturer.name if self.manufacturer_id else "",
             "netbox_module_type": str(self.netbox_module_type),
             "description": self.description,
         }

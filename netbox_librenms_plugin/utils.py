@@ -418,14 +418,18 @@ def find_matching_platform(librenms_os: str) -> dict:
     if not librenms_os or librenms_os == "-":
         return {"found": False, "platform": None, "match_type": None}
 
-    # Try case-insensitive exact name match first
+    # Try case-insensitive exact name match first.  We defer the "ambiguous"
+    # short-circuit so that an explicit PlatformMapping can still disambiguate
+    # the LibreNMS OS in exactly the case where multiple Platform rows share
+    # the name and the user added a mapping to break the tie.
+    platform_ambiguous = False
     try:
         platform = Platform.objects.get(name__iexact=librenms_os)
         return {"found": True, "platform": platform, "match_type": "exact"}
     except Platform.DoesNotExist:
         pass
     except Platform.MultipleObjectsReturned:
-        return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
+        platform_ambiguous = True
 
     # Fall back to PlatformMapping for when the platform name differs from the LibreNMS OS string
     try:
@@ -443,6 +447,9 @@ def find_matching_platform(librenms_os: str) -> dict:
             pass
         except _PlatformMapping.MultipleObjectsReturned:
             return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
+
+    if platform_ambiguous:
+        return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
 
     return {"found": False, "platform": None, "match_type": None}
 
@@ -922,12 +929,35 @@ def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
     )
 
 
+class _ModuleTypeIndex(dict):
+    """Dict mapping LibreNMS keys → ``ModuleType``, plus manufacturer-scoped overrides.
+
+    Behaves exactly like a plain ``dict`` for the global key space (model/part_number
+    plus any global ``ModuleTypeMapping`` rows), but additionally exposes
+    ``mfr_mappings`` — a dict keyed by ``(manufacturer_pk, librenms_model)`` populated
+    from manufacturer-scoped ``ModuleTypeMapping`` rows. ``resolve_module_type`` probes
+    the manufacturer-scoped key first so vendor-specific overrides win for matching
+    devices without leaking into other vendors' lookups.
+    """
+
+    __slots__ = ("mfr_mappings",)
+
+    def __init__(self, *args, mfr_mappings=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mfr_mappings: dict = mfr_mappings or {}
+
+
 def get_module_types_indexed() -> dict:
     """
     Return all NetBox module types indexed by model (and part_number), with ModuleTypeMapping applied.
 
-    ModuleTypeMapping entries take priority over the base model/part_number keys so that
+    Global (manufacturer=NULL) ``ModuleTypeMapping`` rows are merged into the
+    main index and take priority over the base model/part_number keys, so that
     explicit overrides win when the same string appears in both.
+
+    Manufacturer-scoped ``ModuleTypeMapping`` rows are kept out of the main
+    index — they live under ``mfr_mappings`` keyed by ``(manufacturer_pk,
+    librenms_model)`` so they apply only to devices of that vendor.
     """
     from dcim.models import ModuleType
 
@@ -951,22 +981,32 @@ def get_module_types_indexed() -> dict:
     # Mapping ambiguity is tracked separately so that a unique mapping always
     # wins over a base ModuleType entry (explicit overrides take priority).
     #
-    # NOTE on asymmetry vs ``get_module_type_ambiguities`` (issue #72):
-    # ``ModuleTypeMapping.librenms_model`` carries a DB-level ``unique=True``
-    # constraint, so two mapping rows can never collide on the same key. The
-    # ``mapping_ambiguous`` / ``del result[key]`` branch below is therefore
-    # defensive-only — it can never fire under the current schema. Because of
-    # this, there is no companion ``get_module_type_mapping_ambiguities`` helper:
-    # a mapping-vs-mapping collision is structurally impossible. A *single*
-    # mapping silently winning over a base ModuleType row is the documented
-    # contract ("explicit overrides take priority"), not an ambiguity. If the
-    # uniqueness constraint is ever relaxed (e.g. to scope mappings per
-    # manufacturer), revisit this and add a parallel ambiguity surface.
+    # Precedence: a manufacturer-scoped mapping (mfg_pk, librenms_model) wins
+    # over a global one for matching devices; both win over base ModuleType
+    # entries. Manufacturer-scoped rows live in ``mfr_mappings`` and are
+    # NOT merged into the main dict — keeping them isolated avoids polluting
+    # lookups for other vendors. The DB conditional UniqueConstraint pair
+    # (see ``ModuleTypeMapping.Meta.constraints``) ensures (a) no two global
+    # rows share a librenms_model, and (b) no two rows share the same
+    # (librenms_model, manufacturer) pair, so the ``mapping_ambiguous``
+    # branches below are defensive-only — they cannot fire under the current
+    # schema. ``get_module_type_ambiguities`` therefore has no companion
+    # mapping-collision helper.
     mapping_seen: set = set()
     mapping_ambiguous: set = set()
-    for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer").prefetch_related(
-        "netbox_module_type__interfacetemplates"
-    ):
+    mfr_mappings: dict = {}
+    mfr_seen: set = set()
+    for mapping in ModuleTypeMapping.objects.select_related(
+        "netbox_module_type__manufacturer", "manufacturer"
+    ).prefetch_related("netbox_module_type__interfacetemplates"):
+        if mapping.manufacturer_id is not None:
+            mfr_key = (mapping.manufacturer_id, mapping.librenms_model)
+            if mfr_key in mfr_seen:
+                # Defensive: blocked by conditional UniqueConstraint.
+                continue
+            mfr_seen.add(mfr_key)
+            mfr_mappings[mfr_key] = mapping.netbox_module_type
+            continue
         key = mapping.librenms_model
         if key in mapping_ambiguous:
             continue
@@ -976,7 +1016,7 @@ def get_module_types_indexed() -> dict:
         else:
             mapping_seen.add(key)
             result[key] = mapping.netbox_module_type
-    return result
+    return _ModuleTypeIndex(result, mfr_mappings=mfr_mappings)
 
 
 def get_module_type_ambiguities() -> dict:
@@ -995,8 +1035,10 @@ def get_module_type_ambiguities() -> dict:
     and the underlying index ignores manufacturer too.
 
     There is no companion ``get_module_type_mapping_ambiguities`` helper: see
-    the note in ``get_module_types_indexed`` — ``ModuleTypeMapping.librenms_model``
-    is DB-unique, so mapping-vs-mapping collisions cannot occur.
+    the note in ``get_module_types_indexed`` — ``ModuleTypeMapping``'s
+    conditional UniqueConstraint pair (``unique_module_type_mapping`` and
+    ``unique_module_type_mapping_global``) makes mapping-vs-mapping
+    collisions structurally impossible.
     """
     from dcim.models import ModuleType
 
@@ -1144,17 +1186,34 @@ def resolve_module_type(
     (e.g. because the same model name is used by multiple manufacturers, making it
     ambiguous in the primary index).
 
+    When *manufacturer* is provided **and** *module_types* is the ``_ModuleTypeIndex``
+    returned by :func:`get_module_types_indexed`, manufacturer-scoped
+    ``ModuleTypeMapping`` rows are probed first (raw and normalized model name)
+    before falling back to the global index. This lets vendor-specific overrides
+    win without polluting lookups for other vendors.
+
     Returns the matched ModuleType or None.
     """
     if not model_name:
         return None
-    matched = module_types.get(model_name)
+
+    mfr_mappings = getattr(module_types, "mfr_mappings", None)
+    mfr_pk = getattr(manufacturer, "pk", None)
+
+    def _lookup_mfr(name):
+        if mfr_mappings and mfr_pk is not None and name:
+            return mfr_mappings.get((mfr_pk, name))
+        return None
+
+    matched = _lookup_mfr(model_name)
+    if not matched:
+        matched = module_types.get(model_name)
     if not matched:
         normalized = apply_normalization_rules(
             model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
         )
         if normalized != model_name:
-            matched = module_types.get(normalized)
+            matched = _lookup_mfr(normalized) or module_types.get(normalized)
     if not matched and generic_fallback:
         matched = generic_fallback.get(model_name)
         if not matched:

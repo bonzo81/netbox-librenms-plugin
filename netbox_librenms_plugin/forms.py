@@ -356,16 +356,22 @@ class DeviceTypeMappingFilterForm(NetBoxModelFilterSetForm):
 class ModuleTypeMappingForm(NetBoxModelForm):
     """Form for creating and editing module type mappings between LibreNMS and NetBox."""
 
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        help_text="Optional: scope this mapping to a single manufacturer.",
+    )
     netbox_module_type = DynamicModelChoiceField(
         queryset=ModuleType.objects.all(),
         label="NetBox Module Type",
+        query_params={"manufacturer_id": "$manufacturer"},
     )
 
     class Meta:
         """Meta options for ModuleTypeMappingForm."""
 
         model = ModuleTypeMapping
-        fields = ["librenms_model", "netbox_module_type", "description"]
+        fields = ["librenms_model", "manufacturer", "netbox_module_type", "description"]
 
 
 class ModuleTypeMappingImportForm(NetBoxModelImportForm):
@@ -403,6 +409,11 @@ class ModuleTypeMappingFilterForm(NetBoxModelFilterSetForm):
     """Form for filtering module type mappings."""
 
     librenms_model = forms.CharField(required=False, label="LibreNMS Model")
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
     description = forms.CharField(
         required=False,
         label="Description",

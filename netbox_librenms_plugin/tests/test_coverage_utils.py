@@ -471,8 +471,13 @@ class TestFindMatchingPlatformMultipleReturned:
                 assert result["found"] is False
                 assert result["platform"] is None
                 assert result["match_type"] == "ambiguous"
-                # Platform is checked first; MultipleObjectsReturned returns early without reaching PlatformMapping
-                MockPlatformMapping.objects.get.assert_not_called()
+                assert result["ambiguity_source"] == "platform"
+                # Per the fix for the "PlatformMapping never consulted" CodeRabbit
+                # finding: when Platform.MultipleObjectsReturned fires, the function
+                # now defers the ambiguity decision and consults PlatformMapping
+                # first so an explicit override can disambiguate. Only when the
+                # mapping also misses do we surface ambiguous(platform).
+                MockPlatformMapping.objects.get.assert_called_once_with(librenms_os__iexact="ios")
 
 
 class TestGetMissingVlanWarning:

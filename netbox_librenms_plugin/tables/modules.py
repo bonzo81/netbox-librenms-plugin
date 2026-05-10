@@ -546,13 +546,15 @@ class LibreNMSModuleTable(tables.Table):
             sug = record["type_suggestion"]
             base_url = reverse("plugins:netbox_librenms_plugin:moduletypemapping_add")
             return_url = getattr(self, "return_url", "") or ""
-            qs = urlencode(
-                {
-                    "librenms_model": sug["librenms_model"],
-                    "description": sug.get("description") or "",
-                    **({"return_url": return_url} if return_url else {}),
-                }
-            )
+            params = {
+                "librenms_model": sug["librenms_model"],
+                "description": sug.get("description") or "",
+            }
+            if sug.get("manufacturer"):
+                params["manufacturer"] = sug["manufacturer"]
+            if return_url:
+                params["return_url"] = return_url
+            qs = urlencode(params)
             buttons.append(
                 format_html(
                     '<a href="{}?{}" class="btn btn-sm btn-outline-primary ms-1"'

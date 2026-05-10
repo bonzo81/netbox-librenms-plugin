@@ -39,7 +39,7 @@ class ModuleTypeMappingSerializer(NetBoxModelSerializer):
         """Meta options for ModuleTypeMappingSerializer."""
 
         model = ModuleTypeMapping
-        fields = ["id", "librenms_model", "netbox_module_type", "description"]
+        fields = ["id", "librenms_model", "manufacturer", "netbox_module_type", "description"]
 
 
 class ModuleBayMappingSerializer(NetBoxModelSerializer):

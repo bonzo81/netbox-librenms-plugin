@@ -223,6 +223,7 @@ class TestToYamlOnAllMappingModels:
         module_type = MagicMock()
         module_type.__str__ = lambda s: "WS-X4748"
         _set_fk_cache(mapping, "netbox_module_type", module_type)
+        mapping.manufacturer_id = None
         mapping.description = ""
 
         result = mapping.to_yaml()

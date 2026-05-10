@@ -47,12 +47,17 @@ class ModuleTypeMappingFilterSet(django_filters.FilterSet):
 
     librenms_model = django_filters.CharFilter(lookup_expr="icontains")
     description = django_filters.CharFilter(lookup_expr="icontains")
+    manufacturer_id = django_filters.ModelChoiceFilter(
+        field_name="manufacturer",
+        queryset=Manufacturer.objects.all(),
+        label="Manufacturer",
+    )
 
     class Meta:
         """Meta options for ModuleTypeMappingFilterSet."""
 
         model = ModuleTypeMapping
-        fields = ["librenms_model", "description"]
+        fields = ["librenms_model", "description", "manufacturer_id"]
 
 
 class ModuleBayMappingFilterSet(django_filters.FilterSet):

@@ -86,6 +86,7 @@ class ModuleTypeMappingTable(NetBoxTable):
 
     librenms_model = tables.Column(verbose_name="LibreNMS Model", linkify=True)
     netbox_module_type = tables.Column(verbose_name="NetBox Module Type", linkify=True)
+    manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
@@ -98,6 +99,7 @@ class ModuleTypeMappingTable(NetBoxTable):
             "id",
             "librenms_model",
             "netbox_module_type",
+            "manufacturer",
             "description",
             "actions",
         )
@@ -106,6 +108,7 @@ class ModuleTypeMappingTable(NetBoxTable):
             "id",
             "librenms_model",
             "netbox_module_type",
+            "manufacturer",
             "description",
             "actions",
         )

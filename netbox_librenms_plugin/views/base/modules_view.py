@@ -1735,6 +1735,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             else:
                 type_suggestion = self._suggest_type_mapping(item, matched_bay)
                 if type_suggestion:
+                    # Pre-fill manufacturer from current device so the new
+                    # mapping is auto-scoped to the vendor (the user can clear
+                    # it in the form to make it global).
+                    mfr_id = getattr(self, "_current_manufacturer_id", None)
+                    mfr_name = getattr(self, "_current_manufacturer_name", None)
+                    if mfr_id:
+                        type_suggestion.setdefault("manufacturer", mfr_id)
+                        if mfr_name:
+                            type_suggestion.setdefault("manufacturer_name", mfr_name)
                     row["type_suggestion"] = type_suggestion
                 module_type_create = self._suggest_module_type_create(item, manufacturer)
                 if module_type_create:
