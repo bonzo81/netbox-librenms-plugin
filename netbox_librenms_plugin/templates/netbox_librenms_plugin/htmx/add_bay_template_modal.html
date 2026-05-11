@@ -106,36 +106,52 @@
             var preview = document.getElementById("add-bay-mapping-preview");
             if (!nameInput || !checkbox) return;
 
-            // Mirror of AddBayTemplateView._derive_mapping_pattern. Tokenises
-            // both names into [literal, digit-run, …]; returns null unless
-            // structures match, all digit values are equal, and at least one
-            // digit run exists.
+            // Mirror of AddBayTemplateView._derive_mapping_pattern. Maps
+            // each *distinct* digit value on the LibreNMS side to a numbered
+            // capture group (repeats emit back-references), then routes
+            // NetBox-side digits to the matching libre group. Returns null
+            // when libre has no digits, when a NetBox digit value is absent
+            // from libre, or when the pattern fails to round-trip.
             function derivePattern(libre, nb) {
                 if (!libre || !nb) return null;
                 var tokenRe = /(\d+|\D+)/g;
                 var libreTokens = libre.match(tokenRe) || [];
                 var nbTokens = nb.match(tokenRe) || [];
-                if (libreTokens.length !== nbTokens.length) return null;
-                var digitCount = 0;
+                var groups = {};
+                var nextGroup = 1;
                 var pattern = "^";
-                var replacement = "";
                 for (var i = 0; i < libreTokens.length; i++) {
-                    var lt = libreTokens[i], nt = nbTokens[i];
-                    var ld = /^\d+$/.test(lt), nd = /^\d+$/.test(nt);
-                    if (ld !== nd) return null;
-                    if (ld) {
-                        if (lt !== nt) return null;
-                        digitCount++;
-                        pattern += "(\\d+)";
-                        replacement += "\\" + digitCount;
+                    var t = libreTokens[i];
+                    if (/^\d+$/.test(t)) {
+                        if (Object.prototype.hasOwnProperty.call(groups, t)) {
+                            pattern += "\\" + groups[t];
+                        } else {
+                            groups[t] = nextGroup++;
+                            pattern += "(\\d+)";
+                        }
                     } else {
-                        if (lt.toLowerCase() !== nt.toLowerCase()) return null;
-                        pattern += lt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                        replacement += nt;
+                        pattern += t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
                     }
                 }
-                if (digitCount === 0) return null;
                 pattern += "$";
+                if (nextGroup === 1) return null;
+                var replacement = "";
+                for (var j = 0; j < nbTokens.length; j++) {
+                    var u = nbTokens[j];
+                    if (/^\d+$/.test(u)) {
+                        if (!Object.prototype.hasOwnProperty.call(groups, u)) return null;
+                        replacement += "\\" + groups[u];
+                    } else {
+                        replacement += u.replace(/\\/g, "\\\\");
+                    }
+                }
+                // Sanity: the pattern applied to libre must reproduce nb.
+                var rx;
+                try { rx = new RegExp(pattern); } catch (e) { return null; }
+                if (!rx.test(libre)) return null;
+                // JS replace() interprets $1.. for back-refs; convert.
+                var jsReplacement = replacement.replace(/\\(\d+)/g, "$$$1");
+                if (libre.replace(rx, jsReplacement) !== nb) return null;
                 return { pattern: pattern, replacement: replacement };
             }
 

@@ -1081,68 +1081,86 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
     @staticmethod
     def _derive_mapping_pattern(librenms_name, netbox_name):
         """
-        If both names are structurally identical (same alternating literal /
-        digit-run tokens, same digit values, literals equal under
-        case-insensitive comparison) and contain at least one digit run,
-        return a dict describing a regex mapping that covers all siblings
-        sharing the same literal skeleton. Otherwise return ``None``.
+        Derive a regex ``ModuleBayMapping`` rule that maps ``librenms_name``
+        to ``netbox_name`` and naturally covers every sibling bay sharing
+        the same LibreNMS-side literal skeleton.
 
-        The captured digit runs become ``(\\d+)`` groups; the NetBox
-        replacement preserves the operator-chosen literal parts and
-        back-references the same group positions.
+        Both names are tokenised into alternating literal and digit-run
+        segments. Each *distinct* digit value on the LibreNMS side becomes
+        a numbered capture group; subsequent occurrences of the same value
+        emit back-references, so ``"0/FT0"`` produces ``r"^(\\d+)/FT\\1$"``
+        — matching only when both fan-tray digits agree. The NetBox
+        replacement preserves the operator-chosen literals verbatim and
+        back-references the LibreNMS group whose value matches each digit
+        run on the NetBox side.
 
-        Examples:
-            ('Sfm 1', 'SFM 1') -> {kind: 'regex',
-                                   librenms_pattern: r'^Sfm (\\d+)$',
-                                   netbox_replacement: r'SFM \\1', ...}
-            ('Slot 0', 'Slot 0') -> {... pattern: r'^Slot (\\d+)$' ...}
-            ('TenGigE0/0/0/0', same) -> regex with four groups.
-            ('Sfm 1', 'Card 1') -> None (literals differ beyond case).
-            ('Slot A', 'Slot A') -> None (no digit run).
+        Returns ``None`` when:
+          * either name is empty,
+          * the LibreNMS name has no digit run at all,
+          * the NetBox name contains a digit value that does not appear in
+            the LibreNMS name (we'd be inventing a value we can't extract),
+          * the resulting pattern fails to compile or does not round-trip
+            (``compile.fullmatch`` + ``compile.sub`` must reproduce the
+            exact NetBox name).
+
+        Examples::
+
+            ('Sfm 1', 'SFM 1')        -> r'^Sfm (\\d+)$'      → r'SFM \\1'
+            ('0/FT0', 'Fan Tray 0')   -> r'^(\\d+)/FT\\1$'    → r'Fan Tray \\1'
+            ('TenGigE0/0/0/0', same)  -> r'^TenGigE(\\d+)/\\1/\\1/\\1$'
+                                       → r'TenGigE\\1/\\1/\\1/\\1'
+            ('0/FT0', 'Fan Tray 1')   -> None  (libre has no '1')
+            ('Slot A', 'Slot A')      -> None  (no digit run)
         """
         if not librenms_name or not netbox_name:
             return None
         token_re = re.compile(r"(\d+|\D+)")
         libre_tokens = token_re.findall(librenms_name)
         nb_tokens = token_re.findall(netbox_name)
-        if len(libre_tokens) != len(nb_tokens):
-            return None
-        digit_count = 0
+
+        digit_groups = {}
         pattern_parts = ["^"]
-        replacement_parts = []
-        for libre_tok, nb_tok in zip(libre_tokens, nb_tokens):
-            libre_is_digit = libre_tok.isdigit()
-            nb_is_digit = nb_tok.isdigit()
-            if libre_is_digit != nb_is_digit:
-                return None
-            if libre_is_digit:
-                if libre_tok != nb_tok:
-                    return None
-                digit_count += 1
-                pattern_parts.append(r"(\d+)")
-                replacement_parts.append(rf"\{digit_count}")
+        for tok in libre_tokens:
+            if tok.isdigit():
+                if tok in digit_groups:
+                    pattern_parts.append(rf"\{digit_groups[tok]}")
+                else:
+                    idx = len(digit_groups) + 1
+                    digit_groups[tok] = idx
+                    pattern_parts.append(r"(\d+)")
             else:
-                if libre_tok.lower() != nb_tok.lower():
-                    return None
-                pattern_parts.append(re.escape(libre_tok))
-                replacement_parts.append(nb_tok)
-        if digit_count == 0:
-            return None
+                pattern_parts.append(re.escape(tok))
         pattern_parts.append("$")
+        if not digit_groups:
+            return None
+
+        replacement_parts = []
+        for tok in nb_tokens:
+            if tok.isdigit():
+                if tok not in digit_groups:
+                    return None
+                replacement_parts.append(rf"\{digit_groups[tok]}")
+            else:
+                replacement_parts.append(tok.replace("\\", r"\\"))
+
         librenms_pattern = "".join(pattern_parts)
         netbox_replacement = "".join(replacement_parts)
-        # Sanity: pattern must compile and match the original librenms_name.
         try:
             compiled = re.compile(librenms_pattern)
         except re.error:
             return None
         if not compiled.fullmatch(librenms_name):
             return None
+        try:
+            if compiled.sub(netbox_replacement, librenms_name) != netbox_name:
+                return None
+        except re.error:
+            return None
         return {
             "kind": "regex",
             "librenms_pattern": librenms_pattern,
             "netbox_replacement": netbox_replacement,
-            "digit_count": digit_count,
+            "digit_count": len(digit_groups),
         }
 
     @staticmethod

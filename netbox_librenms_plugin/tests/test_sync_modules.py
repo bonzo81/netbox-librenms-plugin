@@ -2824,8 +2824,10 @@ class TestAddBayTemplateViewMappingCheckbox:
 
 
 class TestDeriveMappingPattern:
-    """_derive_mapping_pattern is conservative: same skeleton + same digit
-    values + at least one digit run. Literals may differ in case only."""
+    """_derive_mapping_pattern maps each distinct LibreNMS digit value to a
+    capture group; the NetBox replacement may use any literals as long as
+    every NetBox digit value is present on the LibreNMS side and the
+    pattern round-trips."""
 
     def _fn(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
@@ -2844,26 +2846,39 @@ class TestDeriveMappingPattern:
         assert result is not None
         assert result["digit_count"] == 1
 
-    def test_multi_digit_skeleton(self):
+    def test_multi_digit_skeleton_collapses_repeat_to_backref(self):
+        # All four digits have the same value '0', so they collapse to a
+        # single group with back-references rather than four groups.
         result = self._fn()("TenGigE0/0/0/0", "TenGigE0/0/0/0")
         assert result is not None
-        assert result["digit_count"] == 4
-        # Each group is back-referenced in order in the replacement.
-        assert result["netbox_replacement"] == r"TenGigE\1/\2/\3/\4"
+        assert result["digit_count"] == 1
+        assert result["librenms_pattern"] == r"^TenGigE(\d+)/\1/\1/\1$"
+        assert result["netbox_replacement"] == r"TenGigE\1/\1/\1/\1"
 
-    def test_different_digit_values_returns_none(self):
-        # Both have digits but different values — would silently rewrite the
-        # numeric position, never desired.
+    def test_libre_and_nb_have_different_skeletons(self):
+        # 0/FT0 → Fan Tray 0: both libre digits are '0' so they collapse to
+        # one group, and NetBox '0' references that group.
+        result = self._fn()("0/FT0", "Fan Tray 0")
+        assert result is not None
+        assert result["librenms_pattern"] == r"^(\d+)/FT\1$"
+        assert result["netbox_replacement"] == r"Fan Tray \1"
+
+    def test_literal_difference_with_shared_digit(self):
+        # Literals on libre and NetBox are unrelated — that's fine, they
+        # don't need to match. Digit '1' is shared.
+        result = self._fn()("Sfm 1", "Card 1")
+        assert result is not None
+        assert result["netbox_replacement"] == r"Card \1"
+
+    def test_nb_digit_absent_from_libre_returns_none(self):
+        # NetBox uses digit '2' which is nowhere on the libre side.
         assert self._fn()("Slot 1", "Slot 2") is None
 
     def test_no_digit_run_returns_none(self):
         assert self._fn()("Slot A", "Slot A") is None
 
-    def test_literal_difference_beyond_case_returns_none(self):
-        assert self._fn()("Sfm 1", "Card 1") is None
-
-    def test_token_count_mismatch_returns_none(self):
-        # Adding an extra digit run breaks the skeleton.
+    def test_extra_nb_digit_absent_from_libre_returns_none(self):
+        # NetBox has an extra digit '0' that libre never produces.
         assert self._fn()("Slot 1", "Slot 1/0") is None
 
     def test_empty_input_returns_none(self):
