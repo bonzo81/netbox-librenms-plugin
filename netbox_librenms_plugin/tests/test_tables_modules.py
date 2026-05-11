@@ -18,6 +18,7 @@ class TestLibreNMSModuleTable:
         can_change_module=True,
         can_delete_module=True,
         can_add_module_bay_template=True,
+        can_add_module_type=True,
     ):
         """Create a bare table instance without calling __init__."""
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
@@ -31,6 +32,7 @@ class TestLibreNMSModuleTable:
         table.can_change_module = can_change_module
         table.can_delete_module = can_delete_module
         table.can_add_module_bay_template = can_add_module_bay_template
+        table.can_add_module_type = can_add_module_type
         return table
 
     # ------------------------------------------------------------------
@@ -903,6 +905,20 @@ class TestLibreNMSModuleTable:
         assert "description=" not in result
         assert "manufacturer=" not in result
         assert "model=GLC-T" in result
+
+    def test_render_actions_module_type_button_skipped_when_user_lacks_add_moduletype_perm(self):
+        """Without `dcim.add_moduletype`, the Add Module Type CTA must be hidden — clicking
+        it would surface only a permission error from NetBox's native form."""
+        device = MagicMock()
+        device.pk = 62
+        table = self._make_table(device=device, can_add_module_type=False)
+        record = {
+            "status": "No Type",
+            "module_type_create": {"model": "X", "part_number": "X"},
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/dcim/module-types/add/"):
+            result = str(table.render_actions("", record))
+        assert "Add Module Type" not in result
 
 
 # ---------------------------------------------------------------------------

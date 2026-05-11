@@ -469,10 +469,12 @@ class TestAddDeviceToLibreNMSViewPermission:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_write_permission = MagicMock(return_value=_denied_response())
-        view.request = _make_request(post_data={"snmp_version": "v2c"})
-
-        result = view.post(view.request, object_id=1)
+        view.require_all_permissions = MagicMock(return_value=_denied_response())
+        view.request = _make_request(post_data={"snmp_version": "v2c", "object_type": "device"})
+        # Permission check now runs after object resolution, so the get_object
+        # lookup must be stubbed out to reach it.
+        with patch.object(view, "get_object", return_value=MagicMock()):
+            result = view.post(view.request, object_id=1)
         assert result.status_code == 403
 
 
@@ -481,7 +483,7 @@ class TestAddDeviceToLibreNMSViewFormInvalid:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_write_permission = MagicMock(return_value=None)
+        view.require_all_permissions = MagicMock(return_value=None)
 
         mock_device = MagicMock()
         mock_device.get_absolute_url.return_value = "/device/1/"
@@ -510,7 +512,7 @@ class TestAddDeviceToLibreNMSViewFormValid:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_write_permission = MagicMock(return_value=None)
+        view.require_all_permissions = MagicMock(return_value=None)
 
         mock_device = MagicMock()
         mock_device.get_absolute_url.return_value = "/device/1/"
@@ -556,7 +558,7 @@ class TestAddDeviceToLibreNMSViewFormValidExtraFields:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_write_permission = MagicMock(return_value=None)
+        view.require_all_permissions = MagicMock(return_value=None)
 
         mock_device = MagicMock()
         mock_device.get_absolute_url.return_value = "/device/1/"
@@ -600,7 +602,7 @@ class TestAddDeviceToLibreNMSViewFormValidExtraFields:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_write_permission = MagicMock(return_value=None)
+        view.require_all_permissions = MagicMock(return_value=None)
 
         mock_device = MagicMock()
         mock_device.get_absolute_url.return_value = "/device/1/"
@@ -644,7 +646,7 @@ class TestAddDeviceToLibreNMSViewV3:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_write_permission = MagicMock(return_value=None)
+        view.require_all_permissions = MagicMock(return_value=None)
         view.request = _make_request()
 
         mock_device = MagicMock()
@@ -692,7 +694,7 @@ class TestAddDeviceToLibreNMSViewUnknownVersion:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        view.require_write_permission = MagicMock(return_value=None)
+        view.require_all_permissions = MagicMock(return_value=None)
 
         mock_device = MagicMock()
         mock_device.get_absolute_url.return_value = "/device/1/"

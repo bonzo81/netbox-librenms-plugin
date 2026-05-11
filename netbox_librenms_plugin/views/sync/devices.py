@@ -7,10 +7,19 @@ from django.views import View
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 
-class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
+class AddDeviceToLibreNMSView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    View,
+):
     """Add a NetBox device or VM to LibreNMS via the API."""
 
     def get_form_class(self):
@@ -42,10 +51,8 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
     def post(self, request, object_id):
         """Add a device to LibreNMS using the submitted SNMP form."""
-        # Check write permission before adding device to LibreNMS
-        if error := self.require_write_permission():
-            return error
-
+        # Resolve the target object first so we can apply object-level perms
+        # against the correct model (Device vs VirtualMachine).
         object_type = request.POST.get("object_type")
         self.object = self.get_object(object_id, object_type=object_type)
         if self.object is None:
@@ -57,6 +64,16 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 f"Invalid object_type: {escape(str(object_type))}",
                 status=400,
             )
+
+        # Plugin write perm + NetBox change perm on the resolved model. The
+        # mapping is set per-request because object_type can be either
+        # device or virtualmachine; static class-level declaration cannot
+        # express that branch.
+        target_model = VirtualMachine if object_type == "virtualmachine" else Device
+        self.required_object_permissions = {"POST": [("change", target_model)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
         form_class = self.get_form_class()
 
         snmp_version = request.POST.get("v1v2-snmp_version") or request.POST.get("v3-snmp_version")

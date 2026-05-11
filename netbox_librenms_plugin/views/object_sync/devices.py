@@ -34,7 +34,7 @@ from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
 from ..base.modules_view import BaseModuleTableView, _check_ignore_rules
 from ..base.vlan_table_view import BaseVLANTableView
-from ..mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+from ..mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
@@ -162,10 +162,22 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
         return JsonResponse({"status": "error", "message": "Interface data not found"}, status=404)
 
 
-class SingleModuleVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class SingleModuleVerifyView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    CacheMixin,
+    View,
+):
     """Verify module row data against cached LibreNMS inventory for a selected VC member."""
 
+    # JSON endpoint that returns the rendered module row — only viewers of the
+    # underlying Device should be able to surface its inventory data.
+    required_object_permissions = {"POST": [("view", Device)]}
+
     def post(self, request):
+        if error := self.require_object_permissions_json("POST"):
+            return error
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
         ent_physical_index = data.get("ent_physical_index")
@@ -290,6 +302,7 @@ class SingleModuleVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             can_change_module=has_write_permission and request.user.has_perm("dcim.change_module"),
             can_delete_module=has_write_permission and request.user.has_perm("dcim.delete_module"),
             can_add_module_bay_template=(has_write_permission and request.user.has_perm("dcim.add_modulebaytemplate")),
+            can_add_module_type=(has_write_permission and request.user.has_perm("dcim.add_moduletype")),
         )
         table.configure(request)
         formatted_row = table.format_module_data(row)
@@ -563,6 +576,7 @@ class DeviceModuleTableView(BaseModuleTableView):
             can_change_module=has_write_permission and user.has_perm("dcim.change_module"),
             can_delete_module=has_write_permission and user.has_perm("dcim.delete_module"),
             can_add_module_bay_template=(has_write_permission and user.has_perm("dcim.add_modulebaytemplate")),
+            can_add_module_type=(has_write_permission and user.has_perm("dcim.add_moduletype")),
         )
         server_key = self.librenms_api.server_key
         table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")

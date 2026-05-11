@@ -52,7 +52,10 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert result == mock_ctx
         assert mock_get_context.called
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request == request
+        # Identity check: the child view must store a *copy* of the request,
+        # not the original — equality (==) would silently pass even if the
+        # original were reused (MagicMock instances compare equal).
+        assert child_instance.request is not request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 
@@ -73,7 +76,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert result == mock_ctx
         assert mock_get_context.called
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request == request
+        assert child_instance.request is not request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 
@@ -96,7 +99,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request == request
+        assert child_instance.request is not request
 
     def test_get_vlan_context_delegates_to_vlan_view(self):
         """get_vlan_context() creates DeviceVLANTableView, copies request, and calls get_vlan_context."""
@@ -115,7 +118,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert result == mock_ctx
         assert mock_get_context.called
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request == request
+        assert child_instance.request is not request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 
@@ -136,7 +139,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert result == mock_ctx
         assert mock_get_context.called
         child_instance = mock_get_context.call_args[0][0]
-        assert child_instance.request == request
+        assert child_instance.request is not request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 
@@ -899,6 +902,7 @@ class TestDeviceModuleTableView:
                     "dcim.change_module",
                     "dcim.delete_module",
                     "dcim.add_modulebaytemplate",
+                    "dcim.add_moduletype",
                 }
             )
         )
@@ -924,6 +928,7 @@ class TestDeviceModuleTableView:
             can_change_module=True,
             can_delete_module=True,
             can_add_module_bay_template=True,
+            can_add_module_type=True,
         )
         assert result is mock_table
 

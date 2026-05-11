@@ -60,6 +60,7 @@ class LibreNMSModuleTable(tables.Table):
         can_change_module=False,
         can_delete_module=False,
         can_add_module_bay_template=False,
+        can_add_module_type=False,
         **kwargs,
     ):
         """Initialize table with optional device context."""
@@ -71,6 +72,7 @@ class LibreNMSModuleTable(tables.Table):
         self.can_change_module = can_change_module
         self.can_delete_module = can_delete_module
         self.can_add_module_bay_template = can_add_module_bay_template
+        self.can_add_module_type = can_add_module_type
         super().__init__(*args, **kwargs)
         if not (has_write_permission and can_add_module) and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
@@ -327,8 +329,11 @@ class LibreNMSModuleTable(tables.Table):
             )
         if device and not can_add_template:
             # Viewer lacks dcim.add_modulebaytemplate — don't render a clickable
-            # badge that would only surface a permission error.
-            return ""
+            # badge that would only surface a permission error. mark_safe("")
+            # preserves the SafeString-ness of the surrounding concatenation
+            # (`status_html + fix_html + possible_carrier_html`); a bare ""
+            # would downgrade the result to a plain str and trigger escaping.
+            return mark_safe("")
         if fallback_url:
             return format_html(
                 ' <a href="{}" class="badge bg-warning text-dark" title="{}">'
@@ -637,7 +642,11 @@ class LibreNMSModuleTable(tables.Table):
         # alternative to "Add Mapping": rather than aliasing the LibreNMS
         # model string to an existing NetBox type, the user creates the
         # missing ModuleType directly so subsequent matches work natively.
-        if record.get("status") == "No Type" and record.get("module_type_create"):
+        if (
+            record.get("status") == "No Type"
+            and record.get("module_type_create")
+            and getattr(self, "can_add_module_type", False)
+        ):
             create = record["module_type_create"]
             base_url = reverse("dcim:moduletype_add")
             return_url = getattr(self, "return_url", "") or ""
