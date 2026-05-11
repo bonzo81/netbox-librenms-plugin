@@ -2470,3 +2470,237 @@ class TestModulesRedirectResponse:
         response = _modules_redirect_response(req, "/sync/")
         assert response.status_code == 204
         assert response["HX-Redirect"] == "/sync/?tab=modules#librenms-module-table"
+
+
+class TestAddBayTemplateViewWiring:
+    """AddBayTemplateView must have the right mixins and target kinds."""
+
+    def test_inherits_required_mixins(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        assert LibreNMSPermissionMixin in AddBayTemplateView.__mro__
+        assert NetBoxObjectPermissionMixin in AddBayTemplateView.__mro__
+
+    def test_target_kinds_are_device_type_and_module_type(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        assert AddBayTemplateView.TARGET_KINDS == ("device_type", "module_type")
+
+
+class TestAddBayTemplateViewPostValidation:
+    """POST input validation: target_kind, target_pk, name."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        view = object.__new__(AddBayTemplateView)
+        # Bypass perm checks: require_all_permissions returns None on success.
+        view.require_all_permissions = MagicMock(return_value=None)
+        return view
+
+    def _make_request(self, post_data, htmx=False):
+        req = MagicMock()
+        req.method = "POST"
+        req.POST = post_data
+        req.headers = {"HX-Request": "true"} if htmx else {}
+        return req
+
+    def test_invalid_target_kind_returns_redirect(self):
+        view = self._make_view()
+        req = self._make_request({"target_kind": "bogus", "target_pk": "1", "name": "Slot 1"})
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"
+            ) as mock_redir,
+        ):
+            result = view.post(req, pk=1)
+        assert result == "REDIR"
+        assert mock_messages.error.called
+        assert "Invalid target_kind" in mock_messages.error.call_args[0][1]
+        mock_redir.assert_called_once()
+
+    def test_missing_target_pk_returns_redirect(self):
+        view = self._make_view()
+        req = self._make_request({"target_kind": "device_type", "target_pk": "", "name": "Slot 1"})
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+        ):
+            view.post(req, pk=1)
+        assert "target_pk" in mock_messages.error.call_args[0][1]
+
+    def test_missing_name_returns_redirect(self):
+        view = self._make_view()
+        req = self._make_request({"target_kind": "module_type", "target_pk": "5", "name": "  "})
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+        ):
+            view.post(req, pk=1)
+        assert "name is required" in mock_messages.error.call_args[0][1]
+
+
+class TestAddBayTemplateViewGetValidation:
+    """GET modal renderer validates query-string inputs."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        view = object.__new__(AddBayTemplateView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        return view
+
+    def test_invalid_target_kind_returns_400(self):
+        view = self._make_view()
+        req = MagicMock()
+        req.GET = {"target_kind": "nope", "target_pk": "1"}
+        with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()):
+            response = view.get(req, pk=1)
+        assert response.status_code == 400
+
+    def test_invalid_target_pk_returns_400(self):
+        view = self._make_view()
+        req = MagicMock()
+        req.GET = {"target_kind": "device_type", "target_pk": "abc"}
+        with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()):
+            response = view.get(req, pk=1)
+        assert response.status_code == 400
+
+    def test_valid_request_renders_modal_with_suggestions(self):
+        view = self._make_view()
+        req = MagicMock()
+        req.GET = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "suggested_name": "Fan Tray 0",
+            "suggested_position": "0",
+            "suggested_label": "Fan Controller",
+        }
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value="RENDERED") as mock_render,
+        ):
+            response = view.get(req, pk=42)
+        assert response == "RENDERED"
+        ctx = mock_render.call_args[0][2]
+        assert ctx["device_pk"] == 42
+        assert ctx["target_kind"] == "device_type"
+        assert ctx["target_pk"] == 7
+        assert ctx["suggested_name"] == "Fan Tray 0"
+        assert ctx["suggested_position"] == "0"
+        assert ctx["suggested_label"] == "Fan Controller"
+
+
+class TestDeriveBayTemplateSuggestion:
+    """_derive_bay_template_suggestion infers sane defaults from item dicts."""
+
+    def _helper(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        return BaseModuleTableView._derive_bay_template_suggestion
+
+    def test_extracts_trailing_digit_position(self):
+        result = self._helper()({"entPhysicalName": "Slot 3", "entPhysicalDescr": "Line Card"})
+        assert result["name"] == "Slot 3"
+        assert result["position"] == "3"
+        assert result["label"] == "Line Card"
+
+    def test_extracts_trailing_letter_position(self):
+        result = self._helper()({"entPhysicalName": "CMA-A"})
+        assert result["name"] == "CMA-A"
+        assert result["position"] == "A"
+
+    def test_falls_back_to_class_placeholder_for_fan(self):
+        result = self._helper()({"entPhysicalName": "", "entPhysicalClass": "fan"})
+        assert "Fan Tray" in result["name"]
+        assert result["position"] == "1"
+
+    def test_falls_back_to_class_placeholder_for_powersupply(self):
+        result = self._helper()({"entPhysicalName": "", "entPhysicalClass": "powerSupply"})
+        assert "Power Supply" in result["name"]
+
+    def test_falls_back_to_slot_for_unknown_class(self):
+        result = self._helper()({"entPhysicalName": "", "entPhysicalClass": "module"})
+        assert result["name"] == "Slot 1"
+
+
+class TestRenderFixBayTemplateBadgeModalTrigger:
+    """_render_fix_bay_template_badge emits an HTMX modal trigger when device + target_pk known."""
+
+    def _table_with_device(self, device_pk=99):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        table.device = MagicMock(pk=device_pk)
+        return table
+
+    def _table_without_device(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        # Intentionally unset device — _render_fix_bay_template_badge handles via getattr.
+        return table
+
+    def test_renders_htmx_button_when_device_and_target_pk_present(self):
+        table = self._table_with_device(device_pk=42)
+        with patch(
+            "netbox_librenms_plugin.tables.modules.reverse",
+            return_value="/plugins/librenms_plugin/devices/42/add-bay-template/",
+        ):
+            html = str(
+                table._render_fix_bay_template_badge(
+                    title="some title",
+                    target_kind="module_type",
+                    target_pk=5,
+                    target_label="A9K",
+                    suggestion={"name": "Slot 1", "position": "1", "label": "Line"},
+                    fallback_url="/dcim/module-types/5/",
+                    label="Fix Model",
+                )
+            )
+        assert "hx-get=" in html
+        assert "target_kind=module_type" in html
+        assert "target_pk=5" in html
+        assert "suggested_name=Slot+1" in html or "suggested_name=Slot%201" in html
+        assert "Fix Model" in html
+
+    def test_falls_back_to_link_when_device_missing(self):
+        table = self._table_without_device()
+        html = str(
+            table._render_fix_bay_template_badge(
+                title="t",
+                target_kind="device_type",
+                target_pk=7,
+                target_label="ASR",
+                suggestion={},
+                fallback_url="/dcim/device-types/7/",
+                label="Fix Device Type",
+            )
+        )
+        assert "hx-get" not in html
+        assert '<a href="/dcim/device-types/7/"' in html
+        assert "Fix Device Type" in html
+
+    def test_falls_back_to_span_when_no_url_and_no_device(self):
+        table = self._table_without_device()
+        html = str(
+            table._render_fix_bay_template_badge(
+                title="t",
+                target_kind="device_type",
+                target_pk=None,
+                target_label="ASR",
+                suggestion={},
+                fallback_url="",
+                label="Fix Device Type",
+            )
+        )
+        assert "<span" in html
+        assert "Fix Device Type" in html

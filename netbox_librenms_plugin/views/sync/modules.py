@@ -1039,3 +1039,108 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
             messages.error(request, f"Move failed: {e}")
 
         return _modules_redirect_response(request, sync_url)
+
+
+class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """
+    Create a missing ModuleBayTemplate on a Device Type or Module Type so the
+    user can install a sub-component without leaving the modules sync tab.
+
+    GET renders a pre-filled modal fragment that targets ``#htmx-modal-content``;
+    POST creates the bay template and redirects back to the modules tab.
+    """
+
+    TARGET_KINDS = ("device_type", "module_type")
+
+    def _resolve_target(self, target_kind, target_pk):
+        """Load the DeviceType or ModuleType the new bay template will attach to."""
+        from dcim.models import DeviceType, ModuleType
+
+        if target_kind == "device_type":
+            return get_object_or_404(DeviceType, pk=target_pk)
+        if target_kind == "module_type":
+            return get_object_or_404(ModuleType, pk=target_pk)
+        return None
+
+    def get(self, request, pk):
+        from dcim.models import Device, ModuleBayTemplate
+
+        # Read-only modal render — only require plugin view permission and
+        # NetBox add-permission on ModuleBayTemplate so users without it never
+        # see a form they cannot submit.
+        self.required_object_permissions = {"GET": [("add", ModuleBayTemplate)]}
+        if error := self.require_all_permissions("GET"):
+            return error
+
+        get_object_or_404(Device, pk=pk)
+
+        target_kind = request.GET.get("target_kind", "")
+        if target_kind not in self.TARGET_KINDS:
+            return HttpResponse("Invalid target_kind.", status=400)
+        try:
+            target_pk = int(request.GET.get("target_pk", ""))
+        except (TypeError, ValueError):
+            return HttpResponse("Missing or invalid target_pk.", status=400)
+        target = self._resolve_target(target_kind, target_pk)
+
+        context = {
+            "device_pk": pk,
+            "target_kind": target_kind,
+            "target_pk": target_pk,
+            "target_label": str(target),
+            "suggested_name": request.GET.get("suggested_name", ""),
+            "suggested_position": request.GET.get("suggested_position", ""),
+            "suggested_label": request.GET.get("suggested_label", ""),
+        }
+        return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
+
+    def post(self, request, pk):
+        from dcim.models import Device, ModuleBayTemplate
+
+        self.required_object_permissions = {"POST": [("add", ModuleBayTemplate)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        get_object_or_404(Device, pk=pk)
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+
+        target_kind = request.POST.get("target_kind", "")
+        if target_kind not in self.TARGET_KINDS:
+            messages.error(request, "Invalid target_kind for bay template.")
+            return _modules_redirect_response(request, sync_url)
+        try:
+            target_pk = int(request.POST.get("target_pk", ""))
+        except (TypeError, ValueError):
+            messages.error(request, "Missing or invalid target_pk for bay template.")
+            return _modules_redirect_response(request, sync_url)
+
+        name = (request.POST.get("name") or "").strip()
+        if not name:
+            messages.error(request, "Bay template name is required.")
+            return _modules_redirect_response(request, sync_url)
+        position = (request.POST.get("position") or "").strip()
+        label = (request.POST.get("label") or "").strip()
+        description = (request.POST.get("description") or "").strip()
+
+        target = self._resolve_target(target_kind, target_pk)
+        kwargs = {
+            "name": name,
+            "position": position,
+            "label": label,
+            "description": description,
+        }
+        if target_kind == "device_type":
+            kwargs["device_type"] = target
+        else:
+            kwargs["module_type"] = target
+
+        try:
+            with transaction.atomic():
+                bay_template = ModuleBayTemplate(**kwargs)
+                bay_template.full_clean()
+                bay_template.save()
+            messages.success(request, f"Added bay template '{name}' to {target}.")
+        except (ValidationError, IntegrityError) as e:
+            messages.error(request, f"Failed to add bay template: {e}")
+
+        return _modules_redirect_response(request, sync_url)

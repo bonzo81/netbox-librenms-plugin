@@ -1828,5 +1828,12 @@ document.addEventListener('htmx:afterSettle', function (event) {
     const htmxModal = document.getElementById('htmx-modal');
     if (htmxModal && (htmxModal === event.target || htmxModal.contains(event.target))) {
         updateHtmxModalLabel();
+        // Auto-show the shared HTMX modal whenever new content is swapped into
+        // it (e.g. the Add Bay Template flow). Buttons that target
+        // #htmx-modal-content via hx-get no longer need to wire their own
+        // bootstrap.Modal.show() call.
+        if (!htmxModal.classList.contains('show')) {
+            showModal(htmxModal);
+        }
     }
 });

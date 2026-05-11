@@ -11,6 +11,7 @@ from .base.interfaces_view import BaseInterfaceTableView  # noqa: F401
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView  # noqa: F401
 from .base.librenms_sync_view import BaseLibreNMSSyncView  # noqa: F401
 from .sync.modules import (  # noqa: F401
+    AddBayTemplateView,
     InstallBranchView,
     InstallModuleView,
     InstallSelectedView,

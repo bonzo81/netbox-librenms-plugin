@@ -242,43 +242,92 @@ class LibreNMSModuleTable(tables.Table):
         if record.get("model_incomplete"):
             url = record.get("model_incomplete_url", "")
             name = record.get("model_incomplete_name", "module type")
+            target_pk = record.get("model_incomplete_target_pk")
+            suggestion = record.get("model_incomplete_suggestion") or {}
             title = f"Module type '{name}' has no bay templates — click to add them so sub-components can be installed"
-            if url:
-                fix_html = format_html(
-                    ' <a href="{}" class="badge bg-warning text-dark" title="{}">'
-                    '<i class="mdi mdi-wrench-outline"></i> Fix Model</a>',
-                    url,
-                    title,
-                )
-            else:
-                fix_html = format_html(
-                    ' <span class="badge bg-warning text-dark" title="{}">'
-                    '<i class="mdi mdi-wrench-outline"></i> Fix Model</span>',
-                    title,
-                )
+            fix_html = self._render_fix_bay_template_badge(
+                title=title,
+                target_kind="module_type",
+                target_pk=target_pk,
+                target_label=name,
+                suggestion=suggestion,
+                fallback_url=url,
+                label="Fix Model",
+            )
             return status_html + fix_html + possible_carrier_html
 
         # "Fix Device Type" badge when the device type is missing bay templates for this component.
         if record.get("device_type_incomplete"):
             url = record.get("device_type_incomplete_url", "")
             name = record.get("device_type_incomplete_name", "device type")
+            target_pk = record.get("device_type_incomplete_target_pk")
+            suggestion = record.get("device_type_incomplete_suggestion") or {}
             title = f"Device type '{name}' is missing bay templates for this component — click to add them"
-            if url:
-                fix_html = format_html(
-                    ' <a href="{}" class="badge bg-warning text-dark" title="{}">'
-                    '<i class="mdi mdi-wrench-outline"></i> Fix Device Type</a>',
-                    url,
-                    title,
-                )
-            else:
-                fix_html = format_html(
-                    ' <span class="badge bg-warning text-dark" title="{}">'
-                    '<i class="mdi mdi-wrench-outline"></i> Fix Device Type</span>',
-                    title,
-                )
+            fix_html = self._render_fix_bay_template_badge(
+                title=title,
+                target_kind="device_type",
+                target_pk=target_pk,
+                target_label=name,
+                suggestion=suggestion,
+                fallback_url=url,
+                label="Fix Device Type",
+            )
             return status_html + fix_html + possible_carrier_html
 
         return status_html + possible_carrier_html
+
+    def _render_fix_bay_template_badge(
+        self, *, title, target_kind, target_pk, target_label, suggestion, fallback_url, label
+    ):
+        """
+        Render a "Fix Model" / "Fix Device Type" badge.
+
+        When this table has a bound device and a numeric ``target_pk``, the
+        badge becomes an HTMX trigger that opens the Add Bay Template modal
+        pre-filled with the LibreNMS-derived suggestion.  Otherwise it falls
+        back to a plain link to the NetBox device-type / module-type detail
+        page (or a static badge if no URL is known).
+        """
+        device = getattr(self, "device", None)
+        if device and target_pk:
+            modal_url = reverse(
+                "plugins:netbox_librenms_plugin:add_bay_template",
+                kwargs={"pk": device.pk},
+            )
+            params = urlencode(
+                {
+                    "target_kind": target_kind,
+                    "target_pk": target_pk,
+                    "suggested_name": suggestion.get("name", ""),
+                    "suggested_position": suggestion.get("position", ""),
+                    "suggested_label": suggestion.get("label", ""),
+                }
+            )
+            return format_html(
+                ' <button type="button" class="badge bg-warning text-dark border-0"'
+                ' title="{}"'
+                ' hx-get="{}?{}"'
+                ' hx-target="#htmx-modal-content"'
+                ' hx-swap="innerHTML">'
+                '<i class="mdi mdi-wrench-outline"></i> {}</button>',
+                title,
+                modal_url,
+                params,
+                label,
+            )
+        if fallback_url:
+            return format_html(
+                ' <a href="{}" class="badge bg-warning text-dark" title="{}">'
+                '<i class="mdi mdi-wrench-outline"></i> {}</a>',
+                fallback_url,
+                title,
+                label,
+            )
+        return format_html(
+            ' <span class="badge bg-warning text-dark" title="{}"><i class="mdi mdi-wrench-outline"></i> {}</span>',
+            title,
+            label,
+        )
 
     def render_actions(self, value, record):
         """Render install button for matched modules and install branch for parents."""

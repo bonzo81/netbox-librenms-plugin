@@ -714,6 +714,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     row["device_type_incomplete"] = True
                     row["device_type_incomplete_url"] = device_type.get_absolute_url()
                     row["device_type_incomplete_name"] = str(device_type)
+                    row["device_type_incomplete_target_pk"] = device_type.pk
+                    row["device_type_incomplete_suggestion"] = self._derive_bay_template_suggestion(item)
 
         # Determine child bay scope based on parent match state
         parent_module_id = None
@@ -836,15 +838,28 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # sub-items, flag the parent row so the table can render a "Fix Model"
         # badge linking directly to the module type for quick editing.
         if parent_installed_module and not child_bays:
-            has_no_bay_children = any(
-                table_data[i].get("no_bay_reason") == "empty_parent_bays"
-                for i in range(parent_row_idx + 1, len(table_data))
-            )
-            if has_no_bay_children:
+            first_no_bay_child_idx = None
+            for i in range(parent_row_idx + 1, len(table_data)):
+                if table_data[i].get("no_bay_reason") == "empty_parent_bays":
+                    first_no_bay_child_idx = i
+                    break
+            if first_no_bay_child_idx is not None:
                 mt = parent_installed_module.module_type
                 table_data[parent_row_idx]["model_incomplete"] = True
                 table_data[parent_row_idx]["model_incomplete_url"] = mt.get_absolute_url()
                 table_data[parent_row_idx]["model_incomplete_name"] = str(mt)
+                table_data[parent_row_idx]["model_incomplete_target_pk"] = mt.pk
+                child_row = table_data[first_no_bay_child_idx]
+                # Reconstruct a minimal item dict from the row so the helper
+                # can extract a sensible bay name suggestion.
+                child_item = {
+                    "entPhysicalName": child_row.get("name") or "",
+                    "entPhysicalClass": child_row.get("item_class") or "",
+                    "entPhysicalDescr": child_row.get("description") or "",
+                }
+                table_data[parent_row_idx]["model_incomplete_suggestion"] = self._derive_bay_template_suggestion(
+                    child_item
+                )
 
     def _merge_transceiver_data(self, inventory_data):
         """
@@ -1803,6 +1818,47 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not matched_type:
             return "No Type"
         return "Unmatched"
+
+    @staticmethod
+    def _derive_bay_template_suggestion(item):
+        """
+        Derive a sensible pre-fill for the Add Bay Template modal from a
+        LibreNMS inventory item dict.
+
+        Returns a dict with keys ``name``, ``position`` and ``label``.
+
+        - ``name``: the LibreNMS item name as-is (the user can edit before
+          submit).  Falls back to a class-derived placeholder when the name
+          is empty.
+        - ``position``: the trailing digit/letter token of the name when
+          present (e.g. "Slot 1" -> "1", "CMA-A" -> "A").
+        - ``label``: the LibreNMS description (entPhysicalDescr) trimmed,
+          which is usually a richer human-readable label than the bay name.
+        """
+        raw_name = (item.get("entPhysicalName") or "").strip()
+        descr = (item.get("entPhysicalDescr") or "").strip()
+        phys_class = (item.get("entPhysicalClass") or "").strip().lower()
+
+        position = ""
+        if raw_name:
+            m = re.search(r"(\d+|[A-Za-z]+)$", raw_name)
+            if m:
+                position = m.group(0)
+
+        if not raw_name:
+            class_placeholders = {
+                "fan": "Fan Tray 1",
+                "powersupply": "Power Supply 1",
+                "port": "Port 1",
+            }
+            raw_name = class_placeholders.get(phys_class, "Slot 1")
+            position = re.search(r"\d+$", raw_name).group(0)
+
+        return {
+            "name": raw_name,
+            "position": position,
+            "label": descr,
+        }
 
     @staticmethod
     def _build_no_bay_warning(item, module_bays, suggestion=None, scope_uninstalled=False, holder_hint=None):

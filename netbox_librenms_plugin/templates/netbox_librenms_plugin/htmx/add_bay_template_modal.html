@@ -1,0 +1,61 @@
+{% load helpers %}
+{# Modal-content fragment for adding a missing ModuleBayTemplate to a Device Type or Module Type. #}
+{# Rendered by AddBayTemplateView.get and swapped into #htmx-modal-content. #}
+<div class="modal-header">
+    <h5 id="htmx-modal-label" class="modal-title">
+        <i class="mdi mdi-wrench-outline me-1"></i>Add Bay Template
+    </h5>
+    <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
+</div>
+<form method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:add_bay_template' pk=device_pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="target_kind" value="{{ target_kind }}">
+    <input type="hidden" name="target_pk" value="{{ target_pk }}">
+
+    <div class="modal-body">
+        <p class="text-muted small mb-3">
+            Add a new bay template to
+            {% if target_kind == "device_type" %}device type{% else %}module type{% endif %}
+            <strong>{{ target_label }}</strong>. The values below were pre-filled from
+            LibreNMS data — review and adjust as needed before saving.
+        </p>
+
+        <div class="mb-3">
+            <label for="add-bay-name" class="form-label">Name <span class="text-danger">*</span></label>
+            <input type="text" class="form-control" id="add-bay-name" name="name"
+                   value="{{ suggested_name }}" required>
+            <div class="form-text">
+                Bay name as it should appear on the
+                {% if target_kind == "device_type" %}device type{% else %}module type{% endif %}
+                (e.g. <code>Slot 1</code>, <code>Fan Tray 0</code>).
+            </div>
+        </div>
+
+        <div class="mb-3">
+            <label for="add-bay-position" class="form-label">Position</label>
+            <input type="text" class="form-control" id="add-bay-position" name="position"
+                   value="{{ suggested_position }}">
+            <div class="form-text">Optional positional identifier (e.g. <code>1</code>, <code>A</code>).</div>
+        </div>
+
+        <div class="mb-3">
+            <label for="add-bay-label" class="form-label">Label</label>
+            <input type="text" class="form-control" id="add-bay-label" name="label"
+                   value="{{ suggested_label }}">
+            <div class="form-text">Optional human-readable label.</div>
+        </div>
+
+        <div class="mb-2">
+            <label for="add-bay-description" class="form-label">Description</label>
+            <textarea class="form-control" id="add-bay-description" name="description" rows="2"></textarea>
+        </div>
+    </div>
+
+    <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-plus me-1"></i>Add Bay Template
+        </button>
+    </div>
+</form>

@@ -55,6 +55,7 @@ from .views import (
     MoveModuleView,
     ReplaceModuleView,
     UpdateModuleSerialView,
+    AddBayTemplateView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -195,6 +196,11 @@ urlpatterns = [
         "devices/<int:pk>/move-module/",
         MoveModuleView.as_view(),
         name="move_module",
+    ),
+    path(
+        "devices/<int:pk>/add-bay-template/",
+        AddBayTemplateView.as_view(),
+        name="add_bay_template",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",
