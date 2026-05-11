@@ -155,6 +155,22 @@
                 return { pattern: pattern, replacement: replacement };
             }
 
+            // Build the preview as text + <code> nodes (no innerHTML — the
+            // pattern/replacement strings are derived from operator input
+            // and must never be parsed as HTML).
+            function renderPreview(target, prefix, codeA, sep, codeB, suffix) {
+                while (target.firstChild) target.removeChild(target.firstChild);
+                target.appendChild(document.createTextNode(prefix));
+                var a = document.createElement("code");
+                a.textContent = codeA;
+                target.appendChild(a);
+                target.appendChild(document.createTextNode(sep));
+                var b = document.createElement("code");
+                b.textContent = codeB;
+                target.appendChild(b);
+                target.appendChild(document.createTextNode(suffix));
+            }
+
             function refresh() {
                 var current = nameInput.value.trim();
                 var differs = libreName && current && current !== libreName;
@@ -175,12 +191,9 @@
                         radioRegex.checked = true;
                     }
                     if (radioRegex.checked) {
-                        preview.innerHTML = "Will store regex: <code>" +
-                            pat.pattern + "</code> → <code>" + pat.replacement +
-                            "</code> (covers all bays sharing this skeleton).";
+                        renderPreview(preview, "Will store regex: ", pat.pattern, " → ", pat.replacement, " (covers all bays sharing this skeleton).");
                     } else {
-                        preview.innerHTML = "Will store exact: <code>" +
-                            libreName + "</code> → <code>" + current + "</code>.";
+                        renderPreview(preview, "Will store exact: ", libreName, " → ", current, ".");
                     }
                 } else {
                     // No pattern available → exact-only.
