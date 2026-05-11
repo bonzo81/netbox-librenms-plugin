@@ -297,13 +297,16 @@ class TestReplaceModuleView:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module
-            # select_for_update chain for re-fetch inside transaction
-            sfu_qs = MagicMock()
-            sfu_qs.filter.return_value.select_related.return_value.first.return_value = installed
-            mock_module_cls.objects.select_for_update.return_value = sfu_qs
-            # Re-derived conflict uses serial-based lookup (.filter().exclude().select_related().count()/.first())
-            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 0
-            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
+            # New code does TWO select_for_update() calls inside the atomic
+            # block — one for the installed-module re-fetch, one for the
+            # serial-conflict re-derivation (returns empty list here).
+            installed_chain = MagicMock()
+            installed_chain.filter.return_value.select_related.return_value.first.return_value = installed
+            conflict_chain = MagicMock()
+            conflict_chain.filter.return_value.exclude.return_value.select_related.return_value.__iter__ = lambda s: (
+                iter([])
+            )
+            mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
 
             view.post(request, pk=24)
 
@@ -351,12 +354,20 @@ class TestReplaceModuleView:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module
-            # select_for_update chain: first call re-fetches installed, second re-fetches conflict
-            sfu_qs = MagicMock()
-            sfu_qs.filter.return_value.select_related.return_value.first.side_effect = [installed, conflict]
-            mock_module_cls.objects.select_for_update.return_value = sfu_qs
-            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.count.return_value = 1
-            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = conflict
+            # New code: both the installed re-fetch and the serial-conflict
+            # re-derivation use select_for_update() to lock both rows inside
+            # the atomic block.  Configure the chained mocks accordingly:
+            #   1. installed = Module.objects.select_for_update()
+            #                    .filter(pk=, device=).select_related().first()
+            #   2. conflicts = list(Module.objects.select_for_update()
+            #                    .filter(serial=).exclude(pk=).select_related(...))
+            installed_chain = MagicMock()
+            installed_chain.filter.return_value.select_related.return_value.first.return_value = installed
+            conflict_chain = MagicMock()
+            conflict_chain.filter.return_value.exclude.return_value.select_related.return_value.__iter__ = lambda s: (
+                iter([conflict])
+            )
+            mock_module_cls.objects.select_for_update.side_effect = [installed_chain, conflict_chain]
 
             view.post(request, pk=24)
 

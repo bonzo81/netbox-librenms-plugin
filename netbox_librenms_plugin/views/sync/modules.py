@@ -75,6 +75,16 @@ def _resolve_target_device(page_device, selected_device_id):
     return member or page_device
 
 
+class _SerialConflictAmbiguous(Exception):
+    """Raised inside ReplaceModuleView's transaction when more than one module
+    holds the incoming serial — used to abort the atomic block and surface a
+    user-friendly error after the rollback."""
+
+    def __init__(self, serial):
+        super().__init__(serial)
+        self.serial = serial
+
+
 def _get_sync_device_for_inventory(device, server_key):
     """Return the VC sync device used for module inventory cache keys."""
     return get_librenms_sync_device(device, server_key=server_key) or device
@@ -862,26 +872,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
 
-        # Re-derive any serial conflict from the database rather than trusting
-        # a client-submitted conflict_module_id POST parameter.
-        conflict_module = None
-        if serial:
-            conflict_qs = (
-                Module.objects.filter(serial=serial)
-                .exclude(pk=installed_module.pk)
-                .select_related("module_type", "module_bay", "device")
-            )
-            conflict_count = conflict_qs.count()
-            if conflict_count > 1:
-                messages.error(
-                    request,
-                    f"Serial '{serial}' is assigned to multiple modules; cannot determine which to remove. "
-                    "Please resolve the conflict manually.",
-                )
-                return _modules_redirect_response(request, sync_url)
-            if conflict_count == 1:
-                conflict_module = conflict_qs.first()
-
         module_types = get_module_types_indexed()
         from netbox_librenms_plugin.utils import resolve_module_type
 
@@ -911,15 +901,29 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 old_type_name = installed_module.module_type.model
                 old_bay_name = target_bay.name
 
-                # Remove the serial-conflicting module from its current location (re-derived,
-                # not trusted from a client-submitted conflict_module_id field).
-                if conflict_module:
-                    conflict_module = (
+                # Re-derive any serial conflict from the database INSIDE the locked
+                # transaction (and lock those rows too) — checking before the lock
+                # opens a TOCTOU window where a concurrent request could change a
+                # module's serial and we'd then delete a row that no longer
+                # conflicts.  Re-querying under select_for_update() guarantees the
+                # set we delete from is the same set we validated.
+                conflict_module = None
+                if serial:
+                    conflict_qs = (
                         Module.objects.select_for_update()
-                        .filter(pk=conflict_module.pk)
+                        .filter(serial=serial)
+                        .exclude(pk=installed_module.pk)
                         .select_related("module_type", "module_bay", "device")
-                        .first()
                     )
+                    locked_conflicts = list(conflict_qs)
+                    if len(locked_conflicts) > 1:
+                        # Roll back and surface a clear error — we don't want to
+                        # guess which of N conflicts to remove.
+                        raise _SerialConflictAmbiguous(serial)
+                    if len(locked_conflicts) == 1:
+                        conflict_module = locked_conflicts[0]
+
+                # Remove the serial-conflicting module from its current location.
                 if conflict_module:
                     c_model = conflict_module.module_type.model
                     c_bay = conflict_module.module_bay.name
@@ -948,6 +952,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 f"Replaced {old_type_name} with {matched_type.model} in {old_bay_name}"
                 + (f" (serial: {serial})" if serial else "")
                 + ".",
+            )
+        except _SerialConflictAmbiguous as exc:
+            messages.error(
+                request,
+                f"Serial '{exc.serial}' is assigned to multiple modules; cannot determine which to remove. "
+                "Please resolve the conflict manually.",
             )
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Replace failed: {e}")

@@ -59,6 +59,7 @@ class LibreNMSModuleTable(tables.Table):
         can_add_module=False,
         can_change_module=False,
         can_delete_module=False,
+        can_add_module_bay_template=False,
         **kwargs,
     ):
         """Initialize table with optional device context."""
@@ -69,6 +70,7 @@ class LibreNMSModuleTable(tables.Table):
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
         self.can_delete_module = can_delete_module
+        self.can_add_module_bay_template = can_add_module_bay_template
         super().__init__(*args, **kwargs)
         if not (has_write_permission and can_add_module) and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
@@ -282,14 +284,20 @@ class LibreNMSModuleTable(tables.Table):
         """
         Render a "Fix Model" / "Fix Device Type" badge.
 
-        When this table has a bound device and a numeric ``target_pk``, the
-        badge becomes an HTMX trigger that opens the Add Bay Template modal
-        pre-filled with the LibreNMS-derived suggestion.  Otherwise it falls
-        back to a plain link to the NetBox device-type / module-type detail
-        page (or a static badge if no URL is known).
+        When this table has a bound device, a numeric ``target_pk`` and the
+        viewer has ``dcim.add_modulebaytemplate``, the badge becomes an HTMX
+        trigger that opens the Add Bay Template modal pre-filled with the
+        LibreNMS-derived suggestion.
+
+        When the viewer can't add bay templates, the badge is hidden so it
+        doesn't act as a dead-end control (the modal would only return a 403
+        for them).  The ``<a href>`` and ``<span>`` fallbacks below are kept
+        for callers that don't have a bound device (e.g. unit tests built via
+        ``object.__new__``) or have no ``target_pk`` / URL available.
         """
         device = getattr(self, "device", None)
-        if device and target_pk:
+        can_add_template = getattr(self, "can_add_module_bay_template", False)
+        if device and target_pk and can_add_template:
             modal_url = reverse(
                 "plugins:netbox_librenms_plugin:add_bay_template",
                 kwargs={"pk": device.pk},
@@ -315,6 +323,10 @@ class LibreNMSModuleTable(tables.Table):
                 params,
                 label,
             )
+        if device and not can_add_template:
+            # Viewer lacks dcim.add_modulebaytemplate — don't render a clickable
+            # badge that would only surface a permission error.
+            return ""
         if fallback_url:
             return format_html(
                 ' <a href="{}" class="badge bg-warning text-dark" title="{}">'

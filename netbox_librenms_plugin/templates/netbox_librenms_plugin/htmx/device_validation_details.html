@@ -265,10 +265,12 @@
                                       var a = document.createElement("a");
                                       a.className = "dropdown-item small py-1";
                                       a.href = "#";
-                                      a.textContent = (dt.manufacturer ? dt.manufacturer.display + " — " : "") + dt.display;
+                                      // dt.display already includes the manufacturer
+                                      // (e.g. "Cisco ISR4321"), so don't prepend it again.
+                                      a.textContent = dt.display;
                                       a.addEventListener("click", function (e) {
                                         e.preventDefault();
-                                        searchEl.value = (dt.manufacturer ? dt.manufacturer.display + " — " : "") + dt.display;
+                                        searchEl.value = dt.display;
                                         hiddenEl.value = dt.id;
                                         submitBtn.disabled = false;
                                         dropdownEl.style.display = "none";

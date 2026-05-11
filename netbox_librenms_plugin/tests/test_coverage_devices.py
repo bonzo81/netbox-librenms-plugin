@@ -892,7 +892,15 @@ class TestDeviceModuleTableView:
         view._librenms_api.server_key = "prod-server"
         view.has_write_permission = MagicMock(return_value=True)
         view.request.user.has_perm = MagicMock(
-            side_effect=lambda p: p in {"dcim.add_module", "dcim.change_module", "dcim.delete_module"}
+            side_effect=lambda p: (
+                p
+                in {
+                    "dcim.add_module",
+                    "dcim.change_module",
+                    "dcim.delete_module",
+                    "dcim.add_modulebaytemplate",
+                }
+            )
         )
         return view
 
@@ -915,6 +923,7 @@ class TestDeviceModuleTableView:
             can_add_module=True,
             can_change_module=True,
             can_delete_module=True,
+            can_add_module_bay_template=True,
         )
         assert result is mock_table
 

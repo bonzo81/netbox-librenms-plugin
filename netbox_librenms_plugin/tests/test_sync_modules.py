@@ -2635,11 +2635,12 @@ class TestDeriveBayTemplateSuggestion:
 class TestRenderFixBayTemplateBadgeModalTrigger:
     """_render_fix_bay_template_badge emits an HTMX modal trigger when device + target_pk known."""
 
-    def _table_with_device(self, device_pk=99):
+    def _table_with_device(self, device_pk=99, can_add_module_bay_template=True):
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
         table = object.__new__(LibreNMSModuleTable)
         table.device = MagicMock(pk=device_pk)
+        table.can_add_module_bay_template = can_add_module_bay_template
         return table
 
     def _table_without_device(self):
@@ -2704,3 +2705,20 @@ class TestRenderFixBayTemplateBadgeModalTrigger:
         )
         assert "<span" in html
         assert "Fix Device Type" in html
+
+    def test_returns_empty_when_device_present_but_lacks_add_modulebaytemplate_perm(self):
+        """When a viewer can't add bay templates, the badge is hidden so it doesn't
+        act as a dead-end control. The HTMX modal would only return 403 for them."""
+        table = self._table_with_device(device_pk=42, can_add_module_bay_template=False)
+        html = str(
+            table._render_fix_bay_template_badge(
+                title="t",
+                target_kind="module_type",
+                target_pk=5,
+                target_label="A9K",
+                suggestion={"name": "Slot 1"},
+                fallback_url="/dcim/module-types/5/",
+                label="Fix Model",
+            )
+        )
+        assert html == ""

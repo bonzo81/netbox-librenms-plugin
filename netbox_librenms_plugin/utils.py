@@ -1259,7 +1259,11 @@ def load_bay_mappings() -> tuple:
     """
     from netbox_librenms_plugin.models import ModuleBayMapping
 
-    all_mappings = list(ModuleBayMapping.objects.order_by("is_regex", "librenms_name", "id"))
+    # Regex precedence is first-match-wins, so it must NOT depend on the
+    # lexicographic sort of the pattern text — that would let a pattern edit
+    # silently reorder vendor-specific vs fallback regexes.  Preserve insertion
+    # order within each (exact, regex) bucket by ordering on the PK only.
+    all_mappings = list(ModuleBayMapping.objects.order_by("is_regex", "id"))
     exact = [m for m in all_mappings if not m.is_regex]
     regex = [m for m in all_mappings if m.is_regex]
     return exact, regex

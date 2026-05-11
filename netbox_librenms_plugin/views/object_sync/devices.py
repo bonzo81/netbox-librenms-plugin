@@ -289,6 +289,7 @@ class SingleModuleVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             can_add_module=has_write_permission and request.user.has_perm("dcim.add_module"),
             can_change_module=has_write_permission and request.user.has_perm("dcim.change_module"),
             can_delete_module=has_write_permission and request.user.has_perm("dcim.delete_module"),
+            can_add_module_bay_template=(has_write_permission and request.user.has_perm("dcim.add_modulebaytemplate")),
         )
         table.configure(request)
         formatted_row = table.format_module_data(row)
@@ -561,6 +562,7 @@ class DeviceModuleTableView(BaseModuleTableView):
             can_add_module=has_write_permission and user.has_perm("dcim.add_module"),
             can_change_module=has_write_permission and user.has_perm("dcim.change_module"),
             can_delete_module=has_write_permission and user.has_perm("dcim.delete_module"),
+            can_add_module_bay_template=(has_write_permission and user.has_perm("dcim.add_modulebaytemplate")),
         )
         server_key = self.librenms_api.server_key
         table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")

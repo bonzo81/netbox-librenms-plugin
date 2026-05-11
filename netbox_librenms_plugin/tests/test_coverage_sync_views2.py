@@ -758,6 +758,14 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
             result = view.get_object(5, object_type="virtualmachine")
         assert result is mock_vm
 
+    def test_get_object_returns_none_for_missing_object_type(self):
+        """Missing object_type now returns None (caller turns it into HTTP 400)."""
+        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+
+        view = object.__new__(AddDeviceToLibreNMSView)
+        assert view.get_object(5) is None
+        assert view.get_object(5, object_type="bogus") is None
+
     def test_get_object_raises_http404_when_device_not_found(self):
         from django.http import Http404
 
@@ -772,7 +780,7 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
             side_effect=Http404,
         ):
             with pytest.raises(Http404):
-                view.get_object(5)
+                view.get_object(5, object_type="device")
 
     def test_form_valid_with_poller_group(self):
         """poller_group valid int is passed to API."""

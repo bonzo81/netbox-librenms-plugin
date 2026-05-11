@@ -1,6 +1,16 @@
-"""Conftest for e2e tests — no Django initialization needed."""
+"""Conftest for end-to-end Playwright tests.
 
-import os
+These tests are excluded from the default pytest discovery via ``testpaths``
+in ``pyproject.toml`` and are intended to be invoked explicitly:
 
-# Prevent pytest-django from trying to initialize Django
-os.environ.pop("DJANGO_SETTINGS_MODULE", None)
+    python -m pytest tests/e2e/test_module_install.py -v -s
+
+Note: ``pyproject.toml`` sets ``DJANGO_SETTINGS_MODULE = "netbox.settings"``
+under ``[tool.pytest.ini_options]``, which pytest-django reads directly from
+the config file (not from the environment).  Popping the env var here would
+have no effect on pytest-django's initialisation.  The e2e tests do not
+import or use Django models — they drive a running NetBox over HTTP — so
+pytest-django's auto-loading is harmless and we leave it alone.  If you ever
+need to skip pytest-django entirely for this suite, invoke pytest with
+``-p no:django``.
+"""

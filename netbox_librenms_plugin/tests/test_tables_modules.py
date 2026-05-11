@@ -11,7 +11,14 @@ from unittest.mock import MagicMock, patch
 class TestLibreNMSModuleTable:
     """Direct unit tests for every render_* method on LibreNMSModuleTable."""
 
-    def _make_table(self, device=None, can_add_module=True, can_change_module=True, can_delete_module=True):
+    def _make_table(
+        self,
+        device=None,
+        can_add_module=True,
+        can_change_module=True,
+        can_delete_module=True,
+        can_add_module_bay_template=True,
+    ):
         """Create a bare table instance without calling __init__."""
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
@@ -23,6 +30,7 @@ class TestLibreNMSModuleTable:
         table.can_add_module = can_add_module
         table.can_change_module = can_change_module
         table.can_delete_module = can_delete_module
+        table.can_add_module_bay_template = can_add_module_bay_template
         return table
 
     # ------------------------------------------------------------------

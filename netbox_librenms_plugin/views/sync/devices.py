@@ -1,7 +1,8 @@
 from dcim.models import Device
 from django.contrib import messages
-from django.http import Http404
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.utils.html import escape
 from django.views import View
 from virtualization.models import VirtualMachine
 
@@ -28,12 +29,16 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
         Uses *object_type* to pick the correct model, preventing a false
         match when a Device and VirtualMachine share the same PK.
+
+        Returns ``None`` for invalid *object_type* — callers must short-circuit
+        with HTTP 400 before using the result (a missing/unknown object_type is
+        a client error, not a missing-resource error).
         """
         if object_type == "virtualmachine":
             return get_object_or_404(VirtualMachine, pk=object_id)
         if object_type == "device":
             return get_object_or_404(Device, pk=object_id)
-        raise Http404(f"Invalid object_type: {object_type!r}")
+        return None
 
     def post(self, request, object_id):
         """Add a device to LibreNMS using the submitted SNMP form."""
@@ -41,7 +46,17 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if error := self.require_write_permission():
             return error
 
-        self.object = self.get_object(object_id, object_type=request.POST.get("object_type"))
+        object_type = request.POST.get("object_type")
+        self.object = self.get_object(object_id, object_type=object_type)
+        if self.object is None:
+            # Match the convention used in views/sync/device_fields.py — return
+            # 400 (Bad Request) with an escaped echo of the offending value
+            # rather than raising 404, which would mislead clients into
+            # thinking the object itself is missing.
+            return HttpResponse(
+                f"Invalid object_type: {escape(str(object_type))}",
+                status=400,
+            )
         form_class = self.get_form_class()
 
         snmp_version = request.POST.get("v1v2-snmp_version") or request.POST.get("v3-snmp_version")
