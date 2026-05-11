@@ -1079,6 +1079,42 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         return getattr(device_type, "manufacturer", None) if device_type else None
 
     @staticmethod
+    def _instantiate_template_on_existing(bay_template, target_kind, target):
+        """
+        Materialise the just-saved ``ModuleBayTemplate`` onto every existing
+        device/module of ``target`` so the resolver can match it immediately.
+
+        NetBox auto-creates bays from templates only when a Device/Module is
+        first created — a template added later is invisible to existing
+        instances until manually instantiated. ``target_kind`` selects the
+        scope: device-type templates are instantiated on every Device of that
+        type; module-type templates are instantiated on every installed Module
+        of that type. Pre-existing bays with the resolved name (under the same
+        device/module scope) are skipped so re-adding a template after a
+        partial manual fix is safe.
+        """
+        from dcim.models import Device, Module, ModuleBay
+
+        instantiated = 0
+        if target_kind == "device_type":
+            for device in Device.objects.filter(device_type=target):
+                bay = bay_template.instantiate(device=device)
+                if ModuleBay.objects.filter(device=device, module__isnull=True, name=bay.name).exists():
+                    continue
+                bay.full_clean()
+                bay.save()
+                instantiated += 1
+        elif target_kind == "module_type":
+            for module in Module.objects.filter(module_type=target).select_related("device"):
+                bay = bay_template.instantiate(device=module.device, module=module)
+                if ModuleBay.objects.filter(device=module.device, module=module, name=bay.name).exists():
+                    continue
+                bay.full_clean()
+                bay.save()
+                instantiated += 1
+        return instantiated
+
+    @staticmethod
     def _derive_mapping_pattern(librenms_name, netbox_name):
         """
         Derive a regex ``ModuleBayMapping`` rule that maps ``librenms_name``
@@ -1361,10 +1397,12 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
 
         try:
             mapping_created = False
+            instantiated_count = 0
             with transaction.atomic():
                 bay_template = ModuleBayTemplate(**kwargs)
                 bay_template.full_clean()
                 bay_template.save()
+                instantiated_count = self._instantiate_template_on_existing(bay_template, target_kind, target)
                 if will_add_mapping:
                     mapping = ModuleBayMapping(
                         librenms_name=mapping_libre_value,
@@ -1376,16 +1414,21 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                     mapping.full_clean()
                     mapping.save()
                     mapping_created = True
+            instantiate_note = ""
+            if instantiated_count:
+                noun = "device" if target_kind == "device_type" else "module"
+                plural = "" if instantiated_count == 1 else "s"
+                instantiate_note = f" Bay added to {instantiated_count} existing {noun}{plural}."
             if mapping_created:
                 vendor_note = f" (scoped to {manufacturer})" if manufacturer else " (global)"
                 kind_note = "regex " if mapping_is_regex else ""
                 messages.success(
                     request,
                     f"Added bay template '{name}' to {target} and {kind_note}ModuleBayMapping "
-                    f"'{mapping_libre_value}' → '{mapping_netbox_value}'{vendor_note}.",
+                    f"'{mapping_libre_value}' → '{mapping_netbox_value}'{vendor_note}.{instantiate_note}",
                 )
             else:
-                messages.success(request, f"Added bay template '{name}' to {target}.")
+                messages.success(request, f"Added bay template '{name}' to {target}.{instantiate_note}")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to add bay template: {e}")
 

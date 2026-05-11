@@ -2612,6 +2612,7 @@ class TestAddBayTemplateViewMappingCheckbox:
 
         view = object.__new__(AddBayTemplateView)
         view.require_all_permissions = MagicMock(return_value=None)
+        view._instantiate_template_on_existing = MagicMock(return_value=0)
         return view
 
     def _device_with_manufacturer(self, manufacturer=None):
@@ -2791,6 +2792,90 @@ class TestAddBayTemplateViewMappingCheckbox:
             view.post(req, pk=1)
         mock_mapping_cls.assert_not_called()
 
+
+class TestAddBayTemplateViewInstantiation:
+    """After saving a ModuleBayTemplate, the view materialises it onto every
+    existing Device/Module of the target so the resolver can match the new bay
+    immediately (NetBox only auto-creates bays from templates at first-create
+    time)."""
+
+    def test_instantiate_on_existing_device_type_creates_missing_bays(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        device_type = MagicMock()
+        bay_template = MagicMock()
+        bay_template.instantiate.side_effect = lambda device: MagicMock(name=f"bay-for-{id(device)}")
+        dev_a, dev_b = MagicMock(), MagicMock()
+        with (
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("dcim.models.Module") as mock_module_cls,
+            patch("dcim.models.ModuleBay") as mock_bay_cls,
+        ):
+            mock_device_cls.objects.filter.return_value = [dev_a, dev_b]
+            mock_bay_cls.objects.filter.return_value.exists.return_value = False
+            count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "device_type", device_type)
+        assert count == 2
+        mock_device_cls.objects.filter.assert_called_once_with(device_type=device_type)
+        mock_module_cls.objects.filter.assert_not_called()
+        assert bay_template.instantiate.call_count == 2
+
+    def test_instantiate_skips_devices_that_already_have_the_bay(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        device_type = MagicMock()
+        bay_template = MagicMock()
+        existing_bay = MagicMock()
+        existing_bay.name = "Fan Tray 0"
+        existing_bay.full_clean = MagicMock()
+        existing_bay.save = MagicMock()
+        bay_template.instantiate.return_value = existing_bay
+        with (
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("dcim.models.Module"),
+            patch("dcim.models.ModuleBay") as mock_bay_cls,
+        ):
+            mock_device_cls.objects.filter.return_value = [MagicMock()]
+            # Bay already exists on the device
+            mock_bay_cls.objects.filter.return_value.exists.return_value = True
+            count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "device_type", device_type)
+        assert count == 0
+        existing_bay.save.assert_not_called()
+
+    def test_instantiate_on_existing_module_type_uses_module_queryset(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        module_type = MagicMock()
+        module_a = MagicMock()
+        bay_template = MagicMock()
+        bay_template.instantiate.return_value = MagicMock(name="bay")
+        with (
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("dcim.models.Module") as mock_module_cls,
+            patch("dcim.models.ModuleBay") as mock_bay_cls,
+        ):
+            mock_module_cls.objects.filter.return_value.select_related.return_value = [module_a]
+            mock_bay_cls.objects.filter.return_value.exists.return_value = False
+            count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "module_type", module_type)
+        assert count == 1
+        mock_module_cls.objects.filter.assert_called_once_with(module_type=module_type)
+        mock_device_cls.objects.filter.assert_not_called()
+        bay_template.instantiate.assert_called_once_with(device=module_a.device, module=module_a)
+
+    def test_instantiate_unknown_target_kind_is_noop(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        bay_template = MagicMock()
+        with (
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("dcim.models.Module") as mock_module_cls,
+            patch("dcim.models.ModuleBay"),
+        ):
+            count = AddBayTemplateView._instantiate_template_on_existing(bay_template, "bogus", MagicMock())
+        assert count == 0
+        mock_device_cls.objects.filter.assert_not_called()
+        mock_module_cls.objects.filter.assert_not_called()
+        bay_template.instantiate.assert_not_called()
+
     """_derive_bay_template_suggestion infers sane defaults from item dicts."""
 
     def _helper(self):
@@ -2894,6 +2979,7 @@ class TestAddBayTemplateViewRegexMapping:
 
         view = object.__new__(AddBayTemplateView)
         view.require_all_permissions = MagicMock(return_value=None)
+        view._instantiate_template_on_existing = MagicMock(return_value=0)
         return view
 
     def _device(self, manufacturer=None):
