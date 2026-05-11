@@ -1079,6 +1079,102 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         return getattr(device_type, "manufacturer", None) if device_type else None
 
     @staticmethod
+    def _derive_mapping_pattern(librenms_name, netbox_name):
+        """
+        If both names are structurally identical (same alternating literal /
+        digit-run tokens, same digit values, literals equal under
+        case-insensitive comparison) and contain at least one digit run,
+        return a dict describing a regex mapping that covers all siblings
+        sharing the same literal skeleton. Otherwise return ``None``.
+
+        The captured digit runs become ``(\\d+)`` groups; the NetBox
+        replacement preserves the operator-chosen literal parts and
+        back-references the same group positions.
+
+        Examples:
+            ('Sfm 1', 'SFM 1') -> {kind: 'regex',
+                                   librenms_pattern: r'^Sfm (\\d+)$',
+                                   netbox_replacement: r'SFM \\1', ...}
+            ('Slot 0', 'Slot 0') -> {... pattern: r'^Slot (\\d+)$' ...}
+            ('TenGigE0/0/0/0', same) -> regex with four groups.
+            ('Sfm 1', 'Card 1') -> None (literals differ beyond case).
+            ('Slot A', 'Slot A') -> None (no digit run).
+        """
+        if not librenms_name or not netbox_name:
+            return None
+        token_re = re.compile(r"(\d+|\D+)")
+        libre_tokens = token_re.findall(librenms_name)
+        nb_tokens = token_re.findall(netbox_name)
+        if len(libre_tokens) != len(nb_tokens):
+            return None
+        digit_count = 0
+        pattern_parts = ["^"]
+        replacement_parts = []
+        for libre_tok, nb_tok in zip(libre_tokens, nb_tokens):
+            libre_is_digit = libre_tok.isdigit()
+            nb_is_digit = nb_tok.isdigit()
+            if libre_is_digit != nb_is_digit:
+                return None
+            if libre_is_digit:
+                if libre_tok != nb_tok:
+                    return None
+                digit_count += 1
+                pattern_parts.append(r"(\d+)")
+                replacement_parts.append(rf"\{digit_count}")
+            else:
+                if libre_tok.lower() != nb_tok.lower():
+                    return None
+                pattern_parts.append(re.escape(libre_tok))
+                replacement_parts.append(nb_tok)
+        if digit_count == 0:
+            return None
+        pattern_parts.append("$")
+        librenms_pattern = "".join(pattern_parts)
+        netbox_replacement = "".join(replacement_parts)
+        # Sanity: pattern must compile and match the original librenms_name.
+        try:
+            compiled = re.compile(librenms_pattern)
+        except re.error:
+            return None
+        if not compiled.fullmatch(librenms_name):
+            return None
+        return {
+            "kind": "regex",
+            "librenms_pattern": librenms_pattern,
+            "netbox_replacement": netbox_replacement,
+            "digit_count": digit_count,
+        }
+
+    @staticmethod
+    def _existing_regex_mapping_covers(librenms_name, librenms_class, manufacturer):
+        """
+        True when an existing regex ModuleBayMapping already matches
+        ``librenms_name`` for the given manufacturer / global scope.
+        Iterates regex rows in Python — the row count is small (one per
+        bay-family) so this is cheap, and Postgres can't compare its
+        re-flavoured patterns server-side anyway.
+        """
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        if not librenms_name:
+            return False
+        qs = ModuleBayMapping.objects.filter(
+            librenms_class=librenms_class or "",
+            is_regex=True,
+        )
+        if manufacturer is not None:
+            qs = qs.filter(models.Q(manufacturer=manufacturer) | models.Q(manufacturer__isnull=True))
+        else:
+            qs = qs.filter(manufacturer__isnull=True)
+        for mapping in qs.only("librenms_name"):
+            try:
+                if re.compile(mapping.librenms_name).fullmatch(librenms_name):
+                    return True
+            except re.error:
+                continue
+        return False
+
+    @staticmethod
     def _existing_bay_mapping(librenms_name, librenms_class, manufacturer):
         """
         True when a ModuleBayMapping already covers (librenms_name, librenms_class)
@@ -1126,8 +1222,11 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
 
         librenms_name = request.GET.get("librenms_name", "")
         librenms_class = request.GET.get("librenms_class", "")
+        suggested_name = request.GET.get("suggested_name", "")
         manufacturer = self._device_manufacturer(device)
-        mapping_exists = self._existing_bay_mapping(librenms_name, librenms_class, manufacturer)
+        mapping_exists = self._existing_bay_mapping(
+            librenms_name, librenms_class, manufacturer
+        ) or self._existing_regex_mapping_covers(librenms_name, librenms_class, manufacturer)
         # Offer the auto-mapping option only when we have a LibreNMS name to
         # map *from* and there's no existing mapping covering it.  Permission
         # to add the mapping itself is also required — users without it would
@@ -1135,13 +1234,19 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
 
         can_add_mapping = request.user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
         offer_mapping_checkbox = bool(librenms_name) and not mapping_exists and can_add_mapping
+        # Pattern preview against the *current* suggested NetBox name. The
+        # template re-runs this on every keystroke client-side; the
+        # server-side derivation is for the initial render + POST-time check.
+        mapping_pattern = (
+            self._derive_mapping_pattern(librenms_name, suggested_name) if offer_mapping_checkbox else None
+        )
 
         context = {
             "device_pk": pk,
             "target_kind": target_kind,
             "target_pk": target_pk,
             "target_label": str(target),
-            "suggested_name": request.GET.get("suggested_name", ""),
+            "suggested_name": suggested_name,
             "suggested_position": request.GET.get("suggested_position", ""),
             "suggested_label": request.GET.get("suggested_label", ""),
             "librenms_name": librenms_name,
@@ -1149,6 +1254,8 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             "manufacturer_label": str(manufacturer) if manufacturer else "",
             "offer_mapping_checkbox": offer_mapping_checkbox,
             "mapping_exists": mapping_exists,
+            "mapping_pattern": mapping_pattern,
+            "mapping_default_kind": "regex" if mapping_pattern else "exact",
         }
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
@@ -1186,6 +1293,9 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         librenms_name = (request.POST.get("librenms_name") or "").strip()
         librenms_class = (request.POST.get("librenms_class") or "").strip()
         also_create_mapping = request.POST.get("also_create_mapping") == "1"
+        mapping_kind = request.POST.get("mapping_kind", "exact")
+        if mapping_kind not in ("exact", "regex"):
+            mapping_kind = "exact"
 
         target = self._resolve_target(target_kind, target_pk)
         kwargs = {
@@ -1208,9 +1318,28 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             and request.user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
         )
         manufacturer = self._device_manufacturer(device) if will_add_mapping else None
-        if will_add_mapping and self._existing_bay_mapping(librenms_name, librenms_class, manufacturer):
-            # Race: a mapping was added between modal render and submit.
-            will_add_mapping = False
+        # Resolve regex pattern + replacement when the user opted in.
+        mapping_libre_value = librenms_name
+        mapping_netbox_value = name
+        mapping_is_regex = False
+        if will_add_mapping and mapping_kind == "regex":
+            pattern = self._derive_mapping_pattern(librenms_name, name)
+            if pattern is None:
+                # Server-side rule didn't fire — fall back to exact rather than
+                # writing an unverified regex from client input.
+                mapping_kind = "exact"
+            else:
+                mapping_libre_value = pattern["librenms_pattern"]
+                mapping_netbox_value = pattern["netbox_replacement"]
+                mapping_is_regex = True
+        if will_add_mapping:
+            if mapping_is_regex:
+                race = self._existing_regex_mapping_covers(librenms_name, librenms_class, manufacturer)
+            else:
+                race = self._existing_bay_mapping(librenms_name, librenms_class, manufacturer)
+            if race:
+                # Race: a mapping was added between modal render and submit.
+                will_add_mapping = False
 
         try:
             mapping_created = False
@@ -1220,10 +1349,10 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 bay_template.save()
                 if will_add_mapping:
                     mapping = ModuleBayMapping(
-                        librenms_name=librenms_name,
+                        librenms_name=mapping_libre_value,
                         librenms_class=librenms_class,
-                        netbox_bay_name=name,
-                        is_regex=False,
+                        netbox_bay_name=mapping_netbox_value,
+                        is_regex=mapping_is_regex,
                         manufacturer=manufacturer,
                     )
                     mapping.full_clean()
@@ -1231,10 +1360,11 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                     mapping_created = True
             if mapping_created:
                 vendor_note = f" (scoped to {manufacturer})" if manufacturer else " (global)"
+                kind_note = "regex " if mapping_is_regex else ""
                 messages.success(
                     request,
-                    f"Added bay template '{name}' to {target} and ModuleBayMapping "
-                    f"'{librenms_name}' → '{name}'{vendor_note}.",
+                    f"Added bay template '{name}' to {target} and {kind_note}ModuleBayMapping "
+                    f"'{mapping_libre_value}' → '{mapping_netbox_value}'{vendor_note}.",
                 )
             else:
                 messages.success(request, f"Added bay template '{name}' to {target}.")

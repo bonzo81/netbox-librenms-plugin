@@ -2823,7 +2823,292 @@ class TestAddBayTemplateViewMappingCheckbox:
         assert result["name"] == "Slot 1"
 
 
-class TestRenderFixBayTemplateBadgeModalTrigger:
+class TestDeriveMappingPattern:
+    """_derive_mapping_pattern is conservative: same skeleton + same digit
+    values + at least one digit run. Literals may differ in case only."""
+
+    def _fn(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        return AddBayTemplateView._derive_mapping_pattern
+
+    def test_case_only_difference_with_one_digit(self):
+        result = self._fn()("Sfm 1", "SFM 1")
+        assert result is not None
+        assert result["librenms_pattern"] == r"^Sfm\ (\d+)$"
+        assert result["netbox_replacement"] == r"SFM \1"
+        assert result["digit_count"] == 1
+
+    def test_identical_names_with_digit(self):
+        result = self._fn()("Slot 0", "Slot 0")
+        assert result is not None
+        assert result["digit_count"] == 1
+
+    def test_multi_digit_skeleton(self):
+        result = self._fn()("TenGigE0/0/0/0", "TenGigE0/0/0/0")
+        assert result is not None
+        assert result["digit_count"] == 4
+        # Each group is back-referenced in order in the replacement.
+        assert result["netbox_replacement"] == r"TenGigE\1/\2/\3/\4"
+
+    def test_different_digit_values_returns_none(self):
+        # Both have digits but different values — would silently rewrite the
+        # numeric position, never desired.
+        assert self._fn()("Slot 1", "Slot 2") is None
+
+    def test_no_digit_run_returns_none(self):
+        assert self._fn()("Slot A", "Slot A") is None
+
+    def test_literal_difference_beyond_case_returns_none(self):
+        assert self._fn()("Sfm 1", "Card 1") is None
+
+    def test_token_count_mismatch_returns_none(self):
+        # Adding an extra digit run breaks the skeleton.
+        assert self._fn()("Slot 1", "Slot 1/0") is None
+
+    def test_empty_input_returns_none(self):
+        assert self._fn()("", "Slot 1") is None
+        assert self._fn()("Slot 1", "") is None
+
+
+class TestAddBayTemplateViewRegexMapping:
+    """GET surfaces a derived regex pattern; POST stores it as is_regex=True."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        view = object.__new__(AddBayTemplateView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        return view
+
+    def _device(self, manufacturer=None):
+        device = MagicMock()
+        device.device_type.manufacturer = manufacturer
+        return device
+
+    def test_get_includes_mapping_pattern_when_skeleton_matches(self):
+        view = self._make_view()
+        manufacturer = MagicMock()
+        manufacturer.__str__ = lambda s: "Nokia"
+        device = self._device(manufacturer)
+        req = MagicMock()
+        req.GET = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "suggested_name": "SFM 1",
+            "librenms_name": "Sfm 1",
+            "librenms_class": "fabricModule",
+        }
+        req.user.has_perm.return_value = True
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
+            view.get(req, pk=42)
+        ctx = mock_render.call_args[0][2]
+        assert ctx["mapping_pattern"] is not None
+        assert ctx["mapping_default_kind"] == "regex"
+        assert ctx["mapping_pattern"]["librenms_pattern"].startswith("^Sfm")
+
+    def test_get_omits_mapping_pattern_when_no_digit(self):
+        view = self._make_view()
+        device = self._device(MagicMock())
+        req = MagicMock()
+        req.GET = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "suggested_name": "Card A",
+            "librenms_name": "card a",
+            "librenms_class": "module",
+        }
+        req.user.has_perm.return_value = True
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
+            view.get(req, pk=42)
+        ctx = mock_render.call_args[0][2]
+        assert ctx["mapping_pattern"] is None
+        assert ctx["mapping_default_kind"] == "exact"
+
+    def test_get_skips_checkbox_when_existing_regex_covers_name(self):
+        view = self._make_view()
+        device = self._device(MagicMock())
+        existing = MagicMock()
+        existing.librenms_name = r"^Sfm (\d+)$"
+        req = MagicMock()
+        req.GET = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "suggested_name": "SFM 1",
+            "librenms_name": "Sfm 1",
+            "librenms_class": "fabricModule",
+        }
+        req.user.has_perm.return_value = True
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            # No exact mapping, but a covering regex row exists.
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = [existing]
+            view.get(req, pk=42)
+        ctx = mock_render.call_args[0][2]
+        assert ctx["mapping_exists"] is True
+        assert ctx["offer_mapping_checkbox"] is False
+
+    def _post_helper(self, post_data):
+        view = self._make_view()
+        manufacturer = MagicMock()
+        device = self._device(manufacturer)
+        req = MagicMock()
+        req.method = "POST"
+        req.POST = post_data
+        req.user.has_perm.return_value = True
+        target = MagicMock()
+        return view, req, device, target, manufacturer
+
+    def test_post_creates_regex_mapping_when_kind_regex_and_pattern_derives(self):
+        view, req, device, target, manufacturer = self._post_helper(
+            {
+                "target_kind": "device_type",
+                "target_pk": "7",
+                "name": "SFM 1",
+                "librenms_name": "Sfm 1",
+                "librenms_class": "fabricModule",
+                "also_create_mapping": "1",
+                "mapping_kind": "regex",
+            }
+        )
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_tx.atomic.return_value.__enter__ = lambda s: s
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            mock_bt_cls.return_value = MagicMock()
+            # No existing exact or regex coverage.
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
+            mock_mapping_cls.return_value = MagicMock()
+            view.post(req, pk=1)
+        kwargs = mock_mapping_cls.call_args.kwargs
+        assert kwargs["is_regex"] is True
+        assert kwargs["librenms_name"] == r"^Sfm\ (\d+)$"
+        assert kwargs["netbox_bay_name"] == r"SFM \1"
+        assert kwargs["manufacturer"] is manufacturer
+
+    def test_post_falls_back_to_exact_when_pattern_does_not_derive(self):
+        # mapping_kind=regex requested but server-side rule says no.
+        view, req, device, target, _m = self._post_helper(
+            {
+                "target_kind": "device_type",
+                "target_pk": "7",
+                "name": "Card B",
+                "librenms_name": "card a",  # No digit run → no pattern.
+                "librenms_class": "module",
+                "also_create_mapping": "1",
+                "mapping_kind": "regex",
+            }
+        )
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_tx.atomic.return_value.__enter__ = lambda s: s
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
+            mock_mapping_cls.return_value = MagicMock()
+            view.post(req, pk=1)
+        kwargs = mock_mapping_cls.call_args.kwargs
+        assert kwargs["is_regex"] is False
+        assert kwargs["librenms_name"] == "card a"
+        assert kwargs["netbox_bay_name"] == "Card B"
+
+    def test_post_kind_exact_overrides_derivable_pattern(self):
+        # Pattern would derive, but user explicitly chose exact.
+        view, req, device, target, _m = self._post_helper(
+            {
+                "target_kind": "device_type",
+                "target_pk": "7",
+                "name": "SFM 1",
+                "librenms_name": "Sfm 1",
+                "librenms_class": "fabricModule",
+                "also_create_mapping": "1",
+                "mapping_kind": "exact",
+            }
+        )
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_tx.atomic.return_value.__enter__ = lambda s: s
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = []
+            mock_mapping_cls.return_value = MagicMock()
+            view.post(req, pk=1)
+        kwargs = mock_mapping_cls.call_args.kwargs
+        assert kwargs["is_regex"] is False
+        assert kwargs["librenms_name"] == "Sfm 1"
+
+    def test_post_skips_when_existing_regex_covers(self):
+        view, req, device, target, _m = self._post_helper(
+            {
+                "target_kind": "device_type",
+                "target_pk": "7",
+                "name": "SFM 1",
+                "librenms_name": "Sfm 1",
+                "librenms_class": "fabricModule",
+                "also_create_mapping": "1",
+                "mapping_kind": "regex",
+            }
+        )
+        existing = MagicMock()
+        existing.librenms_name = r"^Sfm (\d+)$"
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_tx.atomic.return_value.__enter__ = lambda s: s
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            mock_bt_cls.return_value = MagicMock()
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.only.return_value = [existing]
+            view.post(req, pk=1)
+        # Coverage already exists → no new ModuleBayMapping instantiated.
+        mock_mapping_cls.assert_not_called()
+
     """_render_fix_bay_template_badge emits an HTMX modal trigger when device + target_pk known."""
 
     def _table_with_device(self, device_pk=99, can_add_module_bay_template=True):
