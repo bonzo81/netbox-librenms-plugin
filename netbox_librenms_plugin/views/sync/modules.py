@@ -5,7 +5,7 @@ import re
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -1072,6 +1072,37 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             return get_object_or_404(ModuleType, pk=target_pk)
         return None
 
+    @staticmethod
+    def _device_manufacturer(device):
+        """Return the device's Manufacturer (or None) for vendor-scoped mapping defaults."""
+        device_type = getattr(device, "device_type", None)
+        return getattr(device_type, "manufacturer", None) if device_type else None
+
+    @staticmethod
+    def _existing_bay_mapping(librenms_name, librenms_class, manufacturer):
+        """
+        True when a ModuleBayMapping already covers (librenms_name, librenms_class)
+        for the given manufacturer (vendor-scoped) or globally (manufacturer is null).
+
+        Only checks exact mappings — regex mappings are intentionally ignored
+        because the per-row suggestion is for one specific name and we don't
+        want to second-guess broader patterns the operator already wrote.
+        """
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        if not librenms_name:
+            return False
+        qs = ModuleBayMapping.objects.filter(
+            librenms_name=librenms_name,
+            librenms_class=librenms_class or "",
+            is_regex=False,
+        )
+        if manufacturer is not None:
+            qs = qs.filter(models.Q(manufacturer=manufacturer) | models.Q(manufacturer__isnull=True))
+        else:
+            qs = qs.filter(manufacturer__isnull=True)
+        return qs.exists()
+
     def get(self, request, pk):
         from dcim.models import Device, ModuleBayTemplate
 
@@ -1082,7 +1113,7 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         if error := self.require_all_permissions("GET"):
             return error
 
-        get_object_or_404(Device, pk=pk)
+        device = get_object_or_404(Device, pk=pk)
 
         target_kind = request.GET.get("target_kind", "")
         if target_kind not in self.TARGET_KINDS:
@@ -1093,6 +1124,18 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             return HttpResponse("Missing or invalid target_pk.", status=400)
         target = self._resolve_target(target_kind, target_pk)
 
+        librenms_name = request.GET.get("librenms_name", "")
+        librenms_class = request.GET.get("librenms_class", "")
+        manufacturer = self._device_manufacturer(device)
+        mapping_exists = self._existing_bay_mapping(librenms_name, librenms_class, manufacturer)
+        # Offer the auto-mapping option only when we have a LibreNMS name to
+        # map *from* and there's no existing mapping covering it.  Permission
+        # to add the mapping itself is also required — users without it would
+        # only see the checkbox return a permission error on POST.
+
+        can_add_mapping = request.user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+        offer_mapping_checkbox = bool(librenms_name) and not mapping_exists and can_add_mapping
+
         context = {
             "device_pk": pk,
             "target_kind": target_kind,
@@ -1101,17 +1144,24 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             "suggested_name": request.GET.get("suggested_name", ""),
             "suggested_position": request.GET.get("suggested_position", ""),
             "suggested_label": request.GET.get("suggested_label", ""),
+            "librenms_name": librenms_name,
+            "librenms_class": librenms_class,
+            "manufacturer_label": str(manufacturer) if manufacturer else "",
+            "offer_mapping_checkbox": offer_mapping_checkbox,
+            "mapping_exists": mapping_exists,
         }
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
     def post(self, request, pk):
         from dcim.models import Device, ModuleBayTemplate
 
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
         self.required_object_permissions = {"POST": [("add", ModuleBayTemplate)]}
         if error := self.require_all_permissions("POST"):
             return error
 
-        get_object_or_404(Device, pk=pk)
+        device = get_object_or_404(Device, pk=pk)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         target_kind = request.POST.get("target_kind", "")
@@ -1132,6 +1182,11 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         label = (request.POST.get("label") or "").strip()
         description = (request.POST.get("description") or "").strip()
 
+        # Optional auto-mapping inputs (echoed from the GET-rendered modal).
+        librenms_name = (request.POST.get("librenms_name") or "").strip()
+        librenms_class = (request.POST.get("librenms_class") or "").strip()
+        also_create_mapping = request.POST.get("also_create_mapping") == "1"
+
         target = self._resolve_target(target_kind, target_pk)
         kwargs = {
             "name": name,
@@ -1144,12 +1199,45 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         else:
             kwargs["module_type"] = target
 
+        # Only add a mapping when the user actually picked a different
+        # NetBox bay name — if the names match, no mapping is needed.
+        will_add_mapping = (
+            also_create_mapping
+            and librenms_name
+            and librenms_name != name
+            and request.user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+        )
+        manufacturer = self._device_manufacturer(device) if will_add_mapping else None
+        if will_add_mapping and self._existing_bay_mapping(librenms_name, librenms_class, manufacturer):
+            # Race: a mapping was added between modal render and submit.
+            will_add_mapping = False
+
         try:
+            mapping_created = False
             with transaction.atomic():
                 bay_template = ModuleBayTemplate(**kwargs)
                 bay_template.full_clean()
                 bay_template.save()
-            messages.success(request, f"Added bay template '{name}' to {target}.")
+                if will_add_mapping:
+                    mapping = ModuleBayMapping(
+                        librenms_name=librenms_name,
+                        librenms_class=librenms_class,
+                        netbox_bay_name=name,
+                        is_regex=False,
+                        manufacturer=manufacturer,
+                    )
+                    mapping.full_clean()
+                    mapping.save()
+                    mapping_created = True
+            if mapping_created:
+                vendor_note = f" (scoped to {manufacturer})" if manufacturer else " (global)"
+                messages.success(
+                    request,
+                    f"Added bay template '{name}' to {target} and ModuleBayMapping "
+                    f"'{librenms_name}' → '{name}'{vendor_note}.",
+                )
+            else:
+                messages.success(request, f"Added bay template '{name}' to {target}.")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to add bay template: {e}")
 

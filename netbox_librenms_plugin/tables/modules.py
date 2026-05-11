@@ -309,6 +309,8 @@ class LibreNMSModuleTable(tables.Table):
                     "suggested_name": suggestion.get("name", ""),
                     "suggested_position": suggestion.get("position", ""),
                     "suggested_label": suggestion.get("label", ""),
+                    "librenms_name": suggestion.get("librenms_name", ""),
+                    "librenms_class": suggestion.get("librenms_class", ""),
                 }
             )
             return format_html(

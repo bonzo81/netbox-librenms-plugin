@@ -12,6 +12,8 @@
     {% csrf_token %}
     <input type="hidden" name="target_kind" value="{{ target_kind }}">
     <input type="hidden" name="target_pk" value="{{ target_pk }}">
+    <input type="hidden" name="librenms_name" value="{{ librenms_name }}">
+    <input type="hidden" name="librenms_class" value="{{ librenms_class }}">
 
     <div class="modal-body">
         <p class="text-muted small mb-3">
@@ -50,6 +52,63 @@
             <label for="add-bay-description" class="form-label">Description</label>
             <textarea class="form-control" id="add-bay-description" name="description" rows="2"></textarea>
         </div>
+
+        {% if offer_mapping_checkbox %}
+        <hr>
+        <div class="form-check mb-2" id="add-bay-mapping-block">
+            <input class="form-check-input" type="checkbox" value="1"
+                   id="add-bay-also-create-mapping" name="also_create_mapping">
+            <label class="form-check-label" for="add-bay-also-create-mapping">
+                Also create a ModuleBayMapping
+                <span id="add-bay-mapping-summary" class="text-muted small d-block"></span>
+            </label>
+            <div class="form-text">
+                LibreNMS reports this bay as
+                <code id="add-bay-libre-name-display">{{ librenms_name }}</code>{% if librenms_class %}
+                (class <code>{{ librenms_class }}</code>){% endif %}.
+                Bay matching is exact and case-sensitive, so a mapping is needed
+                whenever the NetBox bay name differs from the LibreNMS name.
+                {% if manufacturer_label %}
+                The mapping will be scoped to manufacturer
+                <strong>{{ manufacturer_label }}</strong>.
+                {% else %}
+                The mapping will be created globally (the device has no
+                manufacturer set).
+                {% endif %}
+            </div>
+        </div>
+        <script>
+        (function () {
+            var libreName = "{{ librenms_name|escapejs }}";
+            var nameInput = document.getElementById("add-bay-name");
+            var checkbox = document.getElementById("add-bay-also-create-mapping");
+            var summary = document.getElementById("add-bay-mapping-summary");
+            if (!nameInput || !checkbox) return;
+            function refresh() {
+                var current = nameInput.value.trim();
+                var differs = libreName && current && current !== libreName;
+                checkbox.disabled = !differs;
+                if (!differs) {
+                    checkbox.checked = false;
+                    summary.textContent = "(name matches LibreNMS — no mapping needed)";
+                } else {
+                    checkbox.checked = true;
+                    summary.textContent = "Will map LibreNMS '" + libreName + "' → NetBox '" + current + "'";
+                }
+            }
+            nameInput.addEventListener("input", refresh);
+            refresh();
+        })();
+        </script>
+        {% elif mapping_exists %}
+        <hr>
+        <div class="alert alert-info py-2 small mb-0">
+            <i class="mdi mdi-information-outline"></i>
+            A ModuleBayMapping for LibreNMS
+            <code>{{ librenms_name }}</code> already exists — no extra mapping
+            will be created.
+        </div>
+        {% endif %}
     </div>
 
     <div class="modal-footer">

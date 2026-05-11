@@ -1858,6 +1858,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "name": raw_name,
             "position": position,
             "label": descr,
+            # Original LibreNMS values — passed through to the Add Bay Template
+            # modal so it can offer to also create a matching ModuleBayMapping
+            # when the user picks a NetBox bay name that differs from the
+            # LibreNMS one (case differences, vendor naming, etc.).  Bay
+            # matching is exact + case-sensitive dict lookup, so without a
+            # mapping the row would still show "No Bay" after the bay is added.
+            "librenms_name": (item.get("entPhysicalName") or "").strip(),
+            "librenms_class": (item.get("entPhysicalClass") or "").strip(),
         }
 
     @staticmethod

@@ -2597,9 +2597,200 @@ class TestAddBayTemplateViewGetValidation:
         assert ctx["suggested_name"] == "Fan Tray 0"
         assert ctx["suggested_position"] == "0"
         assert ctx["suggested_label"] == "Fan Controller"
+        # Without a librenms_name in the GET, the auto-mapping checkbox is
+        # never offered (there's nothing to map from).
+        assert ctx["offer_mapping_checkbox"] is False
 
 
-class TestDeriveBayTemplateSuggestion:
+class TestAddBayTemplateViewMappingCheckbox:
+    """GET threads librenms_name/class into context and decides whether to
+    show the auto-create-mapping checkbox.  POST creates the mapping when the
+    user opts in and the NetBox name differs from the LibreNMS one."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        view = object.__new__(AddBayTemplateView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        return view
+
+    def _device_with_manufacturer(self, manufacturer=None):
+        device = MagicMock()
+        device.device_type.manufacturer = manufacturer
+        return device
+
+    def test_get_offers_checkbox_when_libre_name_present_and_no_existing_mapping(self):
+        view = self._make_view()
+        manufacturer = MagicMock()
+        manufacturer.__str__ = lambda s: "Nokia"
+        device = self._device_with_manufacturer(manufacturer)
+        req = MagicMock()
+        req.GET = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "suggested_name": "SFM 1",
+            "librenms_name": "Sfm 1",
+            "librenms_class": "fabricModule",
+        }
+        req.user.has_perm.return_value = True
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            view.get(req, pk=42)
+        ctx = mock_render.call_args[0][2]
+        assert ctx["librenms_name"] == "Sfm 1"
+        assert ctx["librenms_class"] == "fabricModule"
+        assert ctx["manufacturer_label"] == "Nokia"
+        assert ctx["offer_mapping_checkbox"] is True
+        assert ctx["mapping_exists"] is False
+
+    def test_get_suppresses_checkbox_when_existing_mapping(self):
+        view = self._make_view()
+        device = self._device_with_manufacturer(MagicMock())
+        req = MagicMock()
+        req.GET = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "librenms_name": "Sfm 1",
+            "librenms_class": "fabricModule",
+        }
+        req.user.has_perm.return_value = True
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = True
+            view.get(req, pk=42)
+        ctx = mock_render.call_args[0][2]
+        assert ctx["mapping_exists"] is True
+        assert ctx["offer_mapping_checkbox"] is False
+
+    def test_get_suppresses_checkbox_when_user_lacks_add_mapping_perm(self):
+        view = self._make_view()
+        device = self._device_with_manufacturer(MagicMock())
+        req = MagicMock()
+        req.GET = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "librenms_name": "Sfm 1",
+        }
+        req.user.has_perm.return_value = False  # lacks add_modulebaymapping
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.render", return_value="R") as mock_render,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            view.get(req, pk=42)
+        ctx = mock_render.call_args[0][2]
+        assert ctx["offer_mapping_checkbox"] is False
+
+    def test_post_creates_mapping_when_checkbox_set_and_names_differ(self):
+        view = self._make_view()
+        manufacturer = MagicMock()
+        device = self._device_with_manufacturer(manufacturer)
+        req = MagicMock()
+        req.method = "POST"
+        req.POST = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "name": "SFM 1",
+            "librenms_name": "Sfm 1",
+            "librenms_class": "fabricModule",
+            "also_create_mapping": "1",
+        }
+        req.user.has_perm.return_value = True
+        target = MagicMock()
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, target]),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_tx.atomic.return_value.__enter__ = lambda s: s
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            mock_bt_cls.return_value = MagicMock()
+            # No existing mapping
+            mock_mapping_cls.objects.filter.return_value.filter.return_value.exists.return_value = False
+            mapping_instance = MagicMock()
+            mock_mapping_cls.return_value = mapping_instance
+            view.post(req, pk=1)
+        # ModuleBayMapping was constructed with the right field values
+        call_kwargs = mock_mapping_cls.call_args.kwargs
+        assert call_kwargs["librenms_name"] == "Sfm 1"
+        assert call_kwargs["netbox_bay_name"] == "SFM 1"
+        assert call_kwargs["librenms_class"] == "fabricModule"
+        assert call_kwargs["is_regex"] is False
+        assert call_kwargs["manufacturer"] is manufacturer
+        mapping_instance.full_clean.assert_called_once()
+        mapping_instance.save.assert_called_once()
+        # Success message mentions both bay and mapping
+        assert any("ModuleBayMapping" in c.args[1] for c in mock_msg.success.call_args_list)
+
+    def test_post_skips_mapping_when_names_match(self):
+        view = self._make_view()
+        device = self._device_with_manufacturer(MagicMock())
+        req = MagicMock()
+        req.method = "POST"
+        req.POST = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "name": "Sfm 1",  # same as LibreNMS — no mapping needed
+            "librenms_name": "Sfm 1",
+            "also_create_mapping": "1",
+        }
+        req.user.has_perm.return_value = True
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, MagicMock()]),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_tx.atomic.return_value.__enter__ = lambda s: s
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            mock_bt_cls.return_value = MagicMock()
+            view.post(req, pk=1)
+        # Mapping must not be instantiated when names match
+        mock_mapping_cls.assert_not_called()
+
+    def test_post_does_not_create_mapping_without_checkbox(self):
+        view = self._make_view()
+        device = self._device_with_manufacturer(MagicMock())
+        req = MagicMock()
+        req.method = "POST"
+        req.POST = {
+            "target_kind": "device_type",
+            "target_pk": "7",
+            "name": "SFM 1",
+            "librenms_name": "Sfm 1",
+            # also_create_mapping omitted
+        }
+        req.user.has_perm.return_value = True
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, MagicMock()]),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
+            patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
+        ):
+            mock_tx.atomic.return_value.__enter__ = lambda s: s
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            mock_bt_cls.return_value = MagicMock()
+            view.post(req, pk=1)
+        mock_mapping_cls.assert_not_called()
+
     """_derive_bay_template_suggestion infers sane defaults from item dicts."""
 
     def _helper(self):
