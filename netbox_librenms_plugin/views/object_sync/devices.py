@@ -176,8 +176,6 @@ class SingleModuleVerifyView(
     required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request):
-        if error := self.require_object_permissions_json("POST"):
-            return error
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
         ent_physical_index = data.get("ent_physical_index")
@@ -200,6 +198,9 @@ class SingleModuleVerifyView(
             row_depth = 0
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
+
+        if error := self.require_all_permissions_json("POST"):
+            return error
 
         if selected_device.virtual_chassis:
             sync_device = get_librenms_sync_device(selected_device, server_key=server_key)
