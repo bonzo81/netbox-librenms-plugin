@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.utils import get_librenms_sync_device
+from netbox_librenms_plugin.utils import get_librenms_device_id, get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -287,8 +287,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 },
             )
 
+        # Fetch ports once and reuse in subsequent enrichment steps.
+        ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
+        if not ports_success or not isinstance(ports_data, dict):
+            ports_data = {}
+
         # Fetch transceiver data and merge with inventory
-        inventory_data, txr_error = self._merge_transceiver_data(inventory_data)
+        inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
+        # Enrich port rows with stable LibreNMS port_id using ports data so
+        # interface matching works even when transceiver metadata is absent.
+        self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
 
         # Cache the merged inventory data, namespaced by server and librenms_id to detect remapping
         cache.set(
@@ -629,8 +637,48 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "module_scoped_bays": module_scoped_bays,
                 "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
+                "interfaces_by_port_id": self._get_interfaces_by_port_id(member),
             }
         return member_contexts
+
+    def _get_interfaces_by_port_id(self, member):
+        """Build an index of device interfaces keyed by LibreNMS port_id."""
+        interface_map = {}
+        server_key = self.librenms_api.server_key
+
+        interface_manager = getattr(member, "interfaces", None)
+        if interface_manager is None or not hasattr(interface_manager, "all"):
+            return interface_map
+
+        for interface in interface_manager.all():
+            port_id = get_librenms_device_id(interface, server_key, auto_save=False)
+            try:
+                port_id = int(port_id)
+            except (TypeError, ValueError):
+                continue
+            if port_id > 0 and port_id not in interface_map:
+                interface_map[port_id] = interface
+        return interface_map
+
+    @staticmethod
+    def _attach_interface_match(row, target_context):
+        """Attach matched NetBox interface metadata to a table row when available."""
+        try:
+            port_id = int(row.get("librenms_port_id") or 0)
+        except (TypeError, ValueError):
+            return
+        if port_id <= 0:
+            return
+
+        interface = (target_context.get("interfaces_by_port_id") or {}).get(port_id)
+        if interface is None:
+            return
+
+        row["matched_interface_name"] = getattr(interface, "name", None) or row.get("name") or "-"
+        try:
+            row["matched_interface_url"] = interface.get_absolute_url()
+        except Exception:
+            row["matched_interface_url"] = None
 
     def _append_rows_for_item_context(
         self,
@@ -679,6 +727,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         row["selected_device_name"] = selected_device.name
         row["member_resolution_source"] = resolution_source
         self._apply_carrier_install_rules(row, item, selected_device)
+        self._attach_interface_match(row, target_context)
         parent_row_idx = len(table_data)
         table_data.append(row)
 
@@ -790,6 +839,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             sub_row["selected_device_name"] = selected_device.name
             sub_row["member_resolution_source"] = resolution_source
             self._apply_carrier_install_rules(sub_row, sub_item, selected_device)
+            self._attach_interface_match(sub_row, target_context)
             table_data.append(sub_row)
 
             # Update bay scope for children of this sub-item.
@@ -833,6 +883,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # Use it to enable "Install Branch" without a second resolve pass.
             elif parent_bay_matched_but_uninstalled and sub_row.get("module_type_id"):
                 table_data[parent_row_idx]["has_installable_children"] = True
+            # Parent is installed but has no child bay templates: for port-class
+            # descendants with a resolved module type we can still install via
+            # sync fallback that infers/creates child SFP bays.
+            elif (
+                sub_row.get("item_class") == "port"
+                and sub_row.get("no_bay_reason") == "interface_child"
+                and sub_row.get("module_type_id")
+            ):
+                table_data[parent_row_idx]["has_installable_children"] = True
 
         # If the installed module's type has no bay templates but has LibreNMS
         # sub-items, flag the parent row so the table can render a "Fix Model"
@@ -861,7 +920,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     child_item
                 )
 
-    def _merge_transceiver_data(self, inventory_data):
+    def _merge_transceiver_data(self, inventory_data, ports_data=None):
         """
         Merge transceiver API data with entity inventory.
 
@@ -892,8 +951,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if (s := (item.get("entPhysicalSerialNum") or "").strip()) and s.lower() not in _PLACEHOLDER_VALUES
         }
 
-        # Build port_id → ifName lookup for better synthetic item naming
-        port_name_map = self._build_port_name_map(transceivers)
+        # Build port_id → interface label lookup for better synthetic item naming
+        port_name_map = self._build_port_name_map(transceivers, ports_data=ports_data)
 
         # Types that are containers, not real transceiver modules
 
@@ -901,6 +960,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ent_idx = txr.get("entity_physical_index")
             if not ent_idx:
                 continue
+
+            port_id = txr.get("port_id")
+            try:
+                port_id = int(port_id) if port_id is not None else None
+            except (TypeError, ValueError):
+                port_id = None
+            port_meta = port_name_map.get(port_id, {}) if port_id else {}
+            ifname = (port_meta.get("ifName") or "").strip() or None
+            ifdescr = (port_meta.get("ifDescr") or "").strip() or None
 
             model = (txr.get("model") or "").strip()
             if model.lower() in _PLACEHOLDER_VALUES:
@@ -931,15 +999,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 if (existing_serial.lower() in _PLACEHOLDER_VALUES or existing_serial.lower() == "builtin") and serial:
                     existing["entPhysicalSerialNum"] = serial
                     inv_serials.add(serial)
+                if port_id:
+                    existing["_librenms_port_id"] = port_id
+                if ifname:
+                    existing["_librenms_ifname"] = ifname
+                if ifdescr:
+                    existing["_librenms_ifdescr"] = ifdescr
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
                 if serial and serial in inv_serials:
                     continue
                 # Create synthetic inventory item for SFPs not in entity inventory
-                port_id = txr.get("port_id", 0)
-                ifname = port_name_map.get(port_id)
                 if ifname:
                     name = ifname
+                elif ifdescr:
+                    name = ifdescr
                 elif port_id:
                     name = f"Transceiver (port {port_id})"
                 else:
@@ -954,6 +1028,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     "entPhysicalDescr": txr_type,
                     "entPhysicalContainedIn": 0,
                     "_from_transceiver_api": True,
+                    "_librenms_port_id": port_id,
+                    "_librenms_ifname": ifname,
+                    "_librenms_ifdescr": ifdescr,
                 }
                 inventory_data.append(synthetic)
                 # Update dedupe maps so subsequent iterations skip this entry
@@ -1012,11 +1089,91 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     it["entPhysicalContainedIn"] = parent_idx
                     break
 
-    def _build_port_name_map(self, transceivers):
-        """
-        Build port_id → ifName mapping for transceiver ports.
+    def _enrich_inventory_port_identity(self, inventory_data, ports_data=None):
+        """Backfill `_librenms_port_id` / labels for port-class inventory rows from LibreNMS ports data."""
+        if ports_data is None:
+            success, ports_data = self.librenms_api.get_ports(self.librenms_id)
+            if not success or not isinstance(ports_data, dict):
+                return
+        elif not isinstance(ports_data, dict):
+            return
 
-        Fetches port data from LibreNMS to resolve port IDs to interface names,
+        ports = ports_data.get("ports")
+        if not isinstance(ports, list):
+            return
+
+        label_to_port_id = {}
+        ambiguous_labels = set()
+        port_meta_by_id = {}
+
+        for port in ports:
+            if not isinstance(port, dict):
+                continue
+            try:
+                port_id = int(port.get("port_id"))
+            except (TypeError, ValueError):
+                continue
+            if port_id <= 0:
+                continue
+
+            ifname = (port.get("ifName") or "").strip()
+            ifdescr = (port.get("ifDescr") or "").strip()
+            port_meta_by_id[port_id] = {"ifName": ifname, "ifDescr": ifdescr}
+
+            for label in [ifname, ifdescr]:
+                if not label:
+                    continue
+                existing = label_to_port_id.get(label)
+                if existing is None:
+                    label_to_port_id[label] = port_id
+                elif existing != port_id:
+                    ambiguous_labels.add(label)
+
+        for label in ambiguous_labels:
+            label_to_port_id.pop(label, None)
+
+        for item in inventory_data:
+            if (item.get("entPhysicalClass") or "").strip().lower() != "port":
+                continue
+
+            port_id = item.get("_librenms_port_id")
+            try:
+                port_id = int(port_id) if port_id is not None else None
+            except (TypeError, ValueError):
+                port_id = None
+
+            if port_id is None or port_id <= 0:
+                candidates = []
+                for value in [
+                    item.get("_librenms_ifname"),
+                    item.get("_librenms_ifdescr"),
+                    item.get("entPhysicalName"),
+                    item.get("entPhysicalDescr"),
+                ]:
+                    label = (value or "").strip()
+                    if label and label not in candidates:
+                        candidates.append(label)
+
+                matched_ids = [label_to_port_id[label] for label in candidates if label in label_to_port_id]
+                matched_ids = sorted(set(matched_ids))
+                if len(matched_ids) != 1:
+                    continue
+                port_id = matched_ids[0]
+                item["_librenms_port_id"] = port_id
+
+            meta = port_meta_by_id.get(port_id)
+            if not meta:
+                continue
+            if meta.get("ifName") and not item.get("_librenms_ifname"):
+                item["_librenms_ifname"] = meta["ifName"]
+            if meta.get("ifDescr") and not item.get("_librenms_ifdescr"):
+                item["_librenms_ifdescr"] = meta["ifDescr"]
+
+    def _build_port_name_map(self, transceivers, ports_data=None):
+        """
+        Build port_id → interface labels mapping for transceiver ports.
+
+        Fetches port data from LibreNMS to resolve port IDs to interface labels,
         enabling better bay matching for synthetic transceiver items (e.g.,
         Nokia 1/1/c1 instead of opaque port IDs).
         """
@@ -1024,19 +1181,98 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not port_ids:
             return {}
 
-        success, ports_data = self.librenms_api.get_ports(self.librenms_id)
-        if not success or not isinstance(ports_data, dict):
+        if ports_data is None:
+            success, ports_data = self.librenms_api.get_ports(self.librenms_id)
+            if not success or not isinstance(ports_data, dict):
+                return {}
+        elif not isinstance(ports_data, dict):
             return {}
 
         ports = ports_data.get("ports")
         if not isinstance(ports, list):
             return {}
 
-        return {
-            p["port_id"]: p["ifName"]
-            for p in ports
-            if isinstance(p, dict) and p.get("port_id") in port_ids and p.get("ifName")
-        }
+        normalized_port_ids = set()
+        for raw_port_id in port_ids:
+            try:
+                port_id = int(raw_port_id)
+            except (TypeError, ValueError):
+                continue
+            if port_id > 0:
+                normalized_port_ids.add(port_id)
+
+        port_map = {}
+        for port in ports:
+            if not isinstance(port, dict):
+                continue
+            try:
+                port_id = int(port.get("port_id"))
+            except (TypeError, ValueError):
+                continue
+            if port_id not in normalized_port_ids:
+                continue
+            ifname = (port.get("ifName") or "").strip()
+            ifdescr = (port.get("ifDescr") or "").strip()
+            if not ifname and not ifdescr:
+                continue
+            port_map[port_id] = {
+                "ifName": ifname,
+                "ifDescr": ifdescr,
+            }
+        return port_map
+
+    @staticmethod
+    def _interface_name_candidates(item):
+        """Return unique interface label candidates for bay matching."""
+        candidates = []
+        for value in [
+            item.get("_librenms_ifname"),
+            item.get("_librenms_ifdescr"),
+            item.get("entPhysicalName"),
+            item.get("entPhysicalDescr"),
+        ]:
+            label = (value or "").strip()
+            if label and label not in candidates:
+                candidates.append(label)
+        return candidates
+
+    @staticmethod
+    def _extract_interface_port_indices(item):
+        """Extract candidate numeric port indices from interface-style labels."""
+        indices = []
+        for label in BaseModuleTableView._interface_name_candidates(item):
+            port_index = BaseModuleTableView._extract_port_index_from_label(label)
+            if port_index and port_index not in indices:
+                indices.append(port_index)
+        return indices
+
+    @staticmethod
+    def _extract_port_index_from_label(label):
+        """Return trailing interface index from labels like Te1/1/1 or Eth42."""
+        if not label:
+            return None
+
+        if "/" in label:
+            tail_segment = label.rsplit("/", 1)[-1].strip()
+            if tail_segment.isdigit():
+                return int(tail_segment)
+
+        trailing_match = re.search(r"(\d+)\s*$", label)
+        if trailing_match:
+            try:
+                return int(trailing_match.group(1))
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _match_bay_by_interface_label(item, module_bays):
+        """Infer bay names from interface labels when positional matching is unavailable."""
+        for port_index in BaseModuleTableView._extract_interface_port_indices(item):
+            for pattern in [f"SFP {port_index}", f"Port {port_index}", f"Bay {port_index}", f"Slot {port_index}"]:
+                if pattern in module_bays:
+                    return module_bays[pattern]
+        return None
 
     def _get_sub_components(self, parent_idx, children_by_parent, index_map, ignore_rules, device_serial=""):
         """
@@ -1278,7 +1514,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if options:
             row["carrier_install_options"] = options
 
-    def _find_parent_container_name(self, item, index_map):
+    @staticmethod
+    def _find_parent_container_name_static(item, index_map):
         """
         Resolve the nearest ancestor container name by walking up the containment chain.
 
@@ -1296,30 +1533,51 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             contained_in = parent.get("entPhysicalContainedIn", 0)
         return None
 
+    def _find_parent_container_name(self, item, index_map):
+        """Instance wrapper for parent container name resolution."""
+        return BaseModuleTableView._find_parent_container_name_static(item, index_map)
+
+    @staticmethod
+    def _build_bay_candidate_names(item, index_map, include_normalized=False, norm_rules_bay=None):
+        """Build deduplicated candidate names for bay matching.
+
+        Candidate order is stable: nearest parent container name first, then
+        interface/item label variants. Optionally appends normalized variants.
+        """
+        parent_name = BaseModuleTableView._find_parent_container_name_static(item, index_map)
+        candidate_names = [parent_name] if parent_name else []
+        for candidate in BaseModuleTableView._interface_name_candidates(item):
+            if candidate not in candidate_names:
+                candidate_names.append(candidate)
+
+        if not include_normalized:
+            return candidate_names
+
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+
+        normalized_extras = []
+        for name in candidate_names:
+            normalized = apply_normalization_rules(name, "module_bay", preloaded_rules=norm_rules_bay)
+            if normalized != name and normalized not in candidate_names and normalized not in normalized_extras:
+                normalized_extras.append(normalized)
+        return candidate_names + normalized_extras
+
     def _match_module_bay(self, item, index_map, module_bays):
         """
         Try to match an inventory item to a NetBox ModuleBay.
         Checks ModuleBayMapping table first (exact then regex), then falls back
         to exact parent name match, then positional matching.
         """
-        parent_name = self._find_parent_container_name(item, index_map)
-        item_name = (item.get("entPhysicalName") or "").strip()
-        item_descr = (item.get("entPhysicalDescr") or "").strip()
         phys_class = (item.get("entPhysicalClass") or "").strip()
         manufacturer_id = getattr(self, "_current_manufacturer_id", None)
 
-        # Build candidate names: parent, item name, item description
-        candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
-
-        from netbox_librenms_plugin.utils import apply_normalization_rules
-
         norm_rules_bay = getattr(self, "_norm_rules_bay", None)
-        normalized_extras = []
-        for name in candidate_names:
-            normalized = apply_normalization_rules(name, "module_bay", preloaded_rules=norm_rules_bay)
-            if normalized != name and normalized not in candidate_names and normalized not in normalized_extras:
-                normalized_extras.append(normalized)
-        all_candidates = candidate_names + normalized_extras
+        all_candidates = BaseModuleTableView._build_bay_candidate_names(
+            item,
+            index_map,
+            include_normalized=True,
+            norm_rules_bay=norm_rules_bay,
+        )
 
         # Use preloaded exact mappings (set in _build_context to avoid N+1 queries).
         exact_mappings = getattr(self, "_exact_bay_mappings", None)
@@ -1581,6 +1839,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if pattern in module_bays:
                 return module_bays[pattern]
 
+        # Final fallback for interface-like children: infer bay index from
+        # labels such as Te1/1/1 or TenGigabitEthernet1/1/1.
+        if phys_class == "port":
+            bay = BaseModuleTableView._match_bay_by_interface_label(item, module_bays)
+            if bay:
+                return bay
+
         return None
 
     def _build_row(
@@ -1692,6 +1957,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "depth": depth,
             "ent_physical_index": item.get("entPhysicalIndex"),
             "has_installable_children": False,
+            "librenms_port_id": item.get("_librenms_port_id"),
+            "librenms_ifname": item.get("_librenms_ifname"),
+            "librenms_ifdescr": item.get("_librenms_ifdescr"),
+            "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
         }
         if name_conflict_reason:
             row["name_conflict_reason"] = name_conflict_reason
@@ -1710,7 +1979,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     scope_empty_installed_bays=scope_empty_installed_bays,
                 )
             row["model_warning"] = self._build_no_bay_warning(
-                item, module_bays, suggestion, scope_uninstalled=scope_uninstalled, holder_hint=holder_hint
+                item,
+                module_bays,
+                suggestion,
+                scope_uninstalled=scope_uninstalled,
+                scope_empty_installed_bays=scope_empty_installed_bays,
+                holder_hint=holder_hint,
             )
             if suggestion:
                 # Pre-fill manufacturer from current device so the new mapping
@@ -1728,7 +2002,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # Tag the root cause so the table can render a more specific status
             # badge: installed parent module has no bay templates at all.
             if scope_empty_installed_bays and not scope_uninstalled:
-                row["no_bay_reason"] = "empty_parent_bays"
+                phys_class_lc = (phys_class or "").strip().lower()
+                if phys_class_lc == "port":
+                    row["no_bay_reason"] = "interface_child"
+                else:
+                    row["no_bay_reason"] = "empty_parent_bays"
         elif status == "No Type":
             ambiguities = getattr(self, "_module_type_ambiguities", None)
             ambiguity_candidates = self._find_ambiguity_candidates(
@@ -1869,7 +2147,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         }
 
     @staticmethod
-    def _build_no_bay_warning(item, module_bays, suggestion=None, scope_uninstalled=False, holder_hint=None):
+    def _build_no_bay_warning(
+        item,
+        module_bays,
+        suggestion=None,
+        scope_uninstalled=False,
+        scope_empty_installed_bays=False,
+        holder_hint=None,
+    ):
         """
         Hint the user toward the missing piece of the NetBox model when bay
         matching produces "No Bay".
@@ -1897,6 +2182,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         if phys_class in class_hints:
             class_part = f"No bay defined for class={phys_class}; add {class_hints[phys_class]} bay templates"
+        elif phys_class == "port":
+            class_part = (
+                "No matching bay; add Slot N / SFP N / Bay N / Port N bay templates "
+                "or a ModuleBayMapping that maps interface labels"
+            )
         elif phys_class in module_classes:
             class_part = "No matching bay; add Slot N / SFP N / Bay N / Port N bay templates"
         else:
@@ -1908,6 +2198,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     "An ancestor module bay matched but has no module installed in NetBox; "
                     "install the parent module first so its bay templates become available, "
                     "then refresh this tab."
+                )
+            elif scope_empty_installed_bays and phys_class == "port":
+                base = (
+                    "Parent module has no child module bays in NetBox. "
+                    "This looks like an interface/port child; Install Branch can infer/create child SFP bays "
+                    "from interface numbering (for example Te1/1/1 -> SFP 1). "
+                    "If inference fails, add explicit child bay templates or a ModuleBayMapping."
                 )
             else:
                 base = (

@@ -122,13 +122,21 @@ class LibreNMSModuleTable(tables.Table):
 
     def render_name(self, value, record):
         """Render inventory item name with tree indentation for sub-components."""
+        display_name = value or "-"
+        matched_interface_url = record.get("matched_interface_url")
+        matched_interface_name = record.get("matched_interface_name") or display_name
+        if matched_interface_url:
+            rendered_name = format_html('<a href="{}">{}</a>', matched_interface_url, matched_interface_name)
+        else:
+            rendered_name = display_name
+
         depth = record.get("depth", 0)
         if depth == 0:
-            return format_html("{}", value or "-")
+            return rendered_name
         # Build visual tree prefix based on nesting depth
         padding_px = depth * 20
         prefix = "└─ "
-        return format_html('<span style="padding-left:{}px">{}{}</span>', padding_px, prefix, value or "-")
+        return format_html('<span style="padding-left:{}px">{}{}</span>', padding_px, prefix, rendered_name)
 
     def render_model(self, value, record):
         """Render model with link to module type if matched."""
@@ -170,10 +178,19 @@ class LibreNMSModuleTable(tables.Table):
     def render_module_bay(self, value, record):
         """Render module bay with link if found in NetBox."""
         if not value or value == "-":
-            return format_html('<span class="text-danger">{}</span>', "No matching bay")
-        if url := record.get("module_bay_url"):
-            return format_html('<a href="{}">{}</a>', url, value)
-        return format_html("{}", value)
+            rendered_value = format_html('<span class="text-danger">{}</span>', "No matching bay")
+        elif url := record.get("module_bay_url"):
+            rendered_value = format_html('<a href="{}">{}</a>', url, value)
+        else:
+            rendered_value = value
+
+        # Mirror Name-column hierarchy marker in Module Bay for child rows.
+        depth = record.get("depth", 0)
+        if depth > 0:
+            padding_px = depth * 20
+            return format_html('<span style="padding-left:{}px">└─ {}</span>', padding_px, rendered_value)
+
+        return rendered_value
 
     def render_module_type(self, value, record):
         """Render module type match status."""
@@ -206,8 +223,14 @@ class LibreNMSModuleTable(tables.Table):
         badge_class = badge_classes.get(value, "bg-secondary text-white")
         warning = record.get("model_warning")
 
-        # More descriptive label when the parent module type simply has no bay templates.
-        display_text = "No Bay on Parent" if record.get("no_bay_reason") == "empty_parent_bays" else value
+        # More descriptive labels for root-cause specific no-bay cases.
+        no_bay_reason = record.get("no_bay_reason")
+        if no_bay_reason == "empty_parent_bays":
+            display_text = "No Bay on Parent"
+        elif no_bay_reason == "interface_child":
+            display_text = "Interface Child"
+        else:
+            display_text = value
 
         # Small "Possible Carrier?" hint badge: holder hint fired but no
         # concrete CarrierAutoInstallRule matched. Encourages the user to add
@@ -384,6 +407,12 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
+                    '<input type="hidden" name="ent_index" value="{}">'
+                    '<input type="hidden" name="librenms_port_id" value="{}">'
+                    '<input type="hidden" name="librenms_ifname" value="{}">'
+                    '<input type="hidden" name="librenms_ifdescr" value="{}">'
+                    '<input type="hidden" name="inventory_name" value="{}">'
+                    '<input type="hidden" name="inventory_descr" value="{}">'
                     '<input type="hidden" name="module_bay_id" value="{}">'
                     '<input type="hidden" name="module_type_id" value="{}">'
                     '<input type="hidden" name="serial" value="{}">'
@@ -394,6 +423,12 @@ class LibreNMSModuleTable(tables.Table):
                     self.csrf_token,
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
+                    record.get("ent_physical_index", ""),
+                    record.get("librenms_port_id", ""),
+                    record.get("librenms_ifname") or "",
+                    record.get("librenms_ifdescr") or "",
+                    record.get("name") or "",
+                    record.get("description") or "",
                     record.get("module_bay_id", ""),
                     record.get("module_type_id", ""),
                     record.get("serial") or "",
