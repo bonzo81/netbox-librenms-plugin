@@ -150,8 +150,9 @@ class TestUpdateInterfaceAttributes:
         librenms_data = {"ifName": "eth0", "port_id": 77}
 
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set:
-                view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
+            with patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=None):
+                with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set:
+                    view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
 
         mock_set.assert_called_once_with(iface, 77, view._librenms_api.server_key)
 
