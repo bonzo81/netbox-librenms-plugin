@@ -20,7 +20,14 @@
 </li>
 {% elif model_name == "virtualmachine" %}
 <li class="breadcrumb-item">
+    {# VirtualMachine.cluster has been nullable since NetBox 3.3 #}
+    {% if object.cluster %}
     <a href="{% url 'virtualization:virtualmachine_list' %}?cluster_id={{ object.cluster.pk }}">{{ object.cluster }}</a>
+    {% elif object.site %}
+    <a href="{% url 'dcim:site' pk=object.site.pk %}">{{ object.site }}</a>
+    {% else %}
+    <span class="text-muted">No cluster</span>
+    {% endif %}
 </li>
 {% endif %}
 {% endwith %}

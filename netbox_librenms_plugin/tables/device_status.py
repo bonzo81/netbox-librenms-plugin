@@ -236,9 +236,13 @@ class DeviceImportTable(tables.Table):
 
         # Check if existing object is a VM
         if existing and isinstance(existing, VirtualMachine):
-            # VM already exists - show its cluster (cluster is required for VMs)
+            # VM already exists - show its cluster. NetBox has allowed
+            # VirtualMachine.cluster to be NULL since 3.3 (VMs can be assigned
+            # directly to a site/device), so guard against the cluster-less case.
             cluster = existing.cluster
-            return mark_safe(f'<span class="badge bg-info text-white">{cluster.name}</span>')
+            if cluster is not None:
+                return mark_safe(f'<span class="badge bg-info text-white">{cluster.name}</span>')
+            return mark_safe('<span class="text-muted small">VM (no cluster)</span>')
 
         # If Device already exists (not VM), show it's not a VM
         if existing:
