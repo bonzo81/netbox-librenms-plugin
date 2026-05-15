@@ -448,6 +448,55 @@ class TestDeviceImportHelperMixin:
         assert "device_import_row.html" in mock_render.call_args[0][1]
 
 
+class TestAttachMessagesOob:
+    """Tests for the _attach_messages_oob helper."""
+
+    def test_returns_none_when_response_is_none(self):
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        assert _attach_messages_oob(None, MagicMock()) is None
+
+    def test_skips_response_without_bytes_content(self):
+        """When .content is a MagicMock or similar non-bytes value, skip cleanly."""
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        response = MagicMock()
+        response.content = MagicMock()  # not bytes / bytearray
+        result = _attach_messages_oob(response, MagicMock())
+        assert result is response  # returned unchanged
+
+    def test_appends_rendered_messages_to_bytes_content(self):
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        response = HttpResponse(b"<tr>row html</tr>")
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.render_to_string",
+            return_value='<div id="django-messages" hx-swap-oob="true"></div>',
+        ) as mock_render:
+            result = _attach_messages_oob(response, MagicMock())
+
+        mock_render.assert_called_once()
+        assert b'<div id="django-messages"' in result.content
+        assert result.content.startswith(b"<tr>row html</tr>")
+
+    def test_swallows_render_errors(self):
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        response = HttpResponse(b"<tr>row html</tr>")
+        original = response.content
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions.render_to_string",
+            side_effect=RuntimeError("db not available"),
+        ):
+            result = _attach_messages_oob(response, MagicMock())
+
+        assert result.content == original
+
+
 class TestDeviceValidationDetailsView:
     """Tests for DeviceValidationDetailsView (lines 477-822)."""
 

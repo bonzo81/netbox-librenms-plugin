@@ -12,6 +12,7 @@ from django.db import IntegrityError, transaction
 
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
+from django.template.loader import render_to_string
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django.utils.text import slugify
@@ -46,6 +47,34 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
+
+
+def _attach_messages_oob(response, request):
+    """
+    Append a single OOB-swap toast container to an HTMX response.
+
+    NetBox's standard ``inc/messages.html`` renders a
+    ``<div id="django-messages" hx-swap-oob="true">`` with one Bootstrap toast
+    per pending Django message. Including this snippet inside per-row partials
+    causes problems on multi-row OOB responses because each render emits a
+    matching ``id="django-messages"`` div and the LAST swap (typically empty
+    once messages have been consumed by an earlier render) wipes the toasts.
+
+    Centralising the include here guarantees a single render per HTMX response
+    so toasts always make it to NetBox's afterSettle ``initMessages()`` hook.
+    """
+    if response is None or not hasattr(response, "content"):
+        return response
+    if not isinstance(response.content, (bytes, bytearray)):
+        return response
+    try:
+        rendered = render_to_string("inc/messages.html", request=request)
+    except Exception:  # pragma: no cover - defensive: don't break HTMX response on render error
+        logger.debug("Failed to render inc/messages.html for OOB toast attach", exc_info=True)
+        return response
+    response.content = response.content + rendered.encode("utf-8")
+    return response
+
 
 # Actions that require the force checkbox when a device-type mismatch is detected.
 _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_type"})
@@ -316,10 +345,13 @@ class DeviceImportHelperMixin:
             "rack_id": selections["rack_id"],
         }
 
-        return render(
+        return _attach_messages_oob(
+            render(
+                request,
+                "netbox_librenms_plugin/htmx/device_import_row.html",
+                context,
+            ),
             request,
-            "netbox_librenms_plugin/htmx/device_import_row.html",
-            context,
         )
 
 
@@ -871,10 +903,11 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     updated_rows_html.append(row_html)
 
             # Return concatenated row HTML with closeModal trigger
-            return HttpResponse(
+            response = HttpResponse(
                 "\n".join(updated_rows_html),
                 headers={"HX-Trigger": '{"closeModal": null}'},
             )
+            return _attach_messages_oob(response, request)
 
         return redirect("plugins:netbox_librenms_plugin:librenms_import")
 

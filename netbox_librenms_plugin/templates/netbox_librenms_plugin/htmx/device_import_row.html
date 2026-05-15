@@ -16,7 +16,6 @@
     </td>
   </tr>
 {% endif %}
-{# Render any pending Django messages as toasts via the standard NetBox include.
-   The include both consumes the message queue (so they don't re-appear on the next
-   full-page load) AND renders them into the OOB-swapped toast container. #}
-{% include 'inc/messages.html' %}
+{# Toast messages are appended once per HTMX response by the calling view via
+   _attach_messages_oob() so multi-row OOB swaps don't wipe each other's
+   #django-messages container. Do not include 'inc/messages.html' here. #}
