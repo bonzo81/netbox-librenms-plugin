@@ -2,6 +2,7 @@
 
 import json
 import logging
+from ipaddress import ip_address as _ipaddr_parse
 from urllib.parse import parse_qs, urlparse
 
 from django.contrib import messages
@@ -773,6 +774,24 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             messages.success(
                 request,
                 f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}",
+            )
+        # Aggregate auto-created IPAM entries across the batch and surface a
+        # single info toast so the user knows a side-effect happened on import.
+        created_ips_all = []
+        for item in device_result.get("success", []):
+            created_ips_all.extend(item.get("created_ips") or [])
+        for item in vm_result.get("success", []):
+            vm_obj = item.get("device") or item.get("vm")
+            ips = getattr(vm_obj, "_librenms_created_ips", None) if vm_obj is not None else None
+            if ips:
+                created_ips_all.extend(ips)
+        if created_ips_all:
+            unique_ips = sorted(set(created_ips_all))
+            preview = ", ".join(unique_ips[:5]) + (f" (+{len(unique_ips) - 5} more)" if len(unique_ips) > 5 else "")
+            messages.info(
+                request,
+                f"Auto-created {len(unique_ips)} IPAM entr{'y' if len(unique_ips) == 1 else 'ies'} "
+                f"in the global scope (unassigned): {preview}.",
             )
         if failed_count:
             messages.error(
@@ -1899,10 +1918,15 @@ class AddAsOOBView(
             # record if it doesn't exist yet so the user has something to
             # later attach to an interface and re-home if needed.
             if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip = get_or_create_global_ip(oob_ip_str)
+                oob_ip, oob_ip_created = get_or_create_global_ip(oob_ip_str)
                 if oob_ip is not None:
                     existing_device.oob_ip = oob_ip
                     update_fields.append("oob_ip")
+                    if oob_ip_created:
+                        messages.info(
+                            request,
+                            f"Auto-created OOB IP {oob_ip_str} in IPAM (unassigned, global scope).",
+                        )
 
             if err := _save_device(existing_device, update_fields=update_fields):
                 return err
@@ -2083,15 +2107,26 @@ class PromoteToHostView(
 
             host_ip_str = (libre_device.get("ip") or "").strip() or None
             if host_ip_str:
-                host_ip = get_or_create_global_ip(host_ip_str)
+                host_ip, host_ip_created = get_or_create_global_ip(host_ip_str)
                 if host_ip is not None:
-                    is_v6 = host_ip.address.version == 6
+                    try:
+                        is_v6 = _ipaddr_parse(host_ip_str).version == 6
+                    except ValueError:
+                        is_v6 = False
+                    assigned = False
                     if is_v6 and existing_device.primary_ip6_id is None:
                         existing_device.primary_ip6 = host_ip
                         update_fields.append("primary_ip6")
+                        assigned = True
                     elif not is_v6 and existing_device.primary_ip4_id is None:
                         existing_device.primary_ip4 = host_ip
                         update_fields.append("primary_ip4")
+                        assigned = True
+                    if host_ip_created and assigned:
+                        messages.info(
+                            request,
+                            f"Auto-created primary IP {host_ip_str} in IPAM (unassigned, global scope).",
+                        )
 
             # Fetch OOB device's IP from LibreNMS if we don't already have one
             # cached in CFD / the relationship.
@@ -2117,10 +2152,15 @@ class PromoteToHostView(
                             pass
 
             if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip = get_or_create_global_ip(oob_ip_str)
+                oob_ip, oob_ip_created = get_or_create_global_ip(oob_ip_str)
                 if oob_ip is not None:
                     existing_device.oob_ip = oob_ip
                     update_fields.append("oob_ip")
+                    if oob_ip_created:
+                        messages.info(
+                            request,
+                            f"Auto-created OOB IP {oob_ip_str} in IPAM (unassigned, global scope).",
+                        )
 
             if err := _save_device(existing_device, update_fields=update_fields):
                 return err

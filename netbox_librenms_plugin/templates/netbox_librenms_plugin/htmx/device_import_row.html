@@ -16,7 +16,7 @@
     </td>
   </tr>
 {% endif %}
-{# Consume and clear any pending Django messages to prevent reappearing toasts #}
-<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">
-{% for _ in messages %}{% endfor %}
-</div>
+{# Render any pending Django messages as toasts via the standard NetBox include.
+   The include both consumes the message queue (so they don't re-appear on the next
+   full-page load) AND renders them into the OOB-swapped toast container. #}
+{% include 'inc/messages.html' %}

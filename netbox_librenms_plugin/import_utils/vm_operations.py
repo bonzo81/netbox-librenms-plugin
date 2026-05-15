@@ -93,7 +93,11 @@ def create_vm_from_librenms(
         if primary_ip:
             from .ip_helpers import get_or_create_global_ip
 
-            get_or_create_global_ip(primary_ip)
+            _ip, was_created = get_or_create_global_ip(primary_ip)
+            if was_created and _ip is not None:
+                # Stash for caller to surface via Django messages (best-effort;
+                # callers that don't read this attribute simply skip the toast).
+                vm._librenms_created_ips = [str(_ip.address.ip)]
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm

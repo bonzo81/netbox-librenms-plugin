@@ -26,42 +26,48 @@ if TYPE_CHECKING:  # pragma: no cover - import only for type hints
 logger = logging.getLogger(__name__)
 
 
-def get_or_create_global_ip(ip_str: str | None) -> "IPAddress | None":
-    """Return the IPAM record for ``ip_str``; create a /32 or /128 if missing.
+def get_or_create_global_ip(ip_str: str | None) -> "tuple[IPAddress | None, bool]":
+    """Return ``(ipam_record, created)`` for ``ip_str``.
 
-    The returned ``IPAddress`` is unassigned (no ``assigned_object``) and
-    lives in the global scope (no VRF). Callers may attach it to an
+    Creates a ``/32`` (IPv4) or ``/128`` (IPv6) global-scope record if no
+    matching ``IPAddress`` exists (matched via ``net_host`` so any prefix
+    length is acceptable). The returned ``IPAddress`` is unassigned (no
+    ``assigned_object``) and has no VRF. Callers may attach it to an
     interface or assign it as ``oob_ip`` afterwards.
 
-    Returns ``None`` if ``ip_str`` is empty, malformed, or if creation
-    fails (the failure is logged but never raised, so callers can treat
-    this as best-effort).
+    The ``created`` flag is ``True`` only when a new IPAM record was
+    inserted by this call, so callers can surface a user-visible toast
+    only on creation (and stay silent when reusing an existing record).
+
+    Returns ``(None, False)`` if ``ip_str`` is empty, malformed, or if
+    creation fails (the failure is logged but never raised, so callers
+    can treat this as best-effort).
     """
     if not ip_str:
-        return None
+        return None, False
     ip_str = ip_str.strip()
     if not ip_str:
-        return None
+        return None, False
 
     try:
         parsed = _ipaddr_parse(ip_str)
     except ValueError:
         logger.debug("get_or_create_global_ip: invalid IP %r", ip_str)
-        return None
+        return None, False
 
     from ipam.models import IPAddress
 
     existing = IPAddress.objects.filter(address__net_host=ip_str).first()
     if existing is not None:
-        return existing
+        return existing, False
 
     mask = "/128" if parsed.version == 6 else "/32"
     try:
-        return IPAddress.objects.create(address=f"{ip_str}{mask}", status="active")
+        return IPAddress.objects.create(address=f"{ip_str}{mask}", status="active"), True
     except Exception:  # pragma: no cover - defensive (validation/integrity)
         logger.warning(
             "get_or_create_global_ip: failed to auto-create %s",
             ip_str,
             exc_info=True,
         )
-        return None
+        return None, False

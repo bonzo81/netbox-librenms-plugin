@@ -949,6 +949,7 @@ def import_single_device(
     """
     try:
         api = LibreNMSAPI(server_key=server_key)
+        created_ips: list[str] = []
 
         # Use pre-fetched device data if provided, otherwise fetch from API
         if libre_device is None:
@@ -1098,7 +1099,9 @@ def import_single_device(
             if primary_ip:
                 from .ip_helpers import get_or_create_global_ip
 
-                get_or_create_global_ip(primary_ip)
+                _ip, was_created = get_or_create_global_ip(primary_ip)
+                if was_created and _ip is not None:
+                    created_ips.append(str(_ip.address.ip))
 
         # Sync additional data based on options
         sync_options = sync_options or {}
@@ -1129,6 +1132,7 @@ def import_single_device(
             "message": f"Successfully imported device: {device.name}",
             "error": None,
             "synced": synced,
+            "created_ips": created_ips,
         }
 
     except Exception as e:

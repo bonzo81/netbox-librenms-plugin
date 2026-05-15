@@ -13,15 +13,15 @@ class TestGetOrCreateGlobalIP:
     def test_returns_none_for_empty_string(self):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
 
-        assert get_or_create_global_ip("") is None
-        assert get_or_create_global_ip(None) is None
-        assert get_or_create_global_ip("   ") is None
+        assert get_or_create_global_ip("") == (None, False)
+        assert get_or_create_global_ip(None) == (None, False)
+        assert get_or_create_global_ip("   ") == (None, False)
 
     def test_returns_none_for_invalid_ip(self):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
 
-        assert get_or_create_global_ip("not-an-ip") is None
-        assert get_or_create_global_ip("192.168.1.999") is None
+        assert get_or_create_global_ip("not-an-ip") == (None, False)
+        assert get_or_create_global_ip("192.168.1.999") == (None, False)
 
     def test_returns_existing_when_present(self):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
@@ -30,11 +30,12 @@ class TestGetOrCreateGlobalIP:
         with patch("ipam.models.IPAddress") as mock_model:
             mock_model.objects.filter.return_value.first.return_value = existing
 
-            result = get_or_create_global_ip("10.0.0.1")
+            result, created = get_or_create_global_ip("10.0.0.1")
 
             mock_model.objects.filter.assert_called_once_with(address__net_host="10.0.0.1")
             mock_model.objects.create.assert_not_called()
             assert result is existing
+            assert created is False
 
     def test_creates_ipv4_with_slash32_when_missing(self):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
@@ -44,10 +45,11 @@ class TestGetOrCreateGlobalIP:
             mock_model.objects.filter.return_value.first.return_value = None
             mock_model.objects.create.return_value = created
 
-            result = get_or_create_global_ip("10.0.0.1")
+            result, was_created = get_or_create_global_ip("10.0.0.1")
 
             mock_model.objects.create.assert_called_once_with(address="10.0.0.1/32", status="active")
             assert result is created
+            assert was_created is True
 
     def test_creates_ipv6_with_slash128_when_missing(self):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
@@ -57,10 +59,11 @@ class TestGetOrCreateGlobalIP:
             mock_model.objects.filter.return_value.first.return_value = None
             mock_model.objects.create.return_value = created
 
-            result = get_or_create_global_ip("2001:db8::1")
+            result, was_created = get_or_create_global_ip("2001:db8::1")
 
             mock_model.objects.create.assert_called_once_with(address="2001:db8::1/128", status="active")
             assert result is created
+            assert was_created is True
 
     def test_strips_whitespace_before_lookup(self):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
@@ -69,10 +72,11 @@ class TestGetOrCreateGlobalIP:
             mock_model.objects.filter.return_value.first.return_value = None
             mock_model.objects.create.return_value = MagicMock()
 
-            get_or_create_global_ip("  10.1.2.3  ")
+            result, was_created = get_or_create_global_ip("  10.1.2.3  ")
 
             mock_model.objects.filter.assert_called_once_with(address__net_host="10.1.2.3")
             mock_model.objects.create.assert_called_once_with(address="10.1.2.3/32", status="active")
+            assert was_created is True
 
     def test_returns_none_and_logs_when_create_raises(self, caplog):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
@@ -82,9 +86,10 @@ class TestGetOrCreateGlobalIP:
             mock_model.objects.create.side_effect = RuntimeError("integrity failure")
 
             with caplog.at_level("WARNING"):
-                result = get_or_create_global_ip("10.0.0.1")
+                result, was_created = get_or_create_global_ip("10.0.0.1")
 
             assert result is None
+            assert was_created is False
             assert any("failed to auto-create" in r.message for r in caplog.records)
 
     def test_reexported_from_import_utils_package(self):
