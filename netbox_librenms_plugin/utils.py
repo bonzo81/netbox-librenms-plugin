@@ -1151,6 +1151,36 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     donor.custom_field_data["librenms_id"] = cf_value
 
 
+def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
+    """
+    Read the ``_migrated_to`` marker (Stage 2b) from the device's
+    ``librenms_id[server_key]`` sub-block.
+
+    Returns the marker dict ``{device_id, server_key, at}`` when the donor
+    was previously merged into another NetBox device via
+    :func:`mark_librenms_migrated`, or ``None`` when no marker is present
+    (or the cf is malformed).
+
+    Used by the librenms-sync UI to switch a donor device into "migrated
+    mode": disable sync actions and surface per-row "Move to winner"
+    buttons.
+    """
+    if device is None:
+        return None
+    cf_value = device.cf.get("librenms_id") if hasattr(device, "cf") else None
+    if not isinstance(cf_value, dict):
+        return None
+    entry = cf_value.get(server_key)
+    if not isinstance(entry, dict):
+        return None
+    marker = entry.get("_migrated_to")
+    if not isinstance(marker, dict):
+        return None
+    if not isinstance(marker.get("device_id"), int):
+        return None
+    return marker
+
+
 def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
     """
     Check if installing this module type in a nested bay would cause a name conflict.
