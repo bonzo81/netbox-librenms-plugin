@@ -1097,9 +1097,9 @@ def import_single_device(
             # the device's interfaces, which doesn't exist on a fresh import.
             primary_ip = libre_device.get("ip")
             if primary_ip:
-                from .ip_helpers import get_or_create_global_ip
+                from .ip_helpers import auto_create_ipam_enabled, get_or_create_global_ip
 
-                _ip, was_created = get_or_create_global_ip(primary_ip)
+                _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=auto_create_ipam_enabled())
                 if was_created and _ip is not None:
                     created_ips.append(str(_ip.address.ip))
 

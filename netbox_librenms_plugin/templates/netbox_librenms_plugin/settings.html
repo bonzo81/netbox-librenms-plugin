@@ -187,6 +187,18 @@
                                             </div>
                                         </div>
 
+                                        <div class="form-group mb-3">
+                                            <div class="form-check form-switch">
+                                                {{ import_form.auto_create_ipam_default }}
+                                                <label class="form-check-label" for="{{ import_form.auto_create_ipam_default.id_for_label }}">
+                                                    {{ import_form.auto_create_ipam_default.label }}
+                                                </label>
+                                                {% if import_form.auto_create_ipam_default.help_text %}
+                                                    <small class="form-text text-muted d-block">{{ import_form.auto_create_ipam_default.help_text }}</small>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+
                                     </div>
                                 </div>
                             </div>

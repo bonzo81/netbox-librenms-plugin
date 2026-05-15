@@ -100,3 +100,57 @@ class TestGetOrCreateGlobalIP:
         )
 
         assert pkg_helper is module_helper
+
+
+class TestAutoCreateOptIn:
+    """``auto_create=False`` opt-out and ``auto_create_ipam_enabled()`` helper."""
+
+    def test_auto_create_false_returns_existing(self):
+        from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
+
+        existing = MagicMock(name="existing-ip")
+        with patch("ipam.models.IPAddress") as mock_model:
+            mock_model.objects.filter.return_value.first.return_value = existing
+
+            result, created = get_or_create_global_ip("10.0.0.1", auto_create=False)
+
+            assert result is existing
+            assert created is False
+            mock_model.objects.create.assert_not_called()
+
+    def test_auto_create_false_skips_creation_when_missing(self):
+        from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
+
+        with patch("ipam.models.IPAddress") as mock_model:
+            mock_model.objects.filter.return_value.first.return_value = None
+
+            result, created = get_or_create_global_ip("10.0.0.1", auto_create=False)
+
+            assert result is None
+            assert created is False
+            mock_model.objects.create.assert_not_called()
+
+    def test_auto_create_ipam_enabled_false_when_no_settings(self):
+        from netbox_librenms_plugin.import_utils.ip_helpers import auto_create_ipam_enabled
+
+        with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_model:
+            mock_model.objects.first.return_value = None
+            assert auto_create_ipam_enabled() is False
+
+    def test_auto_create_ipam_enabled_reads_field(self):
+        from netbox_librenms_plugin.import_utils.ip_helpers import auto_create_ipam_enabled
+
+        with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_model:
+            settings = MagicMock(auto_create_ipam_default=True)
+            mock_model.objects.first.return_value = settings
+            assert auto_create_ipam_enabled() is True
+
+            settings.auto_create_ipam_default = False
+            assert auto_create_ipam_enabled() is False
+
+    def test_auto_create_ipam_enabled_swallows_exceptions(self):
+        from netbox_librenms_plugin.import_utils.ip_helpers import auto_create_ipam_enabled
+
+        with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_model:
+            mock_model.objects.first.side_effect = RuntimeError("db down")
+            assert auto_create_ipam_enabled() is False

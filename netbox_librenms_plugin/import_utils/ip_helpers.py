@@ -26,7 +26,24 @@ if TYPE_CHECKING:  # pragma: no cover - import only for type hints
 logger = logging.getLogger(__name__)
 
 
-def get_or_create_global_ip(ip_str: str | None) -> "tuple[IPAddress | None, bool]":
+def auto_create_ipam_enabled() -> bool:
+    """Return the value of the ``auto_create_ipam_default`` plugin setting.
+
+    Defaults to ``False`` if the settings row does not exist or the field is
+    missing (e.g. during a migration). All callers should consult this before
+    asking ``get_or_create_global_ip(..., auto_create=True)`` so the user's
+    opt-in choice on the plugin settings page is honoured.
+    """
+    try:
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings = LibreNMSSettings.objects.first()
+        return bool(getattr(settings, "auto_create_ipam_default", False)) if settings else False
+    except Exception:  # pragma: no cover - defensive (migrations / startup)
+        return False
+
+
+def get_or_create_global_ip(ip_str: str | None, *, auto_create: bool = True) -> "tuple[IPAddress | None, bool]":
     """Return ``(ipam_record, created)`` for ``ip_str``.
 
     Creates a ``/32`` (IPv4) or ``/128`` (IPv6) global-scope record if no
@@ -39,9 +56,15 @@ def get_or_create_global_ip(ip_str: str | None) -> "tuple[IPAddress | None, bool
     inserted by this call, so callers can surface a user-visible toast
     only on creation (and stay silent when reusing an existing record).
 
-    Returns ``(None, False)`` if ``ip_str`` is empty, malformed, or if
-    creation fails (the failure is logged but never raised, so callers
-    can treat this as best-effort).
+    When ``auto_create`` is ``False``, no new record is ever inserted:
+    only existing records are returned. This lets callers honour the
+    ``auto_create_ipam_default`` plugin setting without having to
+    duplicate the lookup logic.
+
+    Returns ``(None, False)`` if ``ip_str`` is empty, malformed, if
+    ``auto_create=False`` and no record exists, or if creation fails
+    (the failure is logged but never raised, so callers can treat this
+    as best-effort).
     """
     if not ip_str:
         return None, False
@@ -60,6 +83,9 @@ def get_or_create_global_ip(ip_str: str | None) -> "tuple[IPAddress | None, bool
     existing = IPAddress.objects.filter(address__net_host=ip_str).first()
     if existing is not None:
         return existing, False
+
+    if not auto_create:
+        return None, False
 
     mask = "/128" if parsed.version == 6 else "/32"
     try:

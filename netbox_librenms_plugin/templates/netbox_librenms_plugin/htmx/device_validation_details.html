@@ -175,6 +175,9 @@
                         <i class="mdi mdi-sync"></i>
                       </button>
                     </form>
+                    {% if libre_device.hardware and libre_device.hardware != "-" %}
+                      {% include "netbox_librenms_plugin/htmx/_dt_mapping_form.html" with preselect_device_type=validation.existing_device.device_type submit_label="Map LibreNMS hardware to current type" %}
+                    {% endif %}
                   {% elif validation.existing_device and validation.existing_device.device_type %}
                     {{ validation.existing_device.device_type }}
                     {% if sync_info and not sync_info.device_type_synced and sync_info.librenms_device_type %}
@@ -201,106 +204,8 @@
                     {% if libre_device.hardware and libre_device.hardware != "-" %}
                       <div>
                         <span class="text-danger d-block"><i class="mdi mdi-close-circle"></i> No matching type</span>
-                        <form hx-post="{% url 'plugins:netbox_librenms_plugin:add_device_type_mapping' device_id=libre_device.device_id %}"
-                              hx-swap="none"
-                              hx-include="[name=role_{{ libre_device.device_id }}], [name=rack_{{ libre_device.device_id }}], [name=cluster_{{ libre_device.device_id }}], #use-sysname-toggle, #strip-domain-toggle"
-                              class="mt-1"
-                              id="dt-mapping-form-{{ libre_device.device_id }}">
-                          {% csrf_token %}
-                          <input type="hidden" name="server_key" value="{{ server_key }}">
-                          <div class="position-relative">
-                            <label for="dt-search-{{ libre_device.device_id }}" class="visually-hidden">
-                              Search device types
-                            </label>
-                            <input type="text"
-                                   class="form-control form-control-sm"
-                                   id="dt-search-{{ libre_device.device_id }}"
-                                   placeholder="Search device types…"
-                                   autocomplete="off">
-                            <input type="hidden"
-                                   name="device_type_id"
-                                   id="dt-id-{{ libre_device.device_id }}">
-                            <div id="dt-dropdown-{{ libre_device.device_id }}"
-                                 class="dropdown-menu w-100 shadow"
-                                 style="z-index:1050; max-height:200px; overflow-y:auto; display:none;"></div>
-                          </div>
-                          <button type="submit"
-                                  id="dt-submit-{{ libre_device.device_id }}"
-                                  class="btn btn-sm btn-primary mt-1 w-100"
-                                  disabled>Add Mapping</button>
-                        </form>
+                        {% include "netbox_librenms_plugin/htmx/_dt_mapping_form.html" %}
                       </div>
-                      <script>
-                        (function () {
-                          var searchEl = document.getElementById("dt-search-{{ libre_device.device_id }}");
-                          var dropdownEl = document.getElementById("dt-dropdown-{{ libre_device.device_id }}");
-                          var hiddenEl = document.getElementById("dt-id-{{ libre_device.device_id }}");
-                          var submitBtn = document.getElementById("dt-submit-{{ libre_device.device_id }}");
-                          if (!searchEl) return;
-                          var timer = null;
-                          var requestSeq = 0;
-
-                          searchEl.addEventListener("input", function () {
-                            clearTimeout(timer);
-                            hiddenEl.value = "";
-                            submitBtn.disabled = true;
-                            var q = this.value.trim();
-                            if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
-                            timer = setTimeout(function () {
-                              var seq = ++requestSeq;
-                              fetch("{% url 'dcim-api:devicetype-list' %}?q=" + encodeURIComponent(q) + "&limit=20")
-                                .then(function (r) {
-                                  if (!r.ok) {
-                                    throw new Error("DeviceType search failed: HTTP " + r.status);
-                                  }
-                                  return r.json();
-                                })
-                                .then(function (data) {
-                                  if (seq !== requestSeq) return;
-                                  dropdownEl.innerHTML = "";
-                                  if (!data.results || data.results.length === 0) {
-                                    dropdownEl.innerHTML = '<a class="dropdown-item small py-1 text-muted disabled">No results</a>';
-                                  } else {
-                                    data.results.forEach(function (dt) {
-                                      var a = document.createElement("a");
-                                      a.className = "dropdown-item small py-1";
-                                      a.href = "#";
-                                      // dt.display already includes the manufacturer
-                                      // (e.g. "Cisco ISR4321"), so don't prepend it again.
-                                      a.textContent = dt.display;
-                                      a.addEventListener("click", function (e) {
-                                        e.preventDefault();
-                                        searchEl.value = dt.display;
-                                        hiddenEl.value = dt.id;
-                                        submitBtn.disabled = false;
-                                        dropdownEl.style.display = "none";
-                                      });
-                                      dropdownEl.appendChild(a);
-                                    });
-                                  }
-                                  dropdownEl.style.display = "block";
-                                })
-                                .catch(function (err) {
-                                  if (window.console && console.warn) {
-                                    console.warn("DeviceType autocomplete failed:", err);
-                                  }
-                                  dropdownEl.style.display = "none";
-                                });
-                            }, 300);
-                          });
-
-                          function handleDocumentClick(e) {
-                            if (!document.body.contains(dropdownEl)) {
-                              document.removeEventListener("click", handleDocumentClick);
-                              return;
-                            }
-                            if (!searchEl.contains(e.target) && !dropdownEl.contains(e.target)) {
-                              dropdownEl.style.display = "none";
-                            }
-                          }
-                          document.addEventListener("click", handleDocumentClick);
-                        })();
-                      </script>
                     {% else %}
                       <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
                     {% endif %}
@@ -452,6 +357,9 @@
                     {% else %}
                     <span class="text-muted">Optional</span>
                     {% endif %}
+                  {% endif %}
+                  {% if libre_device.os and sync_info and not sync_info.platform_info.platform_exists %}
+                    {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" with preselect_platform=validation.existing_device.platform %}
                   {% endif %}
                 </td>
                 <td>{{ libre_device.os|default:"—" }}</td>
@@ -784,16 +692,154 @@
           </div>
         </div>
         <div class="mb-3">
-          <form style="display:inline"
-                hx-post="{% url 'plugins:netbox_librenms_plugin:device_promote_to_host' device_id=libre_device.device_id %}"
-                hx-swap="none">
-            {% csrf_token %}
-            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-            <input type="hidden" name="server_key" value="{{ server_key }}">
-            <button type="submit" class="btn btn-sm btn-primary">
-              <i class="mdi mdi-server"></i> Promote to host of {{ validation.existing_device.name }}
-            </button>
-          </form>
+          {# Pre-promote pick modal: lets the user override name/type/platform before submit. #}
+          <button type="button"
+                  class="btn btn-sm btn-primary"
+                  data-bs-toggle="modal"
+                  data-bs-target="#promote-modal-{{ libre_device.device_id }}">
+            <i class="mdi mdi-server"></i> Promote to host of {{ validation.existing_device.name }}…
+          </button>
+
+          <div class="modal fade" id="promote-modal-{{ libre_device.device_id }}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content">
+                <form hx-post="{% url 'plugins:netbox_librenms_plugin:device_promote_to_host' device_id=libre_device.device_id %}"
+                      hx-swap="none"
+                      data-bs-dismiss-target="#promote-modal-{{ libre_device.device_id }}">
+                  {% csrf_token %}
+                  <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                  <input type="hidden" name="server_key" value="{{ server_key }}">
+
+                  <div class="modal-header py-2">
+                    <h5 class="modal-title">Promote to host of {{ validation.existing_device.name }}</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                  </div>
+                  <div class="modal-body small">
+                    <p class="text-muted mb-3">
+                      Pick which value to keep on the existing NetBox device. Defaults are
+                      <strong>Keep current</strong> for every field — the original promote
+                      behaviour is unchanged unless you explicitly choose <em>Use new</em>.
+                    </p>
+
+                    {# Name #}
+                    {% with new_name=libre_device.sysName|default:libre_device.hostname %}
+                    <fieldset class="mb-3">
+                      <legend class="fs-6 mb-1">Name</legend>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_name_choice"
+                               id="promote-name-keep-{{ libre_device.device_id }}" value="keep" checked>
+                        <label class="form-check-label" for="promote-name-keep-{{ libre_device.device_id }}">
+                          Keep <code>{{ validation.existing_device.name }}</code>
+                        </label>
+                      </div>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_name_choice"
+                               id="promote-name-new-{{ libre_device.device_id }}" value="new"
+                               data-override-target="override_name"
+                               data-override-value="{{ new_name }}"
+                               {% if not new_name or new_name == validation.existing_device.name %}disabled{% endif %}>
+                        <label class="form-check-label" for="promote-name-new-{{ libre_device.device_id }}">
+                          Use <code>{{ new_name|default:"—" }}</code>
+                        </label>
+                      </div>
+                      <input type="hidden" name="override_name" value="">
+                    </fieldset>
+                    {% endwith %}
+
+                    {# Device type #}
+                    <fieldset class="mb-3">
+                      <legend class="fs-6 mb-1">Device type</legend>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_dt_choice"
+                               id="promote-dt-keep-{{ libre_device.device_id }}" value="keep" checked>
+                        <label class="form-check-label" for="promote-dt-keep-{{ libre_device.device_id }}">
+                          Keep <code>{{ validation.existing_device.device_type|default:"—" }}</code>
+                        </label>
+                      </div>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_dt_choice"
+                               id="promote-dt-new-{{ libre_device.device_id }}" value="new"
+                               data-override-target="override_device_type_id"
+                               data-override-value="{% if validation.device_type.device_type %}{{ validation.device_type.device_type.pk }}{% endif %}"
+                               {% if not validation.device_type.device_type or validation.existing_device.device_type_id == validation.device_type.device_type.pk %}disabled{% endif %}>
+                        <label class="form-check-label" for="promote-dt-new-{{ libre_device.device_id }}">
+                          {% if validation.device_type.device_type %}
+                            Use <code>{{ validation.device_type.device_type }}</code>
+                          {% else %}
+                            <span class="text-muted">No NetBox device type matches LibreNMS hardware
+                            <em>{{ libre_device.hardware|default:"—" }}</em>. Use the
+                            <strong>Add Mapping</strong> shortcut on the Device Type row first.</span>
+                          {% endif %}
+                        </label>
+                      </div>
+                      <input type="hidden" name="override_device_type_id" value="">
+                    </fieldset>
+
+                    {# Platform #}
+                    <fieldset class="mb-3">
+                      <legend class="fs-6 mb-1">Platform</legend>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_pl_choice"
+                               id="promote-pl-keep-{{ libre_device.device_id }}" value="keep" checked>
+                        <label class="form-check-label" for="promote-pl-keep-{{ libre_device.device_id }}">
+                          Keep <code>{{ validation.existing_device.platform|default:"—" }}</code>
+                        </label>
+                      </div>
+                      <div class="form-check">
+                        <input class="form-check-input" type="radio" name="_promote_pl_choice"
+                               id="promote-pl-new-{{ libre_device.device_id }}" value="new"
+                               data-override-target="override_platform_id"
+                               data-override-value="{% if validation.platform.platform %}{{ validation.platform.platform.pk }}{% endif %}"
+                               {% if not validation.platform.platform or validation.existing_device.platform_id == validation.platform.platform.pk %}disabled{% endif %}>
+                        <label class="form-check-label" for="promote-pl-new-{{ libre_device.device_id }}">
+                          {% if validation.platform.platform %}
+                            Use <code>{{ validation.platform.platform }}</code>
+                          {% else %}
+                            <span class="text-muted">No NetBox platform matches LibreNMS OS
+                            <em>{{ libre_device.os|default:"—" }}</em>. Use the
+                            <strong>Add Mapping</strong> shortcut on the Platform row first.</span>
+                          {% endif %}
+                        </label>
+                      </div>
+                      <input type="hidden" name="override_platform_id" value="">
+                    </fieldset>
+                  </div>
+                  <div class="modal-footer py-2">
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-sm btn-primary"
+                            data-bs-dismiss="modal">
+                      <i class="mdi mdi-server"></i> Confirm Promote
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            (function () {
+              var modal = document.getElementById("promote-modal-{{ libre_device.device_id }}");
+              if (!modal) return;
+              modal.addEventListener("change", function (e) {
+                var t = e.target;
+                if (!t || t.type !== "radio") return;
+                var name = t.name;
+                if (!name || !name.startsWith("_promote_")) return;
+                var group = modal.querySelectorAll('input[name="' + name + '"]');
+                group.forEach(function (r) {
+                  var target = r.getAttribute("data-override-target");
+                  if (!target) return;
+                  var hidden = modal.querySelector('input[type=hidden][name="' + target + '"]');
+                  if (!hidden) return;
+                  if (r.checked && r.value === "new") {
+                    hidden.value = r.getAttribute("data-override-value") || "";
+                  } else if (r.checked && r.value === "keep") {
+                    hidden.value = "";
+                  }
+                });
+              });
+            })();
+          </script>
         </div>
       {% else %}
       <div class="mb-3">

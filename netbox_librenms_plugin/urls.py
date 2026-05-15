@@ -14,6 +14,7 @@ from .views import (
     AddDeviceToLibreNMSView,
     AddAsOOBView,
     AddDeviceTypeMappingView,
+    AddPlatformMappingView,
     PromoteToHostView,
     MergeNetBoxDevicesView,
     MoveInterfaceToWinnerView,
@@ -463,6 +464,11 @@ urlpatterns = [
         "device-import/create-platform/<int:device_id>/",
         CreatePlatformFromImportView.as_view(),
         name="create_platform_from_import",
+    ),
+    path(
+        "device-import/add-platform-mapping/<str:device_id>/",
+        AddPlatformMappingView.as_view(),
+        name="add_platform_mapping",
     ),
     path(
         "save-user-pref/",

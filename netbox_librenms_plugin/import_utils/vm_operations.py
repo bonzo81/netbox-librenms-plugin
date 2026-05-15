@@ -91,9 +91,9 @@ def create_vm_from_librenms(
         # VM's interfaces, which doesn't exist on a fresh import.
         primary_ip = libre_device.get("ip")
         if primary_ip:
-            from .ip_helpers import get_or_create_global_ip
+            from .ip_helpers import auto_create_ipam_enabled, get_or_create_global_ip
 
-            _ip, was_created = get_or_create_global_ip(primary_ip)
+            _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=auto_create_ipam_enabled())
             if was_created and _ip is not None:
                 # Stash for caller to surface via Django messages (best-effort;
                 # callers that don't read this attribute simply skip the toast).

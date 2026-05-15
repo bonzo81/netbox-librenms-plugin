@@ -19,6 +19,7 @@ from django.views import View
 
 from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
+    auto_create_ipam_enabled,
     bulk_import_devices,
     bulk_import_vms,
     fetch_device_with_cache,
@@ -1817,6 +1818,105 @@ class CreatePlatformFromImportView(
         return HttpResponse(oob_modal + row_html, content_type="text/html")
 
 
+class AddPlatformMappingView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """HTMX view to create a PlatformMapping from the import validation modal."""
+
+    def post(self, request, device_id):
+        """Create a PlatformMapping linking the LibreNMS OS string to a NetBox Platform."""
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Platform
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        libre_device = fetch_device_with_cache(device_id, self.librenms_api)
+        if not libre_device:
+            return HttpResponse(
+                '<span class="text-danger small">Device not found in LibreNMS.</span>',
+                status=404,
+            )
+
+        librenms_os = (libre_device.get("os") or "").strip()
+        if not librenms_os:
+            return HttpResponse(
+                '<span class="text-danger small">Device has no OS string — cannot create mapping.</span>',
+                status=400,
+            )
+
+        platform_id = request.POST.get("platform_id", "").strip()
+        if not platform_id:
+            return HttpResponse(
+                '<span class="text-danger small">Please select a platform before submitting.</span>',
+                status=400,
+            )
+
+        try:
+            platform_id = int(platform_id)
+        except (ValueError, TypeError):
+            return HttpResponse(
+                '<span class="text-danger small">Invalid platform selection.</span>',
+                status=400,
+            )
+
+        try:
+            platform = Platform.objects.get(pk=platform_id)
+        except Platform.DoesNotExist:
+            return HttpResponse(
+                '<span class="text-danger small">Selected platform not found.</span>',
+                status=404,
+            )
+
+        existing_mapping = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
+        self.required_object_permissions = {
+            "POST": [("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping)]
+        }
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        try:
+            with transaction.atomic():
+                mapping, created = PlatformMapping.objects.get_or_create(
+                    librenms_os=librenms_os.lower(),
+                    defaults={"netbox_platform": platform},
+                )
+                if not created and mapping.netbox_platform_id != platform_id:
+                    mapping.netbox_platform = platform
+                    mapping.save()
+        except Exception as exc:
+            logger.warning("AddPlatformMappingView: failed to save mapping: %s", exc)
+            return HttpResponse(
+                f'<span class="text-danger small">Error saving mapping: {escape(str(exc))}</span>',
+                status=500,
+            )
+
+        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
+        cache.delete(cache_key)
+
+        # Re-render the modal as an OOB swap and the background row so both update in place.
+        # Use format_html + mark_safe per CodeQL trust-assertion pattern (see plugin docs).
+        detail_view = DeviceValidationDetailsView()
+        detail_view._librenms_api = self._librenms_api
+        modal_html = detail_view.get(request, device_id).content.decode("utf-8")
+        oob_modal = format_html(
+            '<div id="htmx-modal-content" hx-swap-oob="innerHTML">{}</div>',
+            mark_safe(modal_html),
+        )
+
+        # Re-validate and include the background table row as a second OOB swap so the
+        # row reflects the new platform/mapping immediately without a secondary request.
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if libre_device is not None and validation is not None:
+            row_response = self.render_device_row(request, libre_device, validation, selections)
+            row_html = row_response.content.decode("utf-8")
+            row_html = format_html("<table><tbody>{}</tbody></table>", mark_safe(row_html))
+        else:
+            row_html = mark_safe("")
+
+        return HttpResponse(oob_modal + row_html, content_type="text/html")
+
+
 class AddAsOOBView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
 ):
@@ -1918,7 +2018,7 @@ class AddAsOOBView(
             # record if it doesn't exist yet so the user has something to
             # later attach to an interface and re-home if needed.
             if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip, oob_ip_created = get_or_create_global_ip(oob_ip_str)
+                oob_ip, oob_ip_created = get_or_create_global_ip(oob_ip_str, auto_create=auto_create_ipam_enabled())
                 if oob_ip is not None:
                     existing_device.oob_ip = oob_ip
                     update_fields.append("oob_ip")
@@ -1987,6 +2087,31 @@ class PromoteToHostView(
         self.required_object_permissions = {"POST": [("change", Device)]}
         if error := self.require_object_permissions("POST"):
             return error
+
+        # Optional per-field overrides from the pre-promote pick modal.
+        # All three default to "keep current"; only applied when the POST
+        # carries an explicit non-empty value.
+        override_name = (request.POST.get("override_name") or "").strip() or None
+        override_dt_id = (request.POST.get("override_device_type_id") or "").strip() or None
+        override_platform_id = (request.POST.get("override_platform_id") or "").strip() or None
+
+        override_device_type = None
+        if override_dt_id:
+            from dcim.models import DeviceType
+
+            try:
+                override_device_type = DeviceType.objects.get(pk=int(override_dt_id))
+            except (DeviceType.DoesNotExist, ValueError, TypeError):
+                return HttpResponse("Invalid override_device_type_id", status=400)
+
+        override_platform = None
+        if override_platform_id:
+            from dcim.models import Platform
+
+            try:
+                override_platform = Platform.objects.get(pk=int(override_platform_id))
+            except (Platform.DoesNotExist, ValueError, TypeError):
+                return HttpResponse("Invalid override_platform_id", status=400)
 
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
         if not libre_device:
@@ -2107,7 +2232,8 @@ class PromoteToHostView(
 
             host_ip_str = (libre_device.get("ip") or "").strip() or None
             if host_ip_str:
-                host_ip, host_ip_created = get_or_create_global_ip(host_ip_str)
+                _auto_create = auto_create_ipam_enabled()
+                host_ip, host_ip_created = get_or_create_global_ip(host_ip_str, auto_create=_auto_create)
                 if host_ip is not None:
                     try:
                         is_v6 = _ipaddr_parse(host_ip_str).version == 6
@@ -2152,7 +2278,7 @@ class PromoteToHostView(
                             pass
 
             if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip, oob_ip_created = get_or_create_global_ip(oob_ip_str)
+                oob_ip, oob_ip_created = get_or_create_global_ip(oob_ip_str, auto_create=auto_create_ipam_enabled())
                 if oob_ip is not None:
                     existing_device.oob_ip = oob_ip
                     update_fields.append("oob_ip")
@@ -2161,6 +2287,19 @@ class PromoteToHostView(
                             request,
                             f"Auto-created OOB IP {oob_ip_str} in IPAM (unassigned, global scope).",
                         )
+
+            # Apply any explicit per-field overrides chosen in the pre-promote modal.
+            # Default behaviour (no overrides) keeps the existing device's name, type
+            # and platform — matching the original promote semantics.
+            if override_name and override_name != existing_device.name:
+                existing_device.name = override_name
+                update_fields.append("name")
+            if override_device_type and existing_device.device_type_id != override_device_type.pk:
+                existing_device.device_type = override_device_type
+                update_fields.append("device_type")
+            if override_platform and existing_device.platform_id != override_platform.pk:
+                existing_device.platform = override_platform
+                update_fields.append("platform")
 
             if err := _save_device(existing_device, update_fields=update_fields):
                 return err
