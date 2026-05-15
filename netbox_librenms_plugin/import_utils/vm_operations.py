@@ -22,6 +22,7 @@ def create_vm_from_librenms(
     use_sysname: bool = True,
     strip_domain: bool = False,
     role=None,
+    auto_create_ipam: bool | None = None,
 ):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
@@ -93,7 +94,8 @@ def create_vm_from_librenms(
         if primary_ip:
             from .ip_helpers import auto_create_ipam_enabled, get_or_create_global_ip
 
-            _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=auto_create_ipam_enabled())
+            _auto_create = auto_create_ipam_enabled() if auto_create_ipam is None else bool(auto_create_ipam)
+            _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=_auto_create)
             if was_created and _ip is not None:
                 # Stash for caller to surface via Django messages (best-effort;
                 # callers that don't read this attribute simply skip the toast).
@@ -190,6 +192,7 @@ def bulk_import_vms(
             # Validate as VM
             use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
             strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+            auto_create_ipam_opt = sync_options.get("auto_create_ipam") if sync_options else None
             validation = validate_device_for_import(
                 libre_device,
                 import_as_vm=True,
@@ -254,6 +257,7 @@ def bulk_import_vms(
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
+                auto_create_ipam=auto_create_ipam_opt,
             )
 
             result["success"].append(

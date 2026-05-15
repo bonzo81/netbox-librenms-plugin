@@ -363,12 +363,20 @@
                     Strip domain
                 </label>
             </div>
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" id="auto-create-ipam-toggle" name="auto-create-ipam-toggle" {% if auto_create_ipam %}checked{% endif %}
+                       data-bs-toggle="tooltip"
+                       title="Auto-create missing IPAM entries for LibreNMS-known IPs on import / promote / OOB attach.">
+                <label class="form-check-label small" for="auto-create-ipam-toggle">
+                    Auto-create IPAM
+                </label>
+            </div>
         </div>
         <button type="button" class="btn btn-success" id="bulk-import-btn" disabled
           hx-post="{% url 'plugins:netbox_librenms_plugin:bulk_import_confirm' %}"
           hx-target="#htmx-modal-content"
           hx-swap="innerHTML"
-          hx-include="#import-selection-form, #use-sysname-toggle, #strip-domain-toggle">
+          hx-include="#import-selection-form, #use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
         <span class="d-inline-flex align-items-center gap-1">
           <i class="mdi mdi-download"></i>
           <span>Import Selected (<span id="import-count">0</span>)</span>

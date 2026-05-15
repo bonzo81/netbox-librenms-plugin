@@ -62,7 +62,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             return False
         return self._filter_form_data.get("use_background_job", True)
 
-    def _load_job_results(self, job_id):
+    def _load_job_results(self, job_id, request=None):
         """
         Load cached results from a completed background job.
 
@@ -128,6 +128,22 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             # Mirror the job's naming settings so toggle state matches the cached results
             self._use_sysname = use_sysname
             self._strip_domain = strip_domain
+            # IPAM auto-create toggle isn't part of the cached fetch — read
+            # the live setting/pref so the per-action toggle remains accurate.
+            try:
+                from netbox_librenms_plugin.models import LibreNMSSettings as _S
+
+                _settings = _S.objects.first()
+            except Exception:
+                _settings = None
+            _ipam = (
+                get_user_pref(request, "plugins.netbox_librenms_plugin.auto_create_ipam")
+                if request is not None
+                else None
+            )
+            if _ipam is None:
+                _ipam = getattr(_settings, "auto_create_ipam_default", False) if _settings else False
+            self._auto_create_ipam = _ipam
 
         return validated_devices
 
@@ -158,13 +174,17 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         _use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
         _strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        _auto_create_ipam = get_user_pref(request, "plugins.netbox_librenms_plugin.auto_create_ipam")
         if _use_sysname is None:
             _use_sysname = getattr(settings_obj, "use_sysname_default", True) if settings_obj else True
         if _strip_domain is None:
             _strip_domain = getattr(settings_obj, "strip_domain_default", False) if settings_obj else False
+        if _auto_create_ipam is None:
+            _auto_create_ipam = getattr(settings_obj, "auto_create_ipam_default", False) if settings_obj else False
 
         self._use_sysname = _use_sysname
         self._strip_domain = _strip_domain
+        self._auto_create_ipam = _auto_create_ipam
         self._settings = settings_obj
 
         # Determine if new filters are being submitted
@@ -186,7 +206,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             try:
                 job_id = int(job_id)
                 logger.info(f"Loading results from job {job_id}")
-                validated_devices = self._load_job_results(job_id)
+                validated_devices = self._load_job_results(job_id, request=request)
                 if validated_devices:
                     self._import_data = validated_devices
                     self._job_results_loaded = True
@@ -350,6 +370,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             "settings": self._settings,
             "use_sysname": self._use_sysname,
             "strip_domain": self._strip_domain,
+            "auto_create_ipam": self._auto_create_ipam,
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),

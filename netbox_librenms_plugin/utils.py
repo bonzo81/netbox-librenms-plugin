@@ -250,6 +250,57 @@ def resolve_naming_preferences(request) -> tuple[bool, bool]:
     return use_sysname, strip_domain
 
 
+def resolve_auto_create_ipam(request) -> bool:
+    """Resolve the IPAM auto-create flag for an import-time request.
+
+    Mirrors the cascade used by :func:`resolve_naming_preferences`:
+
+    1. POST/GET ``auto-create-ipam-toggle`` (or ``auto_create_ipam``) wins
+       — set by the import page toggle and propagated via ``hx-include``.
+    2. Otherwise the user's saved preference
+       ``plugins.netbox_librenms_plugin.auto_create_ipam`` is used.
+    3. Otherwise the plugin-wide ``LibreNMSSettings.auto_create_ipam_default``
+       (which itself defaults to ``False``) is used.
+
+    Use this from request-handling code (HTMX views, sync action POST
+    handlers). Background paths without a request should keep using
+    :func:`netbox_librenms_plugin.import_utils.ip_helpers.auto_create_ipam_enabled`,
+    which is the settings-only fallback.
+    """
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    _TRUTHY = frozenset({"on", "true", "1"})
+    _KEYS = ("auto-create-ipam-toggle", "auto_create_ipam-toggle", "auto_create_ipam")
+
+    def _is_truthy(val):
+        return val.lower() in _TRUTHY if val is not None else False
+
+    if request is None:
+        try:
+            settings = LibreNMSSettings.objects.first()
+            return bool(getattr(settings, "auto_create_ipam_default", False)) if settings else False
+        except Exception:
+            return False
+
+    post_val = next((request.POST.get(k) for k in _KEYS if k in request.POST), None)
+    get_val = next((request.GET.get(k) for k in _KEYS if k in request.GET), None)
+
+    if post_val is not None:
+        return _is_truthy(post_val)
+    if get_val is not None:
+        return _is_truthy(get_val)
+
+    pref = get_user_pref(request, "plugins.netbox_librenms_plugin.auto_create_ipam")
+    if pref is not None:
+        return bool(pref)
+
+    try:
+        settings = LibreNMSSettings.objects.first()
+        return bool(getattr(settings, "auto_create_ipam_default", False)) if settings else False
+    except Exception:
+        return False
+
+
 def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
     """
     Get interface name field with request override support.

@@ -1099,7 +1099,12 @@ def import_single_device(
             if primary_ip:
                 from .ip_helpers import auto_create_ipam_enabled, get_or_create_global_ip
 
-                _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=auto_create_ipam_enabled())
+                _opts = sync_options or {}
+                if "auto_create_ipam" in _opts:
+                    _auto_create = bool(_opts.get("auto_create_ipam"))
+                else:
+                    _auto_create = auto_create_ipam_enabled()
+                _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=_auto_create)
                 if was_created and _ip is not None:
                     created_ips.append(str(_ip.address.ip))
 

@@ -116,7 +116,7 @@
                       <form style="display:inline" class="ms-2"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                             hx-swap="none"
-                            hx-include="#use-sysname-toggle, #strip-domain-toggle">
+                            hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
                         {% csrf_token %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
@@ -165,7 +165,7 @@
                     <form style="display:inline" class="ms-1"
                           hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                           hx-swap="none"
-                          hx-include="#use-sysname-toggle, #strip-domain-toggle">
+                          hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
                       {% csrf_token %}
                       <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                       <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
@@ -580,7 +580,7 @@
         <form style="display:inline"
               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
               hx-swap="none"
-              hx-include="#use-sysname-toggle, #strip-domain-toggle">
+              hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
           {% csrf_token %}
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
@@ -645,7 +645,8 @@
         <div class="mb-3">
           <form style="display:inline"
                 hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
-                hx-swap="none">
+                hx-swap="none"
+                hx-include="#auto-create-ipam-toggle">
             {% csrf_token %}
             <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
             <input type="hidden" name="server_key" value="{{ server_key }}">
@@ -705,7 +706,7 @@
               <div class="modal-content">
                 <form hx-post="{% url 'plugins:netbox_librenms_plugin:device_promote_to_host' device_id=libre_device.device_id %}"
                       hx-swap="none"
-                      data-bs-dismiss-target="#promote-modal-{{ libre_device.device_id }}">
+                      hx-include="#auto-create-ipam-toggle">
                   {% csrf_token %}
                   <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                   <input type="hidden" name="server_key" value="{{ server_key }}">
@@ -846,7 +847,7 @@
         <form style="display:inline"
               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
               hx-swap="none"
-              hx-include="#use-sysname-toggle, #strip-domain-toggle">
+              hx-include="#use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle">
           {% csrf_token %}
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
           <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
@@ -893,7 +894,8 @@
         <div class="mb-3">
           <form style="display:inline"
                 hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
-                hx-swap="none">
+                hx-swap="none"
+                hx-include="#auto-create-ipam-toggle">
             {% csrf_token %}
             <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
             <input type="hidden" name="server_key" value="{{ server_key }}">

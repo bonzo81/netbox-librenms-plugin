@@ -19,7 +19,6 @@ from django.views import View
 
 from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
-    auto_create_ipam_enabled,
     bulk_import_devices,
     bulk_import_vms,
     fetch_device_with_cache,
@@ -38,7 +37,12 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import resolve_naming_preferences, save_user_pref, set_librenms_device_id
+from netbox_librenms_plugin.utils import (
+    resolve_auto_create_ipam,
+    resolve_naming_preferences,
+    save_user_pref,
+    set_librenms_device_id,
+)
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -586,6 +590,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return HttpResponse("Invalid device identifier", status=400)
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
+        auto_create_ipam = resolve_auto_create_ipam(request)
         vc_detection_enabled = _resolve_vc_detection_enabled(request)
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
@@ -594,6 +599,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "vc_detection_enabled": vc_detection_enabled,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
+            "auto_create_ipam": auto_create_ipam,
         }
 
         manual_mappings_per_device: dict[int, dict[str, int]] = {}
@@ -1572,7 +1578,8 @@ class AddDeviceTypeMappingView(
         # Re-render the modal content as an OOB swap so it updates in place.
         # The inner views render via Django templates (auto-escaped), so the
         # decoded content is already safe HTML; wrap with format_html + mark_safe
-        # to compose the OOB envelope without introducing new escape boundaries.
+        # to compose the OOB envelope without introducing new escape boundaries
+        # (CodeQL trust-assertion pattern, see plugin docs).
         detail_view = DeviceValidationDetailsView()
         detail_view._librenms_api = self._librenms_api
         modal_html = detail_view.get(request, device_id).content.decode("utf-8")
@@ -2018,7 +2025,9 @@ class AddAsOOBView(
             # record if it doesn't exist yet so the user has something to
             # later attach to an interface and re-home if needed.
             if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip, oob_ip_created = get_or_create_global_ip(oob_ip_str, auto_create=auto_create_ipam_enabled())
+                oob_ip, oob_ip_created = get_or_create_global_ip(
+                    oob_ip_str, auto_create=resolve_auto_create_ipam(request)
+                )
                 if oob_ip is not None:
                     existing_device.oob_ip = oob_ip
                     update_fields.append("oob_ip")
@@ -2232,7 +2241,7 @@ class PromoteToHostView(
 
             host_ip_str = (libre_device.get("ip") or "").strip() or None
             if host_ip_str:
-                _auto_create = auto_create_ipam_enabled()
+                _auto_create = resolve_auto_create_ipam(request)
                 host_ip, host_ip_created = get_or_create_global_ip(host_ip_str, auto_create=_auto_create)
                 if host_ip is not None:
                     try:
@@ -2278,7 +2287,9 @@ class PromoteToHostView(
                             pass
 
             if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip, oob_ip_created = get_or_create_global_ip(oob_ip_str, auto_create=auto_create_ipam_enabled())
+                oob_ip, oob_ip_created = get_or_create_global_ip(
+                    oob_ip_str, auto_create=resolve_auto_create_ipam(request)
+                )
                 if oob_ip is not None:
                     existing_device.oob_ip = oob_ip
                     update_fields.append("oob_ip")
