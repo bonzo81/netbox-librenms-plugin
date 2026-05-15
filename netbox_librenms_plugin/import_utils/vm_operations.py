@@ -84,6 +84,17 @@ def create_vm_from_librenms(
         set_librenms_device_id(vm, librenms_device_id, server_key)
         vm.save()
 
+        # Pre-create the LibreNMS-known IP in IPAM (global /32 or /128) so
+        # the user can later attach it to a VM interface and assign it as
+        # primary_ip4/6. We do not auto-set primary_ip4 here because
+        # VirtualMachine.clean() requires the IP be assigned to one of the
+        # VM's interfaces, which doesn't exist on a fresh import.
+        primary_ip = libre_device.get("ip")
+        if primary_ip:
+            from .ip_helpers import get_or_create_global_ip
+
+            get_or_create_global_ip(primary_ip)
+
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm
 

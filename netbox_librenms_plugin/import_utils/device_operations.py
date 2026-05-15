@@ -1089,6 +1089,17 @@ def import_single_device(
             device.full_clean()
             device.save()
 
+            # Pre-create the LibreNMS-known IP in IPAM (global /32 or /128)
+            # so the user can later attach it to an interface and assign as
+            # primary_ip4/6. We do not auto-set primary_ip4 here because
+            # NetBox's Device.clean() requires the IP be assigned to one of
+            # the device's interfaces, which doesn't exist on a fresh import.
+            primary_ip = libre_device.get("ip")
+            if primary_ip:
+                from .ip_helpers import get_or_create_global_ip
+
+                get_or_create_global_ip(primary_ip)
+
         # Sync additional data based on options
         sync_options = sync_options or {}
         synced = {"interfaces": 0, "cables": 0, "ip_addresses": 0}

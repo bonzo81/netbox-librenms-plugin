@@ -23,6 +23,7 @@ from netbox_librenms_plugin.import_utils import (
     fetch_device_with_cache,
     get_import_device_cache_key,
     get_librenms_device_by_id,
+    get_or_create_global_ip,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
     validate_device_for_import,
@@ -1894,13 +1895,13 @@ class AddAsOOBView(
                 return HttpResponse(f"Invalid OOB data: {escape(str(exc))}", status=400)
 
             update_fields = ["custom_field_data"]
-            # Assign device.oob_ip if not already set and the IP exists in NetBox.
+            # Assign device.oob_ip if not already set; auto-create the IPAM
+            # record if it doesn't exist yet so the user has something to
+            # later attach to an interface and re-home if needed.
             if oob_ip_str and existing_device.oob_ip_id is None:
-                from ipam.models import IPAddress
-
-                existing_ip = IPAddress.objects.filter(address__net_host=oob_ip_str).first()
-                if existing_ip:
-                    existing_device.oob_ip = existing_ip
+                oob_ip = get_or_create_global_ip(oob_ip_str)
+                if oob_ip is not None:
+                    existing_device.oob_ip = oob_ip
                     update_fields.append("oob_ip")
 
             if err := _save_device(existing_device, update_fields=update_fields):
@@ -2078,30 +2079,11 @@ class PromoteToHostView(
             # the user can re-home / mask it later via the IP-sync flow.
             # Both writes are best-effort and never overwrite an already-set
             # primary_ip4 / primary_ip6 / oob_ip relationship.
-            from ipaddress import ip_address as _ipaddr_parse
-            from ipam.models import IPAddress
-
             update_fields = ["custom_field_data"]
-
-            def _get_or_create_global_ip(ip_str: str) -> "IPAddress | None":
-                """Return an IPAddress for ``ip_str``; create a /32 or /128 if missing."""
-                try:
-                    parsed = _ipaddr_parse(ip_str)
-                except ValueError:
-                    return None
-                existing = IPAddress.objects.filter(address__net_host=ip_str).first()
-                if existing is not None:
-                    return existing
-                mask = "/128" if parsed.version == 6 else "/32"
-                try:
-                    return IPAddress.objects.create(address=f"{ip_str}{mask}", status="active")
-                except Exception:  # pragma: no cover - defensive (validation/integrity)
-                    logger.warning("Failed to auto-create IP %s for promote_to_host", ip_str, exc_info=True)
-                    return None
 
             host_ip_str = (libre_device.get("ip") or "").strip() or None
             if host_ip_str:
-                host_ip = _get_or_create_global_ip(host_ip_str)
+                host_ip = get_or_create_global_ip(host_ip_str)
                 if host_ip is not None:
                     is_v6 = host_ip.address.version == 6
                     if is_v6 and existing_device.primary_ip6_id is None:
@@ -2135,7 +2117,7 @@ class PromoteToHostView(
                             pass
 
             if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip = _get_or_create_global_ip(oob_ip_str)
+                oob_ip = get_or_create_global_ip(oob_ip_str)
                 if oob_ip is not None:
                     existing_device.oob_ip = oob_ip
                     update_fields.append("oob_ip")
