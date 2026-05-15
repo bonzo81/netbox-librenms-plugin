@@ -2068,7 +2068,79 @@ class PromoteToHostView(
             except ValueError as exc:
                 return HttpResponse(f"Invalid promotion data: {escape(str(exc))}", status=400)
 
-            if err := _save_device(existing_device, update_fields=["custom_field_data"]):
+            # After promotion, populate IP relationships on the existing device:
+            #   - primary_ip4 / primary_ip6 from the incoming LibreNMS host's IP
+            #     (the device that's now linked as the host)
+            #   - oob_ip from the previously-linked LibreNMS device's IP
+            #     (the device that's now demoted into the OOB slot)
+            # If the IP does not yet exist in NetBox we create a global /32 (or
+            # /128) entry so the device row looks complete after promotion;
+            # the user can re-home / mask it later via the IP-sync flow.
+            # Both writes are best-effort and never overwrite an already-set
+            # primary_ip4 / primary_ip6 / oob_ip relationship.
+            from ipaddress import ip_address as _ipaddr_parse
+            from ipam.models import IPAddress
+
+            update_fields = ["custom_field_data"]
+
+            def _get_or_create_global_ip(ip_str: str) -> "IPAddress | None":
+                """Return an IPAddress for ``ip_str``; create a /32 or /128 if missing."""
+                try:
+                    parsed = _ipaddr_parse(ip_str)
+                except ValueError:
+                    return None
+                existing = IPAddress.objects.filter(address__net_host=ip_str).first()
+                if existing is not None:
+                    return existing
+                mask = "/128" if parsed.version == 6 else "/32"
+                try:
+                    return IPAddress.objects.create(address=f"{ip_str}{mask}", status="active")
+                except Exception:  # pragma: no cover - defensive (validation/integrity)
+                    logger.warning("Failed to auto-create IP %s for promote_to_host", ip_str, exc_info=True)
+                    return None
+
+            host_ip_str = (libre_device.get("ip") or "").strip() or None
+            if host_ip_str:
+                host_ip = _get_or_create_global_ip(host_ip_str)
+                if host_ip is not None:
+                    is_v6 = host_ip.address.version == 6
+                    if is_v6 and existing_device.primary_ip6_id is None:
+                        existing_device.primary_ip6 = host_ip
+                        update_fields.append("primary_ip6")
+                    elif not is_v6 and existing_device.primary_ip4_id is None:
+                        existing_device.primary_ip4 = host_ip
+                        update_fields.append("primary_ip4")
+
+            # Fetch OOB device's IP from LibreNMS if we don't already have one
+            # cached in CFD / the relationship.
+            if not oob_ip_str and existing_device.oob_ip_id is None:
+                try:
+                    ok, oob_info = self.librenms_api.get_device_info(existing_libre_id)
+                except Exception:  # pragma: no cover - defensive
+                    ok, oob_info = False, None
+                if ok and isinstance(oob_info, dict):
+                    fetched_oob_ip = (oob_info.get("ip") or "").strip() or None
+                    if fetched_oob_ip:
+                        oob_ip_str = fetched_oob_ip
+                        # Re-write the OOB sub-object so the IP is also cached in CFD.
+                        try:
+                            set_librenms_oob(
+                                existing_device,
+                                existing_libre_id,
+                                server_key,
+                                oob_type=oob_type,
+                                ip=oob_ip_str,
+                            )
+                        except ValueError:  # pragma: no cover - defensive
+                            pass
+
+            if oob_ip_str and existing_device.oob_ip_id is None:
+                oob_ip = _get_or_create_global_ip(oob_ip_str)
+                if oob_ip is not None:
+                    existing_device.oob_ip = oob_ip
+                    update_fields.append("oob_ip")
+
+            if err := _save_device(existing_device, update_fields=update_fields):
                 return err
 
         logger.info(
