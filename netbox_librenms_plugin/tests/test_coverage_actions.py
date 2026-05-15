@@ -4129,3 +4129,107 @@ class TestBulkImportEdgePaths:
                                     view.post(request)
 
         mock_redirect.assert_called()
+
+
+class TestBulkImportConfirmCollisions:
+    """Tests for Stage 3 collision-blocking behaviour."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
+
+        view = object.__new__(BulkImportConfirmView)
+        view._librenms_api = _make_api()
+        return view
+
+    def _run_with_two_devices(self, validation_a, validation_b):
+        """Drive BulkImportConfirmView.post with two LibreNMS rows whose
+        validations are stubbed to whatever the test wants. Returns the
+        rendered response."""
+        view = self._make_view()
+        request = _make_request(post={"select": ["1", "2"]})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.GET = MagicMock()
+        request.GET.get = MagicMock(return_value=None)
+
+        libre_devices = {
+            1: {"device_id": 1, "hostname": "alpha"},
+            2: {"device_id": 2, "hostname": "beta"},
+        }
+        validations = {1: validation_a, 2: validation_b}
+
+        def fake_validate(libre_device, **_kwargs):
+            return validations[libre_device["device_id"]]
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre_devices.get(did),
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
+                    return_value={"cluster_id": None, "role_id": None, "rack_id": None},
+                ):
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                        side_effect=fake_validate,
+                    ):
+                        with patch(
+                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
+                            return_value=(True, False),
+                        ):
+                            with patch(
+                                "netbox_librenms_plugin.views.imports.actions.render",
+                            ) as mock_render:
+                                mock_render.side_effect = lambda req, tpl, ctx, status=200: MagicMock(
+                                    status_code=status,
+                                    template_name=tpl,
+                                    context=ctx,
+                                )
+                                view.post(request)
+        return mock_render
+
+    def test_collision_path_renders_collision_template_with_409(self):
+        from types import SimpleNamespace
+
+        nb_device = SimpleNamespace(pk=42, name="srv-collide")
+        validation_a = {
+            "status": "importable",
+            "resolved_name": "alpha",
+            "virtual_chassis": {},
+            "existing_device": nb_device,
+        }
+        validation_b = {
+            "status": "importable",
+            "resolved_name": "beta",
+            "virtual_chassis": {},
+            "oob_candidate": {"device": nb_device, "type": "idrac"},
+        }
+        mock_render = self._run_with_two_devices(validation_a, validation_b)
+        # Last render call should be the collision template at status 409.
+        last = mock_render.call_args
+        assert "bulk_import_collision.html" in last[0][1]
+        assert last[1].get("status") == 409
+        ctx = last[0][2]
+        assert len(ctx["collisions"]) == 1
+        assert ctx["collisions"][0]["nb_device_pk"] == 42
+
+    def test_clean_batch_renders_normal_confirm_template(self):
+        from types import SimpleNamespace
+
+        validation_a = {
+            "status": "importable",
+            "resolved_name": "alpha",
+            "virtual_chassis": {},
+            "existing_device": SimpleNamespace(pk=1, name="nb-a"),
+        }
+        validation_b = {
+            "status": "importable",
+            "resolved_name": "beta",
+            "virtual_chassis": {},
+            "existing_device": SimpleNamespace(pk=2, name="nb-b"),
+        }
+        mock_render = self._run_with_two_devices(validation_a, validation_b)
+        last = mock_render.call_args
+        assert "bulk_import_confirm.html" in last[0][1]
+        # No status kwarg / default 200.
+        assert last[1].get("status", 200) == 200

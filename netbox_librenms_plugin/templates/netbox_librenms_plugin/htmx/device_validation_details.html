@@ -438,12 +438,21 @@
           devices. Pick which one to keep; the other will be marked as merged.
         </span>
       </div>
-      <div class="alert alert-info py-2 mb-3">
-        <i class="mdi mdi-information-outline"></i>
-        Merging copies the donor's LibreNMS link state (host id, OOB id and OOB IP) into
-        the winner. The donor stays in NetBox with a <em>migrated</em> marker so you can
-        re-home its interfaces and cables incrementally; the plugin will no longer try
-        to sync it.
+      <div class="alert alert-info py-2 mb-3 small">
+        <div class="mb-1">
+          <i class="mdi mdi-information-outline"></i>
+          <strong>Pick the device to keep (winner).</strong>
+          The other one becomes the <em>donor</em> and is absorbed.
+        </div>
+        <ul class="mb-1 ps-3">
+          <li><strong>Moved to winner:</strong> LibreNMS link (host id, OOB id, OOB type) and OOB IP <span class="text-muted">(only if the winner has no OOB IP yet)</span>.</li>
+          <li><strong>Stays on donor:</strong> interfaces, cables, primary IP. Re-home them later from the donor's <em>"Migrated to ..."</em> tab.</li>
+        </ul>
+        <div class="text-muted">
+          <i class="mdi mdi-alert-outline"></i>
+          The donor device is <strong>not deleted</strong>. After you have re-homed its
+          child objects, you can delete it from NetBox manually if no longer needed.
+        </div>
       </div>
       <form
         hx-post="{% url 'plugins:netbox_librenms_plugin:device_merge_netbox_devices' device_id=libre_device.device_id %}"
@@ -452,7 +461,7 @@
         <input type="hidden" name="server_key" value="{{ server_key }}">
         <input type="hidden" name="donor_pk" id="merge-donor-{{ libre_device.device_id }}" value="">
         <div class="mb-3">
-          <div class="text-muted small mb-2">Keep (winner):</div>
+          <div class="text-muted small mb-2">Choose the winner (kept). The other becomes the donor (absorbed):</div>
           {% with host=validation.merge_candidates.host_named oob=validation.merge_candidates.oob_named %}
           <div class="form-check mb-1">
             <input class="form-check-input merge-winner-radio" type="radio" name="winner_pk"
@@ -461,6 +470,7 @@
                    data-donor-pk="{{ oob.pk }}"
                    checked>
             <label class="form-check-label" for="merge-winner-host-{{ libre_device.device_id }}">
+              <span class="badge bg-primary-lt me-1">Host name match</span>
               <strong>{{ host.name }}</strong>
               <span class="text-muted">— matches LibreNMS hostname{% if host.librenms_link.host_id %}, currently linked to LibreNMS device #{{ host.librenms_link.host_id }}{% if host.librenms_link.oob_id %} (OOB #{{ host.librenms_link.oob_id }}{% if host.librenms_link.oob_type %}, {{ host.librenms_link.oob_type }}{% endif %}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
             </label>
@@ -471,6 +481,7 @@
                    value="{{ oob.pk }}"
                    data-donor-pk="{{ host.pk }}">
             <label class="form-check-label" for="merge-winner-oob-{{ libre_device.device_id }}">
+              <span class="badge bg-purple text-white me-1">Serial match (OOB)</span>
               <strong>{{ oob.name }}</strong>
               <span class="text-muted">— matches chassis serial{% if oob.librenms_link.host_id %}, currently linked to LibreNMS device #{{ oob.librenms_link.host_id }}{% if oob.librenms_link.oob_id %} (OOB #{{ oob.librenms_link.oob_id }}{% if oob.librenms_link.oob_type %}, {{ oob.librenms_link.oob_type }}{% endif %}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
             </label>
@@ -478,7 +489,7 @@
           {% endwith %}
         </div>
         <button type="submit" class="btn btn-sm btn-warning">
-          <i class="mdi mdi-merge"></i> Merge into selected device
+          <i class="mdi mdi-merge"></i> Merge donor into selected winner
         </button>
       </form>
       <script>

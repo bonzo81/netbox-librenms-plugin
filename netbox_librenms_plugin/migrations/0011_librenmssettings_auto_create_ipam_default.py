@@ -3,7 +3,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_librenms_plugin", "0010_inventory_models"),
+        ("netbox_librenms_plugin", "0010_inventory_and_mapping_models"),
     ]
 
     operations = [
