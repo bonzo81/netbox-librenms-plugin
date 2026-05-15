@@ -1854,7 +1854,7 @@ class AddAsOOBView(
                     existing_device,
                     librenms_id,
                     server_key,
-                    type=oob_type,
+                    oob_type=oob_type,
                     version=oob_version,
                     ip=oob_ip_str,
                 )
@@ -1878,6 +1878,172 @@ class AddAsOOBView(
             oob_type,
             existing_device.name,
             server_key,
+        )
+
+        cache_key = get_import_device_cache_key(device_id, server_key)
+        cache.delete(cache_key)
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return HttpResponse("Device not found after action", status=404)
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        response["HX-Trigger"] = "closeModal"
+        return response
+
+
+class PromoteToHostView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """
+    Promote an incoming LibreNMS host device to be the *primary* link of an existing
+    NetBox device whose current LibreNMS link is the OOB controller.
+
+    The existing NetBox device's current ``librenms_id.{server_key}.id`` is moved into
+    the ``oob`` slot (preserving its bare-int → dict-form transition), and the incoming
+    LibreNMS device id becomes the new host id.  No new NetBox device is created — this
+    is a reassignment, not an import.
+    """
+
+    def post(self, request, device_id):
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Device
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        existing_device_id = request.POST.get("existing_device_id")
+        if not existing_device_id:
+            return HttpResponse("Missing existing_device_id", status=400)
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        try:
+            existing_device = Device.objects.get(pk=int(existing_device_id))
+        except (Device.DoesNotExist, ValueError):
+            return HttpResponse("Existing device not found", status=404)
+
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return HttpResponse("LibreNMS device not found", status=404)
+
+        promote = validation.get("promote_to_host") if validation else None
+        if not promote:
+            return HttpResponse("Promotion is not applicable for this device", status=400)
+        if (validation.get("existing_device") or existing_device).pk != existing_device.pk:
+            return HttpResponse(
+                "Device ID mismatch: existing_device_id does not match validation result",
+                status=400,
+            )
+
+        new_host_id = libre_device.get("device_id")
+        if isinstance(new_host_id, bool):
+            return HttpResponse("Invalid or missing LibreNMS device_id", status=400)
+        try:
+            new_host_id = int(new_host_id)
+        except (TypeError, ValueError):
+            return HttpResponse("Invalid or missing LibreNMS device_id", status=400)
+        if new_host_id <= 0:
+            return HttpResponse("Invalid LibreNMS device_id", status=400)
+
+        existing_libre_id = promote.get("existing_libre_id")
+        try:
+            existing_libre_id = int(existing_libre_id)
+        except (TypeError, ValueError):
+            return HttpResponse("Invalid existing LibreNMS id in promotion data", status=400)
+        if existing_libre_id == new_host_id:
+            return HttpResponse("Existing link already points at this LibreNMS device", status=409)
+
+        oob_type = promote.get("existing_oob_type") or ""
+        if not oob_type:
+            return HttpResponse("Cannot determine OOB type for promotion", status=400)
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id, set_librenms_oob
+
+        server_key = self.librenms_api.server_key
+
+        # Pull stored OOB metadata (ip/version) from existing librenms link if possible,
+        # then ensure the incoming device's IP populates oob_ip on the existing device
+        # only if oob_ip isn't already set.
+        existing_oob_ip = None
+        oob_ip_str = None
+        cf_value = existing_device.custom_field_data.get("librenms_id")
+        if isinstance(cf_value, dict):
+            entry = cf_value.get(server_key)
+            if isinstance(entry, dict):
+                existing_oob_dict = entry.get("oob") if isinstance(entry.get("oob"), dict) else {}
+                existing_oob_ip = existing_oob_dict.get("ip") if isinstance(existing_oob_dict, dict) else None
+        # Prefer existing OOB ip if it was already known; otherwise use existing device's
+        # current oob_ip relationship; otherwise leave unset (do NOT inherit incoming
+        # device's IP — that IP belongs to the host, not the OOB controller).
+        if not existing_oob_ip and existing_device.oob_ip_id:
+            try:
+                from ipam.models import IPAddress  # noqa
+
+                existing_oob_ip = str(existing_device.oob_ip).split("/")[0] if existing_device.oob_ip else None
+            except Exception:  # pragma: no cover - defensive
+                existing_oob_ip = None
+        oob_ip_str = existing_oob_ip or None
+
+        # Reject legacy bare-int librenms_id form (caller should migrate first).
+        stored_id = existing_device.custom_field_data.get("librenms_id")
+        _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
+        if not _is_legacy and isinstance(stored_id, str):
+            try:
+                int(stored_id)
+                _is_legacy = True
+            except (ValueError, TypeError):
+                pass
+        if _is_legacy:
+            return HttpResponse(
+                "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first.",
+                status=409,
+            )
+
+        with transaction.atomic():
+            try:
+                existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+            except Device.DoesNotExist:
+                return HttpResponse(
+                    "Device no longer exists; it may have been deleted concurrently.",
+                    status=409,
+                )
+
+            try:
+                # First, swap the host id to the incoming LibreNMS device id.
+                # set_librenms_device_id preserves any existing OOB sub-object.
+                set_librenms_device_id(
+                    existing_device,
+                    new_host_id,
+                    server_key=server_key,
+                )
+                # Then attach the previously-linked LibreNMS id as the OOB controller.
+                set_librenms_oob(
+                    existing_device,
+                    existing_libre_id,
+                    server_key,
+                    oob_type=oob_type,
+                    ip=oob_ip_str,
+                )
+            except ValueError as exc:
+                return HttpResponse(f"Invalid promotion data: {escape(str(exc))}", status=400)
+
+            if err := _save_device(existing_device):
+                return err
+
+        logger.info(
+            "Promoted LibreNMS host (id %d) to '%s' on server %s; demoted previous link (id %d, type %s) to OOB slot",
+            new_host_id,
+            existing_device.name,
+            server_key,
+            existing_libre_id,
+            oob_type,
         )
 
         cache_key = get_import_device_cache_key(device_id, server_key)

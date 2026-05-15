@@ -638,6 +638,8 @@
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         {% if validation.serial_action == 'oob_candidate' %}
           <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
+        {% elif validation.serial_action == 'promote_to_host' %}
+          <span class="badge bg-info-lt me-1"><i class="mdi mdi-server"></i> Host Detected</span>
         {% else %}
           <span class="badge bg-warning-lt me-1"><i class="mdi mdi-barcode"></i> Serial match</span>
         {% endif %}
@@ -646,13 +648,14 @@
         {% elif validation.serial_action == 'link' %}
           <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Name match</span>
         {% endif %}
-        {% if validation.device_type_mismatch and validation.serial_action != 'oob_candidate' %}
+        {% if validation.device_type_mismatch and validation.serial_action != 'oob_candidate' and validation.serial_action != 'promote_to_host' %}
           <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Type mismatch</span>
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
-          not linked to LibreNMS.
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% if validation.existing_librenms_link.host_id %},
+          currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% else %},
+          not linked to LibreNMS.{% endif %}
         </span>
       </div>
       {% if validation.serial_action == 'oob_candidate' %}
@@ -674,6 +677,34 @@
             <input type="hidden" name="server_key" value="{{ server_key }}">
             <button type="submit" class="btn btn-sm btn-primary">
               <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
+            </button>
+          </form>
+        </div>
+      {% elif validation.serial_action == 'promote_to_host' %}
+        <div class="alert alert-info py-2 mb-3">
+          <i class="mdi mdi-information-outline"></i>
+          NetBox device
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+          is currently linked to LibreNMS device #{{ validation.promote_to_host.existing_libre_id }},
+          which looks like its OOB controller (<strong>{{ validation.promote_to_host.existing_oob_type }}</strong>).
+          The incoming LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
+          shares the same chassis serial and appears to be the <em>host</em>.
+          <br>
+          <small class="text-muted">
+            Promoting will set this LibreNMS entry as the host link and move the existing link
+            (#{{ validation.promote_to_host.existing_libre_id }}) into the OOB slot. No new NetBox
+            device is created.
+          </small>
+        </div>
+        <div class="mb-3">
+          <form style="display:inline"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:device_promote_to_host' device_id=libre_device.device_id %}"
+                hx-swap="none">
+            {% csrf_token %}
+            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+            <input type="hidden" name="server_key" value="{{ server_key }}">
+            <button type="submit" class="btn btn-sm btn-primary">
+              <i class="mdi mdi-server"></i> Promote to host of {{ validation.existing_device.name }}
             </button>
           </form>
         </div>

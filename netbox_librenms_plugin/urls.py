@@ -14,6 +14,7 @@ from .views import (
     AddDeviceToLibreNMSView,
     AddAsOOBView,
     AddDeviceTypeMappingView,
+    PromoteToHostView,
     AssignVCSerialView,
     BulkImportConfirmView,
     BulkImportDevicesView,
@@ -423,6 +424,11 @@ urlpatterns = [
         "device-import/add-as-oob/<int:device_id>/",
         AddAsOOBView.as_view(),
         name="device_add_as_oob",
+    ),
+    path(
+        "device-import/promote-to-host/<int:device_id>/",
+        PromoteToHostView.as_view(),
+        name="device_promote_to_host",
     ),
     path(
         "device-import/add-device-type-mapping/<int:device_id>/",

@@ -19,7 +19,7 @@ from ..utils import (
     match_librenms_hardware_to_device_type,
     set_librenms_device_id,
 )
-from ..constants import normalize_oob_type
+from ..constants import OOB_TYPE_PATTERN, normalize_oob_type
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
     _generate_vc_member_name,
@@ -29,6 +29,49 @@ from .virtual_chassis import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _detect_oob_type_from_name(name):
+    """Return canonical OOB type token (idrac/ilo/ipmi/bmc/drac) found in *name*, or None."""
+    if not name:
+        return None
+    m = OOB_TYPE_PATTERN.search(name)
+    return m.group(1).lower() if m else None
+
+
+def _describe_existing_librenms_link(obj, server_key):
+    """
+    Describe the current LibreNMS linkage on a NetBox object.
+
+    Returns a dict ``{"host_id": int|None, "oob_id": int|None, "oob_type": str|None}``
+    summarising the ``librenms_id`` custom field for *server_key*.  Always returns a
+    dict (with all-None values if nothing is linked) so callers can treat it as a
+    plain status object.  Tolerates legacy bare-int and dict-form custom field values.
+    """
+    info = {"host_id": None, "oob_id": None, "oob_type": None}
+    cf_value = obj.cf.get("librenms_id") if hasattr(obj, "cf") else None
+    if isinstance(cf_value, int) and not isinstance(cf_value, bool):
+        info["host_id"] = cf_value
+        return info
+    if not isinstance(cf_value, dict):
+        return info
+    entry = cf_value.get(server_key)
+    if isinstance(entry, int) and not isinstance(entry, bool):
+        info["host_id"] = entry
+        return info
+    if isinstance(entry, dict):
+        host_id = entry.get("id")
+        if isinstance(host_id, int) and not isinstance(host_id, bool):
+            info["host_id"] = host_id
+        oob = entry.get("oob")
+        if isinstance(oob, dict):
+            oob_id = oob.get("id")
+            if isinstance(oob_id, int) and not isinstance(oob_id, bool):
+                info["oob_id"] = oob_id
+            oob_type = oob.get("type")
+            if isinstance(oob_type, str) and oob_type:
+                info["oob_type"] = oob_type
+    return info
 
 
 def _try_chassis_device_type_match(api, device_id):
@@ -208,11 +251,13 @@ def validate_device_for_import(
         "resolved_name": None,  # Final device name after applying user preferences
         "existing_device": None,
         "existing_match_type": None,  # Track how existing device was matched
-        "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs", "oob_candidate"
+        "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs", "oob_candidate", "promote_to_host"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "serial_duplicate": False,  # True when incoming serial is already on a different device
         "librenms_id_needs_migration": False,  # True when existing device has legacy bare-int ID
         "oob_candidate": None,  # dict {device, type, version, ip} when oob_candidate detected
+        "promote_to_host": None,  # dict {existing_libre_id, existing_oob_type} when incoming should become the host
+        "existing_librenms_link": None,  # dict {host_id, oob_id, oob_type} describing existing device's current LibreNMS linkage
         "name_matches": False,  # True when existing device name matches LibreNMS sysName
         "name_sync_available": False,  # True when existing device name differs from sysName
         "suggested_name": None,  # sysName to suggest when name_sync_available is True
@@ -458,6 +503,11 @@ def validate_device_for_import(
                         result["existing_match_type"] = "serial"
                         result["can_import"] = False
 
+                        # Capture existing device's current LibreNMS linkage so the UI can
+                        # present accurate state (NOT just "not linked to LibreNMS").
+                        existing_link = _describe_existing_librenms_link(existing_by_serial, server_key)
+                        result["existing_librenms_link"] = existing_link
+
                         # Check whether this LibreNMS device is an OOB controller (iDRAC/iLO/IPMI/BMC/DRAC).
                         # If so, and the matching device has no OOB linked yet, offer "Add as OOB" instead
                         # of a serial conflict/link action.
@@ -482,11 +532,35 @@ def validate_device_for_import(
                                     f"Device '{existing_by_serial.name}' already has an OOB controller linked. "
                                     f"Re-import will update the existing OOB entry."
                                 )
+                        elif (
+                            existing_link
+                            and existing_link["host_id"]
+                            and existing_link["host_id"] != libre_device.get("device_id")
+                            and not existing_link.get("oob_id")
+                            and (existing_oob_from_name := _detect_oob_type_from_name(existing_by_serial.name))
+                        ):
+                            # Inverse-OOB case: existing NetBox device is named after an OOB
+                            # controller (e.g. "idrac-jhw6nc4") and is currently linked to a
+                            # different LibreNMS entry (the iDRAC). The incoming LibreNMS
+                            # device shares the chassis serial but is the host (not OOB-typed).
+                            # Offer a non-destructive promotion: move the existing link into
+                            # the OOB slot, then set the incoming device id as the host id.
+                            result["serial_action"] = "promote_to_host"
+                            result["promote_to_host"] = {
+                                "existing_libre_id": existing_link["host_id"],
+                                "existing_oob_type": existing_oob_from_name,
+                            }
                         elif existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower():
-                            result["warnings"].append(
-                                f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
-                                f"(not linked to LibreNMS)"
-                            )
+                            if existing_link and existing_link["host_id"]:
+                                result["warnings"].append(
+                                    f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
+                                    f"(currently linked to LibreNMS device #{existing_link['host_id']})"
+                                )
+                            else:
+                                result["warnings"].append(
+                                    f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
+                                    f"(not linked to LibreNMS)"
+                                )
                             result["serial_action"] = "link"
                         else:
                             result["warnings"].append(
