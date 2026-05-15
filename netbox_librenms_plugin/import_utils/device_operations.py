@@ -251,13 +251,14 @@ def validate_device_for_import(
         "resolved_name": None,  # Final device name after applying user preferences
         "existing_device": None,
         "existing_match_type": None,  # Track how existing device was matched
-        "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs", "oob_candidate", "promote_to_host"
+        "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs", "oob_candidate", "promote_to_host", "merge_netbox_devices"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "serial_duplicate": False,  # True when incoming serial is already on a different device
         "librenms_id_needs_migration": False,  # True when existing device has legacy bare-int ID
         "oob_candidate": None,  # dict {device, type, version, ip} when oob_candidate detected
         "promote_to_host": None,  # dict {existing_libre_id, existing_oob_type} when incoming should become the host
         "existing_librenms_link": None,  # dict {host_id, oob_id, oob_type} describing existing device's current LibreNMS linkage
+        "merge_candidates": None,  # dict {host_named: {pk,name,librenms_link}, oob_named: {pk,name,librenms_link}} when two NB devices look like the same physical box
         "name_matches": False,  # True when existing device name matches LibreNMS sysName
         "name_sync_available": False,  # True when existing device name differs from sysName
         "suggested_name": None,  # sysName to suggest when name_sync_available is True
@@ -568,6 +569,64 @@ def validate_device_for_import(
                                 f"but hostname differs (LibreNMS: '{hostname}'). Device may have been reinstalled."
                             )
                             result["serial_action"] = "hostname_differs"
+
+            # Stage 2 — merge-candidates detection.
+            # When the hostname-matched device and the serial-matched device are
+            # DIFFERENT NetBox objects, the two probably represent the same
+            # physical box (host + OOB) imported as separate entries. Surface
+            # this as a merge action instead of silently picking one.
+            try:
+                _serial_for_pair = (libre_device.get("serial") or "").strip()
+                if (
+                    _serial_for_pair
+                    and _serial_for_pair != "-"
+                    and not import_as_vm
+                    and result.get("existing_device") is not None
+                    and result.get("existing_match_type") in ("hostname", "serial")
+                ):
+                    _hostname_match = (
+                        result["existing_device"] if result.get("existing_match_type") == "hostname" else None
+                    )
+                    _serial_match = result["existing_device"] if result.get("existing_match_type") == "serial" else None
+                    # Whichever path landed first, look the other one up too.
+                    if _hostname_match and not _serial_match:
+                        _serial_match = (
+                            Device.objects.filter(serial=_serial_for_pair).exclude(pk=_hostname_match.pk).first()
+                        )
+                    elif _serial_match and not _hostname_match and hostname:
+                        _hostname_match = (
+                            Device.objects.filter(name__iexact=hostname).exclude(pk=_serial_match.pk).first()
+                        )
+
+                    if _hostname_match and _serial_match and _hostname_match.pk != _serial_match.pk:
+                        host_link = _describe_existing_librenms_link(_hostname_match, server_key)
+                        oob_link = _describe_existing_librenms_link(_serial_match, server_key)
+                        # Conservative guard: at least one side must already be linked,
+                        # otherwise this is more likely two unrelated devices that share
+                        # serial data by coincidence (test fixtures, mis-keyed assets).
+                        if (host_link and host_link["host_id"]) or (oob_link and oob_link["host_id"]):
+                            result["serial_action"] = "merge_netbox_devices"
+                            result["merge_candidates"] = {
+                                "host_named": {
+                                    "pk": _hostname_match.pk,
+                                    "name": _hostname_match.name,
+                                    "librenms_link": host_link,
+                                },
+                                "oob_named": {
+                                    "pk": _serial_match.pk,
+                                    "name": _serial_match.name,
+                                    "librenms_link": oob_link,
+                                },
+                            }
+                            result["can_import"] = False
+                            result["warnings"].append(
+                                f"Two NetBox devices appear to represent this physical box: "
+                                f"'{_hostname_match.name}' (matches LibreNMS hostname) and "
+                                f"'{_serial_match.name}' (matches chassis serial). "
+                                f"Choose which one to keep and merge the other into it."
+                            )
+            except Exception:  # pragma: no cover - defensive: never break validation
+                logger.exception("merge-candidate detection failed")
 
             # Check by primary IP (weaker match, IP could be reassigned) - only for devices
             if not result["existing_device"]:

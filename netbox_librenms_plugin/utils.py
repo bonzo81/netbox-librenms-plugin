@@ -1026,6 +1026,131 @@ def netbox_resolves_module_token_per_leaf():
     return version >= _MODULE_TOKEN_LEAF_FIX_VERSION
 
 
+def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
+    """
+    Merge donor's ``librenms_id[server_key]`` link state into winner's.
+
+    Used by the Stage-2 "two NetBox devices represent the same physical box"
+    flow.  After this call (and a subsequent save), the winner holds the
+    union of both LibreNMS linkages and the donor is left with **no active
+    link** under ``server_key`` — only a ``_migrated_to`` marker pointing at
+    the winner.  Callers must persist both objects themselves.
+
+    Conflict policy (winner-wins for already-populated fields):
+
+    * If winner already has ``id`` set, donor's ``id`` is moved into the
+      ``oob`` slot (only when winner has no ``oob`` yet, with type derived
+      from the donor's name when possible).
+    * If winner has no ``id`` and donor does, winner inherits ``id``.
+    * If donor has an ``oob`` sub-block and winner has none, winner
+      inherits it verbatim.
+    * Winner's existing ``oob`` is never overwritten.
+
+    Args:
+        winner: NetBox Device that will hold the merged link state.
+        donor: NetBox Device whose link state will be absorbed.
+        server_key: LibreNMS server key to scope the merge to.
+
+    Returns:
+        A dict describing what was actually merged: keys ``host_id_from_donor``,
+        ``oob_from_donor`` (None or dict), ``donor_id_demoted_to_oob``
+        (None or dict).  Useful for audit logging and tests.
+    """
+    from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN
+
+    summary = {
+        "host_id_from_donor": None,
+        "oob_from_donor": None,
+        "donor_id_demoted_to_oob": None,
+    }
+
+    winner_cf = winner.custom_field_data.get("librenms_id") or {}
+    donor_cf = donor.custom_field_data.get("librenms_id") or {}
+    if not isinstance(winner_cf, dict) or not isinstance(donor_cf, dict):
+        # Legacy bare-int forms must be migrated by the caller before merging.
+        raise ValueError("Cannot merge: one or both devices have a legacy bare-integer librenms_id.")
+
+    winner_entry = winner_cf.get(server_key)
+    if isinstance(winner_entry, int) and not isinstance(winner_entry, bool):
+        winner_entry = {"id": winner_entry}
+    elif isinstance(winner_entry, dict):
+        winner_entry = dict(winner_entry)
+    else:
+        winner_entry = {}
+
+    donor_entry = donor_cf.get(server_key)
+    if isinstance(donor_entry, int) and not isinstance(donor_entry, bool):
+        donor_entry = {"id": donor_entry}
+    elif not isinstance(donor_entry, dict):
+        donor_entry = {}
+
+    donor_id = donor_entry.get("id")
+    donor_oob = donor_entry.get("oob") if isinstance(donor_entry.get("oob"), dict) else None
+
+    winner_id = winner_entry.get("id")
+    winner_oob = winner_entry.get("oob") if isinstance(winner_entry.get("oob"), dict) else None
+
+    if winner_id is None and donor_id is not None:
+        winner_entry["id"] = donor_id
+        summary["host_id_from_donor"] = donor_id
+    elif winner_id is not None and donor_id is not None and winner_oob is None:
+        # Demote donor's host id into winner's oob slot. Infer type from donor name.
+        match = OOB_TYPE_PATTERN.search(donor.name or "")
+        if match:
+            inferred_type = match.group(1).lower()
+            demoted = {"id": int(donor_id), "type": inferred_type}
+            winner_entry["oob"] = demoted
+            summary["donor_id_demoted_to_oob"] = demoted
+            winner_oob = demoted
+
+    if donor_oob and winner_oob is None:
+        winner_entry["oob"] = dict(donor_oob)
+        summary["oob_from_donor"] = dict(donor_oob)
+
+    winner_cf[server_key] = winner_entry
+    winner.custom_field_data["librenms_id"] = winner_cf
+    return summary
+
+
+def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", at: str | None = None) -> None:
+    """
+    Mark *donor* as migrated to the device with primary key *winner_pk*.
+
+    Removes any active ``id`` / ``oob`` keys from ``donor.custom_field_data
+    ['librenms_id'][server_key]`` (so the device is no longer matched by
+    ``find_by_librenms_id``) and writes a ``_migrated_to`` sub-key with the
+    target device pk, server key, and ISO-8601 UTC timestamp.
+
+    Does **not** call ``donor.save()`` — caller is responsible for persisting.
+
+    Args:
+        donor: NetBox Device being absorbed by the winner.
+        winner_pk: Primary key of the winning device.
+        server_key: LibreNMS server key whose link state is being cleared.
+        at: ISO timestamp string. When None, ``datetime.utcnow().isoformat()``
+            with a ``Z`` suffix is used.
+    """
+    from datetime import datetime, timezone
+
+    cf_value = donor.custom_field_data.get("librenms_id") or {}
+    if not isinstance(cf_value, dict):
+        cf_value = {}
+    entry = cf_value.get(server_key)
+    if isinstance(entry, int) and not isinstance(entry, bool):
+        entry = {"id": entry}
+    elif not isinstance(entry, dict):
+        entry = {}
+    entry.pop("id", None)
+    entry.pop("oob", None)
+    entry["_migrated_to"] = {
+        "device_id": int(winner_pk),
+        "server_key": server_key,
+        "at": at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    cf_value[server_key] = entry
+    donor.custom_field_data["librenms_id"] = cf_value
+
+
 def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):
     """
     Check if installing this module type in a nested bay would cause a name conflict.

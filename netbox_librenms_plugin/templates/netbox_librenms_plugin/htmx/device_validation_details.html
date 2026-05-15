@@ -514,7 +514,73 @@
 
   {# Status & Actions #}
   {% if validation.existing_device %}
-    {% if validation.existing_match_type == 'librenms_id' %}
+    {% if validation.serial_action == 'merge_netbox_devices' %}
+      {# Stage 2: two NetBox devices appear to represent the same physical box. #}
+      <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-warning me-1"><i class="mdi mdi-merge"></i> Two NetBox devices</span>
+        <span class="text-muted ms-1">
+          — A hostname match and a chassis-serial match resolved to two different NetBox
+          devices. Pick which one to keep; the other will be marked as merged.
+        </span>
+      </div>
+      <div class="alert alert-info py-2 mb-3">
+        <i class="mdi mdi-information-outline"></i>
+        Merging copies the donor's LibreNMS link state (host id, OOB id and OOB IP) into
+        the winner. The donor stays in NetBox with a <em>migrated</em> marker so you can
+        re-home its interfaces and cables incrementally; the plugin will no longer try
+        to sync it.
+      </div>
+      <form
+        hx-post="{% url 'plugins:netbox_librenms_plugin:device_merge_netbox_devices' device_id=libre_device.device_id %}"
+        hx-swap="none">
+        {% csrf_token %}
+        <input type="hidden" name="server_key" value="{{ server_key }}">
+        <input type="hidden" name="donor_pk" id="merge-donor-{{ libre_device.device_id }}" value="">
+        <div class="mb-3">
+          <div class="text-muted small mb-2">Keep (winner):</div>
+          {% with host=validation.merge_candidates.host_named oob=validation.merge_candidates.oob_named %}
+          <div class="form-check mb-1">
+            <input class="form-check-input merge-winner-radio" type="radio" name="winner_pk"
+                   id="merge-winner-host-{{ libre_device.device_id }}"
+                   value="{{ host.pk }}"
+                   data-donor-pk="{{ oob.pk }}"
+                   checked>
+            <label class="form-check-label" for="merge-winner-host-{{ libre_device.device_id }}">
+              <strong>{{ host.name }}</strong>
+              <span class="text-muted">— matches LibreNMS hostname{% if host.librenms_link.host_id %}, currently linked to LibreNMS device #{{ host.librenms_link.host_id }}{% if host.librenms_link.oob_id %} (OOB #{{ host.librenms_link.oob_id }}{% if host.librenms_link.oob_type %}, {{ host.librenms_link.oob_type }}{% endif %}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
+            </label>
+          </div>
+          <div class="form-check mb-1">
+            <input class="form-check-input merge-winner-radio" type="radio" name="winner_pk"
+                   id="merge-winner-oob-{{ libre_device.device_id }}"
+                   value="{{ oob.pk }}"
+                   data-donor-pk="{{ host.pk }}">
+            <label class="form-check-label" for="merge-winner-oob-{{ libre_device.device_id }}">
+              <strong>{{ oob.name }}</strong>
+              <span class="text-muted">— matches chassis serial{% if oob.librenms_link.host_id %}, currently linked to LibreNMS device #{{ oob.librenms_link.host_id }}{% if oob.librenms_link.oob_id %} (OOB #{{ oob.librenms_link.oob_id }}{% if oob.librenms_link.oob_type %}, {{ oob.librenms_link.oob_type }}{% endif %}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
+            </label>
+          </div>
+          {% endwith %}
+        </div>
+        <button type="submit" class="btn btn-sm btn-warning">
+          <i class="mdi mdi-merge"></i> Merge into selected device
+        </button>
+      </form>
+      <script>
+        (function() {
+          var donorInput = document.getElementById("merge-donor-{{ libre_device.device_id }}");
+          var radios = document.querySelectorAll('input.merge-winner-radio[name="winner_pk"]');
+          function syncDonor() {
+            radios.forEach(function(r) {
+              if (r.checked) { donorInput.value = r.dataset.donorPk || ""; }
+            });
+          }
+          radios.forEach(function(r) { r.addEventListener("change", syncDonor); });
+          syncDonor();
+        })();
+      </script>
+
+    {% elif validation.existing_match_type == 'librenms_id' %}
       <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         {% if existing_id_servers %}
           {% for srv in existing_id_servers %}

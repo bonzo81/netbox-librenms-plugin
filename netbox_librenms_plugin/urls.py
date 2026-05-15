@@ -15,6 +15,7 @@ from .views import (
     AddAsOOBView,
     AddDeviceTypeMappingView,
     PromoteToHostView,
+    MergeNetBoxDevicesView,
     AssignVCSerialView,
     BulkImportConfirmView,
     BulkImportDevicesView,
@@ -429,6 +430,11 @@ urlpatterns = [
         "device-import/promote-to-host/<int:device_id>/",
         PromoteToHostView.as_view(),
         name="device_promote_to_host",
+    ),
+    path(
+        "device-import/merge-netbox-devices/<int:device_id>/",
+        MergeNetBoxDevicesView.as_view(),
+        name="device_merge_netbox_devices",
     ),
     path(
         "device-import/add-device-type-mapping/<int:device_id>/",

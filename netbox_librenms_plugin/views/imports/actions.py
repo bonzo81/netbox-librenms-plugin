@@ -2058,6 +2058,150 @@ class PromoteToHostView(
         return response
 
 
+class MergeNetBoxDevicesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """
+    Merge two existing NetBox devices that represent the same physical box.
+
+    The user (via radio buttons in the validation modal) picks which device is
+    the **winner** (kept) and which is the **donor** (absorbed). The donor's
+    LibreNMS link state under the active ``server_key`` is merged into the
+    winner; the donor's active link is then cleared and a ``_migrated_to``
+    marker is written.  Interfaces, cables and primary IPs are NOT moved —
+    those stay on the donor for the user to re-home incrementally via the
+    Stage-2b "Migrated to X" tab.
+    """
+
+    def post(self, request, device_id):
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Device
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.utils import (
+            mark_librenms_migrated,
+            merge_librenms_links,
+        )
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        winner_pk_raw = request.POST.get("winner_pk")
+        donor_pk_raw = request.POST.get("donor_pk")
+        if not winner_pk_raw or not donor_pk_raw:
+            return HttpResponse("Missing winner_pk or donor_pk", status=400)
+        try:
+            winner_pk = int(winner_pk_raw)
+            donor_pk = int(donor_pk_raw)
+        except (TypeError, ValueError):
+            return HttpResponse("Invalid winner_pk or donor_pk", status=400)
+        if winner_pk == donor_pk:
+            return HttpResponse("Winner and donor must be different devices", status=400)
+
+        try:
+            winner = Device.objects.get(pk=winner_pk)
+            donor = Device.objects.get(pk=donor_pk)
+        except Device.DoesNotExist:
+            return HttpResponse("Winner or donor device not found", status=404)
+
+        # Permission gate: user must be able to change BOTH devices.
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return HttpResponse("LibreNMS device not found", status=404)
+
+        merge_candidates = (validation or {}).get("merge_candidates") or {}
+        candidate_pks = {
+            (merge_candidates.get("host_named") or {}).get("pk"),
+            (merge_candidates.get("oob_named") or {}).get("pk"),
+        }
+        candidate_pks.discard(None)
+        if {winner_pk, donor_pk} != candidate_pks:
+            return HttpResponse(
+                "winner_pk/donor_pk do not match the validation result's merge candidates",
+                status=400,
+            )
+
+        # Reject legacy bare-int librenms_id form on either side. The merge
+        # helpers refuse to operate on legacy data to prevent silent migration.
+        for label, obj in (("winner", winner), ("donor", donor)):
+            stored = obj.custom_field_data.get("librenms_id")
+            is_legacy = isinstance(stored, int) and not isinstance(stored, bool)
+            if not is_legacy and isinstance(stored, str):
+                try:
+                    int(stored)
+                    is_legacy = True
+                except (ValueError, TypeError):
+                    pass
+            if is_legacy:
+                return HttpResponse(
+                    f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
+                    "use 'Convert mapping' to migrate before merging.",
+                    status=409,
+                )
+
+        server_key = self.librenms_api.server_key
+
+        with transaction.atomic():
+            # Lock both rows in deterministic pk order to avoid deadlocks.
+            locked = list(Device.objects.select_for_update().filter(pk__in=[winner_pk, donor_pk]).order_by("pk"))
+            if len(locked) != 2:
+                return HttpResponse(
+                    "One of the devices no longer exists; it may have been deleted concurrently.",
+                    status=409,
+                )
+            locked_by_pk = {d.pk: d for d in locked}
+            winner = locked_by_pk[winner_pk]
+            donor = locked_by_pk[donor_pk]
+
+            try:
+                summary = merge_librenms_links(winner, donor, server_key=server_key)
+            except ValueError as exc:
+                return HttpResponse(f"Cannot merge: {escape(str(exc))}", status=400)
+
+            # Transfer OOB IP relationship if winner has none and donor has one.
+            oob_ip_transferred = False
+            if donor.oob_ip_id and not winner.oob_ip_id:
+                winner.oob_ip = donor.oob_ip
+                donor.oob_ip = None
+                oob_ip_transferred = True
+
+            # Clear donor's active link and stamp migration marker.
+            mark_librenms_migrated(donor, winner.pk, server_key=server_key)
+
+            if err := _save_device(winner):
+                return err
+            if err := _save_device(donor):
+                return err
+
+        logger.info(
+            "Merged NetBox device '%s' (pk=%d) into '%s' (pk=%d) on server %s. Summary: %s; oob_ip_transferred=%s",
+            donor.name,
+            donor.pk,
+            winner.name,
+            winner.pk,
+            server_key,
+            summary,
+            oob_ip_transferred,
+        )
+
+        cache_key = get_import_device_cache_key(device_id, server_key)
+        cache.delete(cache_key)
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return HttpResponse("Device not found after merge", status=404)
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        response["HX-Trigger"] = "closeModal"
+        return response
+
+
 class SaveUserPrefView(LibreNMSPermissionMixin, View):
     """Save a user preference via POST. Used by JS toggle handlers."""
 
