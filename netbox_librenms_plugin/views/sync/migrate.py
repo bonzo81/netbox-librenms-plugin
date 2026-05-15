@@ -259,8 +259,11 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             list(Device.objects.select_for_update().filter(pk__in=ordered).order_by("pk"))
             setattr(winner, field, donor_ip)
             setattr(donor, field, None)
-            winner.save()
-            donor.save()
+            # Save only the touched FK column to avoid full_clean() rejecting
+            # the merge over pre-existing inconsistencies on either device
+            # (e.g. ``face`` set without ``rack``).
+            winner.save(update_fields=[field])
+            donor.save(update_fields=[field])
 
         return _hx_response(
             request,

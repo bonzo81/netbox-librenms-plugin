@@ -2174,10 +2174,20 @@ class MergeNetBoxDevicesView(
             # Clear donor's active link and stamp migration marker.
             mark_librenms_migrated(donor, winner.pk, server_key=server_key)
 
-            if err := _save_device(winner):
-                return err
-            if err := _save_device(donor):
-                return err
+            # Persist only the fields we actually touched.  Calling
+            # ``full_clean()`` here (or relying on it via ``_save_device``)
+            # would re-validate every field on the device — which is
+            # undesirable when the rows hold pre-existing inconsistencies
+            # (e.g. ``face`` set without ``rack``) that are unrelated to
+            # this merge.  See issue surfaced during eve-ng-02 merge.
+            update_fields = ["custom_field_data"]
+            if oob_ip_transferred:
+                update_fields.append("oob_ip")
+            try:
+                winner.save(update_fields=update_fields)
+                donor.save(update_fields=update_fields)
+            except Exception as exc:  # pragma: no cover - defensive
+                return HttpResponse(f"Save failed: {escape(str(exc))}", status=500)
 
         logger.info(
             "Merged NetBox device '%s' (pk=%d) into '%s' (pk=%d) on server %s. Summary: %s; oob_ip_transferred=%s",
