@@ -132,18 +132,42 @@ def _htmx_error_response(message: str) -> HttpResponse:
     return resp
 
 
-def _save_device(device) -> HttpResponse | None:
-    """Call full_clean() then save(). Return an HttpResponse on failure, None on success."""
+def _save_device(device, update_fields: list[str] | None = None) -> HttpResponse | None:
+    """Persist a Device row, returning an HttpResponse on failure or None on success.
+
+    When ``update_fields`` is provided, the call uses ``save(update_fields=...)``
+    which (a) issues a narrower UPDATE that only writes those columns and
+    (b) bypasses ``full_clean()``.  This is the correct mode when the
+    caller mutates only a known small set of fields and the device row
+    may carry pre-existing inconsistencies on *other* fields (e.g. a
+    legacy ``face`` value left behind after a rack was cleared).
+    Validating those untouched fields would block legitimate updates.
+
+    When ``update_fields`` is ``None`` (the default), the legacy behaviour
+    is preserved: ``full_clean()`` runs against the entire row before
+    ``save()`` writes every column.
+    """
+    from django.db import IntegrityError
+
+    if update_fields is None:
+        try:
+            device.full_clean()
+        except ValidationError as exc:
+            error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+            return HttpResponse(f"Validation error: {escape(str(error_msg))}", status=400)
+        try:
+            device.save()
+        except IntegrityError as exc:
+            return HttpResponse(f"Integrity error: {escape(str(exc))}", status=409)
+        return None
+
     try:
-        device.full_clean()
+        device.save(update_fields=update_fields)
+    except IntegrityError as exc:
+        return HttpResponse(f"Integrity error: {escape(str(exc))}", status=409)
     except ValidationError as exc:
         error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-        return _htmx_error_response(f"Validation error: {error_msg}")
-    try:
-        device.save()
-    except IntegrityError:
-        logger.exception("Failed to save %s pk=%s", type(device).__name__, getattr(device, "pk", None))
-        return _htmx_error_response("Unable to save changes. Please try again.")
+        return HttpResponse(f"Validation error: {escape(str(error_msg))}", status=400)
     return None
 
 
@@ -1164,9 +1188,11 @@ class DeviceConflictActionView(
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
                     existing_device.name = hostname
+                    fields = ["custom_field_data", "name"]
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
-                    if err := _save_device(existing_device):
+                        fields.append("device_type")
+                    if err := _save_device(existing_device, update_fields=fields):
                         return err
                     logger.info(f"Linked device '{existing_device.name}' to LibreNMS ID {librenms_id}")
 
@@ -1174,6 +1200,7 @@ class DeviceConflictActionView(
                     # Update hostname, serial, and link to LibreNMS
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     incoming_serial = libre_device.get("serial") or ""
+                    fields = ["custom_field_data", "name"]
                     if incoming_serial and incoming_serial != "-":
                         # Lock any conflicting device under the same transaction to reduce
                         # the serial-assignment race window (best-effort; a DB unique
@@ -1190,11 +1217,13 @@ class DeviceConflictActionView(
                                 f"'{conflict_device.name}' (ID: {conflict_device.pk})"
                             )
                         existing_device.serial = incoming_serial
+                        fields.append("serial")
                     existing_device.name = hostname
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
+                        fields.append("device_type")
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-                    if err := _save_device(existing_device):
+                    if err := _save_device(existing_device, update_fields=fields):
                         return err
                     logger.info(
                         f"Updated device '{existing_device.name}': serial={incoming_serial}, "
@@ -1204,6 +1233,7 @@ class DeviceConflictActionView(
                 elif action == "update_serial":
                     # Update only the serial and link to LibreNMS
                     incoming_serial = libre_device.get("serial") or ""
+                    fields = ["custom_field_data"]
                     if incoming_serial and incoming_serial != "-":
                         # Lock any conflicting device under the same transaction to reduce
                         # the serial-assignment race window (best-effort; a DB unique
@@ -1220,10 +1250,12 @@ class DeviceConflictActionView(
                                 f"'{conflict_device.name}' (ID: {conflict_device.pk})"
                             )
                         existing_device.serial = incoming_serial
+                        fields.append("serial")
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
+                        fields.append("device_type")
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-                    if err := _save_device(existing_device):
+                    if err := _save_device(existing_device, update_fields=fields):
                         return err
                     logger.info(
                         f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
@@ -1234,7 +1266,7 @@ class DeviceConflictActionView(
             # Sync device name from LibreNMS (e.g., IP → sysName)
             hostname = _get_hostname_for_action(request, validation, libre_device)
             existing_device.name = hostname
-            if err := _save_device(existing_device):
+            if err := _save_device(existing_device, update_fields=["name"]):
                 return err
             logger.info(f"Synced name on device '{existing_device.name}' from LibreNMS")
 
@@ -1242,7 +1274,7 @@ class DeviceConflictActionView(
             # Update device type from LibreNMS (requires force for mismatch)
             if librenms_device_type:
                 existing_device.device_type = librenms_device_type
-                if err := _save_device(existing_device):
+                if err := _save_device(existing_device, update_fields=["device_type"]):
                     return err
                 logger.info(f"Updated device type on '{existing_device.name}' to {librenms_device_type}")
             else:
@@ -1277,7 +1309,7 @@ class DeviceConflictActionView(
                             f"'{conflict_device.name}' (ID: {conflict_device.pk})"
                         )
                     locked_device.serial = incoming_serial
-                    if err := _save_device(locked_device):
+                    if err := _save_device(locked_device, update_fields=["serial"]):
                         return err
                     logger.info(f"Synced serial on '{locked_device.name}' to {incoming_serial}")
             else:
@@ -1292,7 +1324,7 @@ class DeviceConflictActionView(
                 match_result = find_matching_platform(librenms_os)
                 if match_result["found"]:
                     existing_device.platform = match_result["platform"]
-                    if err := _save_device(existing_device):
+                    if err := _save_device(existing_device, update_fields=["platform"]):
                         return err
                     logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
                 elif match_result.get("match_type") == "ambiguous":
@@ -1317,7 +1349,7 @@ class DeviceConflictActionView(
             hw_match = match_librenms_hardware_to_device_type(hardware)
             if hw_match and hw_match.get("matched"):
                 existing_device.device_type = hw_match["device_type"]
-                if err := _save_device(existing_device):
+                if err := _save_device(existing_device, update_fields=["device_type"]):
                     return err
                 logger.info(f"Synced device type on '{existing_device.name}' to {hw_match['device_type']}")
             else:
@@ -1861,6 +1893,7 @@ class AddAsOOBView(
             except ValueError as exc:
                 return HttpResponse(f"Invalid OOB data: {escape(str(exc))}", status=400)
 
+            update_fields = ["custom_field_data"]
             # Assign device.oob_ip if not already set and the IP exists in NetBox.
             if oob_ip_str and existing_device.oob_ip_id is None:
                 from ipam.models import IPAddress
@@ -1868,8 +1901,9 @@ class AddAsOOBView(
                 existing_ip = IPAddress.objects.filter(address__net_host=oob_ip_str).first()
                 if existing_ip:
                     existing_device.oob_ip = existing_ip
+                    update_fields.append("oob_ip")
 
-            if err := _save_device(existing_device):
+            if err := _save_device(existing_device, update_fields=update_fields):
                 return err
 
         logger.info(
@@ -2034,7 +2068,7 @@ class PromoteToHostView(
             except ValueError as exc:
                 return HttpResponse(f"Invalid promotion data: {escape(str(exc))}", status=400)
 
-            if err := _save_device(existing_device):
+            if err := _save_device(existing_device, update_fields=["custom_field_data"]):
                 return err
 
         logger.info(
