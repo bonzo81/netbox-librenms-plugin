@@ -303,7 +303,7 @@ class LibreNMSInterfaceTable(tables.Table):
         rendered = self._render_field(value, record, self.interface_name_field, "name")
         badges = ""
         if record.get("_source") == "oob":
-            badges += '<span class="badge bg-secondary ms-1" title="From OOB controller">OOB</span>'
+            badges += '<span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
         if record.get("_dedup_conflict"):
             badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
         if badges:

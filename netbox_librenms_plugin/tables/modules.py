@@ -124,7 +124,7 @@ class LibreNMSModuleTable(tables.Table):
         """Render inventory item name with tree indentation for sub-components."""
         depth = record.get("depth", 0)
         oob_badge = (
-            format_html(' <span class="badge bg-secondary ms-1" title="From OOB controller">OOB</span>')
+            format_html(' <span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>')
             if record.get("_source") == "oob"
             else ""
         )

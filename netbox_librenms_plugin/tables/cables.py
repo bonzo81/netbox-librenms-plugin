@@ -62,7 +62,7 @@ class LibreNMSCableTable(tables.Table):
     def render_local_port(self, value, record):
         """Render local port name as a link if URL is available."""
         oob_badge = (
-            format_html(' <span class="badge bg-secondary ms-1" title="From OOB controller">OOB</span>')
+            format_html(' <span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>')
             if record.get("_source") == "oob"
             else ""
         )

@@ -192,6 +192,13 @@
                           <i class="mdi mdi-sync"></i>
                         </button>
                       </form>
+                    {% elif sync_info and not sync_info.device_type_synced and not sync_info.librenms_device_type and libre_device.hardware and libre_device.hardware != "-" %}
+                      {# LibreNMS hardware has no NetBox mapping yet — let the user create one,
+                         pre-selected to the existing device's type so the common case is one click. #}
+                      <div class="mt-1">
+                        <span class="text-warning small d-block"><i class="mdi mdi-alert"></i> No mapping for LibreNMS hardware</span>
+                        {% include "netbox_librenms_plugin/htmx/_dt_mapping_form.html" with preselect_device_type=validation.existing_device.device_type submit_label="Map LibreNMS hardware to current type" %}
+                      </div>
                     {% elif validation.device_type.device_type %}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
