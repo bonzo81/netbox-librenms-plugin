@@ -890,9 +890,9 @@ def set_librenms_oob(
     """
     from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN, OOB_TYPES
 
-    if not OOB_TYPE_PATTERN.search(oob_type):
+    if not (match := OOB_TYPE_PATTERN.search(oob_type)):
         raise ValueError(f"oob_type {oob_type!r} does not match any known OOB type {OOB_TYPES}")
-    normalized_type = OOB_TYPE_PATTERN.search(oob_type).group(1).lower()
+    normalized_type = match.group(1).lower()
 
     cf_value = obj.custom_field_data.get("librenms_id") or {}
     if not isinstance(cf_value, dict):

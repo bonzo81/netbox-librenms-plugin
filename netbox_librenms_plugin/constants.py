@@ -8,7 +8,7 @@ PERM_CHANGE_PLUGIN = "netbox_librenms_plugin.change_librenmssettings"
 LIBRENMS_VLAN_STATE_ACTIVE = 1
 
 # OOB management controller detection
-OOB_TYPE_PATTERN = re.compile(r"\b(idrac|ilo|ipmi|bmc|drac)\b", re.IGNORECASE)
+OOB_TYPE_PATTERN = re.compile(r"\b(idrac|ilo|ipmi|bmc|drac)", re.IGNORECASE)
 OOB_TYPES = ("idrac", "ilo", "ipmi", "bmc", "drac")
 
 
