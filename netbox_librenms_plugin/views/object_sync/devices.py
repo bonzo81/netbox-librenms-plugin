@@ -199,7 +199,9 @@ class SingleModuleVerifyView(
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-        if error := self.require_all_permissions_json("POST"):
+        # Read-only verify endpoint: only require object-view permission, not
+        # plugin write (which require_all_permissions_json would enforce).
+        if error := self.require_object_permissions_json("POST"):
             return error
 
         if selected_device.virtual_chassis:
@@ -220,7 +222,9 @@ class SingleModuleVerifyView(
             return JsonResponse({"status": "error", "message": "Inventory row not found"}, status=404)
 
         module_table_view = DeviceModuleTableView()
-        module_table_view.request = request
+        # Shallow-copy the request so the child view can mutate request.GET /
+        # request.POST without affecting this request object.
+        module_table_view.request = copy.copy(request)
 
         from netbox_librenms_plugin.utils import (
             get_enabled_ignore_rules,

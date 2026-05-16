@@ -1488,6 +1488,7 @@ class AddDeviceTypeMappingView(
                 if locked:
                     if locked.netbox_device_type_id != device_type_id:
                         locked.netbox_device_type = device_type
+                        locked.full_clean()
                         locked.save()
                 else:
                     try:

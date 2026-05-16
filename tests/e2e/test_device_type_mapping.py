@@ -85,11 +85,13 @@ def _delete_mapping(pk: int):
 
 
 def _restore_mapping(hardware: str, device_type_id: int):
+    # update_or_create — get_or_create would not revert an existing mapping
+    # whose netbox_device_type was mutated by the test.
     _netbox_shell(
         f"from netbox_librenms_plugin.models import DeviceTypeMapping; "
         f"from dcim.models import DeviceType; "
         f"dt = DeviceType.objects.get(pk={device_type_id}); "
-        f"DeviceTypeMapping.objects.get_or_create("
+        f"DeviceTypeMapping.objects.update_or_create("
         f"  librenms_hardware={hardware!r}, defaults={{'netbox_device_type': dt}})"
     )
 
@@ -135,7 +137,9 @@ def _close_modal(page):
     close_btn = page.locator("#htmx-modal button.btn-close[data-bs-dismiss='modal']").first
     if close_btn.count() > 0 and close_btn.is_visible():
         close_btn.click()
-        page.wait_for_timeout(400)
+        # Wait for Bootstrap to actually hide the modal rather than guessing
+        # at the animation duration.
+        page.wait_for_selector("#htmx-modal:not(.show)", timeout=4000)
 
 
 def _find_no_match_modal(page):
@@ -153,12 +157,11 @@ def _find_no_match_modal(page):
             page.wait_for_selector("#htmx-modal-content .modal-header", timeout=8000)
         except Exception:
             continue
-        page.wait_for_timeout(500)
+        page.wait_for_load_state("networkidle")
         modal = page.locator("#htmx-modal-content")
         if "No matching type" in modal.inner_text():
             return modal, row
         _close_modal(page)
-        page.wait_for_timeout(200)
     return None, None
 
 
@@ -222,19 +225,34 @@ class TestDeviceTypeMappingModal:
         )
         print(f"searchEl found via getElementById: {has_listener}")
 
-        # Try dispatching input event directly via JS to bypass any event listener gaps
+        # Dispatch input event to trigger dropdown fetch; wait for either
+        # results to appear or a brief HTMX network exchange to settle.
         page.evaluate(
             f"() => {{"
             f"  var el = document.getElementById({search_id!r});"
             f"  if (el) {{ el.value = 'a'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }}"
             f"}}"
         )
-        page.wait_for_timeout(1500)
+        try:
+            page.wait_for_selector(
+                "#htmx-modal-content [id^='dt-dropdown-'] a",
+                timeout=2000,
+                state="attached",
+            )
+        except Exception:
+            pass
 
-        # If still no dropdown, try using the keyboard directly on the focused element
+        # If still no dropdown, type via keyboard and wait again
         search.click()
         page.keyboard.type("b", delay=100)
-        page.wait_for_timeout(1500)
+        try:
+            page.wait_for_selector(
+                "#htmx-modal-content [id^='dt-dropdown-'] a",
+                timeout=2000,
+                state="attached",
+            )
+        except Exception:
+            pass
 
         # Final check
         dropdown_items = modal.locator("[id^='dt-dropdown-'] a")
@@ -245,13 +263,18 @@ class TestDeviceTypeMappingModal:
             timeout=8000,
             state="attached",
         )
-        page.wait_for_timeout(200)
 
         dropdown = modal.locator("[id^='dt-dropdown-']")
         first = dropdown.locator("a").first
         assert first.count() > 0, "No results in DeviceType dropdown"
         first.click()
-        page.wait_for_timeout(200)
+        # Wait for the hidden input to receive the selected value rather than
+        # polling with a fixed timeout.
+        page.wait_for_function(
+            "() => { var el = document.querySelector(\"#htmx-modal-content input[name='device_type_id']\");"
+            " return el && el.value && el.value.length > 0; }",
+            timeout=4000,
+        )
 
         hidden_val = modal.locator("input[name='device_type_id']").input_value()
         assert hidden_val, "Hidden device_type_id not filled after clicking a result"
@@ -259,8 +282,8 @@ class TestDeviceTypeMappingModal:
         # Submit
         modal.locator("button:has-text('Add Mapping')").click()
 
-        # Wait for OOB modal update + JS-triggered row refresh (50ms defer + network round-trip)
-        page.wait_for_timeout(3000)
+        # Wait for the OOB row swap + modal refresh to settle via network idle
+        # rather than a fixed 3s timeout.
         page.wait_for_load_state("networkidle")
 
         # --- Assert 1: modal stays open and shows match ---

@@ -111,7 +111,7 @@ class LibreNMSModuleTable(tables.Table):
         """Render inventory item name with tree indentation for sub-components."""
         depth = record.get("depth", 0)
         if depth == 0:
-            return value or "-"
+            return format_html("{}", value or "-")
         # Build visual tree prefix based on nesting depth
         padding_px = depth * 20
         prefix = "└─ "
@@ -123,11 +123,11 @@ class LibreNMSModuleTable(tables.Table):
             return "-"
         if url := record.get("module_type_url"):
             return format_html('<a href="{}">{}</a>', url, value)
-        return value
+        return format_html("{}", value)
 
     def render_serial(self, value, record):
         """Render serial number."""
-        return value or "-"
+        return format_html("{}", value or "-")
 
     def render_description(self, value, record):
         """Render description, truncated for display."""
@@ -135,7 +135,7 @@ class LibreNMSModuleTable(tables.Table):
             return "-"
         if len(value) > 60:
             return format_html('<span title="{}">{}&hellip;</span>', value, value[:57])
-        return value
+        return format_html("{}", value)
 
     def render_item_class(self, value, record):
         """Render the entPhysicalClass with an icon."""
@@ -160,7 +160,7 @@ class LibreNMSModuleTable(tables.Table):
             return format_html('<span class="text-danger">{}</span>', "No matching bay")
         if url := record.get("module_bay_url"):
             return format_html('<a href="{}">{}</a>', url, value)
-        return value
+        return format_html("{}", value)
 
     def render_module_type(self, value, record):
         """Render module type match status."""
@@ -168,7 +168,7 @@ class LibreNMSModuleTable(tables.Table):
             return format_html('<span class="text-warning">{}</span>', "No matching type")
         if url := record.get("module_type_url"):
             return format_html('<a href="{}">{}</a>', url, value)
-        return value
+        return format_html("{}", value)
 
     def render_status(self, value, record):
         """Render sync status with badge."""
@@ -698,11 +698,14 @@ class VCModuleTable(LibreNMSModuleTable):
 
     def __init__(self, *args, device=None, **kwargs):
         super().__init__(*args, device=device, **kwargs)
+        # Cache VC members once so render_device_selection doesn't re-query for
+        # every row in large module tables.
+        self._vc_members = []
         if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
+            self._vc_members = list(self.device.virtual_chassis.members.all())
             self.columns.show("device_selection")
 
     def render_device_selection(self, value, record):
-        members = self.device.virtual_chassis.members.all()
         selected_device_id = record.get("selected_device_id") or self.device.id
         ent_index = record.get("ent_physical_index", "")
 
@@ -713,7 +716,7 @@ class VCModuleTable(LibreNMSModuleTable):
                 f"{escape(member.name)}"
                 "</option>"
             )
-            for member in members
+            for member in self._vc_members
         ]
 
         return format_html(

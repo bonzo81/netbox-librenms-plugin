@@ -599,25 +599,13 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.warning(request, "None of the selected indices matched cached inventory.")
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        # Filter out items matching 'skip' ignore rules (consistent with what the table shows)
+        # Load ignore rules once; they're evaluated per-row inside the install
+        # loop using the *resolved* target device serial, since VC rows may
+        # switch to a different member via device_selection_<ent_index>.
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
         from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
         ignore_rules = get_enabled_ignore_rules()
-        device_serial = (getattr(page_device, "serial", None) or "").strip()
-        if ignore_rules:
-            items = [
-                item
-                for item in items
-                if _check_ignore_rules(
-                    item,
-                    index_map.get(item.get("entPhysicalContainedIn")),
-                    ignore_rules,
-                    index_map,
-                    device_serial,
-                )
-                not in {"skip", "transparent"}
-            ]
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
         # Manufacturer-scoping happens per-iteration since target_device may
@@ -636,6 +624,18 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     ent_index = item.get("entPhysicalIndex")
                     selected_device_id = request.POST.get(f"device_selection_{ent_index}")
                     target_device = _resolve_target_device(page_device, selected_device_id)
+                    if ignore_rules:
+                        target_serial = (getattr(target_device, "serial", None) or "").strip()
+                        rule_action = _check_ignore_rules(
+                            item,
+                            index_map.get(item.get("entPhysicalContainedIn")),
+                            ignore_rules,
+                            index_map,
+                            target_serial,
+                        )
+                        if rule_action in {"skip", "transparent"}:
+                            skipped.append(f"{item.get('entPhysicalName', '?')}: matched ignore rule")
+                            continue
                     mfr_id = getattr(getattr(target_device, "device_type", None), "manufacturer_id", None)
                     exact_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(all_exact, mfr_id)
                     regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(all_regex, mfr_id)
@@ -1254,12 +1254,14 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         return qs.exists()
 
     def get(self, request, pk):
-        from dcim.models import Device, ModuleBayTemplate
+        from dcim.models import Device, ModuleBay, ModuleBayTemplate
 
         # Read-only modal render — only require plugin view permission and
         # NetBox add-permission on ModuleBayTemplate so users without it never
-        # see a form they cannot submit.
-        self.required_object_permissions = {"GET": [("add", ModuleBayTemplate)]}
+        # see a form they cannot submit. POST also instantiates live ModuleBay
+        # rows via _instantiate_template_on_existing(), so require add_modulebay
+        # here too to keep the GET/POST permission contract aligned.
+        self.required_object_permissions = {"GET": [("add", ModuleBayTemplate), ("add", ModuleBay)]}
         if error := self.require_all_permissions("GET"):
             return error
 
@@ -1314,11 +1316,14 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
     def post(self, request, pk):
-        from dcim.models import Device, ModuleBayTemplate
+        from dcim.models import Device, ModuleBay, ModuleBayTemplate
 
         from netbox_librenms_plugin.models import ModuleBayMapping
 
-        self.required_object_permissions = {"POST": [("add", ModuleBayTemplate)]}
+        # POST creates the template AND instantiates live ModuleBay rows on
+        # existing devices/modules via _instantiate_template_on_existing(), so
+        # gate on add_modulebay in addition to add_modulebaytemplate.
+        self.required_object_permissions = {"POST": [("add", ModuleBayTemplate), ("add", ModuleBay)]}
         if error := self.require_all_permissions("POST"):
             return error
 
