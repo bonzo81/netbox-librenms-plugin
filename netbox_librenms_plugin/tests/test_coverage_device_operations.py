@@ -2009,8 +2009,106 @@ class TestOOBDetection:
         assert result["promote_to_host"] is None
         assert result["existing_librenms_link"]["oob_id"] == 99
 
+    def test_serial_role_choice_available_offers_both_options_when_feasible(self):
+        """When existing has a different LibreNMS host id linked, no OOB, and no name match,
+        both oob_candidate and promote_to_host are populated and serial_role_choice_available
+        signals the UI to render the host/OOB toggle."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "idrac-jhw6nc4"  # OOB pattern in name -> heuristic picks promote
+        existing.cf = {"librenms_id": {"default": {"id": 25}}}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        # Heuristic chose promote_to_host (existing name suggests OOB, host link demote-able).
+        assert result["serial_action"] == "promote_to_host"
+        # Toggle is available so the user can flip to "Add as OOB" instead.
+        assert result["serial_role_choice_available"] is True
+        assert result["oob_candidate"] is not None
+        assert result["oob_candidate"]["device"] is existing
+        assert result["promote_to_host"] is not None
+        assert result["promote_to_host"]["existing_libre_id"] == 25
+
+    def test_serial_role_choice_not_available_when_names_match_and_no_link(self):
+        """Exact name match with no existing LibreNMS link -> simple link case, no toggle."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "server01",
+            "sysName": "server01",
+            "hardware": "PowerEdge R640",
+            "serial": "XYZ789",
+            "os": "linux",
+            "ip": "192.168.1.1",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "server01"
+        existing.cf = {}  # not linked
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] == "link"
+        assert result.get("serial_role_choice_available") is False
+        assert result["oob_candidate"] is None
+        assert result["promote_to_host"] is None
+
     def test_serial_match_inverse_oob_requires_oob_pattern_in_name(self):
-        """Existing device without OOB pattern in its name → fall back to hostname_differs."""
+        """Existing device without OOB pattern in its name but with a different LibreNMS link
+        is now treated as an ambiguous host/OOB chassis pair: both options are populated and a
+        UI role-toggle is offered, defaulting to oob_candidate (least-destructive)."""
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
         libre_device = {
@@ -2049,9 +2147,12 @@ class TestOOBDetection:
             for p in reversed(patches):
                 p.stop()
 
-        assert result["serial_action"] == "hostname_differs"
-        assert result["promote_to_host"] is None
-        # but existing link state is still surfaced
+        assert result["serial_action"] == "oob_candidate"
+        assert result["serial_role_choice_available"] is True
+        assert result["oob_candidate"] is not None
+        assert result["promote_to_host"] is not None
+        assert result["promote_to_host"]["existing_libre_id"] == 99
+        # existing link state is still surfaced
         assert result["existing_librenms_link"]["host_id"] == 99
 
     # ------------------------------------------------------------------

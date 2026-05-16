@@ -649,13 +649,41 @@
           not linked to LibreNMS.{% endif %}
         </span>
       </div>
-      {% if validation.serial_action == 'oob_candidate' %}
+      {% if validation.serial_role_choice_available %}
+        <div class="mb-2 small d-flex flex-wrap align-items-center gap-2">
+          <span class="text-muted">This LibreNMS device is the:</span>
+          <div class="btn-group btn-group-sm" role="group" aria-label="LibreNMS device role">
+            <input type="radio" class="btn-check serial-role-radio"
+                   name="serial-role-{{ libre_device.device_id }}"
+                   id="serial-role-host-{{ libre_device.device_id }}-radio"
+                   data-target="serial-role-host-{{ libre_device.device_id }}"
+                   autocomplete="off"
+                   {% if validation.serial_action == 'promote_to_host' %}checked{% endif %}>
+            <label class="btn btn-outline-info" for="serial-role-host-{{ libre_device.device_id }}-radio">
+              <i class="mdi mdi-server"></i> Host
+            </label>
+            <input type="radio" class="btn-check serial-role-radio"
+                   name="serial-role-{{ libre_device.device_id }}"
+                   id="serial-role-oob-{{ libre_device.device_id }}-radio"
+                   data-target="serial-role-oob-{{ libre_device.device_id }}"
+                   autocomplete="off"
+                   {% if validation.serial_action == 'oob_candidate' %}checked{% endif %}>
+            <label class="btn btn-outline-purple" for="serial-role-oob-{{ libre_device.device_id }}-radio">
+              <i class="mdi mdi-chip"></i> OOB controller
+            </label>
+          </div>
+          <span class="text-muted small">(heuristic guess pre-selected -- flip if wrong)</span>
+        </div>
+      {% endif %}
+      {% if validation.oob_candidate %}
+      <div id="serial-role-oob-{{ libre_device.device_id }}"
+           {% if validation.serial_role_choice_available and validation.serial_action != 'oob_candidate' %}style="display:none"{% endif %}>
         <div class="alert alert-info py-2 mb-3">
           <i class="mdi mdi-information-outline"></i>
           LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
           appears to be an OOB management controller
           (<strong>{{ validation.oob_candidate.type }}</strong>
-          {% if validation.oob_candidate.ip %}— {{ validation.oob_candidate.ip }}{% endif %}).
+          {% if validation.oob_candidate.ip %}-- {{ validation.oob_candidate.ip }}{% endif %}).
           It shares a chassis serial with
           <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
         </div>
@@ -672,7 +700,11 @@
             </button>
           </form>
         </div>
-      {% elif validation.serial_action == 'promote_to_host' %}
+      </div>
+      {% endif %}
+      {% if validation.promote_to_host %}
+      <div id="serial-role-host-{{ libre_device.device_id }}"
+           {% if validation.serial_role_choice_available and validation.serial_action != 'promote_to_host' %}style="display:none"{% endif %}>
         <div class="alert alert-info py-2 mb-3 small">
           <div class="d-flex align-items-center gap-2 mb-1">
             <i class="mdi mdi-swap-horizontal"></i>
@@ -698,7 +730,7 @@
               </tr>
               <tr>
                 <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
-                <td class="py-0 pe-3 text-muted">—</td>
+                <td class="py-0 pe-3 text-muted">--</td>
                 <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
                 <td class="py-0">#{{ validation.promote_to_host.existing_libre_id }} <span class="text-muted">({{ validation.promote_to_host.existing_oob_type }})</span></td>
               </tr>
@@ -706,16 +738,15 @@
           </table>
           <div class="text-muted">
             <i class="mdi mdi-information-outline"></i>
-            Existing device is updated in place — no new NetBox device is created.
+            Existing device is updated in place -- no new NetBox device is created.
           </div>
         </div>
         <div class="mb-3">
-          {# Pre-promote pick modal: lets the user override name/type/platform before submit. #}
           <button type="button"
                   class="btn btn-sm btn-primary"
                   data-bs-toggle="modal"
                   data-bs-target="#promote-modal-{{ libre_device.device_id }}">
-            <i class="mdi mdi-server"></i> Promote to host of {{ validation.existing_device.name }}…
+            <i class="mdi mdi-server"></i> Promote to host of {{ validation.existing_device.name }}...
           </button>
 
           <div class="modal fade" id="promote-modal-{{ libre_device.device_id }}" tabindex="-1" aria-hidden="true">
@@ -859,7 +890,9 @@
             })();
           </script>
         </div>
-      {% else %}
+      </div>
+      {% endif %}
+      {% if validation.serial_action == 'link' or validation.serial_action == 'hostname_differs' %}
       <div class="mb-3">
         <form style="display:inline"
               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
@@ -873,7 +906,7 @@
               <input class="form-check-input" type="checkbox" name="force" id="force-serial-{{ libre_device.device_id }}"
                      onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
               <label class="form-check-label text-danger" for="force-serial-{{ libre_device.device_id }}">
-                <i class="mdi mdi-alert-circle"></i> Device type mismatch — check to force
+                <i class="mdi mdi-alert-circle"></i> Device type mismatch -- check to force
               </label>
             </div>
           {% endif %}
@@ -1008,3 +1041,19 @@
     <i class="mdi mdi-close"></i> Close
   </button>
 </div>
+
+<script>
+  (function () {
+    document.querySelectorAll(".serial-role-radio").forEach(function (radio) {
+      if (radio.dataset.serialRoleBound) return;
+      radio.dataset.serialRoleBound = "1";
+      radio.addEventListener("change", function () {
+        var name = radio.name;
+        document.querySelectorAll('input.serial-role-radio[name="' + name + '"]').forEach(function (r) {
+          var target = document.getElementById(r.dataset.target);
+          if (target) target.style.display = r.checked ? "" : "none";
+        });
+      });
+    });
+  })();
+</script>

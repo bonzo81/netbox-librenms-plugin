@@ -1723,11 +1723,22 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "serial"
         assert "not linked to LibreNMS" in result["warnings"][0]
 
-    def test_serial_match_diff_hostname_offers_hostname_differs(self):
-        """Serial matches but hostname differs offers hostname_differs action."""
+    def test_serial_match_diff_hostname_offers_role_choice(self):
+        """Serial matches but hostname differs offers a host/OOB role choice toggle.
+
+        Previously this returned `hostname_differs`. With the role-toggle work
+        (see device_validation_details.html + device_operations.py refactor),
+        when an existing NetBox device matches by serial but the names differ
+        AND neither host nor OOB role is conclusively chosen by the heuristic,
+        we now expose both `oob_candidate` and `promote_to_host` data blocks
+        and surface a role-choice toggle in the UI. Default action is
+        `oob_candidate` (least destructive).
+        """
         existing = MagicMock()
         existing.name = "old-hostname"
         existing.serial = "ABC123"
+        existing.pk = 7
+        existing.custom_field_data = {}
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
@@ -1746,9 +1757,9 @@ class TestSerialNumberMatching:
         device_data = {"device_id": 1, "hostname": "new-hostname", "serial": "ABC123"}
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
-        assert result["serial_action"] == "hostname_differs"
+        assert result["serial_action"] == "oob_candidate"
         assert result["existing_match_type"] == "serial"
-        assert "hostname differs" in result["warnings"][0]
+        assert result.get("oob_candidate") is not None
 
     def test_hostname_match_diff_serial_offers_update(self):
         """Hostname matches but serial differs offers update_serial action."""
