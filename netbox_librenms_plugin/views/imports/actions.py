@@ -2099,7 +2099,9 @@ class AddAsOOBView(
             return HttpResponse("Device not found after action", status=404)
 
         response = self.render_device_row(request, libre_device, validation, selections)
-        response["HX-Trigger"] = "closeModal"
+        # Keep the validation modal open and refresh its contents in place so
+        # the user can confirm the new OOB attachment without losing context.
+        response["HX-Trigger"] = json.dumps({"validationRefresh": {"deviceId": device_id}})
         return response
 
 
@@ -2375,7 +2377,12 @@ class PromoteToHostView(
             return HttpResponse("Device not found after action", status=404)
 
         response = self.render_device_row(request, libre_device, validation, selections)
-        response["HX-Trigger"] = "closeModal"
+        # Keep the underlying validation modal open and re-fetch its content so
+        # the user can see the device's new link state (host id + OOB slot)
+        # without losing context. The JS handler in librenms_import.js fires a
+        # fresh GET to the validation URL using the row's existing details
+        # button.
+        response["HX-Trigger"] = json.dumps({"validationRefresh": {"deviceId": device_id}})
         return response
 
 

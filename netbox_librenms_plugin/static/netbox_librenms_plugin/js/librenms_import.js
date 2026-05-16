@@ -1201,12 +1201,59 @@
 
             const dismissTrigger = event.target.closest('[data-bs-dismiss="modal"]');
             if (dismissTrigger) {
-                event.preventDefault();
-
-                // Check if it's in the HTMX modal
-                if (modalElement.contains(dismissTrigger)) {
+                // Only handle dismiss triggers whose nearest .modal ancestor IS
+                // the outer HTMX modal. Buttons inside nested modals (e.g. the
+                // Promote-to-host modal rendered inside #htmx-modal-content)
+                // must be left for Bootstrap's own dismiss handler so they
+                // close the inner modal, not the outer one. We also avoid
+                // preventDefault here so form submit buttons that happen to
+                // carry data-bs-dismiss="modal" in nested modals still submit.
+                const nearestModal = dismissTrigger.closest('.modal');
+                if (nearestModal === modalElement) {
+                    event.preventDefault();
                     hideModal(modalElement, fallbackBackdropRef);
                 }
+            }
+        });
+
+        // Refresh the validation modal in place (used after promote / OOB
+        // attach actions that mutate device link state but should leave the
+        // user inside the modal so they can see the new state). Also closes
+        // any nested modals (e.g. the Promote-to-host pick modal) before
+        // re-fetching so the user sees the refreshed validation directly.
+        document.body.addEventListener('validationRefresh', function (event) {
+            // Close any nested Bootstrap modals currently open inside the
+            // outer validation modal content. `window.bootstrap` is not
+            // exposed by NetBox so we fall back to plain DOM toggling.
+            document.querySelectorAll('#htmx-modal-content .modal.show').forEach(function (nested) {
+                try {
+                    if (window.bootstrap) {
+                        bootstrap.Modal.getOrCreateInstance(nested).hide();
+                    } else {
+                        nested.classList.remove('show');
+                        nested.style.display = 'none';
+                        nested.setAttribute('aria-hidden', 'true');
+                    }
+                } catch (err) {
+                    // Swallow - we still want to refresh the validation panel.
+                }
+            });
+
+            const deviceId = event.detail && (event.detail.deviceId || event.detail.device_id);
+            if (!deviceId) {
+                return;
+            }
+            const btn = document.querySelector(
+                'tr#device-row-' + deviceId + ' button[hx-get*="/validation/' + deviceId + '/"]'
+            );
+            if (btn) {
+                // htmx registers a delegated click handler on document, so a
+                // synthetic MouseEvent click on the row's "View details"
+                // button re-triggers the validation GET and swaps the new
+                // content into #htmx-modal-content. We cannot call
+                // `htmx.trigger()` directly because NetBox does not expose
+                // the htmx global to user scripts.
+                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
             }
         });
 
