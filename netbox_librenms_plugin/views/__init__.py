@@ -24,6 +24,7 @@ from .base.vlan_table_view import BaseVLANTableView  # noqa: F401
 from .imports import (  # noqa: F401
     BulkImportConfirmView,
     BulkImportDevicesView,
+    CreatePlatformFromImportView,
     DeviceClusterUpdateView,
     DeviceConflictActionView,
     DeviceRackUpdateView,

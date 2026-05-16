@@ -26,6 +26,7 @@ from .views import (
     CarrierAutoInstallRuleListView,
     CarrierAutoInstallRuleView,
     CreateAndAssignPlatformView,
+    CreatePlatformFromImportView,
     DeleteNetBoxInterfacesView,
     DeviceCableTableView,
     DeviceClusterUpdateView,
@@ -421,6 +422,11 @@ urlpatterns = [
         "device-import/add-device-type-mapping/<int:device_id>/",
         AddDeviceTypeMappingView.as_view(),
         name="add_device_type_mapping",
+    ),
+    path(
+        "device-import/create-platform/<int:device_id>/",
+        CreatePlatformFromImportView.as_view(),
+        name="create_platform_from_import",
     ),
     path(
         "save-user-pref/",
