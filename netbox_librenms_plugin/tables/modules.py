@@ -354,8 +354,6 @@ class LibreNMSModuleTable(tables.Table):
             return ""
         if not self.has_write_permission:
             return ""
-        if not self.can_add_module and not self.can_change_module:
-            return ""
         # "Integrated" rows are duplicate SNMP entries for a single physical
         # card (parent + integrated child sharing serial+model) — there's
         # nothing to install, so no actions.

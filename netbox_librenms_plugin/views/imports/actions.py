@@ -141,8 +141,9 @@ def _save_device(device) -> HttpResponse | None:
         return _htmx_error_response(f"Validation error: {error_msg}")
     try:
         device.save()
-    except IntegrityError as exc:
-        return _htmx_error_response(f"Integrity error: {exc}")
+    except IntegrityError:
+        logger.exception("Failed to save %s pk=%s", type(device).__name__, getattr(device, "pk", None))
+        return _htmx_error_response("Unable to save changes. Please try again.")
     return None
 
 
@@ -1385,8 +1386,13 @@ class DeviceConflictActionView(
                 # on every other field being valid.
                 try:
                     locked_device.save(update_fields=["custom_field_data"])
-                except IntegrityError as exc:
-                    return _htmx_error_response(f"Integrity error: {exc}")
+                except IntegrityError:
+                    logger.exception(
+                        "Failed to persist migrated LibreNMS mapping for %s pk=%s",
+                        type(locked_device).__name__,
+                        locked_device.pk,
+                    )
+                    return _htmx_error_response("Unable to migrate the LibreNMS mapping. Please try again.")
             logger.info(
                 f"Migrated legacy librenms_id on '{locked_device.name}' "
                 f"to {{{self.librenms_api.server_key!r}: {cf_locked_int}}}"
