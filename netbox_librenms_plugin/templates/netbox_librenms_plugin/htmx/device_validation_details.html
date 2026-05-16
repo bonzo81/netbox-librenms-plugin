@@ -411,12 +411,10 @@
                     {% elif sync_info and sync_info.platform_synced %}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
-                  {% elif validation.platform.platform %}
-                    {{ validation.platform.platform.name }}
-                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
-                  {% elif sync_info and sync_info.platform_info.platform_exists %}
+                  {% elif validation.existing_device %}
+                    {# Existing device with no platform assigned — show Not set + sync button #}
                     <span class="text-muted">Not set</span>
-                    {% if validation.existing_device %}
+                    {% if validation.platform.platform or sync_info and sync_info.platform_info.platform_exists %}
                     <form style="display:inline" class="ms-1"
                           hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                           hx-swap="none">
@@ -428,7 +426,19 @@
                         <i class="mdi mdi-sync"></i>
                       </button>
                     </form>
+                    {% elif libre_device.os and libre_device.os != "-" %}
+                    <button type="button" class="btn btn-sm btn-outline-warning py-0 px-1"
+                            hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
+                            hx-target="#htmx-modal-content"
+                            hx-swap="innerHTML"
+                            title="Create platform for {{ libre_device.os }}">
+                      <i class="mdi mdi-plus"></i> Create Platform
+                    </button>
                     {% endif %}
+                  {% elif validation.platform.platform %}
+                    {# New import — platform will be assigned on import #}
+                    {{ validation.platform.platform.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
                     {% if libre_device.os and libre_device.os != "-" %}
                     <button type="button" class="btn btn-sm btn-outline-warning py-0 px-1"
