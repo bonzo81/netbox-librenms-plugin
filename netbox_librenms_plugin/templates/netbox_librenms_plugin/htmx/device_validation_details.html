@@ -678,14 +678,41 @@
       {% if validation.oob_candidate %}
       <div id="serial-role-oob-{{ libre_device.device_id }}"
            {% if validation.serial_role_choice_available and validation.serial_action != 'oob_candidate' %}style="display:none"{% endif %}>
-        <div class="alert alert-info py-2 mb-3">
-          <i class="mdi mdi-information-outline"></i>
-          LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
-          appears to be an OOB management controller
-          (<strong>{{ validation.oob_candidate.type }}</strong>
-          {% if validation.oob_candidate.ip %}-- {{ validation.oob_candidate.ip }}{% endif %}).
-          It shares a chassis serial with
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
+        <div class="alert alert-info py-2 mb-3 small">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <i class="mdi mdi-swap-horizontal"></i>
+            <strong>OOB attach effect on
+              <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+            </strong>
+          </div>
+          <table class="table table-sm table-borderless mb-1" style="width:auto;">
+            <thead>
+              <tr class="text-muted">
+                <th class="py-0 pe-3 fw-normal">Slot</th>
+                <th class="py-0 pe-3 fw-normal">Before</th>
+                <th class="py-0 pe-3 fw-normal"></th>
+                <th class="py-0 fw-normal">After</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
+                <td class="py-0 pe-3 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }}{% else %}--{% endif %}</td>
+                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                <td class="py-0 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
+              </tr>
+              <tr>
+                <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
+                <td class="py-0 pe-3 text-muted">--</td>
+                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                <td class="py-0">#{{ libre_device.device_id }} <span class="text-muted">({{ validation.oob_candidate.type }}{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="text-muted">
+            <i class="mdi mdi-information-outline"></i>
+            Existing device is updated in place -- no new NetBox device is created.
+          </div>
         </div>
         <div class="mb-3">
           <form style="display:inline"
