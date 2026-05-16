@@ -379,6 +379,10 @@ def validate_device_for_import(
                 if _existing_oob and _existing_oob.get("id") == librenms_id:
                     result["existing_match_type"] = "librenms_oob"
 
+                # Surface the full host/OOB linkage so the import table can render
+                # both halves of an existing pair with consistent paired styling.
+                result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
+
                 # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
                 # Direct access needed to detect legacy format for migration prompt:
                 # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the

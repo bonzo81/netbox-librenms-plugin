@@ -471,16 +471,25 @@ class DeviceImportTable(tables.Table):
             has_name_sync = validation.get("name_sync_available", False)
             has_sync_needed = match_type == "librenms_id" and serial_action in ("update_serial", "conflict")
 
+            existing_link = validation.get("existing_librenms_link") or {}
+            paired_oob_id = existing_link.get("oob_id")
+            paired_host_id = existing_link.get("host_id")
+            paired_oob_type = existing_link.get("oob_type") or "OOB"
+
             if is_oob_candidate:
                 btn_class = "btn-outline-purple"
                 btn_icon = "mdi-chip"
                 btn_label = " OOB"
                 btn_title = "Add as OOB controller"
             elif is_oob_linked:
+                # This LibreNMS row is the OOB half of an existing pair.
                 btn_class = "btn-outline-info"
                 btn_icon = "mdi-chip"
-                btn_label = ""
-                btn_title = "View OOB details"
+                btn_label = " OOB"
+                if paired_host_id:
+                    btn_title = f"Linked as OOB controller (paired host: LibreNMS #{paired_host_id})"
+                else:
+                    btn_title = "Linked as OOB controller"
             elif has_mismatch:
                 btn_class = "btn-outline-danger"
                 btn_icon = "mdi-alert-circle"
@@ -501,6 +510,15 @@ class DeviceImportTable(tables.Table):
                 btn_icon = "mdi-database-alert"
                 btn_label = " Legacy ID"
                 btn_title = "View legacy ID migration details"
+            elif match_type == "librenms_id" and paired_oob_id and paired_oob_id != paired_host_id:
+                # This LibreNMS row is the host half of an existing host/OOB
+                # pair. Render it with the same info-tinted styling as the OOB
+                # row so the user sees them as one paired device rather than
+                # two unrelated statuses (one green "ready", one blue "OOB").
+                btn_class = "btn-outline-info"
+                btn_icon = "mdi-server-network"
+                btn_label = " Host"
+                btn_title = f"Linked as host (paired OOB: LibreNMS #{paired_oob_id}, {paired_oob_type})"
             else:
                 btn_class = "btn-outline-success"
                 btn_icon = "mdi-check-circle"
