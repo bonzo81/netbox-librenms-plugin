@@ -1377,8 +1377,16 @@ class DeviceConflictActionView(
                     )
                 if not migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key):
                     return _htmx_error_response("Migration failed: librenms_id could not be converted.")
-                if err := _save_device(locked_device):
-                    return err
+                # Save only the field we actually mutated. Running full_clean() on the
+                # whole object would reject the migration over unrelated pre-existing
+                # validation issues (e.g. legacy rack face/position without a rack),
+                # which is too strict for an ID-only migration: the point of "Convert
+                # mapping" is to clean up the librenms_id custom field, not to gate
+                # on every other field being valid.
+                try:
+                    locked_device.save(update_fields=["custom_field_data"])
+                except IntegrityError as exc:
+                    return _htmx_error_response(f"Integrity error: {exc}")
             logger.info(
                 f"Migrated legacy librenms_id on '{locked_device.name}' "
                 f"to {{{self.librenms_api.server_key!r}: {cf_locked_int}}}"
