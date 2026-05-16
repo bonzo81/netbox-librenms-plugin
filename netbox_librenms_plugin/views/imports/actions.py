@@ -1432,40 +1432,25 @@ class AddDeviceTypeMappingView(
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
         if not libre_device:
-            return HttpResponse(
-                '<span class="text-danger small">Device not found in LibreNMS.</span>',
-                status=404,
-            )
+            return _htmx_error_response("Device not found in LibreNMS.")
 
         hardware = (libre_device.get("hardware") or "").strip()
         if not hardware or hardware == "-":
-            return HttpResponse(
-                '<span class="text-danger small">Device has no hardware string — cannot create mapping.</span>',
-                status=400,
-            )
+            return _htmx_error_response("Device has no hardware string — cannot create mapping.")
 
         device_type_id = request.POST.get("device_type_id", "").strip()
         if not device_type_id:
-            return HttpResponse(
-                '<span class="text-danger small">Please select a device type before submitting.</span>',
-                status=400,
-            )
+            return _htmx_error_response("Please select a device type before submitting.")
 
         try:
             device_type_id = int(device_type_id)
         except (ValueError, TypeError):
-            return HttpResponse(
-                '<span class="text-danger small">Invalid device type selection.</span>',
-                status=400,
-            )
+            return _htmx_error_response("Invalid device type selection.")
 
         try:
             device_type = DeviceType.objects.get(pk=device_type_id)
         except DeviceType.DoesNotExist:
-            return HttpResponse(
-                '<span class="text-danger small">Selected device type not found.</span>',
-                status=404,
-            )
+            return _htmx_error_response("Selected device type not found.")
 
         # Resolve the existing mapping first so we only require the permission
         # actually needed: "add" for a new mapping, "change" for an update.
@@ -1513,18 +1498,12 @@ class AddDeviceTypeMappingView(
                     except IntegrityError:
                         # Two concurrent requests both saw no existing mapping and
                         # both attempted create(); select_for_update() cannot lock
-                        # absent rows. Return 409 so the client retries (the
-                        # second attempt will find the row and take the update path).
-                        return HttpResponse(
-                            '<span class="text-danger small">Mapping was created concurrently. Please try again.</span>',
-                            status=409,
-                        )
+                        # absent rows. Surface a toast asking the user to retry
+                        # (the second attempt will find the row and take the update path).
+                        return _htmx_error_response("Mapping was created concurrently. Please try again.")
         except Exception as exc:
             logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
-            return HttpResponse(
-                '<span class="text-danger small">Error saving mapping. Please try again.</span>',
-                status=500,
-            )
+            return _htmx_error_response("Error saving mapping. Please try again.")
 
         # Clear cached LibreNMS device data so re-validation picks up the new mapping
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
@@ -1623,7 +1602,7 @@ class CreatePlatformFromImportView(
 
     def post(self, request, device_id):
         """Create platform + optional mapping + optional device assignment, then return OOB swaps."""
-        from dcim.models import Device, Manufacturer, Platform
+        from dcim.models import Manufacturer, Platform
 
         from netbox_librenms_plugin.models import PlatformMapping
 
@@ -1645,10 +1624,11 @@ class CreatePlatformFromImportView(
             except (ValueError, TypeError):
                 device_pk = None
 
-        # Re-resolve the matched NetBox object via current validation. This both
-        # tells us which model (Device vs VirtualMachine) to assign to and acts as
-        # a fallback when the hidden device_pk field was missing (validation
-        # match may have appeared after the modal was first opened).
+        # Re-resolve the matched NetBox object via current validation. This
+        # tells us which model (Device vs VirtualMachine) to assign to and
+        # protects against a stale/spoofed hidden device_pk: we only mutate an
+        # existing object when current validation unambiguously resolves it
+        # (and the supplied device_pk, if any, agrees with that resolution).
         existing_obj = None
         try:
             _, _validation, _ = self.get_validated_device_with_selections(device_id, request)
@@ -1660,11 +1640,11 @@ class CreatePlatformFromImportView(
         if existing_obj is not None and (device_pk is None or device_pk == existing_obj.pk):
             target_model = type(existing_obj)
             target_pk = existing_obj.pk
-        elif device_pk is not None:
-            # Hidden device_pk supplied but validation couldn't confirm; default to Device.
-            target_model = Device
-            target_pk = device_pk
         else:
+            # Either validation could not confirm a target, or the hidden
+            # device_pk disagreed with the validated object. Don't guess a
+            # model — create the platform but skip assignment so we never
+            # mutate the wrong record.
             target_model = None
             target_pk = None
 
@@ -1683,16 +1663,10 @@ class CreatePlatformFromImportView(
         librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
 
         if not platform_name:
-            return HttpResponse(
-                '<span class="text-danger small">Platform name is required.</span>',
-                status=400,
-            )
+            return _htmx_error_response("Platform name is required.")
 
         if Platform.objects.filter(name__iexact=platform_name).exists():
-            return HttpResponse(
-                f'<span class="text-danger small">Platform "{escape(platform_name)}" already exists.</span>',
-                status=400,
-            )
+            return _htmx_error_response(f'Platform "{platform_name}" already exists.')
 
         manufacturer = None
         if manufacturer_id:
@@ -1750,10 +1724,7 @@ class CreatePlatformFromImportView(
                             pass
         except (ValidationError, IntegrityError) as exc:
             logger.exception("CreatePlatformFromImportView: failed to create platform: %s", exc)
-            return HttpResponse(
-                '<span class="text-danger small">Error creating platform. Please try again.</span>',
-                status=500,
-            )
+            return _htmx_error_response("Error creating platform. Please try again.")
 
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)

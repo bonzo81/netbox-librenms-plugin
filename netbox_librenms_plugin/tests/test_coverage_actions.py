@@ -56,7 +56,8 @@ class TestSaveDevice:
         device.full_clean.side_effect = ValidationError({"name": ["This field is required."]})
 
         response = _save_device(device)
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_integrity_error_returns_409(self):
         from django.db import IntegrityError
@@ -68,7 +69,8 @@ class TestSaveDevice:
         device.save.side_effect = IntegrityError("duplicate key")
 
         response = _save_device(device)
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_success_returns_none(self):
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -673,7 +675,8 @@ class TestDeviceRoleUpdateView:
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
             result = view.post(MagicMock(), device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     @patch("netbox_librenms_plugin.views.imports.actions.render")
     def test_device_found_renders_row(self, mock_render):
@@ -707,7 +710,8 @@ class TestDeviceClusterUpdateView:
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
             result = view.post(MagicMock(), device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
 
 class TestDeviceRackUpdateView:
@@ -724,7 +728,8 @@ class TestDeviceRackUpdateView:
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
             result = view.post(MagicMock(), device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
 
 class TestDeviceConflictActionView:
@@ -749,14 +754,16 @@ class TestDeviceConflictActionView:
         with patch.object(view, "require_write_permission", return_value=None):
             request = _make_request(post={"existing_device_id": "1"})
             result = view.post(request, device_id=1)
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     def test_missing_existing_device_id_returns_400(self):
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             request = _make_request(post={"action": "link"})
             result = view.post(request, device_id=1)
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     def test_vm_with_unsupported_action_returns_400(self):
         view = self._make_view()
@@ -769,7 +776,8 @@ class TestDeviceConflictActionView:
                 }
             )
             result = view.post(request, device_id=1)
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     def test_existing_device_not_found_returns_404(self):
         view = self._make_view()
@@ -781,7 +789,8 @@ class TestDeviceConflictActionView:
 
                 request = _make_request(post={"action": "link", "existing_device_id": "abc"})
                 result = view.post(request, device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     def test_unknown_action_returns_400(self):
         view = self._make_view()
@@ -806,7 +815,8 @@ class TestDeviceConflictActionView:
                         )
                         result = view.post(request, device_id=1)
 
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
 
 class TestSaveUserPrefView:
@@ -1115,7 +1125,8 @@ class TestDeviceConflictActionViewVMGuard:
         with patch.object(view, "require_all_permissions", return_value=None):
             response = view.post(request, device_id=1)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_missing_action_returns_400(self):
         """Line 989-990: missing action returns 400."""
@@ -1125,7 +1136,8 @@ class TestDeviceConflictActionViewVMGuard:
         with patch.object(view, "require_all_permissions", return_value=None):
             response = view.post(request, device_id=1)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_server_key_override_creates_new_api(self):
         """Line 987: POST server_key creates new LibreNMSAPI."""
@@ -1172,7 +1184,8 @@ class TestDeviceRoleClusterRackViews:
             with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
                 response = view.post(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_device_cluster_update_not_found(self):
         """DeviceClusterUpdateView returns 404 when device not found."""
@@ -1187,7 +1200,8 @@ class TestDeviceRoleClusterRackViews:
             with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
                 response = view.post(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_device_rack_update_not_found(self):
         """DeviceRackUpdateView returns 404 when device not found."""
@@ -1202,7 +1216,8 @@ class TestDeviceRoleClusterRackViews:
             with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
                 response = view.post(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_device_role_update_renders_row(self):
         """DeviceRoleUpdateView renders row when device found."""
@@ -1612,7 +1627,8 @@ class TestDeviceConflictActionMissingExisting:
                 MockDevice.objects.get.side_effect = ValueError("Not found")
                 response = view.post(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestDeviceConflictActionMorePaths:
@@ -1660,7 +1676,8 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_force_required_without_force_returns_400(self):
         """Lines 1044/1047-1048: device_type_mismatch + force required but not provided."""
@@ -1690,7 +1707,8 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_validated_existing_pk_mismatch_returns_400(self):
         """Line 1027: validated_existing.pk != existing_device.pk → 400."""
@@ -1724,7 +1742,8 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_validated_existing_none_returns_400(self):
         """Line 1025: validated_existing is None → 400."""
@@ -1755,7 +1774,8 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_require_object_permissions_fails(self):
         """Line 1014: require_object_permissions returns error."""
@@ -1811,7 +1831,8 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migrate_already_json_format_returns_400(self):
         """Lines 1260-1265: cf_value already dict → 400."""
@@ -1844,7 +1865,8 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migrate_id_mismatch_returns_400(self):
         """Line 1272-1275: cf_int != librenms_id → 400."""
@@ -1877,7 +1899,8 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_sync_device_type_no_match_returns_400(self):
         """Line 1241: sync_device_type with no HW match → 400."""
@@ -1912,7 +1935,8 @@ class TestDeviceConflictActionMorePaths:
                         ):
                             response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_sync_platform_no_os_returns_400(self):
         """Line 1227: sync_platform with empty OS → 400."""
@@ -1943,7 +1967,8 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_sync_platform_not_found_in_netbox(self):
         """Line 1225: sync_platform platform not in NetBox → 400."""
@@ -1977,7 +2002,8 @@ class TestDeviceConflictActionMorePaths:
                         ):
                             response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestDeviceConflictUpdateAction:
@@ -2133,7 +2159,8 @@ class TestDeviceConflictActionBoolAndInvalidId:
                     ):
                         response = view.post(request, device_id=1)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_non_int_librenms_id_returns_400(self):
         """Lines 1047-1048: librenms_id is non-int string → 400."""
@@ -2163,7 +2190,8 @@ class TestDeviceConflictActionBoolAndInvalidId:
                     ):
                         response = view.post(request, device_id=1)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestDeviceConflictLinkIdConflict:
@@ -2217,7 +2245,8 @@ class TestDeviceConflictLinkIdConflict:
                                 mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
                                 response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestBulkImportConfirmViewVMRole:
@@ -2345,7 +2374,8 @@ class TestSaveDevicePath:
 
         result = _save_device(mock_device)
         assert result is not None
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     def test_save_device_integrity_error(self):
         """Lines 54-56: IntegrityError during save."""
@@ -2358,7 +2388,8 @@ class TestSaveDevicePath:
 
         result = _save_device(mock_device)
         assert result is not None
-        assert result.status_code == 409  # IntegrityError returns 409
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     def test_should_enable_vc_detection_when_cached(self):
         """Line 168: VC data already cached → returns True."""
@@ -2434,7 +2465,8 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
                                 mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
                                 response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestMigrateLibreNMSIdMorePaths:
@@ -2493,7 +2525,8 @@ class TestMigrateLibreNMSIdMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migration_succeeds_and_renders_row(self):
         """Lines 1282-1323: successful migration renders row."""
@@ -2657,7 +2690,8 @@ class TestDeviceConflictMoreActions:
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
                 response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_update_serial_save_success_renders_row(self):
         """Lines 1146-1149: update_serial with no conflict → save + render."""
@@ -2703,7 +2737,8 @@ class TestDeviceConflictMoreActions:
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
                 response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_sync_platform_success_renders_row(self):
         """Line 1222: sync_platform with found platform → save + render."""
@@ -2758,7 +2793,8 @@ class TestDeviceConflictMoreActions:
                 with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
                     response = view.post(request, device_id=42)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestMoreSaveErrorPaths:
@@ -2842,7 +2878,8 @@ class TestMoreSaveErrorPaths:
             MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = conflict
             response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_update_with_device_type_mismatch_forced(self):
         """Lines 1116, 1119: update with force + device_type_mismatch → device_type applied."""
@@ -2957,7 +2994,8 @@ class TestSyncSerialAction:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
 
 class TestUpdateAndSerialSaveErrors:
@@ -3093,7 +3131,8 @@ class TestSyncSerialMorePaths:
             MockDevice.objects.select_for_update.return_value.get.side_effect = DoesNotExistExc("gone")
             response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_sync_serial_conflict_under_lock(self):
         """Lines 1196-1200: sync_serial serial conflict → 409."""
@@ -3118,7 +3157,8 @@ class TestSyncSerialMorePaths:
             MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
             response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_sync_serial_save_error(self):
         """Line 1207: sync_serial → _save_device returns error."""
@@ -3205,7 +3245,8 @@ class TestMigrateLibreNMSIdTransactionPaths:
                         with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
                             response = view.post(req, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migrate_already_migrated_under_lock(self):
         """Lines 1292-1298: cf_locked already dict under lock → 400."""
@@ -3220,7 +3261,8 @@ class TestMigrateLibreNMSIdTransactionPaths:
                         with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
                             response = view.post(req, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migrate_id_changed_under_lock(self):
         """Lines 1300-1303: cf_locked_int != librenms_id under lock → 400."""
@@ -3235,7 +3277,8 @@ class TestMigrateLibreNMSIdTransactionPaths:
                         with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
                             response = view.post(req, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migrate_id_conflict_with_other_device(self):
         """Lines 1309-1315: another device already has this ID → 409."""
@@ -3252,7 +3295,8 @@ class TestMigrateLibreNMSIdTransactionPaths:
                             with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=conflict_dev):
                                 response = view.post(req, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migrate_migration_fails(self):
         """Lines 1316-1320: migrate_legacy_librenms_id returns False → 400."""
@@ -3270,15 +3314,16 @@ class TestMigrateLibreNMSIdTransactionPaths:
                                 ):
                                     response = view.post(req, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migrate_save_error(self):
-        """Line 1321-1322: _save_device returns error."""
+        """Migrate path saves only librenms_id field; IntegrityError on save → htmx toast."""
         view = self._make_view()
         req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-        from django.http import HttpResponse
+        from django.db import IntegrityError
 
-        err = HttpResponse("save error", status=400)
+        locked.save.side_effect = IntegrityError("dup")
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device", MockDevice):
@@ -3289,12 +3334,10 @@ class TestMigrateLibreNMSIdTransactionPaths:
                                 with patch(
                                     "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=True
                                 ):
-                                    with patch(
-                                        "netbox_librenms_plugin.views.imports.actions._save_device", return_value=err
-                                    ):
-                                        response = view.post(req, device_id=42)
+                                    response = view.post(req, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_migrate_success_renders_row(self):
         """Lines 1323+: successful migration renders row."""

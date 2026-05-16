@@ -2856,7 +2856,8 @@ class TestDeviceConflictActionView:
 
         view.request = request
         response = view.post(request, device_id=10)
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_unknown_action_returns_400(self):
         """Unknown action should return 400."""
@@ -2884,7 +2885,8 @@ class TestDeviceConflictActionView:
             view.request = request
             response = view.post(request, device_id=10)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -2956,7 +2958,8 @@ class TestDeviceConflictActionView:
             view.request = request
             response = view.post(request, device_id=10)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
         existing_device.save.assert_not_called()
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
