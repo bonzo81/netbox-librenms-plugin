@@ -504,7 +504,7 @@ class TestGetView:
 
                                     with patch.object(view, "get_server_info", return_value={}):
                                         view.get(request)
-                                        mock_load.assert_called_once_with(42)
+                                        mock_load.assert_called_once_with(42, request=request)
 
     def test_get_job_id_preserves_vc_flag_when_query_flag_missing(self):
         """job_id pages keep vc_detection_enabled from loaded job results."""
@@ -515,7 +515,7 @@ class TestGetView:
         mock_api = MagicMock()
         mock_api.server_key = "default"
 
-        def _load_job_side_effect(_job_id):
+        def _load_job_side_effect(_job_id, request=None):
             view._vc_detection_enabled = True
             return [{"device_id": 1, "hostname": "router1"}]
 
@@ -543,7 +543,7 @@ class TestGetView:
                                     with patch.object(view, "get_server_info", return_value={}):
                                         view.get(request)
 
-        mock_load.assert_called_once_with(42)
+        mock_load.assert_called_once_with(42, request=request)
         context = mock_render.call_args[0][2]
         assert context["vc_detection_enabled"] is True
 
