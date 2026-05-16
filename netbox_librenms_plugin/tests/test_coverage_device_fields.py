@@ -1055,6 +1055,64 @@ class TestCreateAndAssignPlatformView:
 
         mock_mapping_cls.assert_not_called()
 
+    def test_required_object_permissions_include_platformmapping_when_create_mapping(self):
+        """When create_mapping is checked, ('add', PlatformMapping) is added to required_object_permissions
+        BEFORE require_all_permissions runs (so the authorization check sees it)."""
+        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
+
+        view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
+        )
+
+        captured = {}
+
+        def fake_require(method):
+            captured["perms"] = view.required_object_permissions.get(method, [])
+            # Short-circuit by returning a sentinel response so post() exits early.
+            return MagicMock()
+
+        view.require_all_permissions = fake_require
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
+        ):
+            view.post(req, pk=1)
+
+        assert ("add", RealPlatformMapping) in captured["perms"], (
+            "Expected ('add', PlatformMapping) in required_object_permissions when create_mapping=True"
+        )
+
+    def test_required_object_permissions_exclude_platformmapping_when_no_create_mapping(self):
+        """When create_mapping is NOT checked, ('add', PlatformMapping) must NOT be added."""
+        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
+
+        view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping=""
+        )
+
+        captured = {}
+
+        def fake_require(method):
+            captured["perms"] = view.required_object_permissions.get(method, [])
+            return MagicMock()
+
+        view.require_all_permissions = fake_require
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
+        ):
+            view.post(req, pk=1)
+
+        assert ("add", RealPlatformMapping) not in captured["perms"], (
+            "Did not expect ('add', PlatformMapping) when create_mapping is unchecked"
+        )
+
 
 # ---------------------------------------------------------------------------
 # AssignVCSerialView

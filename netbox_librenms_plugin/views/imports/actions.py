@@ -1622,7 +1622,7 @@ class CreatePlatformFromImportView(
 
             self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
-        create_mapping = bool(request.POST.get("create_mapping"))
+        create_mapping = _parse_boolish(request.POST.get("create_mapping")) is True
         device_pk_str = (request.POST.get("device_pk") or "").strip()
         device_pk = None
         if device_pk_str:

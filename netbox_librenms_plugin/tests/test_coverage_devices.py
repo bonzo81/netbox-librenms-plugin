@@ -903,6 +903,9 @@ class TestDeviceModuleTableView:
                     "dcim.delete_module",
                     "dcim.add_modulebaytemplate",
                     "dcim.add_moduletype",
+                    "netbox_librenms_plugin.add_carrierautoinstallrule",
+                    "netbox_librenms_plugin.add_modulebaymapping",
+                    "netbox_librenms_plugin.add_moduletypemapping",
                 }
             )
         )
@@ -929,6 +932,9 @@ class TestDeviceModuleTableView:
             can_delete_module=True,
             can_add_module_bay_template=True,
             can_add_module_type=True,
+            can_add_carrier_rule=True,
+            can_add_module_bay_mapping=True,
+            can_add_module_type_mapping=True,
         )
         assert result is mock_table
 

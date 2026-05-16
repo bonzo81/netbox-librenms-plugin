@@ -308,6 +308,15 @@ class SingleModuleVerifyView(
             can_delete_module=has_write_permission and request.user.has_perm("dcim.delete_module"),
             can_add_module_bay_template=(has_write_permission and request.user.has_perm("dcim.add_modulebaytemplate")),
             can_add_module_type=(has_write_permission and request.user.has_perm("dcim.add_moduletype")),
+            can_add_carrier_rule=(
+                has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_carrierautoinstallrule")
+            ),
+            can_add_module_bay_mapping=(
+                has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+            ),
+            can_add_module_type_mapping=(
+                has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
+            ),
         )
         table.configure(request)
         formatted_row = table.format_module_data(row)
@@ -582,6 +591,15 @@ class DeviceModuleTableView(BaseModuleTableView):
             can_delete_module=has_write_permission and user.has_perm("dcim.delete_module"),
             can_add_module_bay_template=(has_write_permission and user.has_perm("dcim.add_modulebaytemplate")),
             can_add_module_type=(has_write_permission and user.has_perm("dcim.add_moduletype")),
+            can_add_carrier_rule=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.add_carrierautoinstallrule")
+            ),
+            can_add_module_bay_mapping=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+            ),
+            can_add_module_type_mapping=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
+            ),
         )
         server_key = self.librenms_api.server_key
         table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")

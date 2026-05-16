@@ -19,6 +19,9 @@ class TestLibreNMSModuleTable:
         can_delete_module=True,
         can_add_module_bay_template=True,
         can_add_module_type=True,
+        can_add_carrier_rule=True,
+        can_add_module_bay_mapping=True,
+        can_add_module_type_mapping=True,
     ):
         """Create a bare table instance without calling __init__."""
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
@@ -33,6 +36,9 @@ class TestLibreNMSModuleTable:
         table.can_delete_module = can_delete_module
         table.can_add_module_bay_template = can_add_module_bay_template
         table.can_add_module_type = can_add_module_type
+        table.can_add_carrier_rule = can_add_carrier_rule
+        table.can_add_module_bay_mapping = can_add_module_bay_mapping
+        table.can_add_module_type_mapping = can_add_module_type_mapping
         return table
 
     # ------------------------------------------------------------------

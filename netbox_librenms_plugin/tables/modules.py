@@ -61,6 +61,9 @@ class LibreNMSModuleTable(tables.Table):
         can_delete_module=False,
         can_add_module_bay_template=False,
         can_add_module_type=False,
+        can_add_carrier_rule=False,
+        can_add_module_bay_mapping=False,
+        can_add_module_type_mapping=False,
         **kwargs,
     ):
         """Initialize table with optional device context."""
@@ -73,6 +76,9 @@ class LibreNMSModuleTable(tables.Table):
         self.can_delete_module = can_delete_module
         self.can_add_module_bay_template = can_add_module_bay_template
         self.can_add_module_type = can_add_module_type
+        self.can_add_carrier_rule = can_add_carrier_rule
+        self.can_add_module_bay_mapping = can_add_module_bay_mapping
+        self.can_add_module_type_mapping = can_add_module_type_mapping
         super().__init__(*args, **kwargs)
         if not (has_write_permission and can_add_module) and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
@@ -83,6 +89,7 @@ class LibreNMSModuleTable(tables.Table):
     def configure(self, request):
         """Configure pagination settings and CSRF token."""
         from django.middleware.csrf import get_token
+        from django.utils.http import url_has_allowed_host_and_scheme
 
         self.csrf_token = get_token(request)
         # Use HX-Current-URL (the real browser URL) when available so that
@@ -91,17 +98,23 @@ class LibreNMSModuleTable(tables.Table):
         if request:
             # HX-Current-URL is the real browser URL (full absolute URL).
             # Extract only the path+query so return_url stays relative, which
-            # is what NetBox's ObjectEditView expects.  Fall back to the HTMX
-            # endpoint path when the header is absent (non-HTMX requests).
+            # is what NetBox's ObjectEditView expects. Validate via
+            # url_has_allowed_host_and_scheme to prevent open-redirect attacks
+            # from client-controlled values like "//@example.com/...". Fall
+            # back to the HTMX endpoint path when the header is absent or the
+            # value fails validation.
             htmx_current = request.headers.get("HX-Current-URL", "")
-            if htmx_current:
+            safe_relative = ""
+            if htmx_current and url_has_allowed_host_and_scheme(
+                htmx_current,
+                allowed_hosts={request.get_host()},
+                require_https=request.is_secure(),
+            ):
                 parsed = urlparse(htmx_current)
-                relative = parsed.path
+                safe_relative = parsed.path
                 if parsed.query:
-                    relative = f"{relative}?{parsed.query}"
-                self.return_url = relative
-            else:
-                self.return_url = request.get_full_path()
+                    safe_relative = f"{safe_relative}?{parsed.query}"
+            self.return_url = safe_relative or request.get_full_path()
         else:
             self.return_url = ""
         paginate = {"paginator_class": EnhancedPaginator, "per_page": get_table_paginate_count(request, self.prefix)}
@@ -535,6 +548,7 @@ class LibreNMSModuleTable(tables.Table):
             record.get("status") == "No Bay"
             and record.get("holder_hint_present")
             and not record.get("carrier_install_options")
+            and getattr(self, "can_add_carrier_rule", False)
         ):
             base_url = reverse("plugins:netbox_librenms_plugin:carrierautoinstallrule_add")
             return_url = getattr(self, "return_url", "") or ""
@@ -573,7 +587,11 @@ class LibreNMSModuleTable(tables.Table):
         # capturing the trailing-number pattern (e.g. ^0/(\d+)$ -> Slot \1),
         # so one entry covers the whole device-type slot family rather than
         # one mapping per slot.
-        if record.get("status") == "No Bay" and record.get("model_suggestion"):
+        if (
+            record.get("status") == "No Bay"
+            and record.get("model_suggestion")
+            and getattr(self, "can_add_module_bay_mapping", False)
+        ):
             sug = record["model_suggestion"]
             base_url = reverse("plugins:netbox_librenms_plugin:modulebaymapping_add")
             return_url = getattr(self, "return_url", "") or ""
@@ -608,7 +626,11 @@ class LibreNMSModuleTable(tables.Table):
         # Opens the ModuleTypeMapping create form pre-filled with the LibreNMS
         # model name and a helpful description so the user only needs to pick
         # or create the matching NetBox ModuleType.
-        if record.get("status") == "No Type" and record.get("type_suggestion"):
+        if (
+            record.get("status") == "No Type"
+            and record.get("type_suggestion")
+            and getattr(self, "can_add_module_type_mapping", False)
+        ):
             sug = record["type_suggestion"]
             base_url = reverse("plugins:netbox_librenms_plugin:moduletypemapping_add")
             return_url = getattr(self, "return_url", "") or ""
