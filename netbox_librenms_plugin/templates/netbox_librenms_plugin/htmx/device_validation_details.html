@@ -770,9 +770,8 @@
         </div>
         <div class="mb-3">
           <button type="button"
-                  class="btn btn-sm btn-primary"
-                  data-bs-toggle="modal"
-                  data-bs-target="#promote-modal-{{ libre_device.device_id }}">
+                  class="btn btn-sm btn-primary promote-modal-trigger"
+                  data-modal-target="promote-modal-{{ libre_device.device_id }}">
             <i class="mdi mdi-server"></i> Promote to host of {{ validation.existing_device.name }}...
           </button>
 
@@ -1080,6 +1079,32 @@
           var target = document.getElementById(r.dataset.target);
           if (target) target.style.display = r.checked ? "" : "none";
         });
+      });
+    });
+
+    // Open the nested Promote-options modal manually. We bypass
+    // data-bs-toggle="modal" here because NetBox's bundled JS hooks
+    // the data-api click listener and crashes ("Cannot read properties
+    // of null (reading 'hide')") when triggered from inside our HTMX
+    // modal, which isn't owned by a Bootstrap Modal instance.
+    document.querySelectorAll(".promote-modal-trigger").forEach(function (btn) {
+      if (btn.dataset.promoteModalBound) return;
+      btn.dataset.promoteModalBound = "1";
+      btn.addEventListener("click", function (event) {
+        event.preventDefault();
+        var targetId = btn.dataset.modalTarget;
+        var modalEl = targetId && document.getElementById(targetId);
+        if (!modalEl) return;
+        if (typeof bootstrap !== "undefined" && bootstrap.Modal) {
+          bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        } else if (typeof window.bootstrap !== "undefined" && window.bootstrap.Modal) {
+          window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        } else {
+          modalEl.classList.add("show");
+          modalEl.style.display = "block";
+          modalEl.removeAttribute("aria-hidden");
+          modalEl.setAttribute("aria-modal", "true");
+        }
       });
     });
   })();
