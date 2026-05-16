@@ -17,6 +17,7 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_mem
 from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.utils import (
     find_by_librenms_id,
+    find_matching_platform,
     get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
     migrate_legacy_librenms_id,
@@ -263,18 +264,23 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.warning(request, "No OS information available in LibreNMS")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        platform_name = os_name
-
-        try:
-            platform = Platform.objects.get(name__iexact=platform_name)
-        except Platform.DoesNotExist:
+        result = find_matching_platform(os_name)
+        if result["match_type"] == "ambiguous":
+            messages.error(
+                request,
+                "Multiple platforms match '{}'. Please resolve the ambiguity via a Platform Mapping.".format(os_name),
+            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        if not result["found"] or result["platform"] is None:
             messages.error(
                 request,
                 "Platform '{}' does not exist in NetBox. Use 'Create & Sync' button to create it first.".format(
-                    platform_name
+                    os_name
                 ),
             )
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        platform = result["platform"]
 
         old_platform = device.platform
         device.platform = platform

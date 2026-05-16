@@ -569,13 +569,12 @@ class TestUpdateDevicePlatformView:
         view._librenms_api.get_librenms_id.return_value = 3
         view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
 
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_platform_cls.objects.get.side_effect = mock_platform_cls.DoesNotExist()
-
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
+                return_value={"found": False, "platform": None, "match_type": None},
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
@@ -588,16 +587,16 @@ class TestUpdateDevicePlatformView:
         view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
 
         mock_platform = MagicMock()
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_platform_cls.objects.get.return_value = mock_platform
 
         mock_device = MagicMock()
         mock_device.platform = MagicMock()  # old platform exists
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
+                return_value={"found": True, "platform": mock_platform, "match_type": "exact"},
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
@@ -614,16 +613,16 @@ class TestUpdateDevicePlatformView:
         view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
 
         mock_platform = MagicMock()
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_platform_cls.objects.get.return_value = mock_platform
 
         mock_device = MagicMock()
         mock_device.platform = None  # no old platform
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
+                return_value={"found": True, "platform": mock_platform, "match_type": "exact"},
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
@@ -634,6 +633,49 @@ class TestUpdateDevicePlatformView:
         mock_device.full_clean.assert_called_once()
         mock_device.save.assert_called_once()
 
+    def test_save_success_via_platform_mapping(self):
+        """Sync button works when a PlatformMapping maps LibreNMS OS to a differently-named NetBox platform."""
+        view = self._view()
+        view._librenms_api.get_librenms_id.return_value = 3
+        view._librenms_api.get_device_info.return_value = (True, {"os": "junos"})
+
+        mock_platform = MagicMock()
+        mock_platform.__str__ = lambda self: "JunOS"
+
+        mock_device = MagicMock()
+        mock_device.platform = None
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
+                return_value={"found": True, "platform": mock_platform, "match_type": "mapping"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request(), pk=1)
+        mock_msg.success.assert_called_once()
+        assert mock_device.platform is mock_platform
+
+    def test_ambiguous_platform_returns_error(self):
+        view = self._view()
+        view._librenms_api.get_librenms_id.return_value = 3
+        view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
+                return_value={"found": False, "platform": None, "match_type": "ambiguous"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request(), pk=1)
+        mock_msg.error.assert_called_once()
+        assert "ambiguity" in mock_msg.error.call_args[0][1].lower()
+
     def test_save_validation_error(self):
         from django.core.exceptions import ValidationError
 
@@ -642,9 +684,6 @@ class TestUpdateDevicePlatformView:
         view._librenms_api.get_device_info.return_value = (True, {"os": "ios"})
 
         mock_platform = MagicMock()
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_platform_cls.objects.get.return_value = mock_platform
 
         mock_device = MagicMock()
         mock_device.platform = None
@@ -652,7 +691,10 @@ class TestUpdateDevicePlatformView:
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.find_matching_platform",
+                return_value={"found": True, "platform": mock_platform, "match_type": "exact"},
+            ),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
