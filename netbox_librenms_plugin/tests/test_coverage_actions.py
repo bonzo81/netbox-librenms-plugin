@@ -56,8 +56,8 @@ class TestSaveDevice:
         device.full_clean.side_effect = ValidationError({"name": ["This field is required."]})
 
         response = _save_device(device)
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
+        assert response.status_code == 400
+        assert b"Validation error" in response.content
 
     def test_integrity_error_returns_409(self):
         from django.db import IntegrityError
@@ -69,8 +69,8 @@ class TestSaveDevice:
         device.save.side_effect = IntegrityError("duplicate key")
 
         response = _save_device(device)
-        assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
+        assert response.status_code == 409
+        assert b"Integrity error" in response.content
 
     def test_success_returns_none(self):
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -2441,7 +2441,7 @@ class TestSaveDevicePath:
     """Test _save_device IntegrityError and ValidationError paths (line 168)."""
 
     def test_save_device_validation_error(self):
-        """Lines 50-52: ValidationError during save."""
+        """ValidationError during full_clean → 400 response."""
         from netbox_librenms_plugin.views.imports.actions import _save_device
         from django.core.exceptions import ValidationError as DjangoValidationError
 
@@ -2450,11 +2450,11 @@ class TestSaveDevicePath:
 
         result = _save_device(mock_device)
         assert result is not None
-        assert result.status_code == 200
-        assert result.headers.get("HX-Reswap") == "none"
+        assert result.status_code == 400
+        assert b"Validation error" in result.content
 
     def test_save_device_integrity_error(self):
-        """Lines 54-56: IntegrityError during save."""
+        """IntegrityError during save → 409 response."""
         from netbox_librenms_plugin.views.imports.actions import _save_device
         from django.db import IntegrityError
 
@@ -2464,8 +2464,8 @@ class TestSaveDevicePath:
 
         result = _save_device(mock_device)
         assert result is not None
-        assert result.status_code == 200
-        assert result.headers.get("HX-Reswap") == "none"
+        assert result.status_code == 409
+        assert b"Integrity error" in result.content
 
     def test_should_enable_vc_detection_when_cached(self):
         """Line 168: VC data already cached → returns True."""
