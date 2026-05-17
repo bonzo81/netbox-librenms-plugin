@@ -702,7 +702,8 @@ def validate_device_for_import(
                                 libre_device.get("hardware", ""),
                             )
                             is_oob_ip = device.oob_ip_id is not None and existing_ip.pk == device.oob_ip_id
-                            if oob_type and (is_oob_ip or not device.primary_ip4_id):
+                            has_primary_ip = bool(device.primary_ip4_id or device.primary_ip6_id)
+                            if oob_type and (is_oob_ip or not has_primary_ip):
                                 existing_oob = get_librenms_oob(device, server_key=server_key)
                                 if existing_oob is None:
                                     result["existing_device"] = device
