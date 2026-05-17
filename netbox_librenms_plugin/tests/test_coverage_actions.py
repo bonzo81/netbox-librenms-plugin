@@ -4144,7 +4144,7 @@ class TestBulkImportConfirmCollisions:
     def _run_with_two_devices(self, validation_a, validation_b):
         """Drive BulkImportConfirmView.post with two LibreNMS rows whose
         validations are stubbed to whatever the test wants. Returns the
-        rendered response."""
+        actual response object returned by view.post()."""
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
@@ -4185,8 +4185,8 @@ class TestBulkImportConfirmCollisions:
                                     template_name=tpl,
                                     context=ctx,
                                 )
-                                view.post(request)
-        return mock_render
+                                response = view.post(request)
+        return response
 
     def test_collision_path_renders_collision_template_with_409(self):
         from types import SimpleNamespace
@@ -4204,14 +4204,13 @@ class TestBulkImportConfirmCollisions:
             "virtual_chassis": {},
             "oob_candidate": {"device": nb_device, "type": "idrac"},
         }
-        mock_render = self._run_with_two_devices(validation_a, validation_b)
-        # Last render call should be the collision template at status 409.
-        last = mock_render.call_args
-        assert "bulk_import_collision.html" in last[0][1]
-        assert last[1].get("status") == 409
-        ctx = last[0][2]
-        assert len(ctx["collisions"]) == 1
-        assert ctx["collisions"][0]["nb_device_pk"] == 42
+        response = self._run_with_two_devices(validation_a, validation_b)
+        # Response itself should be the collision template at status 409.
+        assert response is not None, "view.post returned None instead of a rendered response"
+        assert "bulk_import_collision.html" in response.template_name
+        assert response.status_code == 409
+        assert len(response.context["collisions"]) == 1
+        assert response.context["collisions"][0]["nb_device_pk"] == 42
 
     def test_clean_batch_renders_normal_confirm_template(self):
         from types import SimpleNamespace
@@ -4228,8 +4227,8 @@ class TestBulkImportConfirmCollisions:
             "virtual_chassis": {},
             "existing_device": SimpleNamespace(pk=2, name="nb-b"),
         }
-        mock_render = self._run_with_two_devices(validation_a, validation_b)
-        last = mock_render.call_args
-        assert "bulk_import_confirm.html" in last[0][1]
-        # No status kwarg / default 200.
-        assert last[1].get("status", 200) == 200
+        response = self._run_with_two_devices(validation_a, validation_b)
+        assert response is not None, "view.post returned None instead of a rendered response"
+        assert "bulk_import_confirm.html" in response.template_name
+        # Default render() status is 200.
+        assert response.status_code == 200
