@@ -78,9 +78,11 @@ def get_or_create_global_ip(ip_str: str | None, *, auto_create: bool = True) -> 
         logger.debug("get_or_create_global_ip: invalid IP %r", ip_str)
         return None, False
 
+    from django.db import IntegrityError
+
     from ipam.models import IPAddress
 
-    existing = IPAddress.objects.filter(address__net_host=ip_str).first()
+    existing = IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True).first()
     if existing is not None:
         return existing, False
 
@@ -90,7 +92,17 @@ def get_or_create_global_ip(ip_str: str | None, *, auto_create: bool = True) -> 
     mask = "/128" if parsed.version == 6 else "/32"
     try:
         return IPAddress.objects.create(address=f"{ip_str}{mask}", status="active"), True
-    except Exception:  # pragma: no cover - defensive (validation/integrity)
+    except IntegrityError:
+        # Concurrent create won the race; re-query the global record and return it.
+        existing = IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True).first()
+        if existing is not None:
+            return existing, False
+        logger.warning(
+            "get_or_create_global_ip: IntegrityError but no global record found for %s",
+            ip_str,
+        )
+        return None, False
+    except Exception:  # pragma: no cover - defensive (validation etc.)
         logger.warning(
             "get_or_create_global_ip: failed to auto-create %s",
             ip_str,

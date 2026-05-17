@@ -32,7 +32,7 @@ class TestGetOrCreateGlobalIP:
 
             result, created = get_or_create_global_ip("10.0.0.1")
 
-            mock_model.objects.filter.assert_called_once_with(address__net_host="10.0.0.1")
+            mock_model.objects.filter.assert_called_once_with(address__net_host="10.0.0.1", vrf__isnull=True)
             mock_model.objects.create.assert_not_called()
             assert result is existing
             assert created is False
@@ -74,9 +74,26 @@ class TestGetOrCreateGlobalIP:
 
             result, was_created = get_or_create_global_ip("  10.1.2.3  ")
 
-            mock_model.objects.filter.assert_called_once_with(address__net_host="10.1.2.3")
+            mock_model.objects.filter.assert_called_once_with(address__net_host="10.1.2.3", vrf__isnull=True)
             mock_model.objects.create.assert_called_once_with(address="10.1.2.3/32", status="active")
             assert was_created is True
+
+    def test_integrity_error_on_create_returns_concurrently_created_record(self):
+        """A concurrent insert that races us is re-fetched and returned."""
+        from django.db import IntegrityError
+
+        from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
+
+        racing_winner = MagicMock(name="racing-winner")
+        with patch("ipam.models.IPAddress") as mock_model:
+            # First filter (pre-create) → None, second filter (post-IntegrityError) → winner.
+            mock_model.objects.filter.return_value.first.side_effect = [None, racing_winner]
+            mock_model.objects.create.side_effect = IntegrityError("duplicate key")
+
+            result, was_created = get_or_create_global_ip("10.0.0.1")
+
+            assert result is racing_winner
+            assert was_created is False
 
     def test_returns_none_and_logs_when_create_raises(self, caplog):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
