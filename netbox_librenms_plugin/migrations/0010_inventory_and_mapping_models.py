@@ -65,14 +65,33 @@ def _insert_default_inventory_ignore_rules(apps, schema_editor):
 
 
 def _delete_default_inventory_ignore_rules(apps, schema_editor):
+    """Reverse the seed by matching each rule on its full signature.
+
+    Filtering by name alone would also remove user-created rules that happen
+    to share the seeded name (``InventoryIgnoreRule.name`` is not unique), so
+    we match each seeded row on the distinctive fields that uniquely identify
+    it as the migration's own insert.
+    """
     db_alias = schema_editor.connection.alias
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
-    InventoryIgnoreRule.objects.using(db_alias).filter(
-        name__in=(
-            "Cisco IOS-XR IDPROM entries",
-            "Embedded RP / fixed-chassis system board",
-        )
-    ).delete()
+    seeded = (
+        {
+            "name": "Cisco IOS-XR IDPROM entries",
+            "match_type": "ends_with",
+            "pattern": "IDPROM",
+            "action": "skip",
+            "require_serial_match_parent": True,
+        },
+        {
+            "name": "Embedded RP / fixed-chassis system board",
+            "match_type": "serial_matches_device",
+            "pattern": "",
+            "action": "transparent",
+            "require_serial_match_parent": False,
+        },
+    )
+    for signature in seeded:
+        InventoryIgnoreRule.objects.using(db_alias).filter(**signature).delete()
 
 
 class Migration(migrations.Migration):
