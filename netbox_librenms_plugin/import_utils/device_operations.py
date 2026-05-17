@@ -12,6 +12,7 @@ from virtualization.models import Cluster  # noqa: F401 — used by test mock.pa
 
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
+    coerce_librenms_id,
     find_by_librenms_id,
     find_matching_platform,
     find_matching_site,
@@ -50,27 +51,29 @@ def _describe_existing_librenms_link(obj, server_key):
     """
     info = {"host_id": None, "oob_id": None, "oob_type": None}
     cf_value = obj.cf.get("librenms_id") if hasattr(obj, "cf") else None
-    if isinstance(cf_value, int) and not isinstance(cf_value, bool):
-        info["host_id"] = cf_value
-        return info
+    # Legacy bare-int OR string-digit (pre-JSON format).
     if not isinstance(cf_value, dict):
+        info["host_id"] = coerce_librenms_id(cf_value)
         return info
     entry = cf_value.get(server_key)
-    if isinstance(entry, int) and not isinstance(entry, bool):
-        info["host_id"] = entry
+    # Per-server simple form: legacy bare-int or string-digit under the server key.
+    if not isinstance(entry, dict):
+        info["host_id"] = coerce_librenms_id(entry)
         return info
-    if isinstance(entry, dict):
-        host_id = entry.get("id")
-        if isinstance(host_id, int) and not isinstance(host_id, bool):
-            info["host_id"] = host_id
-        oob = entry.get("oob")
-        if isinstance(oob, dict):
-            oob_id = oob.get("id")
-            if isinstance(oob_id, int) and not isinstance(oob_id, bool):
-                info["oob_id"] = oob_id
-            oob_type = oob.get("type")
-            if isinstance(oob_type, str) and oob_type:
-                info["oob_type"] = oob_type
+    # New dict-form: {"id": <int>, "oob": {"id": <int>, "type": <str>, ...}}.
+    # Inner ids are always written as ints by set_librenms_device_id, so a strict
+    # int check is sufficient here — no string-digit fallback needed.
+    host_id = entry.get("id")
+    if isinstance(host_id, int) and not isinstance(host_id, bool):
+        info["host_id"] = host_id
+    oob = entry.get("oob")
+    if isinstance(oob, dict):
+        oob_id = oob.get("id")
+        if isinstance(oob_id, int) and not isinstance(oob_id, bool):
+            info["oob_id"] = oob_id
+        oob_type = oob.get("type")
+        if isinstance(oob_type, str) and oob_type:
+            info["oob_type"] = oob_type
     return info
 
 

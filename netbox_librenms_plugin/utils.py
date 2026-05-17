@@ -655,6 +655,26 @@ def check_vlan_group_matches(
     return True
 
 
+def coerce_librenms_id(value) -> int | None:
+    """Coerce a raw LibreNMS ID value (int or string-digit) to int, or None.
+
+    Accepts only ``int`` and ``str`` — other types (None, dicts, MagicMocks,
+    etc.) return None.  Booleans are rejected because ``bool`` is a subclass
+    of ``int`` in Python, so ``int(True)`` silently becomes ``1`` — a
+    valid-looking device ID.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):
     """
     Get the LibreNMS device/port ID for a specific server from the JSON custom field.

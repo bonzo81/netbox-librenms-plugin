@@ -234,15 +234,12 @@ class LibreNMSAPI:
     def _normalize_librenms_id(value):
         """Coerce a raw LibreNMS ID value to int or None.
 
-        Booleans are rejected because bool is a subclass of int in Python,
-        so int(True) silently becomes 1 — a valid-looking device ID.
+        Thin wrapper around :func:`netbox_librenms_plugin.utils.coerce_librenms_id`
+        kept for back-compat with internal callers in this module.
         """
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            return int(value)
-        except (ValueError, TypeError):
-            return None
+        from netbox_librenms_plugin.utils import coerce_librenms_id
+
+        return coerce_librenms_id(value)
 
     def _get_cache_key(self, obj):
         """
