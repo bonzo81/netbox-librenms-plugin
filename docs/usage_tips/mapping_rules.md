@@ -25,7 +25,7 @@ The mapping lookup is case-insensitive. If no mapping exists, the plugin tries a
 
 **Screenshot:**
 
-![Platform Mapping List](../img/Netbox-librenms-plugin-platform-mappings.png)
+![Platform Mapping List](../img/platform_mappings/list.png)
 
 ---
 
@@ -47,7 +47,7 @@ Matching is case-insensitive and exact after normalisation. If the LibreNMS hard
 
 **Screenshot:**
 
-![Device Type Mapping List](../img/Netbox-librenms-plugin-device-type-mappings.png)
+![Device Type Mapping List](../img/device_type_mappings/list.png)
 
 ---
 
@@ -75,7 +75,7 @@ Optionally scoped to a **Manufacturer**: when both a manufacturer-scoped and a g
 
 **Screenshot:**
 
-![Module Type Mapping List](../img/Netbox-librenms-plugin-module-type-mappings.png)
+![Module Type Mapping List](../img/module_type_mappings/list.png)
 
 ---
 
@@ -111,7 +111,7 @@ Supports:
 
 **Screenshot:**
 
-![Module Bay Mapping List](../img/Netbox-librenms-plugin-module-bay-mappings.png)
+![Module Bay Mapping List](../img/module_bay_mappings/list.png)
 
 ---
 
@@ -147,7 +147,7 @@ Result: 3HE16474AARA01 -> 3HE16474AA
 
 **Screenshot:**
 
-![Normalization Rule List](../img/Netbox-librenms-plugin-normalization-rules.png)
+![Normalization Rule List](../img/normalization_rules/list.png)
 
 ---
 
@@ -179,7 +179,7 @@ The **Require serial match parent** option (recommended) adds a safety net: the 
 
 **Screenshot:**
 
-![Inventory Ignore Rule List](../img/Netbox-librenms-plugin-inventory-ignore-rules.png)
+![Inventory Ignore Rule List](../img/inventory_ignore_rules/list.png)
 
 ---
 
@@ -210,7 +210,7 @@ Rules are **suggest-only** — no module is installed automatically. The user cl
 
 **Screenshot:**
 
-![Carrier Auto-Install Rule List](../img/Netbox-librenms-plugin-carrier-auto-install-rules.png)
+![Carrier Auto-Install Rule List](../img/carrier_auto_install_rules/list.png)
 
 ---
 
@@ -218,4 +218,4 @@ Rules are **suggest-only** — no module is installed automatically. The user cl
 
 All mapping types support NetBox's standard bulk YAML import. Click the **Import** button next to any mapping list. You can also export existing mappings as YAML for backup or cross-environment migration using the **Export** action on the list page.
 
-Pre-built example rules for common vendor patterns are available in [`contrib/`](../../contrib/) in the plugin repository.
+Pre-built example rules for common vendor patterns are available in [`contrib/`](../../contrib/) in the plugin repository. Pull requests with additional examples or corrections are welcome.
