@@ -3,11 +3,32 @@
 * Search and discover devices from LibreNMS using flexible filters
 * Validate device prerequisites before import (Site, Device Type, Device Role)
 * Import devices as physical Devices or Virtual Machines
-* Smart matching for Sites, Device Types, and Platforms
+* Smart matching for Sites, Device Types, and Platforms (via [mapping rules](usage_tips/mapping_rules.md))
+* Unified Platform creation modal — same experience on import page and device sync page
 * Bulk import support
 * Automatic Virtual Chassis creation for stackable devices
 * Background job processing for large device sets
 * Duplicate detection to prevent re-importing existing devices
+
+### [Module / Inventory Sync](usage_tips/module_sync.md)
+
+* Compare LibreNMS ENTITY-MIB inventory to NetBox module bays and installed modules
+* Install, update, or skip modules directly from the sync table
+* Match statuses: Matched, No Bay, No Type, Name Conflict, Not Installed
+* Inline modal to create missing ModuleBayTemplate, ModuleTypeMapping, or ModuleBayMapping without leaving the page
+* Carrier Auto-Install suggestion for chassis that omit holder modules from SNMP
+
+### [Mapping Rules](usage_tips/mapping_rules.md)
+
+* **Platform Mappings** — LibreNMS OS string to NetBox Platform
+* **Device Type Mappings** — LibreNMS hardware string to NetBox DeviceType
+* **Module Type Mappings** — LibreNMS entPhysicalModelName to NetBox ModuleType (with manufacturer scoping)
+* **Module Bay Mappings** — LibreNMS entPhysicalName to NetBox bay name (exact or regex, manufacturer scoping)
+* **Normalization Rules** — regex-based string transformation before matching (strips vendor suffixes etc.)
+* **Inventory Ignore Rules** — skip or make-transparent phantom EEPROM/IDPROM entities
+* **Carrier Auto-Install Rules** — suggest carrier module installation for vendors that omit them from SNMP
+* Bulk YAML import/export for all mapping types
+* Vendor-contributed example rules in `contrib/`
 
 ### Plugin Settings
 
