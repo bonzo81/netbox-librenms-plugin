@@ -22,6 +22,17 @@ Search and import devices from LibreNMS into NetBox with comprehensive validatio
 
 See the [Device Import Guide](librenms_import/overview.md) for detailed usage instructions.
 
+### Module / Inventory Sync
+
+Synchronize physical inventory data from LibreNMS (via ENTITY-MIB) to NetBox installed modules:
+
+* Compare LibreNMS inventory items (line-cards, transceivers, fans, PSUs) against NetBox module bays
+* Install, update, or skip individual modules directly from the sync table
+* Rich mapping system: ModuleTypeMapping, ModuleBayMapping (with regex support), NormalizationRules, InventoryIgnoreRules, CarrierAutoInstallRules
+* Virtual Chassis aware — inventory rows distributed across correct VC members
+
+See the [Module Sync Guide](usage_tips/module_sync.md) and [Mapping Rules Guide](usage_tips/mapping_rules.md) for details.
+
 ### Device Field Sync
 
 Synchronize device information from LibreNMS to NetBox. The following device fields can be synchronized:
@@ -29,7 +40,7 @@ Synchronize device information from LibreNMS to NetBox. The following device fie
 * Device Name (with naming preference support)
 * Serial Number (including virtual chassis members)
 * Device Type
-* Platform
+* Platform (via [Platform Mappings](usage_tips/mapping_rules.md#platform-mappings))
 
 ### Interface Sync
 

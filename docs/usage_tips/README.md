@@ -11,10 +11,20 @@
     - Create specific mappings for your network equipment types
     - Pay attention to speed-based mappings for accurate interface types
 
-3. [Multi Server Configuration](multi_server_configuration.md)
+3. [Configure Platform Mappings](mapping_rules.md#platform-mappings) (optional)
+    - Map LibreNMS OS strings to NetBox Platform objects
+    - Ensures correct platform assignment during device import and sync
+
+4. [Multi Server Configuration](multi_server_configuration.md)
     - Configure multiple LibreNMS instances in your NetBox configuration
     - Switch between different LibreNMS servers through the web interface
     - Maintain backward compatibility with single-server configurations
+
+## Module Sync
+
+[Module Sync Guide](module_sync.md) - Synchronize physical inventory from LibreNMS to NetBox modules
+
+[Mapping Rules Guide](mapping_rules.md) - Configure all mapping types (Platform, Device Type, Module Type, Module Bay, Normalization, Ignore, Carrier)
 
 ## Device Import
 
