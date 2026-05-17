@@ -25,7 +25,7 @@ The mapping lookup is case-insensitive. If no mapping exists, the plugin tries a
 
 **Screenshot:**
 
-![Platform Mapping List](../img/platform-mapping-list.png)
+![Platform Mapping List](../img/Netbox-librenms-plugin-platform-mappings.png)
 
 ---
 
@@ -47,7 +47,7 @@ Matching is case-insensitive and exact after normalisation. If the LibreNMS hard
 
 **Screenshot:**
 
-![Device Type Mapping List](../img/device-type-mapping-list.png)
+![Device Type Mapping List](../img/Netbox-librenms-plugin-device-type-mappings.png)
 
 ---
 
@@ -75,7 +75,7 @@ Optionally scoped to a **Manufacturer**: when both a manufacturer-scoped and a g
 
 **Screenshot:**
 
-![Module Type Mapping List](../img/module-type-mapping-list.png)
+![Module Type Mapping List](../img/Netbox-librenms-plugin-module-type-mappings.png)
 
 ---
 
@@ -111,7 +111,7 @@ Supports:
 
 **Screenshot:**
 
-![Module Bay Mapping List](../img/module-bay-mapping-list.png)
+![Module Bay Mapping List](../img/Netbox-librenms-plugin-module-bay-mappings.png)
 
 ---
 
@@ -147,7 +147,7 @@ Result: 3HE16474AARA01 -> 3HE16474AA
 
 **Screenshot:**
 
-![Normalization Rule List](../img/normalization-rule-list.png)
+![Normalization Rule List](../img/Netbox-librenms-plugin-normalization-rules.png)
 
 ---
 
@@ -179,7 +179,7 @@ The **Require serial match parent** option (recommended) adds a safety net: the 
 
 **Screenshot:**
 
-![Inventory Ignore Rule List](../img/inventory-ignore-rule-list.png)
+![Inventory Ignore Rule List](../img/Netbox-librenms-plugin-inventory-ignore-rules.png)
 
 ---
 
@@ -210,7 +210,7 @@ Rules are **suggest-only** — no module is installed automatically. The user cl
 
 **Screenshot:**
 
-![Carrier Auto-Install Rule List](../img/carrier-auto-install-rule-list.png)
+![Carrier Auto-Install Rule List](../img/Netbox-librenms-plugin-carrier-auto-install-rules.png)
 
 ---
 

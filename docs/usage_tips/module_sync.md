@@ -43,7 +43,7 @@ For Virtual Chassis devices, the Modules tab automatically distributes inventory
 
 ## Screenshot
 
-![Module Sync Tab](../img/module-sync-tab.png)
+![Module Sync Tab](../img/Netbox-librenms-plugin-module-sync-tab.png)
 
 ## Related Configuration
 
