@@ -11,7 +11,7 @@ from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGI
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
 
-def _parse_request_json(request):
+def parse_request_json(request):
     """Parse JSON from request.body, returning (data, error_response).
 
     On success returns (dict, None). On malformed input returns (None, JsonResponse 400).

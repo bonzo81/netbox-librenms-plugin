@@ -38,7 +38,7 @@ from ..mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
-    _parse_request_json,
+    parse_request_json,
 )
 
 
@@ -122,7 +122,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
 
     def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
-        data, err = _parse_request_json(request)
+        data, err = parse_request_json(request)
         if err:
             return err
         selected_device_id = data.get("device_id")
@@ -183,7 +183,7 @@ class SingleModuleVerifyView(
     required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request):
-        data, err = _parse_request_json(request)
+        data, err = parse_request_json(request)
         if err:
             return err
         selected_device_id = data.get("device_id")
@@ -344,7 +344,7 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     def post(self, request):
         from ipam.models import VLAN, VLANGroup
 
-        data, err = _parse_request_json(request)
+        data, err = parse_request_json(request)
         if err:
             return err
         device_id = data.get("device_id")
@@ -472,7 +472,7 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
     def post(self, request):
         from ipam.models import VLAN, VLANGroup
 
-        data, err = _parse_request_json(request)
+        data, err = parse_request_json(request)
         if err:
             return err
         vlan_group_id = data.get("vlan_group_id")
@@ -526,7 +526,7 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cach
         if error := self.require_write_permission_json():
             return error
 
-        data, err = _parse_request_json(request)
+        data, err = parse_request_json(request)
         if err:
             return err
         device_id = data.get("device_id")

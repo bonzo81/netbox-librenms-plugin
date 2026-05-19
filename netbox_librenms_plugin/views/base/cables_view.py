@@ -20,7 +20,7 @@ from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
-    _parse_request_json,
+    parse_request_json,
 )
 
 
@@ -419,7 +419,7 @@ class SingleCableVerifyView(BaseCableTableView):
     """
 
     def post(self, request):
-        data, err = _parse_request_json(request)
+        data, err = parse_request_json(request)
         if err:
             return err
         selected_device_id = data.get("device_id")
