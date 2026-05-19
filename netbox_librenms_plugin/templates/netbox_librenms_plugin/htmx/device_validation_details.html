@@ -403,7 +403,8 @@
                                 hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
                                 hx-target="#htmx-modal-content"
                                 hx-swap="innerHTML"
-                                title="Create platform for {{ libre_device.os }}">
+                                title="Create platform for {{ libre_device.os }}"
+                                aria-label="Create platform for {{ libre_device.os }}">
                           <i class="mdi mdi-plus"></i>
                         </button>
                         {% endif %}

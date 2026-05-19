@@ -878,7 +878,7 @@ class TestDeviceVCDetailsView:
         view._librenms_api = _make_api()
         return view
 
-    def test_device_not_found_renders_htmx_error_toast(self):
+    def test_device_not_found_returns_404(self):
         view = self._make_view()
         with patch("netbox_librenms_plugin.views.imports.actions.get_librenms_device_by_id", return_value=None):
             result = view.get(MagicMock(), device_id=1)

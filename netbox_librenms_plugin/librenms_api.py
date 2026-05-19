@@ -428,16 +428,15 @@ class LibreNMSAPI:
         if data["snmp_version"] in ("v1", "v2c"):
             payload["community"] = data["community"]
         elif data["snmp_version"] == "v3":
-            payload.update(
-                {
-                    "authlevel": data["authlevel"],
-                    "authname": data["authname"],
-                    "authpass": data["authpass"],
-                    "authalgo": data["authalgo"],
-                    "cryptopass": data["cryptopass"],
-                    "cryptoalgo": data["cryptoalgo"],
-                }
-            )
+            payload["authlevel"] = data["authlevel"]
+            payload["authname"] = data["authname"]
+            # Credential keys only apply at the auth levels that use them. Omit
+            # empty values instead of sending empty strings — LibreNMS rejects
+            # those for noAuthNoPriv / authNoPriv add-device requests.
+            for key in ("authpass", "authalgo", "cryptopass", "cryptoalgo"):
+                value = data.get(key)
+                if value:
+                    payload[key] = value
 
         try:
             response = requests.post(

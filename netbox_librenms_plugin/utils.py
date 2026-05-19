@@ -107,14 +107,22 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
     vc = device.virtual_chassis
     all_members = vc.members.all()
 
+    def _is_valid_librenms_id(val):
+        # Reject None, booleans, and anything that doesn't coerce to a positive int.
+        if val is None or isinstance(val, bool):
+            return False
+        try:
+            return int(val) > 0
+        except (TypeError, ValueError):
+            return False
+
     if server_key is not None:
         # Priority 1: Prefer member with an explicit per-server dict mapping for server_key.
         # This ensures a migrated device is preferred over one with a legacy bare-int ID.
         for member in all_members:
             raw_cf = member.cf.get("librenms_id")
             if isinstance(raw_cf, dict):
-                val = raw_cf.get(server_key)
-                if val is not None and not isinstance(val, bool):
+                if _is_valid_librenms_id(raw_cf.get(server_key)):
                     return member
 
         # Priority 2 (legacy fallback): Any member whose librenms_id resolves for this server
@@ -129,9 +137,9 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
         for member in all_members:
             raw_cf = member.cf.get("librenms_id")
             if isinstance(raw_cf, dict):
-                if any(v is not None and not isinstance(v, bool) for v in raw_cf.values()):
+                if any(_is_valid_librenms_id(v) for v in raw_cf.values()):
                     return member
-            elif raw_cf:
+            elif _is_valid_librenms_id(raw_cf):
                 return member
 
     # Priority 2: Use master device if it has primary IP

@@ -4,6 +4,7 @@ from .interfaces import LibreNMSInterfaceTable, LibreNMSVMInterfaceTable, VCInte
 from .ipaddresses import IPAddressTable
 from .locations import SiteLocationSyncTable
 from .mappings import (
+    CarrierAutoInstallRuleTable,
     DeviceTypeMappingTable,
     InterfaceTypeMappingTable,
     InventoryIgnoreRuleTable,
@@ -16,6 +17,7 @@ from .vlans import LibreNMSVLANTable
 from .VM_status import VMStatusTable
 
 __all__ = [
+    "CarrierAutoInstallRuleTable",
     "DeviceStatusTable",
     "DeviceTypeMappingTable",
     "InterfaceTypeMappingTable",
