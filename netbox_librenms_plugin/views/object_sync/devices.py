@@ -176,7 +176,10 @@ class SingleModuleVerifyView(
     required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request):
-        data = json.loads(request.body)
+        try:
+            data = json.loads(request.body)
+        except (TypeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
         selected_device_id = data.get("device_id")
         ent_physical_index = data.get("ent_physical_index")
         server_key = data.get("server_key") or self.librenms_api.server_key

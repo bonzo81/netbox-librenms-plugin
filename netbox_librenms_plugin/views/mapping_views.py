@@ -456,11 +456,15 @@ class BulkExportYAMLView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         if error := self.require_object_permissions("POST"):
             return error
         pks = request.POST.getlist("pk")
+        if not pks:
+            return HttpResponseBadRequest("No objects selected.")
         try:
             int_pks = [int(pk) for pk in pks]
         except (ValueError, TypeError):
             return HttpResponseBadRequest("Invalid pk value.")
         objects = self.queryset.filter(pk__in=int_pks).order_by("pk")
+        if not objects.exists():
+            return HttpResponseBadRequest("No matching objects found.")
         yaml_parts = [obj.to_yaml() for obj in objects]
         content = "---\n".join(yaml_parts)
         response = HttpResponse(content, content_type="text/yaml; charset=utf-8")

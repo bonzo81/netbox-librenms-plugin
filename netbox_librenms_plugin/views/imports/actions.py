@@ -1636,13 +1636,15 @@ class CreatePlatformFromImportView(
         # protects against a stale/spoofed hidden device_pk: we only mutate an
         # existing object when current validation unambiguously resolves it
         # (and the supplied device_pk, if any, agrees with that resolution).
-        existing_obj = None
         try:
             _, _validation, _ = self.get_validated_device_with_selections(device_id, request)
-            if _validation:
-                existing_obj = _validation.get("existing_device")
         except Exception:
-            existing_obj = None
+            logger.exception(
+                "CreatePlatformFromImportView: failed to resolve assignment target for device_id=%s",
+                device_id,
+            )
+            return _htmx_error_response("Unable to confirm the target object for platform assignment.")
+        existing_obj = _validation.get("existing_device") if _validation else None
 
         if existing_obj is not None and (device_pk is None or device_pk == existing_obj.pk):
             target_model = type(existing_obj)

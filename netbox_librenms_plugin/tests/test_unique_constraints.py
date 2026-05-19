@@ -38,13 +38,17 @@ class TestModuleBayMappingUniqueConstraints:
     def test_global_constraint_excludes_manufacturer_field(self):
         from netbox_librenms_plugin.models import ModuleBayMapping
 
+        found = False
         for c in ModuleBayMapping._meta.constraints:
             if not isinstance(c, UniqueConstraint):
                 continue
             if _condition_keys(c) == {"manufacturer__isnull": True}:
+                found = True
                 assert "manufacturer" not in c.fields
                 assert "librenms_name" in c.fields
                 assert "librenms_class" in c.fields
+                break
+        assert found, "Expected manufacturer__isnull=True constraint was not found"
 
 
 class TestCarrierAutoInstallRuleUniqueConstraints:
@@ -61,10 +65,14 @@ class TestCarrierAutoInstallRuleUniqueConstraints:
     def test_global_constraint_excludes_manufacturer_field(self):
         from netbox_librenms_plugin.models import CarrierAutoInstallRule
 
+        found = False
         for c in CarrierAutoInstallRule._meta.constraints:
             if not isinstance(c, UniqueConstraint):
                 continue
             if _condition_keys(c) == {"manufacturer__isnull": True}:
+                found = True
                 assert "manufacturer" not in c.fields
                 assert "librenms_child_class" in c.fields
                 assert "netbox_bay_name_pattern" in c.fields
+                break
+        assert found, "Expected manufacturer__isnull=True constraint was not found"
