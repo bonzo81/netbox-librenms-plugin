@@ -77,10 +77,18 @@ Optional:
       }, 300);
     });
 
-    document.addEventListener("click", function (e) {
+    // Outside-click hides the dropdown. The listener self-removes once the
+    // form leaves the DOM (HTMX swap, modal teardown) so handlers don't
+    // accumulate on document each time this template re-renders.
+    function onDocClick(e) {
+      if (!document.body.contains(searchEl)) {
+        document.removeEventListener("click", onDocClick);
+        return;
+      }
       if (!searchEl.contains(e.target) && !dropdownEl.contains(e.target)) {
         dropdownEl.style.display = "none";
       }
-    });
+    }
+    document.addEventListener("click", onDocClick);
   })();
 </script>
