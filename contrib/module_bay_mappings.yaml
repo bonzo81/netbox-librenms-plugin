@@ -90,13 +90,13 @@
 # Nokia transceiver connector bays
 # LibreNMS ifName "1/1/c1" (slot/mda/connector) → NetBox bay "1/c1"
 # ({module} on MDA resolves to position, stripping the slot prefix)
-- librenms_name: "(\\d+)/(\\d+)/(c\\d+)"
+- librenms_name: "^(\\d+)/(\\d+)/(c\\d+)$"
   librenms_class: "port"
   netbox_bay_name: "\\2/\\3"
   is_regex: true
   description: "Nokia transceiver slot/mda/cN → mda-pos/cN"
 # LibreNMS ifName "2/x1/1/c2" (slot/xiom/mda/connector) → NetBox bay "1/c2"
-- librenms_name: "(\\d+)/x(\\d+)/(\\d+)/(c\\d+)"
+- librenms_name: "^(\\d+)/x(\\d+)/(\\d+)/(c\\d+)$"
   librenms_class: "port"
   netbox_bay_name: "\\3/\\4"
   is_regex: true
