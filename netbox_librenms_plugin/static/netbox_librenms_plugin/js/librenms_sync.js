@@ -1050,6 +1050,14 @@ function handleModuleChange(select, value) {
     const row = document.querySelector(`tr[data-ent-index="${select.dataset.rowId}"]`);
     const rowDepth = row?.dataset?.depth || 0;
 
+    // Abort any in-flight verify for this select so a slower earlier response
+    // can't clobber a faster later one when the user changes the dropdown rapidly.
+    if (select._moduleVerifyController) {
+        select._moduleVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._moduleVerifyController = controller;
+
     fetch('/plugins/librenms_plugin/verify-module/', {
         method: 'POST',
         headers: {
@@ -1061,7 +1069,8 @@ function handleModuleChange(select, value) {
             ent_physical_index: select.dataset.module,
             depth: rowDepth,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
-        })
+        }),
+        signal: controller.signal
     })
         .then(response => {
             if (!response.ok) {
@@ -1104,6 +1113,7 @@ function handleModuleChange(select, value) {
             initializeModuleReplaceButtons();
         })
         .catch(error => {
+            if (error.name === 'AbortError') return;
             console.error('Error verifying module:', error.message);
         });
 }
