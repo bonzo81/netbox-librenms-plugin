@@ -17,6 +17,7 @@ Maps a LibreNMS OS string (e.g. `junos`, `eos`, `ios`) to a NetBox Platform obje
 The mapping lookup is case-insensitive. If no mapping exists, the plugin tries an exact name/slug match against existing NetBox Platforms, then leaves the field empty.
 
 **YAML format:**
+
 ```yaml
 - librenms_os: junos
   netbox_platform: JunOS
@@ -39,6 +40,7 @@ Maps a LibreNMS hardware string (e.g. `Juniper MX480 Internet Backbone Router`) 
 Matching is case-insensitive and exact after normalization. If the LibreNMS hardware string is contained within a DeviceType model name (or vice versa), the plugin tries that fallback as well.
 
 **YAML format:**
+
 ```yaml
 - librenms_hardware: "Juniper MX480 Internet Backbone Router"
   netbox_device_type: MX480
@@ -61,6 +63,7 @@ Maps a LibreNMS `entPhysicalModelName` string (e.g. `SFP-1G-T`, `3HE16474AA`) to
 Optionally scoped to a **Manufacturer**: when both a manufacturer-scoped and a global mapping exist for the same model string, the manufacturer-scoped row wins for devices from that vendor.
 
 **YAML format:**
+
 ```yaml
 - librenms_model: SFP-1G-T
   manufacturer: ""
@@ -93,6 +96,7 @@ Supports:
 - **Manufacturer scoping** — vendor-scoped mapping wins over a global one when both match
 
 **YAML format:**
+
 ```yaml
 - librenms_name: "Power Supply 1"
   librenms_class: powerSupply
@@ -127,7 +131,8 @@ Regex-based string transformations applied *before* ModuleTypeMapping or ModuleB
 Useful for stripping vendor revision suffixes so a single ModuleTypeMapping entry covers all hardware revisions.
 
 **Example:** strip Nokia revision suffixes
-```
+
+```text
 scope:         module_type
 manufacturer:  Nokia
 match_pattern: ^(3HE\w{5}[A-Z]{2})[A-Z]{2}\d{2}$
@@ -136,6 +141,7 @@ Result: 3HE16474AARA01 -> 3HE16474AA
 ```
 
 **YAML format:**
+
 ```yaml
 - scope: module_type
   manufacturer: Nokia
@@ -167,6 +173,7 @@ Filter or reclassify specific ENTITY-MIB inventory items that would otherwise ap
 The **Require serial match parent** option (recommended) adds a safety net: the name-based rule only fires when the item's serial number also matches an ancestor entity's serial.
 
 **YAML format:**
+
 ```yaml
 - name: "Cisco IOS-XR IDPROM phantom"
   match_type: ends_with
@@ -198,6 +205,7 @@ Rules are **suggest-only** — no module is installed automatically. The user cl
 - `carrier_module_type` — the ModuleType to suggest installing
 
 **YAML format:**
+
 ```yaml
 - manufacturer: Nokia
   device_type_pattern: ".*SR-s.*"
