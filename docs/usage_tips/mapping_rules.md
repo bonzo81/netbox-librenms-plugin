@@ -37,7 +37,7 @@ Maps a LibreNMS hardware string (e.g. `Juniper MX480 Internet Backbone Router`) 
 **Used by:**
 - Device Import — device type auto-match when importing
 
-Matching is case-insensitive and exact after normalization. If the LibreNMS hardware string is contained within a DeviceType model name (or vice versa), the plugin tries that fallback as well.
+Matching is case-insensitive and exact: the LibreNMS hardware string must equal the DeviceTypeMapping's `librenms_hardware` value (or, if no mapping matches, the DeviceType's `part_number` or `model`). The plugin does not perform partial or containment matching.
 
 **YAML format:**
 
