@@ -37,6 +37,17 @@ from ..base.vlan_table_view import BaseVLANTableView
 from ..mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
+def _parse_request_json(request):
+    """Parse JSON from request.body, returning (data, error_response).
+
+    On success returns (dict, None). On malformed input returns (None, JsonResponse 400).
+    """
+    try:
+        return json.loads(request.body), None
+    except (TypeError, ValueError):
+        return None, JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
+
+
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
 class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
     """Device detail tab showing LibreNMS sync information."""
@@ -117,7 +128,9 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
 
     def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
-        data = json.loads(request.body)
+        data, err = _parse_request_json(request)
+        if err:
+            return err
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()
@@ -176,10 +189,9 @@ class SingleModuleVerifyView(
     required_object_permissions = {"POST": [("view", Device)]}
 
     def post(self, request):
-        try:
-            data = json.loads(request.body)
-        except (TypeError, ValueError):
-            return JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
+        data, err = _parse_request_json(request)
+        if err:
+            return err
         selected_device_id = data.get("device_id")
         ent_physical_index = data.get("ent_physical_index")
         server_key = data.get("server_key") or self.librenms_api.server_key
@@ -338,7 +350,9 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     def post(self, request):
         from ipam.models import VLAN, VLANGroup
 
-        data = json.loads(request.body)
+        data, err = _parse_request_json(request)
+        if err:
+            return err
         device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         vlan_group_id = data.get("vlan_group_id")
@@ -464,7 +478,9 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
     def post(self, request):
         from ipam.models import VLAN, VLANGroup
 
-        data = json.loads(request.body)
+        data, err = _parse_request_json(request)
+        if err:
+            return err
         vlan_group_id = data.get("vlan_group_id")
         vid_str = data.get("vid", "")
         librenms_name = data.get("name", "")
@@ -516,7 +532,9 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cach
         if error := self.require_write_permission_json():
             return error
 
-        data = json.loads(request.body)
+        data, err = _parse_request_json(request)
+        if err:
+            return err
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})
         server_key = data.get("server_key")
