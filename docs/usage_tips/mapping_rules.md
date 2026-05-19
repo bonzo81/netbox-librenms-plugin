@@ -36,7 +36,7 @@ Maps a LibreNMS hardware string (e.g. `Juniper MX480 Internet Backbone Router`) 
 **Used by:**
 - Device Import — device type auto-match when importing
 
-Matching is case-insensitive and exact after normalisation. If the LibreNMS hardware string is contained within a DeviceType model name (or vice versa), the plugin tries that fallback as well.
+Matching is case-insensitive and exact after normalization. If the LibreNMS hardware string is contained within a DeviceType model name (or vice versa), the plugin tries that fallback as well.
 
 **YAML format:**
 ```yaml
@@ -120,9 +120,9 @@ Supports:
 Regex-based string transformations applied *before* ModuleTypeMapping or ModuleBayMapping lookups. Rules are chained in priority order (lower number = runs first); each rule transforms the output of the previous.
 
 **Scopes:**
-- `module_type` — normalises `entPhysicalModelName` before ModuleTypeMapping lookup
-- `device_type` — normalises LibreNMS hardware string before DeviceTypeMapping lookup
-- `module_bay` — normalises `entPhysicalName` before ModuleBayMapping lookup
+- `module_type` — normalizes `entPhysicalModelName` before ModuleTypeMapping lookup
+- `device_type` — normalizes LibreNMS hardware string before DeviceTypeMapping lookup
+- `module_bay` — normalizes `entPhysicalName` before ModuleBayMapping lookup
 
 Useful for stripping vendor revision suffixes so a single ModuleTypeMapping entry covers all hardware revisions.
 
