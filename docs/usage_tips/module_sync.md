@@ -1,10 +1,10 @@
 # Module Sync
 
-The Module Sync tab lets you reconcile the physical inventory reported by LibreNMS (via ENTITY-MIB) with the installed modules recorded in NetBox. It appears as a **Modules** tab on the LibreNMS Sync page for every Device and Virtual Chassis.
+The Module Sync tab lets you reconcile LibreNMS physical inventory (ENTITY-MIB, plus a transceiver API source for vendors that don't expose SFPs via ENTITY-MIB) with the installed modules recorded in NetBox. It appears as a **Modules** tab on the LibreNMS Sync page for every Device and Virtual Chassis.
 
 ## How It Works
 
-When you open the Modules tab, the plugin fetches the ENTITY-MIB inventory tree from LibreNMS and compares each line-card, transceiver, fan, power supply, and other physical component against the NetBox module bays and installed modules for that device.
+When you open the Modules tab, the plugin fetches the ENTITY-MIB inventory tree from LibreNMS, merges in transceiver data from the LibreNMS transceiver API (used for vendors that don't expose SFPs via ENTITY-MIB), and compares each line-card, transceiver, fan, power supply, and other physical component against the NetBox module bays and installed modules for that device.
 
 Each row in the table shows:
 

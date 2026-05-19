@@ -14,7 +14,7 @@ Maps a LibreNMS OS string (e.g. `junos`, `eos`, `ios`) to a NetBox Platform obje
 - Device Field Sync — platform sync on the device LibreNMS-Sync page
 - Device Import — platform auto-match when importing devices from LibreNMS
 
-The mapping lookup is case-insensitive. If no mapping exists, the plugin tries an exact name/slug match against existing NetBox Platforms, then leaves the field empty.
+Matching is case-insensitive. The plugin first tries an exact `Platform.name` match against existing NetBox Platforms; if none (or ambiguous), it falls back to `PlatformMapping`. If neither produces a unique result, the field is left empty.
 
 **YAML format:**
 
