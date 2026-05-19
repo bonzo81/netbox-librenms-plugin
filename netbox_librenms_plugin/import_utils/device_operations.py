@@ -622,6 +622,12 @@ def validate_device_for_import(
                                 )
                                 result["serial_action"] = "hostname_differs"
 
+            # Refresh local variable to reflect any VM-mode adjustments made during detection
+            # (e.g. existing VM found by hostname sets result["import_as_vm"] = True).
+            # Must happen before the merge-candidates block below so a VM hostname-match
+            # doesn't fall through to Device-only merge logic.
+            import_as_vm = result["import_as_vm"]
+
             # Stage 2 — merge-candidates detection.
             # When the hostname-matched device and the serial-matched device are
             # DIFFERENT NetBox objects, the two probably represent the same
@@ -731,10 +737,6 @@ def validate_device_for_import(
                                     f"IP address {primary_ip} already assigned to device '{device.name}' (not linked to LibreNMS)"
                                 )
                                 result["can_import"] = False
-
-        # Refresh local variable to reflect any VM-mode adjustments made during detection
-        # (e.g. existing VM found by hostname sets result["import_as_vm"] = True)
-        import_as_vm = result["import_as_vm"]
 
         # Validate based on import type (Device or VM)
         if import_as_vm:
