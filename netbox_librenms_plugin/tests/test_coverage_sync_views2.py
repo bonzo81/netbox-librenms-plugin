@@ -503,8 +503,8 @@ class TestAddDeviceToLibreNMSViewFormInvalid:
             # Provide an invalid form (missing required hostname)
             view.post(view.request, object_id=1)
 
-        # Should show form errors
-        assert mock_msgs.error.call_count >= 0  # form validation may or may not find errors
+        # Should show form errors (hostname and community are required)
+        assert mock_msgs.error.call_count >= 1
 
 
 class TestAddDeviceToLibreNMSViewFormValid:
@@ -1505,8 +1505,11 @@ class TestSyncVLANsViewWithGroup:
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["200"], "vlan_group_200": "3"})
             view.post(view.request, object_type="device", object_id=1)
 
-        call_kwargs = mock_vlan_cls.objects.get_or_create.call_args[1]
-        assert call_kwargs.get("group") is mock_vlan_group or mock_vlan_cls.objects.get_or_create.called
+        mock_vlan_cls.objects.get_or_create.assert_called_once_with(
+            vid=200,
+            group=mock_vlan_group,
+            defaults={"name": "Production", "status": "active"},
+        )
 
     def test_invalid_vlan_group_id_falls_back_to_global(self):
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView

@@ -2847,8 +2847,8 @@ class TestDeviceConflictActionView:
         # Serial should NOT be updated to '-'
         assert existing_device.serial == "EXISTING"
 
-    def test_missing_action_returns_400(self):
-        """Missing action or existing_device_id should return 400."""
+    def test_missing_action_returns_hx_noswap_response(self):
+        """Missing action or existing_device_id returns 200 with HX-Reswap=none."""
         view = self._create_view()
         request = MagicMock()
         request.user.has_perm.return_value = True
@@ -2859,8 +2859,8 @@ class TestDeviceConflictActionView:
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
 
-    def test_unknown_action_returns_400(self):
-        """Unknown action should return 400."""
+    def test_unknown_action_returns_hx_noswap_response(self):
+        """Unknown action returns 200 with HX-Reswap=none."""
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         view = self._create_view()
@@ -2931,8 +2931,8 @@ class TestDeviceConflictActionView:
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
-    def test_device_type_mismatch_blocked_without_force(self, mock_cache_key, mock_cache):
-        """Action should be blocked when device_type_mismatch is True and force is not set."""
+    def test_device_type_mismatch_blocked_without_force_returns_hx_noswap(self, mock_cache_key, mock_cache):
+        """Blocked mismatch returns 200 with HX-Reswap=none when force is not set."""
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         view = self._create_view()

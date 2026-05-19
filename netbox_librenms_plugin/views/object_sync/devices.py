@@ -1,5 +1,4 @@
 import copy
-import json
 
 from dcim.models import Device
 from django.core.cache import cache
@@ -34,18 +33,13 @@ from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
 from ..base.modules_view import BaseModuleTableView, _check_ignore_rules
 from ..base.vlan_table_view import BaseVLANTableView
-from ..mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
-
-
-def _parse_request_json(request):
-    """Parse JSON from request.body, returning (data, error_response).
-
-    On success returns (dict, None). On malformed input returns (None, JsonResponse 400).
-    """
-    try:
-        return json.loads(request.body), None
-    except (TypeError, ValueError):
-        return None, JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
+from ..mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    _parse_request_json,
+)
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")

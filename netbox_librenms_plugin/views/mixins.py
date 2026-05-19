@@ -1,12 +1,25 @@
+import json
+
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+
+def _parse_request_json(request):
+    """Parse JSON from request.body, returning (data, error_response).
+
+    On success returns (dict, None). On malformed input returns (None, JsonResponse 400).
+    """
+    try:
+        return json.loads(request.body), None
+    except (TypeError, ValueError):
+        return None, JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
 
 
 def _get_safe_redirect_url(request):
