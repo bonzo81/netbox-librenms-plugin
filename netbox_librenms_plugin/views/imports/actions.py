@@ -1725,11 +1725,13 @@ class CreatePlatformFromImportView(
                 if create_mapping and librenms_os:
                     if not PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists():
                         try:
-                            PlatformMapping.objects.create(
-                                librenms_os=librenms_os.lower(),
-                                netbox_platform=platform,
-                            )
+                            with transaction.atomic():
+                                PlatformMapping.objects.create(
+                                    librenms_os=librenms_os.lower(),
+                                    netbox_platform=platform,
+                                )
                         except IntegrityError:
+                            # Concurrent request created the mapping; safe to ignore.
                             pass
         except (ValidationError, IntegrityError) as exc:
             logger.exception("CreatePlatformFromImportView: failed to create platform: %s", exc)

@@ -463,7 +463,7 @@ class BulkExportYAMLView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         except (ValueError, TypeError):
             return HttpResponseBadRequest("Invalid pk value.")
         objects = self.queryset.filter(pk__in=int_pks).order_by("pk")
-        if not objects.exists():
+        if not objects:
             return HttpResponseBadRequest("No matching objects found.")
         yaml_parts = [obj.to_yaml() for obj in objects]
         content = "---\n".join(yaml_parts)

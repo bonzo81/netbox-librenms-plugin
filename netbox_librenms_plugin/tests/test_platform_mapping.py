@@ -578,7 +578,7 @@ class TestBulkExportYAMLView:
         mock_qs.filter.return_value.order_by.assert_called_once_with("pk")
 
     def test_returns_200_with_empty_selection(self):
-        """Response is 200 even when no PKs are selected (empty YAML)."""
+        """Response is 400 when no PKs are selected."""
         from netbox_librenms_plugin.views.mapping_views import DeviceTypeMappingBulkExportYAMLView
 
         view = DeviceTypeMappingBulkExportYAMLView.__new__(DeviceTypeMappingBulkExportYAMLView)
@@ -591,7 +591,7 @@ class TestBulkExportYAMLView:
         with patch.object(view, "require_object_permissions", return_value=None):
             response = view.post(request)
 
-        assert response.status_code == 200
+        assert response.status_code == 400
 
     def test_all_mapping_bulk_export_yaml_views_exist(self):
         """All mapping model BulkExportYAML views exist."""
