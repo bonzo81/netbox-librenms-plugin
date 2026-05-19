@@ -107,6 +107,25 @@ class TestPollerGroupCacheKeyServerScoped:
         set_call_key = mock_cache.set.call_args[0][0]
         assert set_call_key == expected_key
 
+    def test_api_init_failure_returns_defaults_without_cache_lookup(self):
+        """If LibreNMSAPI() raises, return defaults — never read the legacy unscoped key."""
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI",
+                side_effect=RuntimeError("no config"),
+            ),
+            patch("django.core.cache.cache") as mock_cache,
+        ):
+            from netbox_librenms_plugin.forms import _get_librenms_poller_group_choices
+
+            result = _get_librenms_poller_group_choices()
+
+        assert result == [("0", "Default (0)")]
+        mock_cache.get.assert_not_called()
+        mock_cache.set.assert_not_called()
+
 
 class TestQueryDictNotMutated:
     """Finding 7: LibreNMSImportFilterForm must not mutate the original QueryDict."""

@@ -76,22 +76,18 @@ def _get_librenms_poller_group_choices():
 
     choices = [("0", "Default (0)")]
 
-    api = None
-    cache_key = "librenms_poller_group_choices"
     try:
         api = LibreNMSAPI()
-        cache_key = f"librenms_poller_group_choices_{api.server_key}"
     except Exception:
-        pass
+        logger.exception("Failed to initialize LibreNMSAPI; using default poller group choices")
+        return choices
 
+    cache_key = f"librenms_poller_group_choices_{api.server_key}"
     cached_choices = cache.get(cache_key)
     if cached_choices is not None:
         return cached_choices
 
     try:
-        if api is None:
-            api = LibreNMSAPI()
-            cache_key = f"librenms_poller_group_choices_{api.server_key}"
         success, poller_groups = api.get_poller_groups()
 
         if success:
