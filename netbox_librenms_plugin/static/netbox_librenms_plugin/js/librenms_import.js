@@ -235,6 +235,82 @@
     }
 
     // ============================================
+    // ERROR TOAST DISPLAY
+    // ============================================
+
+    /**
+     * Build and show a Bootstrap toast for an HTMX error response.
+     * Appends to NetBox's #django-messages container so it uses the same
+     * styling and stacking as Django messages. Falls back to console.error
+     * if Bootstrap or the container is unavailable.
+     *
+     * Accepts either an XHR (from htmx:responseError) or a plain string message
+     * (from the librenmsError HX-Trigger event dispatched by the server).
+     *
+     * @param {XMLHttpRequest|string|null} source
+     */
+    function showErrorToast(source) {
+        if (!source) {
+            return;
+        }
+        const isXhr = typeof source === 'object' && 'responseText' in source;
+        const container = document.getElementById('django-messages');
+        if (!container || typeof bootstrap === 'undefined' || !bootstrap.Toast) {
+            if (isXhr) {
+                console.error('LibreNMS plugin: server error', source.status, source.responseText);
+            } else {
+                console.error('LibreNMS plugin: server error', source);
+            }
+            return;
+        }
+
+        // Truncate very long error bodies (some Django validation traces are huge).
+        let raw;
+        if (isXhr) {
+            raw = (source.responseText || '').trim();
+            if (!raw) {
+                raw = `Request failed with status ${source.status}`;
+            }
+        } else {
+            raw = String(source).trim() || 'Server error';
+        }
+        const MAX = 600;
+        if (raw.length > MAX) {
+            raw = raw.slice(0, MAX) + '\u2026';
+        }
+
+        const toast = document.createElement('div');
+        toast.className = 'toast toast-dark border-0 shadow-sm';
+        toast.setAttribute('role', 'alert');
+        toast.setAttribute('aria-live', 'assertive');
+        toast.setAttribute('aria-atomic', 'true');
+        toast.setAttribute('data-bs-delay', '12000');
+
+        const header = document.createElement('div');
+        header.className = 'toast-header text-bg-danger';
+        const icon = document.createElement('i');
+        icon.className = 'mdi mdi-alert-circle me-1';
+        header.appendChild(icon);
+        header.appendChild(document.createTextNode(' Error'));
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'btn-close me-0 m-auto';
+        closeBtn.setAttribute('data-bs-dismiss', 'toast');
+        closeBtn.setAttribute('aria-label', 'Close');
+        header.appendChild(closeBtn);
+
+        const body = document.createElement('div');
+        body.className = 'toast-body';
+        // Use textContent to keep server response untrusted-safe (no HTML injection).
+        body.textContent = raw;
+
+        toast.appendChild(header);
+        toast.appendChild(body);
+        container.appendChild(toast);
+        bootstrap.Toast.getOrCreateInstance(toast).show();
+    }
+
+    // ============================================
     // USER PREFERENCE PERSISTENCE
     // ============================================
 
@@ -1035,7 +1111,14 @@
             if (event.target === bulkImportBtn && pendingRowImport) {
                 restoreSelectionState(pendingRowImport.previousSelections);
                 pendingRowImport = null;
+                return;
             }
+            // Fallback for genuine 5xx / unexpected 4xx responses that bypass
+            // the server-side _htmx_error_response helper (which returns 200 +
+            // an OOB toast for expected validation errors).
+            try {
+                showErrorToast(event.detail && event.detail.xhr);
+            } catch (_) { /* never let toast-rendering break HTMX flow */ }
         });
 
         // SessionStorage management for device roles
@@ -1089,9 +1172,13 @@
                 return;
             }
 
-            if (modalContent && modalContent.innerHTML.trim().length === 0 && event.detail.xhr) {
-                modalContent.innerHTML = event.detail.xhr.responseText;
-            }
+            // NOTE: Do NOT fall back to `modalContent.innerHTML = xhr.responseText`
+            // when the swap leaves the modal empty. That would inject the response
+            // without going through htmx.process(), so any inner forms with hx-post
+            // would not be HTMX-instrumented and would submit natively, navigating
+            // the browser to the raw response (e.g. a 400 with a plain validation
+            // error message). HTMX has already performed the swap; if the response
+            // body was empty, leaving the modal empty is the correct behaviour.
 
             // Initialize Bootstrap tooltips inside the freshly-swapped modal content
             if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {

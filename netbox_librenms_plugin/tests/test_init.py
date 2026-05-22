@@ -63,6 +63,8 @@ class TestEnsureLibreNMSIdCustomField:
                 "is_cloneable": False,
             },
         )
+        MockCustomField.objects.using.assert_called_with("default")
+        MockContentType.objects.db_manager.assert_called_with("default")
 
         # Should have added content types for all 4 models
         assert mock_cf.object_types.add.call_count == 4
@@ -104,6 +106,8 @@ class TestEnsureLibreNMSIdCustomField:
 
         # All pks already present, no types should be added
         mock_cf.object_types.add.assert_not_called()
+        MockCustomField.objects.using.assert_called_with("default")
+        MockContentType.objects.db_manager.assert_called_with("default")
 
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)

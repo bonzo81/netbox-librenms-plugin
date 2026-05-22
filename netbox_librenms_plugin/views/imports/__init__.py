@@ -3,6 +3,7 @@
 from .actions import (  # noqa: F401
     BulkImportConfirmView,
     BulkImportDevicesView,
+    CreatePlatformFromImportView,
     DeviceClusterUpdateView,
     DeviceConflictActionView,
     DeviceRackUpdateView,
@@ -16,6 +17,7 @@ from .list import LibreNMSImportView  # noqa: F401
 __all__ = [
     "BulkImportConfirmView",
     "BulkImportDevicesView",
+    "CreatePlatformFromImportView",
     "DeviceClusterUpdateView",
     "DeviceConflictActionView",
     "DeviceRackUpdateView",

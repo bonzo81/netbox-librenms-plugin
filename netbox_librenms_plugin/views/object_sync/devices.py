@@ -1,4 +1,4 @@
-import json
+import copy
 
 from dcim.models import Device
 from django.core.cache import cache
@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tables.interfaces import (
     LibreNMSInterfaceTable,
     VCInterfaceTable,
 )
+from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleTable
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_sync_device,
@@ -30,8 +31,15 @@ from ..base.cables_view import BaseCableTableView
 from ..base.interfaces_view import BaseInterfaceTableView
 from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
+from ..base.modules_view import BaseModuleTableView, _check_ignore_rules
 from ..base.vlan_table_view import BaseVLANTableView
-from ..mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+from ..mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    parse_request_json,
+)
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
@@ -46,23 +54,31 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
         """Return interface sync context for the device."""
         interface_name_field = get_interface_name_field(request)
         interface_table_view = DeviceInterfaceTableView()
-        interface_table_view.request = request
+        interface_table_view.request = copy.copy(request)
         return interface_table_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
         """Return cable sync context for the device."""
         cable_table_view = DeviceCableTableView()
+        cable_table_view.request = copy.copy(request)
         return cable_table_view.get_context_data(request, obj)
 
     def get_ip_context(self, request, obj):
         """Return IP address sync context for the device."""
         ipaddress_table_view = DeviceIPAddressTableView()
+        ipaddress_table_view.request = copy.copy(request)
         return ipaddress_table_view.get_context_data(request, obj)
 
     def get_vlan_context(self, request, obj):
         vlan_table_view = DeviceVLANTableView()
-        vlan_table_view.request = request
+        vlan_table_view.request = copy.copy(request)
         return vlan_table_view.get_vlan_context(request, obj)
+
+    def get_module_context(self, request, obj):
+        """Return module sync context for the device."""
+        module_table_view = DeviceModuleTableView()
+        module_table_view.request = copy.copy(request)
+        return module_table_view.get_context_data(request, obj)
 
 
 class DeviceInterfaceTableView(BaseInterfaceTableView):
@@ -106,14 +122,18 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
 
     def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
-        data = json.loads(request.body)
+        data, err = parse_request_json(request)
+        if err:
+            return err
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()
-        server_key = data.get("server_key") or self.librenms_api.server_key
+        server_key = data.get("server_key")
 
         if not selected_device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        if not server_key:
+            server_key = self.librenms_api.server_key
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
@@ -149,6 +169,169 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
         return JsonResponse({"status": "error", "message": "Interface data not found"}, status=404)
 
 
+class SingleModuleVerifyView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    CacheMixin,
+    View,
+):
+    """Verify module row data against cached LibreNMS inventory for a selected VC member."""
+
+    # JSON endpoint that returns the rendered module row — only viewers of the
+    # underlying Device should be able to surface its inventory data.
+    required_object_permissions = {"POST": [("view", Device)]}
+
+    def post(self, request):
+        data, err = parse_request_json(request)
+        if err:
+            return err
+        selected_device_id = data.get("device_id")
+        ent_physical_index = data.get("ent_physical_index")
+        server_key = data.get("server_key") or self.librenms_api.server_key
+        row_depth = data.get("depth", 0)
+
+        if not selected_device_id:
+            return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        if ent_physical_index in (None, ""):
+            return JsonResponse({"status": "error", "message": "No entPhysicalIndex provided"}, status=400)
+
+        try:
+            ent_physical_index = int(ent_physical_index)
+        except (TypeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid entPhysicalIndex"}, status=400)
+
+        try:
+            row_depth = int(row_depth)
+        except (TypeError, ValueError):
+            row_depth = 0
+
+        selected_device = get_object_or_404(Device, pk=selected_device_id)
+
+        # Read-only verify endpoint: only require object-view permission, not
+        # plugin write (which require_all_permissions_json would enforce).
+        if error := self.require_object_permissions_json("POST"):
+            return error
+
+        if selected_device.virtual_chassis:
+            sync_device = get_librenms_sync_device(selected_device, server_key=server_key)
+            if sync_device is None:
+                return JsonResponse({"status": "error", "message": "No sync device found for VC"}, status=404)
+        else:
+            sync_device = selected_device
+
+        cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key))
+        if not isinstance(cached_payload, dict):
+            return JsonResponse({"status": "error", "message": "No cached inventory data"}, status=404)
+
+        inventory_data = cached_payload.get("inventory") or []
+        index_map = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
+        item = index_map.get(ent_physical_index)
+        if not item:
+            return JsonResponse({"status": "error", "message": "Inventory row not found"}, status=404)
+
+        module_table_view = DeviceModuleTableView()
+        # Shallow-copy the request so the child view can mutate request.GET /
+        # request.POST without affecting this request object.
+        module_table_view.request = copy.copy(request)
+
+        from netbox_librenms_plugin.utils import (
+            get_enabled_ignore_rules,
+            load_bay_mappings,
+            preload_normalization_rules,
+        )
+
+        module_table_view._exact_bay_mappings, module_table_view._regex_bay_mappings = load_bay_mappings()
+        manufacturer = getattr(getattr(selected_device, "device_type", None), "manufacturer", None)
+        module_table_view._norm_rules_bay = preload_normalization_rules("module_bay")
+        module_table_view._norm_rules_type = preload_normalization_rules("module_type", manufacturer=manufacturer)
+
+        children_by_parent = {}
+        for inventory_item in inventory_data:
+            parent_idx = inventory_item.get("entPhysicalContainedIn")
+            if parent_idx is not None:
+                children_by_parent.setdefault(parent_idx, []).append(inventory_item)
+
+        ignore_rules = get_enabled_ignore_rules()
+        device_serial = (getattr(selected_device, "serial", None) or "").strip()
+        ignore_cache = {
+            inventory_item["entPhysicalIndex"]: _check_ignore_rules(
+                inventory_item,
+                index_map.get(inventory_item.get("entPhysicalContainedIn")),
+                ignore_rules,
+                index_map,
+                device_serial,
+            )
+            for inventory_item in inventory_data
+            if inventory_item.get("entPhysicalIndex") is not None
+        }
+
+        module_types = module_table_view._get_module_types()
+        transparent_indices = module_table_view._find_transparent_indices(inventory_data, ignore_cache)
+        top_items = module_table_view._collect_top_items(
+            inventory_data,
+            index_map,
+            ignore_rules,
+            device_serial,
+            transparent_indices,
+            ignore_cache,
+        )
+        table_data = module_table_view._build_table_rows_for_member(
+            selected_device,
+            top_items,
+            index_map,
+            children_by_parent,
+            ignore_rules,
+            device_serial,
+            module_types,
+            manufacturer=manufacturer,
+        )
+        module_table_view._detect_serial_conflicts(table_data)
+
+        # entPhysicalIndex should be unique, depth fallback handles malformed duplicates.
+        row = next(
+            (
+                candidate
+                for candidate in table_data
+                if candidate.get("ent_physical_index") == ent_physical_index and candidate.get("depth", 0) == row_depth
+            ),
+            None,
+        )
+        if row is None:
+            row = next(
+                (candidate for candidate in table_data if candidate.get("ent_physical_index") == ent_physical_index),
+                None,
+            )
+        if row is None:
+            return JsonResponse({"status": "error", "message": "Inventory row not found"}, status=404)
+
+        has_write_permission = self.has_write_permission()
+        table_class = VCModuleTable if selected_device.virtual_chassis else LibreNMSModuleTable
+        table = table_class(
+            [],
+            device=selected_device,
+            server_key=server_key,
+            has_write_permission=has_write_permission,
+            can_add_module=has_write_permission and request.user.has_perm("dcim.add_module"),
+            can_change_module=has_write_permission and request.user.has_perm("dcim.change_module"),
+            can_delete_module=has_write_permission and request.user.has_perm("dcim.delete_module"),
+            can_add_module_bay_template=(has_write_permission and request.user.has_perm("dcim.add_modulebaytemplate")),
+            can_add_module_type=(has_write_permission and request.user.has_perm("dcim.add_moduletype")),
+            can_add_carrier_rule=(
+                has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_carrierautoinstallrule")
+            ),
+            can_add_module_bay_mapping=(
+                has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+            ),
+            can_add_module_type_mapping=(
+                has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
+            ),
+        )
+        table.configure(request)
+        formatted_row = table.format_module_data(row)
+        return JsonResponse({"status": "success", "formatted_row": formatted_row})
+
+
 class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     """
     Verify VLAN assignments for an interface against a specific VLAN group.
@@ -161,7 +344,9 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     def post(self, request):
         from ipam.models import VLAN, VLANGroup
 
-        data = json.loads(request.body)
+        data, err = parse_request_json(request)
+        if err:
+            return err
         device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         vlan_group_id = data.get("vlan_group_id")
@@ -287,7 +472,9 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
     def post(self, request):
         from ipam.models import VLAN, VLANGroup
 
-        data = json.loads(request.body)
+        data, err = parse_request_json(request)
+        if err:
+            return err
         vlan_group_id = data.get("vlan_group_id")
         vid_str = data.get("vid", "")
         librenms_name = data.get("name", "")
@@ -339,13 +526,17 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cach
         if error := self.require_write_permission_json():
             return error
 
-        data = json.loads(request.body)
+        data, err = parse_request_json(request)
+        if err:
+            return err
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})
-        server_key = data.get("server_key") or self.librenms_api.server_key
+        server_key = data.get("server_key")
 
         if not device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        if not server_key:
+            server_key = self.librenms_api.server_key
 
         device = get_object_or_404(Device, pk=device_id)
 
@@ -393,3 +584,38 @@ class DeviceVLANTableView(BaseVLANTableView):
     """VLAN synchronization table view for Devices."""
 
     model = Device
+
+
+class DeviceModuleTableView(BaseModuleTableView):
+    """Module/inventory synchronization view for Devices."""
+
+    model = Device
+
+    def get_table(self, data, obj):
+        """Return the module sync table."""
+        user = self.request.user
+        has_write_permission = self.has_write_permission()
+        table_class = VCModuleTable if hasattr(obj, "virtual_chassis") and obj.virtual_chassis else LibreNMSModuleTable
+        table = table_class(
+            data,
+            device=obj,
+            server_key=self.librenms_api.server_key,
+            has_write_permission=has_write_permission,
+            can_add_module=has_write_permission and user.has_perm("dcim.add_module"),
+            can_change_module=has_write_permission and user.has_perm("dcim.change_module"),
+            can_delete_module=has_write_permission and user.has_perm("dcim.delete_module"),
+            can_add_module_bay_template=(has_write_permission and user.has_perm("dcim.add_modulebaytemplate")),
+            can_add_module_type=(has_write_permission and user.has_perm("dcim.add_moduletype")),
+            can_add_carrier_rule=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.add_carrierautoinstallrule")
+            ),
+            can_add_module_bay_mapping=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+            ),
+            can_add_module_type_mapping=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
+            ),
+        )
+        server_key = self.librenms_api.server_key
+        table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
+        return table

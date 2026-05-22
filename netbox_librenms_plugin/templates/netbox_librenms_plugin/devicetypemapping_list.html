@@ -1,0 +1,19 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Device Type Mapping</h4>
+        <p>Map LibreNMS hardware strings to NetBox device types.
+           When importing devices from LibreNMS, these mappings are checked first before
+           falling back to exact part number / model matching.</p>
+        <p>Example: Map "Juniper MX480 Internet Backbone Router" to device type "MX480"</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:devicetypemapping_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

@@ -1,0 +1,94 @@
+# Inventory Ignore Rules — filter ENTITY-MIB items during module sync
+#
+# Two actions are supported:
+#   skip        — remove the item from the sync table entirely
+#   transparent — hide the item's row but promote its ENTITY-MIB children to
+#                 device-level bay matching (use for embedded/fixed-chassis modules)
+#
+# Match types:
+#   ends_with | starts_with | contains | regex
+#                         — compare entPhysicalName
+#   serial_matches_device — compare entPhysicalSerialNum to the NetBox device's
+#                           own serial number (no pattern needed)
+#
+# Import via: LibreNMS Plugin → Settings → Inventory Ignore Rules → Import
+#
+# Additional fields:
+#   require_serial_match_parent:
+#       true  — (name-based rules only) only apply if the item's serial matches
+#               any ancestor entity's serial in the ENTITY-MIB tree
+#       false — apply unconditionally on name match alone
+#   enabled:     true | false
+#   description: optional notes
+#
+# Serial-match ancestor walk (name-based rules only):
+#   When require_serial_match_parent is true the plugin walks up the ENTITY-MIB
+#   ancestor chain until it finds a non-empty serial. If that serial equals the
+#   item's serial the rule fires. This handles multi-level hierarchies, e.g.
+#   Cisco IOS-XR: IDPROM → Mother Board [empty serial] → RP module.
+#
+# Both rules below are also created automatically by migration 0010. Import them
+# only if you wiped the table or need to replicate settings across instances.
+
+# ─── Cisco IOS-XR — IDPROM entries (action=skip) ─────────────────────────────
+# IOS-XR reports each hardware component's EEPROM as a child entity whose name
+# ends in "-IDPROM". These share the same model+serial as the parent and are not
+# installable hardware.
+#
+# Hierarchy example (Cisco 8201-SYS):
+#   0/RP0/CPU0  (serial FOC2418NHRK)
+#   └── 0/RP0/CPU0-Mother Board  (serial empty)
+#       └── 0/RP0/CPU0-Base Board IDPROM  (serial FOC2418NHRK) ← SKIP
+#   Optics0/0/0/0  (serial SN123)
+#   └── Optics0/0/0/0-IDPROM  (serial SN123)                  ← SKIP
+
+- name: "Cisco IOS-XR IDPROM entries"
+  match_type: ends_with
+  pattern: "IDPROM"
+  action: skip
+  require_serial_match_parent: true
+  enabled: true
+  description: >
+    Cisco IOS-XR reports every hardware component's EEPROM as a child entity
+    whose entPhysicalName ends in "IDPROM". These entries duplicate the parent
+    module's serial number and are not real installable modules.
+    The serial-match guard ensures only genuine EEPROM duplicates are skipped —
+    a module whose name happens to end in "IDPROM" but has a different serial
+    will not be filtered.
+
+# ─── Fixed-chassis embedded RP (action=transparent) ──────────────────────────
+# Fixed-form routers (e.g. Cisco 8201-SYS, 8101-32FH, Juniper PTX10001-36MR)
+# report their built-in RP/system-board as an ENTITY-MIB module whose serial
+# number equals the chassis/device serial. The RP is NOT a removable FRU —
+# it IS the device itself. Marking it "transparent" hides the RP row but lets
+# its ENTITY-MIB children (transceivers, fans, PSUs) fall through to device-
+# level bay matching.
+#
+# Detection signal: entPhysicalSerialNum == NetBox Device.serial
+#
+# Hierarchy for Cisco 8201-SYS (device serial = FOC2418NHRK):
+#   Rack 0-Control Card Slot 0  (container)
+#   └── 0/RP0/CPU0  (serial FOC2418NHRK) ← TRANSPARENT (= device serial)
+#       └── Optics Controller containers
+#           └── 0/RP0/CPU0-QSFP bay N
+#               └── Optics0/0/0/N  (transceiver) ← becomes device-level bay match
+#
+# The 8201-SYS device type should have device-level bays for:
+#   Optics0/0/0/0–23  (400GE QSFP-DD)
+#   HundredGigE0/0/0/24–35  (100GE QSFP28)
+#   0/FT0–4  (fans)
+#   0/PM0–1  (PSUs)
+# NO bay for 0/RP0/CPU0 — the RP is the device, not a pluggable module.
+
+- name: "Embedded RP / fixed-chassis system board"
+  match_type: serial_matches_device
+  pattern: ""
+  action: transparent
+  require_serial_match_parent: false
+  enabled: true
+  description: >
+    Fixed-form routers report the built-in RP as an ENTITY-MIB module whose
+    serial number equals the device's own serial. Marking it transparent hides
+    the RP row in the sync table while promoting its children (transceivers,
+    fans, PSUs) to device-level bay matching. No pattern is needed — detection
+    is purely serial-based.

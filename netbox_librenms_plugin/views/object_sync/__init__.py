@@ -5,9 +5,11 @@ from .devices import (  # noqa: F401
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceModuleTableView,
     DeviceVLANTableView,
     SaveVlanGroupOverridesView,
     SingleInterfaceVerifyView,
+    SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
     VerifyVlanSyncGroupView,
 )

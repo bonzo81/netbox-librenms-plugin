@@ -102,8 +102,7 @@ function hideModal(el) {
     el.style.display = 'none';
     el.setAttribute('aria-hidden', 'true');
     el.removeAttribute('aria-modal');
-    const backdrop = document.querySelector('.modal-backdrop');
-    if (backdrop) backdrop.remove();
+    document.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.remove());
     document.body.classList.remove('modal-open');
     document.body.style.removeProperty('padding-right');
     document.body.style.removeProperty('overflow');
@@ -123,6 +122,25 @@ function getCookie(name) {
         }
     }
     return cookieValue;
+}
+
+/**
+ * Extract a human-readable error message from a non-2xx fetch Response.
+ * Attempts JSON parse first, checking error/message/detail fields.
+ * Falls back to raw response text. Truncates to 300 characters.
+ * @param {Response} response
+ * @returns {Promise<string>}
+ */
+function fetchErrorMessage(response) {
+    return response.text().then(t => {
+        const ct = (response.headers.get('Content-Type') || '').toLowerCase();
+        let msg = t || `HTTP ${response.status}`;
+        if (ct.includes('application/json')) {
+            try { const d = JSON.parse(t); msg = d.error || d.message || d.detail || msg; } catch (_) {}
+        }
+        if (msg.length > 300) msg = msg.slice(0, 300) + '...';
+        return msg;
+    });
 }
 
 /**
@@ -248,10 +266,15 @@ function initializeCountdowns() {
     if (window.vlanCountdownInterval) {
         clearInterval(window.vlanCountdownInterval);
     }
+    if (window.moduleCountdownInterval) {
+        clearInterval(window.moduleCountdownInterval);
+    }
+
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
     window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
     window.vlanCountdownInterval = initializeCountdown("vlan-countdown-timer");
+    window.moduleCountdownInterval = initializeCountdown("module-countdown-timer");
 }
 
 // ============================================
@@ -311,6 +334,7 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-ipaddress-table');
     initializeTableCheckboxes('librenms-vlan-table');
     initializeTableCheckboxes('librenms-port-vlan-table');
+    initializeTableCheckboxes('librenms-module-table');
 }
 
 // ============================================
@@ -325,6 +349,7 @@ function initializeVCMemberSelect() {
     setTimeout(() => {
         const interfaceTable = document.getElementById('librenms-interface-table');
         const cableTable = document.getElementById('librenms-cable-table-vc');
+        const moduleTable = document.getElementById('librenms-module-table');
 
         if (interfaceTable) {
             // Only target VC member selects, exclude VLAN group selects
@@ -346,6 +371,23 @@ function initializeVCMemberSelect() {
                     select.dataset.cableSelectInitialized = 'true';
                     select.tomselect.on('change', function (value) {
                         handleCableChange(select, value);
+                    });
+                }
+            });
+        }
+
+        if (moduleTable) {
+            const moduleSelects = moduleTable.querySelectorAll('.vc-member-select');
+            moduleSelects.forEach(select => {
+                if (select.tomselect && !select.dataset.moduleSelectInitialized) {
+                    select.dataset.moduleSelectInitialized = 'true';
+                    select.tomselect.on('change', function (value) {
+                        handleModuleChange(select, value);
+                    });
+                } else if (!select.tomselect && !select.dataset.moduleSelectInitialized) {
+                    select.dataset.moduleSelectInitialized = 'true';
+                    select.addEventListener('change', function () {
+                        handleModuleChange(select, this.value);
                     });
                 }
             });
@@ -563,7 +605,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(t => { throw new Error(t || `HTTP ${response.status}`); });
+                return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
             }
             return response.json();
         })
@@ -745,7 +787,7 @@ function initializeVlanModalSave() {
                 })
             }).then(response => {
                 if (!response.ok) {
-                    return response.text().then(t => { throw new Error(`HTTP ${response.status}: ${t}`); });
+                    return fetchErrorMessage(response).then(msg => { throw new Error(`HTTP ${response.status}: ${msg}`); });
                 }
                 // Apply DOM mutations only after the server has persisted the overrides
                 applyButtonUpdates();
@@ -819,7 +861,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
     })
         .then(response => {
             if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
+                return fetchErrorMessage(response).then(msg => { throw new Error(`HTTP ${response.status}: ${msg}`); });
             }
             return response.json();
         })
@@ -889,7 +931,7 @@ function handleVRFChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(t => { throw new Error(t); });
+                return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
             }
             return response.json();
         })
@@ -931,9 +973,7 @@ function handleInterfaceChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(text => {
-                    throw new Error(`Server error ${response.status}: ${text}`);
-                });
+                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
             }
             return response.json();
         })
@@ -978,9 +1018,7 @@ function handleCableChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return response.text().then(text => {
-                    throw new Error(`Server error ${response.status}: ${text}`);
-                });
+                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
             }
             return response.json();
         })
@@ -998,6 +1036,85 @@ function handleCableChange(select, value) {
         })
         .catch(error => {
             console.error('Error verifying cable:', error.message);
+        });
+}
+
+/**
+ * Handle VC member selection change for module verification.
+ * Fetches recalculated matching status for one module row and updates cells inline.
+ *
+ * @param {HTMLSelectElement} select - VC member dropdown for a module row
+ * @param {string} value - Selected NetBox device ID
+ */
+function handleModuleChange(select, value) {
+    const row = document.querySelector(`tr[data-ent-index="${select.dataset.rowId}"]`);
+    const rowDepth = row?.dataset?.depth || 0;
+
+    // Abort any in-flight verify for this select so a slower earlier response
+    // can't clobber a faster later one when the user changes the dropdown rapidly.
+    if (select._moduleVerifyController) {
+        select._moduleVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._moduleVerifyController = controller;
+
+    fetch('/plugins/librenms_plugin/verify-module/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+        },
+        body: JSON.stringify({
+            device_id: value,
+            ent_physical_index: select.dataset.module,
+            depth: rowDepth,
+            server_key: document.querySelector('input[name="server_key"]')?.value || null
+        }),
+        signal: controller.signal
+    })
+        .then(response => {
+            if (!response.ok) {
+                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (!row || data.status !== 'success' || !data.formatted_row) return;
+
+            const formattedRow = data.formatted_row;
+            const deviceSelCell = row.querySelector('td[data-col="device_selection"]');
+            if (deviceSelCell) {
+                deviceSelCell.innerHTML = formattedRow.device_selection || '';
+            }
+            row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
+            row.querySelector('td[data-col="model"]').innerHTML = formattedRow.model;
+            row.querySelector('td[data-col="serial"]').innerHTML = formattedRow.serial;
+            row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
+            row.querySelector('td[data-col="item_class"]').innerHTML = formattedRow.item_class;
+            // Replace each cell content if present. Defensive null-checks keep this
+            // resilient if the row markup ever drops one of these data-col cells.
+            const cellMap = {
+                module_bay: formattedRow.module_bay,
+                module_type: formattedRow.module_type,
+                status: formattedRow.status,
+                actions: formattedRow.actions,
+            };
+            for (const [col, html] of Object.entries(cellMap)) {
+                const cell = row.querySelector(`td[data-col="${col}"]`);
+                if (cell) {
+                    cell.innerHTML = html;
+                } else {
+                    console.warn(`Module row missing data-col="${col}" cell — skipping update`);
+                }
+            }
+
+            // Re-bind listeners because row controls (select/buttons/forms) were replaced.
+            initializeVCMemberSelect();
+            initializeModuleReplaceButtons();
+        })
+        .catch(error => {
+            if (error.name === 'AbortError') return;
+            console.error('Error verifying module:', error.message);
         });
 }
 
@@ -1299,7 +1416,7 @@ function updateInterfaceNameField() {
             // Persist to user preferences via API
             const savePrefUrl = this.closest('[data-save-pref-url]')?.dataset.savePrefUrl;
             if (savePrefUrl) {
-                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
                 if (csrfToken) {
                     fetch(savePrefUrl, {
                         method: 'POST',
@@ -1425,6 +1542,11 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
         }
     })
         .then(response => {
+            if (!response.ok) {
+                return fetchErrorMessage(response).then(msg => {
+                    throw new Error(`HTTP ${response.status} ${response.statusText}: ${msg}`);
+                });
+            }
             return response.json();
         })
         .then(data => {
@@ -1484,15 +1606,18 @@ function initializeSyncFormSpinners() {
         button.dataset.spinnerInitialized = 'true';
 
         button.addEventListener('htmx:beforeRequest', function () {
-            const originalText = button.textContent.trim();
-            button.dataset.originalText = originalText;
+            button.dataset.originalHtml = button.innerHTML;
             button.disabled = true;
-            button.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>' + originalText;
+            const label = button.textContent.trim();
+            const spinner = document.createElement('span');
+            spinner.className = 'spinner-border spinner-border-sm me-2';
+            button.textContent = label;
+            button.insertBefore(spinner, button.firstChild);
         });
 
         button.addEventListener('htmx:afterRequest', function () {
             button.disabled = false;
-            button.innerHTML = button.dataset.originalText || button.textContent;
+            button.innerHTML = button.dataset.originalHtml;
         });
     });
 }
@@ -1520,6 +1645,16 @@ function handleInstallSelectedSubmit() {
         hidden.value = cb.value;
         hidden.dataset.injectedSelect = '1';
         form.appendChild(hidden);
+
+        const selectedDevice = table.querySelector(`#device_selection_${cb.value}`);
+        if (selectedDevice) {
+            const hiddenDevice = document.createElement('input');
+            hiddenDevice.type = 'hidden';
+            hiddenDevice.name = `device_selection_${cb.value}`;
+            hiddenDevice.value = selectedDevice.value;
+            hiddenDevice.dataset.injectedSelect = '1';
+            form.appendChild(hiddenDevice);
+        }
     });
 }
 
@@ -1559,11 +1694,13 @@ function initializeModuleReplaceButtons() {
             const moduleId = this.dataset.moduleId;
             const entIndex = this.dataset.entIndex;
             const serverKey = this.dataset.serverKey;
+            const selectedDeviceId = this.dataset.selectedDeviceId;
 
             const params = new URLSearchParams({
                 module_id: moduleId,
                 ent_index: entIndex,
                 server_key: serverKey,
+                selected_device_id: selectedDeviceId,
             });
 
             // Show shared HTMX modal with loading state
@@ -1571,7 +1708,7 @@ function initializeModuleReplaceButtons() {
             if (modalContent) {
                 modalContent.innerHTML =
                     '<div class="modal-header">' +
-                    '<h5 class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
+                    '<h5 id="htmx-modal-label" class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
                     '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
                     '</div>' +
                     '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
@@ -1583,7 +1720,7 @@ function initializeModuleReplaceButtons() {
             showModal(document.getElementById('htmx-modal'));
 
             // Fetch preview content and inject into modal body
-            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
             const fetchHeaders = {};
             if (csrfToken) {
                 fetchHeaders['X-CSRFToken'] = csrfToken;
@@ -1593,14 +1730,17 @@ function initializeModuleReplaceButtons() {
                 headers: fetchHeaders,
             })
                 .then(response => {
-                    if (!response.ok) return response.text().then(t => { throw new Error(t); });
+                    if (!response.ok) return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
                     return response.text();
                 })
                 .then(html => {
                     const modalBody = document.getElementById('htmx-modal-body');
                     if (modalBody) {
                         modalBody.innerHTML = html;
-                        htmx.process(modalBody);
+                        if (typeof htmx !== 'undefined') {
+                            htmx.process(modalBody);
+                        }
+                        updateHtmxModalLabel();
                     }
                 })
                 .catch(err => {
@@ -1680,15 +1820,30 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
 
 // Update HTMX modal accessible label after content loads so screen readers
 // announce the actual dialog title rather than the static "Loading" placeholder.
-document.addEventListener('DOMContentLoaded', function () {
+function updateHtmxModalLabel() {
     const htmxModal = document.getElementById('htmx-modal');
-    if (htmxModal) {
-        htmxModal.addEventListener('htmx:afterSettle', function () {
-            const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
-            const label = document.getElementById('htmx-modal-label');
-            if (header && label) {
-                label.textContent = header.textContent.trim();
-            }
-        });
+    if (!htmxModal) return;
+    const modalBody = htmxModal.querySelector('#htmx-modal-body') || htmxModal;
+    const header = modalBody.querySelector('.modal-title, .modal-header h5, .modal-header h4');
+    const labelId = htmxModal.getAttribute('aria-labelledby');
+    const label = (labelId && document.getElementById(labelId)) || document.getElementById('htmx-modal-label');
+    if (header && label && header !== label) {
+        label.textContent = header.textContent.trim();
+    }
+}
+
+// Listen at document level so the handler fires regardless of which element
+// HTMX dispatches afterSettle on (swap target or ancestor).
+document.addEventListener('htmx:afterSettle', function (event) {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal && (htmxModal === event.target || htmxModal.contains(event.target))) {
+        updateHtmxModalLabel();
+        // Auto-show the shared HTMX modal whenever new content is swapped into
+        // it (e.g. the Add Bay Template flow). Buttons that target
+        // #htmx-modal-content via hx-get no longer need to wire their own
+        // bootstrap.Modal.show() call.
+        if (!htmxModal.classList.contains('show')) {
+            showModal(htmxModal);
+        }
     }
 });

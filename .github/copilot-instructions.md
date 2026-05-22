@@ -70,6 +70,29 @@
 - Navigation menu (`navigation.py`) has 3 groups: **Settings** (Plugin Settings, Interface Mappings), **Import** (LibreNMS Import), **Status Check** (Site & Location Sync, Device Status, VM Status). All items use `permissions=[PERM_VIEW_PLUGIN]`.
 - **Background job polling requires superuser** — non-superusers fall back to synchronous mode. See `background-jobs.instructions.md` for details.
 
+## CodeQL & Security Patterns
+
+### Clearing CodeQL `py/reflected-xss` false positives
+When a view builds an `HttpResponse` from Django-template-rendered HTML (decoded via `.content.decode()`), CodeQL traces `request → template-render → HttpResponse` as reflected XSS even though Django templates auto-escape all user values.
+
+**Correct fix:** use `format_html()` to compose the envelope and `mark_safe()` as a **trust assertion** on the inner HTML — CodeQL's Django taint model recognises this pattern and stops tracking the taint:
+
+```python
+from django.utils.html import format_html
+from django.utils.safestring import mark_safe
+
+modal_html = some_view.get(request, pk).content.decode("utf-8")
+oob = format_html('<div id="target" hx-swap-oob="innerHTML">{}</div>', mark_safe(modal_html))
+return HttpResponse(oob, content_type="text/html")
+```
+
+> **Important:** `mark_safe()` is a trust assertion, not a sanitizer — it tells Django "I guarantee this string is already safe HTML." Only use it when `modal_html` comes from a server-rendered Django view (whose templates auto-escape all user values). Never pass untrusted user input to `mark_safe()` — that would introduce real XSS.
+
+**Do NOT** use `# lgtm[py/reflected-xss]` — that is LGTM.com legacy syntax and is **not** honoured by GitHub's modern CodeQL Action.
+
+### URL converters
+Always use `<int:pk>` (not `<str:pk>`) for numeric IDs in URL patterns. Django's `<int:>` converter auto-validates and returns 404 for non-integer values, eliminating the URL-parameter taint source that CodeQL otherwise flags.
+
 ## When in Doubt
 - Check docs in `docs/development/` for structure, view inheritance, mixins, and template conventions before introducing new patterns.
 - Review the existing sync views (e.g., `views/sync/interfaces.py`) as reference implementations for data flow and caching patterns.

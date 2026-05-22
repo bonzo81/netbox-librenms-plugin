@@ -1,5 +1,3 @@
-import json
-
 from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
@@ -18,7 +16,12 @@ from netbox_librenms_plugin.utils import (
     get_librenms_sync_device,
     get_virtual_chassis_member,
 )
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    parse_request_json,
+)
 
 
 def _librenms_id_q(server_key: str, value) -> Q:
@@ -416,7 +419,9 @@ class SingleCableVerifyView(BaseCableTableView):
     """
 
     def post(self, request):
-        data = json.loads(request.body)
+        data, err = parse_request_json(request)
+        if err:
+            return err
         selected_device_id = data.get("device_id")
         local_port_id = data.get("local_port_id")
         # Read server_key from POST so we use the exact server the user was viewing

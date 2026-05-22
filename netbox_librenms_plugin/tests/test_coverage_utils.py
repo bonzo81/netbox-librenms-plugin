@@ -451,22 +451,33 @@ class TestFindMatchingSiteMultipleReturned:
 class TestFindMatchingPlatformMultipleReturned:
     """Tests for find_matching_platform MultipleObjectsReturned (lines 358-360)."""
 
-    def test_multiple_objects_returned_uses_first(self):
+    def test_multiple_objects_returned_returns_ambiguous(self):
         from netbox_librenms_plugin.utils import find_matching_platform
 
-        mock_platform = MagicMock()
         Platform_DoesNotExist = type("DoesNotExist", (Exception,), {})
         Platform_MultipleObjectsReturned = type("MultipleObjectsReturned", (Exception,), {})
+        PlatformMapping_DoesNotExist = type("DoesNotExist", (Exception,), {})
 
-        with patch("dcim.models.Platform") as MockPlatform:
-            MockPlatform.DoesNotExist = Platform_DoesNotExist
-            MockPlatform.MultipleObjectsReturned = Platform_MultipleObjectsReturned
-            MockPlatform.objects.get.side_effect = Platform_MultipleObjectsReturned("multiple")
-            MockPlatform.objects.filter.return_value.first.return_value = mock_platform
+        with patch("netbox_librenms_plugin.models.PlatformMapping") as MockPlatformMapping:
+            MockPlatformMapping.DoesNotExist = PlatformMapping_DoesNotExist
+            MockPlatformMapping.objects.get.side_effect = PlatformMapping_DoesNotExist("no mapping")
 
-            result = find_matching_platform("ios")
-            assert result["found"] is True
-            assert result["platform"] is mock_platform
+            with patch("dcim.models.Platform") as MockPlatform:
+                MockPlatform.DoesNotExist = Platform_DoesNotExist
+                MockPlatform.MultipleObjectsReturned = Platform_MultipleObjectsReturned
+                MockPlatform.objects.get.side_effect = Platform_MultipleObjectsReturned("multiple")
+
+                result = find_matching_platform("ios")
+                assert result["found"] is False
+                assert result["platform"] is None
+                assert result["match_type"] == "ambiguous"
+                assert result["ambiguity_source"] == "platform"
+                # Per the fix for the "PlatformMapping never consulted" CodeRabbit
+                # finding: when Platform.MultipleObjectsReturned fires, the function
+                # now defers the ambiguity decision and consults PlatformMapping
+                # first so an explicit override can disambiguate. Only when the
+                # mapping also misses do we surface ambiguous(platform).
+                MockPlatformMapping.objects.get.assert_called_once_with(librenms_os__iexact="ios")
 
 
 class TestGetMissingVlanWarning:
@@ -549,3 +560,128 @@ class TestFindByLibreNMSIdNoneGuard:
         result = find_by_librenms_id(model, None, server_key="default")
         assert result is None
         model.objects.filter.assert_not_called()
+
+
+class TestNetboxResolvesModuleTokenPerLeaf:
+    """Version-gating helper for {module} token resolution behaviour (NetBox #20467)."""
+
+    def test_returns_true_for_4_5_6(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 5, 6)):
+            assert utils.netbox_resolves_module_token_per_leaf() is True
+
+    def test_returns_true_for_4_6_0(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 6, 0)):
+            assert utils.netbox_resolves_module_token_per_leaf() is True
+
+    def test_returns_false_for_4_5_5(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 5, 5)):
+            assert utils.netbox_resolves_module_token_per_leaf() is False
+
+    def test_returns_false_for_4_4_10(self):
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 10)):
+            assert utils.netbox_resolves_module_token_per_leaf() is False
+
+    def test_returns_true_when_version_undetectable(self):
+        """Permissive default: avoid false positives on unknown versions."""
+        from netbox_librenms_plugin import utils
+
+        with patch.object(utils, "_get_netbox_version_tuple", return_value=None):
+            assert utils.netbox_resolves_module_token_per_leaf() is True
+
+
+class TestHasNestedNameConflictVersionGating:
+    """has_nested_name_conflict() must short-circuit on NetBox >= 4.5.6 (issue #20467)."""
+
+    def _build_args(self, with_module_token=True):
+        """Build (module_type, module_bay, sibling_counts) that would trigger
+        the legacy conflict (nested bay, sibling exists, {module} in template)."""
+        template = MagicMock()
+        template.name = "{module}" if with_module_token else "Gi0/1"
+        module_type = MagicMock()
+        module_type.model = "X2-10GB-LR"
+        module_type.interfacetemplates.all.return_value = [template]
+
+        module_bay = MagicMock()
+        module_bay.module_id = 820
+        module_bay.device = MagicMock()
+
+        sibling_counts = {820: 8}
+        return module_type, module_bay, sibling_counts
+
+    def test_skipped_on_supported_netbox(self):
+        from netbox_librenms_plugin import utils
+
+        module_type, module_bay, sibling_counts = self._build_args()
+        with patch.object(utils, "netbox_resolves_module_token_per_leaf", return_value=True):
+            result = utils.has_nested_name_conflict(module_type, module_bay, sibling_counts)
+        assert result == ""
+
+    def test_warns_on_old_netbox(self):
+        from netbox_librenms_plugin import utils
+
+        module_type, module_bay, sibling_counts = self._build_args()
+        with patch.object(utils, "netbox_resolves_module_token_per_leaf", return_value=False):
+            result = utils.has_nested_name_conflict(module_type, module_bay, sibling_counts)
+        assert result != ""
+        assert "X2-10GB-LR" in result
+        assert "4.5.6" in result
+        assert "20467" in result
+
+    def test_old_netbox_no_module_token_no_conflict(self):
+        from netbox_librenms_plugin import utils
+
+        module_type, module_bay, sibling_counts = self._build_args(with_module_token=False)
+        with patch.object(utils, "netbox_resolves_module_token_per_leaf", return_value=False):
+            result = utils.has_nested_name_conflict(module_type, module_bay, sibling_counts)
+        assert result == ""
+
+    def test_old_netbox_top_level_bay_no_conflict(self):
+        from netbox_librenms_plugin import utils
+
+        module_type, module_bay, sibling_counts = self._build_args()
+        module_bay.module_id = None
+        with patch.object(utils, "netbox_resolves_module_token_per_leaf", return_value=False):
+            result = utils.has_nested_name_conflict(module_type, module_bay, sibling_counts)
+        assert result == ""
+
+    def test_old_netbox_single_sibling_no_conflict(self):
+        from netbox_librenms_plugin import utils
+
+        module_type, module_bay, sibling_counts = self._build_args()
+        sibling_counts = {820: 1}
+        with patch.object(utils, "netbox_resolves_module_token_per_leaf", return_value=False):
+            result = utils.has_nested_name_conflict(module_type, module_bay, sibling_counts)
+        assert result == ""
+
+
+class TestGetNetboxVersionTuple:
+    """Parse netbox.settings.RELEASE.version into a comparable tuple."""
+
+    def test_parses_standard_version(self):
+        from netbox_librenms_plugin import utils
+
+        fake_release = MagicMock(version="4.5.8")
+        with patch("netbox.settings.RELEASE", fake_release):
+            assert utils._get_netbox_version_tuple() == (4, 5, 8)
+
+    def test_strips_build_suffix(self):
+        from netbox_librenms_plugin import utils
+
+        fake_release = MagicMock(version="4.5.8-Docker-4.0.2")
+        with patch("netbox.settings.RELEASE", fake_release):
+            assert utils._get_netbox_version_tuple() == (4, 5, 8)
+
+    def test_returns_none_on_unparseable(self):
+        from netbox_librenms_plugin import utils
+
+        fake_release = MagicMock(version="not-a-version")
+        with patch("netbox.settings.RELEASE", fake_release):
+            assert utils._get_netbox_version_tuple() is None

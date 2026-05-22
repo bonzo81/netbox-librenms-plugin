@@ -549,30 +549,15 @@ class TestAddDeviceToLibreNMSViewGetObject:
             result = view.get_object(5, "virtualmachine")
         assert result is mock_vm
 
-    def test_no_type_tries_device_first(self):
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+    def test_device_type_fetches_device(self):
+        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView, Device
 
         view = _make_view(AddDeviceToLibreNMSView)
         mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_dev_cls:
-            mock_dev_cls.objects.get.return_value = mock_device
-            mock_dev_cls.DoesNotExist = Exception
-            result = view.get_object(1)
+        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device) as mock_get:
+            result = view.get_object(1, "device")
         assert result is mock_device
-
-    def test_device_not_found_falls_back_to_vm(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
-
-        view = _make_view(AddDeviceToLibreNMSView)
-        mock_vm = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_dev_cls:
-            mock_dev_cls.DoesNotExist = Device.DoesNotExist
-            mock_dev_cls.objects.get.side_effect = Device.DoesNotExist
-            with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_vm):
-                result = view.get_object(1)
-        assert result is mock_vm
+        mock_get.assert_called_once_with(Device, pk=1)
 
 
 class TestAddDeviceToLibreNMSViewPost:
@@ -580,22 +565,45 @@ class TestAddDeviceToLibreNMSViewPost:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = _make_view(AddDeviceToLibreNMSView)
+        view.request = _make_request({"object_type": "device"})
+        mock_obj = MagicMock()
         mock_error = MagicMock()
-        with patch.object(view, "require_write_permission", return_value=mock_error):
-            result = view.post(view.request, object_id=1)
+        # Perm check now runs after the object is resolved so the mixin can
+        # build the right object-permission set (Device vs VirtualMachine).
+        with patch.object(view, "get_object", return_value=mock_obj):
+            with patch.object(view, "require_all_permissions", return_value=mock_error) as mock_perm:
+                result = view.post(view.request, object_id=1)
         assert result is mock_error
+        mock_perm.assert_called_once_with("POST")
+        # Exactly one model in the dynamically-set required_object_permissions.
+        from dcim.models import Device
+
+        assert view.required_object_permissions == {"POST": [("change", Device)]}
+
+    def test_invalid_object_type_returns_400_without_perm_check(self):
+        """Bad client input (missing/unknown object_type) must surface a 400 immediately,
+        without triggering the permission check — there's no model to check against yet."""
+        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+
+        view = _make_view(AddDeviceToLibreNMSView)
+        view.request = _make_request({"object_type": "bogus"})
+        with patch.object(view, "get_object", return_value=None):
+            with patch.object(view, "require_all_permissions") as mock_perm:
+                response = view.post(view.request, object_id=1)
+        assert response.status_code == 400
+        mock_perm.assert_not_called()
 
     def test_form_invalid_shows_error_and_redirects(self):
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = _make_view(AddDeviceToLibreNMSView)
-        view.request = _make_request({"v1v2-snmp_version": "v2c", "snmp_version": "v2c"})
+        view.request = _make_request({"v1v2-snmp_version": "v2c", "snmp_version": "v2c", "object_type": "device"})
         mock_obj = MagicMock()
         mock_obj.get_absolute_url.return_value = "/dcim/devices/1/"
         mock_form = MagicMock()
         mock_form.is_valid.return_value = False
         mock_form.errors.items.return_value = [("hostname", ["This field is required."])]
-        with patch.object(view, "require_write_permission", return_value=None):
+        with patch.object(view, "require_all_permissions", return_value=None):
             with patch.object(view, "get_object", return_value=mock_obj):
                 with patch.object(view, "get_form_class", return_value=MagicMock(return_value=mock_form)):
                     with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
@@ -608,13 +616,13 @@ class TestAddDeviceToLibreNMSViewPost:
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = _make_view(AddDeviceToLibreNMSView)
-        view.request = _make_request({"v1v2-snmp_version": "v2c"})
+        view.request = _make_request({"v1v2-snmp_version": "v2c", "object_type": "device"})
         mock_obj = MagicMock()
         mock_obj.get_absolute_url.return_value = "/dcim/devices/1/"
         mock_form = MagicMock()
         mock_form.is_valid.return_value = True
         mock_form.cleaned_data = {}
-        with patch.object(view, "require_write_permission", return_value=None):
+        with patch.object(view, "require_all_permissions", return_value=None):
             with patch.object(view, "get_object", return_value=mock_obj):
                 with patch.object(view, "get_form_class", return_value=MagicMock(return_value=mock_form)):
                     with patch.object(view, "form_valid", return_value=MagicMock()):

@@ -19,6 +19,8 @@ if codespace_name:
         "127.0.0.1",
         "*",
     ]
+    # Development environment — logging config values is an accepted tradeoff here.
+    # CodeQL alert for this is dismissed intentionally.
     print(f"🔗 Codespaces detected: {codespace_name}")
     print(f"🔒 CSRF Trusted Origins: {CSRF_TRUSTED_ORIGINS}")
     print(f"🌐 Allowed Hosts: {ALLOWED_HOSTS}")

@@ -1,0 +1,36 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <table class="table table-hover attr-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Match Type</th>
+            <th>Pattern</th>
+            <th>Action</th>
+            <th>Require Serial Match</th>
+            <th>Enabled</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{{ object.name }}</td>
+            <td>{{ object.get_match_type_display }}</td>
+            <td>{% if object.match_type == "serial_matches_device" %}<span class="text-muted">—</span>{% else %}<code>{{ object.pattern }}</code>{% endif %}</td>
+            <td>{{ object.get_action_display }}</td>
+            <td>{% if object.match_type == "serial_matches_device" %}<span class="text-muted">—</span>{% elif object.require_serial_match_parent %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
+            <td>{% if object.enabled %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
+            <td>{{ object.description|default:"—" }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

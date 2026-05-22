@@ -1,0 +1,231 @@
+{% load helpers %}
+{# Modal-content fragment for adding a missing ModuleBayTemplate to a Device Type or Module Type. #}
+{# Rendered by AddBayTemplateView.get and swapped into #htmx-modal-content. #}
+<div class="modal-header">
+    <h5 id="htmx-modal-label" class="modal-title">
+        <i class="mdi mdi-wrench-outline me-1"></i>Add Bay Template
+    </h5>
+    <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
+</div>
+<form method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:add_bay_template' pk=device_pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="target_kind" value="{{ target_kind }}">
+    <input type="hidden" name="target_pk" value="{{ target_pk }}">
+    <input type="hidden" name="librenms_name" value="{{ librenms_name }}">
+    <input type="hidden" name="librenms_class" value="{{ librenms_class }}">
+
+    <div class="modal-body">
+        <p class="text-muted small mb-3">
+            Add a new bay template to
+            {% if target_kind == "device_type" %}device type{% else %}module type{% endif %}
+            <strong>{{ target_label }}</strong>. The values below were pre-filled from
+            LibreNMS data — review and adjust as needed before saving.
+        </p>
+
+        <div class="mb-3">
+            <label for="add-bay-name" class="form-label">Name <span class="text-danger">*</span></label>
+            <input type="text" class="form-control" id="add-bay-name" name="name"
+                   value="{{ suggested_name }}" required>
+            <div class="form-text">
+                Bay name as it should appear on the
+                {% if target_kind == "device_type" %}device type{% else %}module type{% endif %}
+                (e.g. <code>Slot 1</code>, <code>Fan Tray 0</code>).
+            </div>
+        </div>
+
+        <div class="mb-3">
+            <label for="add-bay-position" class="form-label">Position</label>
+            <input type="text" class="form-control" id="add-bay-position" name="position"
+                   value="{{ suggested_position }}">
+            <div class="form-text">Optional positional identifier (e.g. <code>1</code>, <code>A</code>).</div>
+        </div>
+
+        <div class="mb-3">
+            <label for="add-bay-label" class="form-label">Label</label>
+            <input type="text" class="form-control" id="add-bay-label" name="label"
+                   value="{{ suggested_label }}">
+            <div class="form-text">Optional human-readable label.</div>
+        </div>
+
+        <div class="mb-2">
+            <label for="add-bay-description" class="form-label">Description</label>
+            <textarea class="form-control" id="add-bay-description" name="description" rows="2"></textarea>
+        </div>
+
+        {% if offer_mapping_checkbox %}
+        <hr>
+        <div class="form-check mb-2" id="add-bay-mapping-block">
+            <input class="form-check-input" type="checkbox" value="1"
+                   id="add-bay-also-create-mapping" name="also_create_mapping">
+            <label class="form-check-label" for="add-bay-also-create-mapping">
+                Also create a ModuleBayMapping
+                <span id="add-bay-mapping-summary" class="text-muted small d-block"></span>
+            </label>
+            <div class="form-text">
+                LibreNMS reports this bay as
+                <code id="add-bay-libre-name-display">{{ librenms_name }}</code>{% if librenms_class %}
+                (class <code>{{ librenms_class }}</code>){% endif %}.
+                Bay matching is exact and case-sensitive, so a mapping is needed
+                whenever the NetBox bay name differs from the LibreNMS name.
+                {% if manufacturer_label %}
+                The mapping will be scoped to manufacturer
+                <strong>{{ manufacturer_label }}</strong>.
+                {% else %}
+                The mapping will be created globally (the device has no
+                manufacturer set).
+                {% endif %}
+            </div>
+            <div class="mt-2 ps-1" id="add-bay-mapping-kind-block" style="display:none;">
+                <div class="form-check form-check-inline">
+                    <input class="form-check-input" type="radio" name="mapping_kind"
+                           id="add-bay-mapping-kind-regex" value="regex">
+                    <label class="form-check-label small" for="add-bay-mapping-kind-regex">
+                        All bays of this kind <span class="text-muted">(regex)</span>
+                    </label>
+                </div>
+                <div class="form-check form-check-inline">
+                    <input class="form-check-input" type="radio" name="mapping_kind"
+                           id="add-bay-mapping-kind-exact" value="exact">
+                    <label class="form-check-label small" for="add-bay-mapping-kind-exact">
+                        This bay only <span class="text-muted">(exact)</span>
+                    </label>
+                </div>
+                <div class="form-text small" id="add-bay-mapping-preview"></div>
+            </div>
+        </div>
+        <script>
+        (function () {
+            var libreName = "{{ librenms_name|escapejs }}";
+            var nameInput = document.getElementById("add-bay-name");
+            var checkbox = document.getElementById("add-bay-also-create-mapping");
+            var summary = document.getElementById("add-bay-mapping-summary");
+            var kindBlock = document.getElementById("add-bay-mapping-kind-block");
+            var radioRegex = document.getElementById("add-bay-mapping-kind-regex");
+            var radioExact = document.getElementById("add-bay-mapping-kind-exact");
+            var preview = document.getElementById("add-bay-mapping-preview");
+            if (!nameInput || !checkbox) return;
+
+            // Mirror of AddBayTemplateView._derive_mapping_pattern. Maps
+            // each *distinct* digit value on the LibreNMS side to a numbered
+            // capture group (repeats emit back-references), then routes
+            // NetBox-side digits to the matching libre group. Returns null
+            // when libre has no digits, when a NetBox digit value is absent
+            // from libre, or when the pattern fails to round-trip.
+            function derivePattern(libre, nb) {
+                if (!libre || !nb) return null;
+                var tokenRe = /(\d+|\D+)/g;
+                var libreTokens = libre.match(tokenRe) || [];
+                var nbTokens = nb.match(tokenRe) || [];
+                var groups = {};
+                var nextGroup = 1;
+                var pattern = "^";
+                for (var i = 0; i < libreTokens.length; i++) {
+                    var t = libreTokens[i];
+                    if (/^\d+$/.test(t)) {
+                        if (Object.prototype.hasOwnProperty.call(groups, t)) {
+                            pattern += "\\" + groups[t];
+                        } else {
+                            groups[t] = nextGroup++;
+                            pattern += "(\\d+)";
+                        }
+                    } else {
+                        pattern += t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                    }
+                }
+                pattern += "$";
+                if (nextGroup === 1) return null;
+                var replacement = "";
+                for (var j = 0; j < nbTokens.length; j++) {
+                    var u = nbTokens[j];
+                    if (/^\d+$/.test(u)) {
+                        if (!Object.prototype.hasOwnProperty.call(groups, u)) return null;
+                        replacement += "\\" + groups[u];
+                    } else {
+                        replacement += u.replace(/\\/g, "\\\\");
+                    }
+                }
+                // Sanity: the pattern applied to libre must reproduce nb.
+                var rx;
+                try { rx = new RegExp(pattern); } catch (e) { return null; }
+                if (!rx.test(libre)) return null;
+                // JS replace() interprets $1.. for back-refs; convert.
+                var jsReplacement = replacement.replace(/\\(\d+)/g, "$$$1");
+                if (libre.replace(rx, jsReplacement) !== nb) return null;
+                return { pattern: pattern, replacement: replacement };
+            }
+
+            // Build the preview as text + <code> nodes (no innerHTML — the
+            // pattern/replacement strings are derived from operator input
+            // and must never be parsed as HTML).
+            function renderPreview(target, prefix, codeA, sep, codeB, suffix) {
+                while (target.firstChild) target.removeChild(target.firstChild);
+                target.appendChild(document.createTextNode(prefix));
+                var a = document.createElement("code");
+                a.textContent = codeA;
+                target.appendChild(a);
+                target.appendChild(document.createTextNode(sep));
+                var b = document.createElement("code");
+                b.textContent = codeB;
+                target.appendChild(b);
+                target.appendChild(document.createTextNode(suffix));
+            }
+
+            function refresh() {
+                var current = nameInput.value.trim();
+                var differs = libreName && current && current !== libreName;
+                checkbox.disabled = !differs;
+                if (!differs) {
+                    checkbox.checked = false;
+                    kindBlock.style.display = "none";
+                    summary.textContent = "(name matches LibreNMS — no mapping needed)";
+                    return;
+                }
+                checkbox.checked = true;
+                summary.textContent = "Will map LibreNMS '" + libreName + "' → NetBox '" + current + "'";
+                var pat = derivePattern(libreName, current);
+                if (pat) {
+                    kindBlock.style.display = "";
+                    radioRegex.disabled = false;
+                    if (!radioRegex.checked && !radioExact.checked) {
+                        radioRegex.checked = true;
+                    }
+                    if (radioRegex.checked) {
+                        renderPreview(preview, "Will store regex: ", pat.pattern, " → ", pat.replacement, " (covers all bays sharing this skeleton).");
+                    } else {
+                        renderPreview(preview, "Will store exact: ", libreName, " → ", current, ".");
+                    }
+                } else {
+                    // No pattern available → exact-only.
+                    kindBlock.style.display = "none";
+                    radioExact.checked = true;
+                    radioRegex.checked = false;
+                }
+            }
+
+            nameInput.addEventListener("input", refresh);
+            radioRegex.addEventListener("change", refresh);
+            radioExact.addEventListener("change", refresh);
+            // Server-supplied default kind, picked up on first render.
+            {% if mapping_default_kind == "regex" %}radioRegex.checked = true;{% else %}radioExact.checked = true;{% endif %}
+            refresh();
+        })();
+        </script>
+        {% elif mapping_exists %}
+        <hr>
+        <div class="alert alert-info py-2 small mb-0">
+            <i class="mdi mdi-information-outline"></i>
+            A ModuleBayMapping for LibreNMS
+            <code>{{ librenms_name }}</code> already exists — no extra mapping
+            will be created.
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-plus me-1"></i>Add Bay Template
+        </button>
+    </div>
+</form>

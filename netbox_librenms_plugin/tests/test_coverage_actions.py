@@ -56,7 +56,8 @@ class TestSaveDevice:
         device.full_clean.side_effect = ValidationError({"name": ["This field is required."]})
 
         response = _save_device(device)
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_integrity_error_returns_409(self):
         from django.db import IntegrityError
@@ -68,7 +69,8 @@ class TestSaveDevice:
         device.save.side_effect = IntegrityError("duplicate key")
 
         response = _save_device(device)
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_success_returns_none(self):
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -420,8 +422,12 @@ class TestDeviceImportHelperMixin:
                         "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
                         return_value={"status": "importable"},
                     ):
-                        request = _make_request()
-                        result_device, validation, selections = view.get_validated_device_with_selections(1, request)
+                        with patch("netbox_librenms_plugin.views.imports.actions.cache") as mock_cache:
+                            mock_cache.get.return_value = None
+                            request = _make_request()
+                            result_device, validation, selections = view.get_validated_device_with_selections(
+                                1, request
+                            )
         assert result_device is libre_device
         assert validation is not None
 
@@ -665,11 +671,13 @@ class TestDeviceRoleUpdateView:
         view._librenms_api = _make_api()
         return view
 
-    def test_device_not_found_returns_404(self):
+    def test_device_not_found_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
             result = view.post(MagicMock(), device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"Device not found" in result.content
 
     @patch("netbox_librenms_plugin.views.imports.actions.render")
     def test_device_found_renders_row(self, mock_render):
@@ -699,11 +707,13 @@ class TestDeviceClusterUpdateView:
         view._librenms_api = _make_api()
         return view
 
-    def test_device_not_found_returns_404(self):
+    def test_device_not_found_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
             result = view.post(MagicMock(), device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"Device not found" in result.content
 
 
 class TestDeviceRackUpdateView:
@@ -716,11 +726,13 @@ class TestDeviceRackUpdateView:
         view._librenms_api = _make_api()
         return view
 
-    def test_device_not_found_returns_404(self):
+    def test_device_not_found_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
             result = view.post(MagicMock(), device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"Device not found" in result.content
 
 
 class TestDeviceConflictActionView:
@@ -740,21 +752,25 @@ class TestDeviceConflictActionView:
             result = view.post(MagicMock(), device_id=1)
         assert result is error_resp
 
-    def test_missing_action_returns_400(self):
+    def test_missing_action_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             request = _make_request(post={"existing_device_id": "1"})
             result = view.post(request, device_id=1)
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"Missing action or existing_device_id" in result.content
 
-    def test_missing_existing_device_id_returns_400(self):
+    def test_missing_existing_device_id_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             request = _make_request(post={"action": "link"})
             result = view.post(request, device_id=1)
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"Missing action or existing_device_id" in result.content
 
-    def test_vm_with_unsupported_action_returns_400(self):
+    def test_vm_with_unsupported_action_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             request = _make_request(
@@ -765,9 +781,11 @@ class TestDeviceConflictActionView:
                 }
             )
             result = view.post(request, device_id=1)
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"is not supported for virtual machines" in result.content
 
-    def test_existing_device_not_found_returns_404(self):
+    def test_existing_device_not_found_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
@@ -777,9 +795,11 @@ class TestDeviceConflictActionView:
 
                 request = _make_request(post={"action": "link", "existing_device_id": "abc"})
                 result = view.post(request, device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"Existing device not found" in result.content
 
-    def test_unknown_action_returns_400(self):
+    def test_unknown_action_renders_htmx_error_toast(self):
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
@@ -802,7 +822,9 @@ class TestDeviceConflictActionView:
                         )
                         result = view.post(request, device_id=1)
 
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
+        assert b"Unknown action: unknown_action" in result.content
 
 
 class TestSaveUserPrefView:
@@ -943,7 +965,10 @@ class TestShouldEnableVCDetection:
     def test_enable_vc_detection_from_post(self):
         view = self._make_view()
         request = _make_request(post={"enable_vc_detection": "on"})
-        assert view._should_enable_vc_detection(1, request) is True
+        with patch("netbox_librenms_plugin.views.imports.actions.cache") as mock_cache:
+            mock_cache.get.return_value = None
+            result = view._should_enable_vc_detection(1, request)
+        assert result is True
 
 
 class TestBuildSyncInfoNoPlatform:
@@ -1094,7 +1119,7 @@ class TestDeviceConflictActionViewVMGuard:
         view.request = MagicMock()
         return view
 
-    def test_non_migrate_action_for_vm_returns_400(self):
+    def test_non_migrate_action_for_vm_renders_htmx_error_toast(self):
         """Lines 995-999: VM + non-migrate action = 400."""
         view = self._make_view()
         request = _make_request(
@@ -1108,17 +1133,21 @@ class TestDeviceConflictActionViewVMGuard:
         with patch.object(view, "require_all_permissions", return_value=None):
             response = view.post(request, device_id=1)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"is not supported for virtual machines" in response.content
 
-    def test_missing_action_returns_400(self):
-        """Line 989-990: missing action returns 400."""
+    def test_missing_action_renders_htmx_error_toast(self):
+        """Line 989-990: missing action renders htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(post={"existing_device_id": "1"})  # No action
 
         with patch.object(view, "require_all_permissions", return_value=None):
             response = view.post(request, device_id=1)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Missing action or existing_device_id" in response.content
 
     def test_server_key_override_creates_new_api(self):
         """Line 987: POST server_key creates new LibreNMSAPI."""
@@ -1153,7 +1182,7 @@ class TestDeviceRoleClusterRackViews:
     """Tests for DeviceRoleUpdateView, DeviceClusterUpdateView, DeviceRackUpdateView."""
 
     def test_device_role_update_not_found(self):
-        """DeviceRoleUpdateView returns 404 when device not found."""
+        """DeviceRoleUpdateView renders htmx error toast (200) when device not found."""
         from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
 
         view = object.__new__(DeviceRoleUpdateView)
@@ -1165,10 +1194,12 @@ class TestDeviceRoleClusterRackViews:
             with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
                 response = view.post(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Device not found" in response.content
 
     def test_device_cluster_update_not_found(self):
-        """DeviceClusterUpdateView returns 404 when device not found."""
+        """DeviceClusterUpdateView renders htmx error toast (200) when device not found."""
         from netbox_librenms_plugin.views.imports.actions import DeviceClusterUpdateView
 
         view = object.__new__(DeviceClusterUpdateView)
@@ -1180,10 +1211,12 @@ class TestDeviceRoleClusterRackViews:
             with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
                 response = view.post(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Device not found" in response.content
 
     def test_device_rack_update_not_found(self):
-        """DeviceRackUpdateView returns 404 when device not found."""
+        """DeviceRackUpdateView renders htmx error toast (200) when device not found."""
         from netbox_librenms_plugin.views.imports.actions import DeviceRackUpdateView
 
         view = object.__new__(DeviceRackUpdateView)
@@ -1195,7 +1228,9 @@ class TestDeviceRoleClusterRackViews:
             with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)):
                 response = view.post(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Device not found" in response.content
 
     def test_device_role_update_renders_row(self):
         """DeviceRoleUpdateView renders row when device found."""
@@ -1589,8 +1624,8 @@ class TestDeviceConflictActionMissingExisting:
         view.request = MagicMock()
         return view
 
-    def test_existing_device_not_found_returns_404(self):
-        """Line 1008-1009: Device.objects.get raises DoesNotExist → 404."""
+    def test_existing_device_not_found_renders_htmx_error_toast(self):
+        """Line 1008-1009: Device.objects.get raises DoesNotExist → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1605,7 +1640,9 @@ class TestDeviceConflictActionMissingExisting:
                 MockDevice.objects.get.side_effect = ValueError("Not found")
                 response = view.post(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Existing device not found" in response.content
 
 
 class TestDeviceConflictActionMorePaths:
@@ -1625,8 +1662,8 @@ class TestDeviceConflictActionMorePaths:
 
         return ExitStack()
 
-    def test_unknown_action_returns_400(self):
-        """Line 1338: unknown action returns 400."""
+    def test_unknown_action_renders_htmx_error_toast(self):
+        """Line 1338: unknown action renders htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1653,9 +1690,11 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Unknown action: unknown_action_xyz" in response.content
 
-    def test_force_required_without_force_returns_400(self):
+    def test_force_required_without_force_renders_htmx_error_toast(self):
         """Lines 1044/1047-1048: device_type_mismatch + force required but not provided."""
         view = self._make_view()
         request = _make_request(
@@ -1683,10 +1722,12 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Device type mismatch detected" in response.content
 
-    def test_validated_existing_pk_mismatch_returns_400(self):
-        """Line 1027: validated_existing.pk != existing_device.pk → 400."""
+    def test_validated_existing_pk_mismatch_renders_htmx_error_toast(self):
+        """Line 1027: validated_existing.pk != existing_device.pk → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1717,10 +1758,12 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Device ID mismatch" in response.content
 
-    def test_validated_existing_none_returns_400(self):
-        """Line 1025: validated_existing is None → 400."""
+    def test_validated_existing_none_renders_htmx_error_toast(self):
+        """Line 1025: validated_existing is None → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1748,7 +1791,9 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Missing validated conflict target" in response.content
 
     def test_require_object_permissions_fails(self):
         """Line 1014: require_object_permissions returns error."""
@@ -1774,8 +1819,8 @@ class TestDeviceConflictActionMorePaths:
 
         assert response.status_code == 403
 
-    def test_migrate_not_flagged_returns_400(self):
-        """Line 1252-1255: migrate_librenms_id with unflagged device → 400."""
+    def test_migrate_not_flagged_renders_htmx_error_toast(self):
+        """Line 1252-1255: migrate_librenms_id with unflagged device → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1804,10 +1849,12 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"already in JSON format" in response.content
 
-    def test_migrate_already_json_format_returns_400(self):
-        """Lines 1260-1265: cf_value already dict → 400."""
+    def test_migrate_already_json_format_renders_htmx_error_toast(self):
+        """Lines 1260-1265: cf_value already dict → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1837,10 +1884,12 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"already in JSON format" in response.content
 
-    def test_migrate_id_mismatch_returns_400(self):
-        """Line 1272-1275: cf_int != librenms_id → 400."""
+    def test_migrate_id_mismatch_renders_htmx_error_toast(self):
+        """Line 1272-1275: cf_int != librenms_id → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1870,10 +1919,12 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"does not match the active device ID" in response.content
 
-    def test_sync_device_type_no_match_returns_400(self):
-        """Line 1241: sync_device_type with no HW match → 400."""
+    def test_sync_device_type_no_match_renders_htmx_error_toast(self):
+        """Line 1241: sync_device_type with no HW match → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1905,10 +1956,12 @@ class TestDeviceConflictActionMorePaths:
                         ):
                             response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"No matching device type for" in response.content
 
-    def test_sync_platform_no_os_returns_400(self):
-        """Line 1227: sync_platform with empty OS → 400."""
+    def test_sync_platform_no_os_renders_htmx_error_toast(self):
+        """Line 1227: sync_platform with empty OS → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1936,10 +1989,12 @@ class TestDeviceConflictActionMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"No OS info from LibreNMS" in response.content
 
     def test_sync_platform_not_found_in_netbox(self):
-        """Line 1225: sync_platform platform not in NetBox → 400."""
+        """Line 1225: sync_platform platform not in NetBox → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -1970,7 +2025,9 @@ class TestDeviceConflictActionMorePaths:
                         ):
                             response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"not found in NetBox" in response.content
 
 
 class TestDeviceConflictUpdateAction:
@@ -2098,8 +2155,8 @@ class TestDeviceConflictActionBoolAndInvalidId:
         view.request = MagicMock()
         return view
 
-    def test_bool_librenms_id_returns_400(self):
-        """Line 1044: librenms_id is a boolean → 400."""
+    def test_bool_librenms_id_renders_htmx_error_toast(self):
+        """Line 1044: librenms_id is a boolean → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -2126,10 +2183,12 @@ class TestDeviceConflictActionBoolAndInvalidId:
                     ):
                         response = view.post(request, device_id=1)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Invalid or missing LibreNMS device_id in payload" in response.content
 
-    def test_non_int_librenms_id_returns_400(self):
-        """Lines 1047-1048: librenms_id is non-int string → 400."""
+    def test_non_int_librenms_id_renders_htmx_error_toast(self):
+        """Lines 1047-1048: librenms_id is non-int string → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -2156,7 +2215,9 @@ class TestDeviceConflictActionBoolAndInvalidId:
                     ):
                         response = view.post(request, device_id=1)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Invalid or missing LibreNMS device_id in payload" in response.content
 
 
 class TestDeviceConflictLinkIdConflict:
@@ -2170,8 +2231,8 @@ class TestDeviceConflictLinkIdConflict:
         view.request = MagicMock()
         return view
 
-    def test_id_conflict_returns_409(self):
-        """Lines 1075-1079: LibreNMS ID conflict → 409."""
+    def test_id_conflict_renders_htmx_error_toast(self):
+        """Lines 1075-1079: LibreNMS ID conflict → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -2210,7 +2271,9 @@ class TestDeviceConflictLinkIdConflict:
                                 mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
                                 response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"LibreNMS ID conflict" in response.content
 
 
 class TestBulkImportConfirmViewVMRole:
@@ -2338,7 +2401,8 @@ class TestSaveDevicePath:
 
         result = _save_device(mock_device)
         assert result is not None
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     def test_save_device_integrity_error(self):
         """Lines 54-56: IntegrityError during save."""
@@ -2351,7 +2415,8 @@ class TestSaveDevicePath:
 
         result = _save_device(mock_device)
         assert result is not None
-        assert result.status_code == 409  # IntegrityError returns 409
+        assert result.status_code == 200
+        assert result.headers.get("HX-Reswap") == "none"
 
     def test_should_enable_vc_detection_when_cached(self):
         """Line 168: VC data already cached → returns True."""
@@ -2390,8 +2455,8 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
         view.request = MagicMock()
         return view
 
-    def test_device_deleted_during_lock_returns_409(self):
-        """Lines 1069-1073: Device.DoesNotExist during select_for_update → 409."""
+    def test_device_deleted_during_lock_renders_htmx_error_toast(self):
+        """Lines 1069-1073: Device.DoesNotExist during select_for_update → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(
             post={
@@ -2427,7 +2492,9 @@ class TestDeviceConflictSelectForUpdateDoesNotExist:
                                 mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
                                 response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Device no longer exists" in response.content
 
 
 class TestMigrateLibreNMSIdMorePaths:
@@ -2461,8 +2528,8 @@ class TestMigrateLibreNMSIdMorePaths:
             {},
         )
 
-    def test_serial_not_confirmed_no_force_returns_400(self):
-        """Line 1277-1280: serial not confirmed, no force → 400."""
+    def test_serial_not_confirmed_no_force_renders_htmx_error_toast(self):
+        """Line 1277-1280: serial not confirmed, no force → htmx error toast (200)."""
         view = self._make_view()
         request = self._make_base_request()
 
@@ -2486,7 +2553,9 @@ class TestMigrateLibreNMSIdMorePaths:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Serial number not confirmed" in response.content
 
     def test_migration_succeeds_and_renders_row(self):
         """Lines 1282-1323: successful migration renders row."""
@@ -2637,8 +2706,8 @@ class TestDeviceConflictMoreActions:
 
         assert response.status_code == 400
 
-    def test_update_serial_conflict_returns_409(self):
-        """Line 1139: update_serial with serial conflict → 409."""
+    def test_update_serial_conflict_renders_htmx_error_toast(self):
+        """Line 1139: update_serial with serial conflict → htmx error toast (200)."""
         view, request, mock_existing, libre_device, validation = self._base_setup("update_serial")
         conflict_device = MagicMock()
         conflict_device.name = "router99"
@@ -2650,7 +2719,9 @@ class TestDeviceConflictMoreActions:
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
                 response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Serial conflict" in response.content
 
     def test_update_serial_save_success_renders_row(self):
         """Lines 1146-1149: update_serial with no conflict → save + render."""
@@ -2687,8 +2758,8 @@ class TestDeviceConflictMoreActions:
 
         assert response.status_code == 400
 
-    def test_update_type_no_device_type_returns_400(self):
-        """Line 1171: update_type with no librenms_device_type → 400."""
+    def test_update_type_no_device_type_renders_htmx_error_toast(self):
+        """Line 1171: update_type with no librenms_device_type → htmx error toast (200)."""
         view, request, mock_existing, libre_device, validation = self._base_setup("update_type")
         # No device_type_mismatch + no force → librenms_device_type = None
 
@@ -2696,7 +2767,9 @@ class TestDeviceConflictMoreActions:
             with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
                 response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"No LibreNMS device type available to update" in response.content
 
     def test_sync_platform_success_renders_row(self):
         """Line 1222: sync_platform with found platform → save + render."""
@@ -2732,7 +2805,7 @@ class TestDeviceConflictMoreActions:
 
         mock_render.assert_called_once()
 
-    def test_device_not_found_after_action_returns_404(self):
+    def test_device_not_found_after_action_renders_htmx_error_toast(self):
         """Line 1338: get_validated_device_with_selections returns None after action."""
         view, request, mock_existing, libre_device, validation = self._base_setup("sync_name")
 
@@ -2751,7 +2824,9 @@ class TestDeviceConflictMoreActions:
                 with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
                     response = view.post(request, device_id=42)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Device not found after action" in response.content
 
 
 class TestMoreSaveErrorPaths:
@@ -2824,7 +2899,7 @@ class TestMoreSaveErrorPaths:
         return stack, MockDevice
 
     def test_update_serial_conflict_in_update(self):
-        """Line 1108: update action with serial conflict → 409."""
+        """Line 1108: update action with serial conflict → htmx error toast (200)."""
         view, request, mock_existing, libre_device, validation = self._base_setup("update")
         conflict = MagicMock()
         conflict.name = "other"
@@ -2835,7 +2910,9 @@ class TestMoreSaveErrorPaths:
             MockDevice.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = conflict
             response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Serial conflict" in response.content
 
     def test_update_with_device_type_mismatch_forced(self):
         """Lines 1116, 1119: update with force + device_type_mismatch → device_type applied."""
@@ -2926,8 +3003,8 @@ class TestSyncSerialAction:
         view.request = MagicMock()
         return view
 
-    def test_sync_serial_no_serial_returns_400(self):
-        """Line 1210: sync_serial with empty serial → 400."""
+    def test_sync_serial_no_serial_renders_htmx_error_toast(self):
+        """Line 1210: sync_serial with empty serial → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(post={"action": "sync_serial", "existing_device_id": "1"})
         mock_existing = MagicMock()
@@ -2950,7 +3027,9 @@ class TestSyncSerialAction:
                     ):
                         response = view.post(request, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"No valid serial from LibreNMS" in response.content
 
 
 class TestUpdateAndSerialSaveErrors:
@@ -3071,7 +3150,7 @@ class TestSyncSerialMorePaths:
         return stack, MockDevice, DoesNotExistExc
 
     def test_sync_serial_device_deleted_under_lock(self):
-        """Lines 1182-1183: Device.DoesNotExist during select_for_update → 409."""
+        """Lines 1182-1183: Device.DoesNotExist during select_for_update → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(post={"action": "sync_serial", "existing_device_id": "1"})
         mock_existing = MagicMock()
@@ -3086,10 +3165,12 @@ class TestSyncSerialMorePaths:
             MockDevice.objects.select_for_update.return_value.get.side_effect = DoesNotExistExc("gone")
             response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Device no longer exists" in response.content
 
     def test_sync_serial_conflict_under_lock(self):
-        """Lines 1196-1200: sync_serial serial conflict → 409."""
+        """Lines 1196-1200: sync_serial serial conflict → htmx error toast (200)."""
         view = self._make_view()
         request = _make_request(post={"action": "sync_serial", "existing_device_id": "1"})
         mock_existing = MagicMock()
@@ -3111,7 +3192,9 @@ class TestSyncSerialMorePaths:
             MockDevice.objects.filter.return_value.exclude.return_value.first.return_value = conflict_device
             response = view.post(request, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Serial conflict" in response.content
 
     def test_sync_serial_save_error(self):
         """Line 1207: sync_serial → _save_device returns error."""
@@ -3186,7 +3269,7 @@ class TestMigrateLibreNMSIdTransactionPaths:
         return request, mock_existing, libre_device, validation, locked_device, MockDevice, DoesNotExistExc, mock_tx
 
     def test_migrate_device_deleted_under_lock(self):
-        """Lines 1285-1289: DoesNotExist during select_for_update → 409."""
+        """Lines 1285-1289: DoesNotExist during select_for_update → htmx error toast (200)."""
         view = self._make_view()
         req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
         MockDevice.objects.select_for_update.return_value.get.side_effect = DNE("gone")
@@ -3198,10 +3281,12 @@ class TestMigrateLibreNMSIdTransactionPaths:
                         with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
                             response = view.post(req, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Object no longer exists" in response.content
 
     def test_migrate_already_migrated_under_lock(self):
-        """Lines 1292-1298: cf_locked already dict under lock → 400."""
+        """Lines 1292-1298: cf_locked already dict under lock → htmx error toast (200)."""
         view = self._make_view()
         req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
         locked.custom_field_data = {"librenms_id": {"default": 42}}  # Already migrated under lock
@@ -3213,10 +3298,12 @@ class TestMigrateLibreNMSIdTransactionPaths:
                         with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
                             response = view.post(req, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"already in JSON format" in response.content
 
     def test_migrate_id_changed_under_lock(self):
-        """Lines 1300-1303: cf_locked_int != librenms_id under lock → 400."""
+        """Lines 1300-1303: cf_locked_int != librenms_id under lock → htmx error toast (200)."""
         view = self._make_view()
         req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
         locked.custom_field_data = {"librenms_id": 99}  # Different ID under lock
@@ -3228,10 +3315,12 @@ class TestMigrateLibreNMSIdTransactionPaths:
                         with patch("netbox_librenms_plugin.views.imports.actions.transaction", mock_tx):
                             response = view.post(req, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"changed under lock" in response.content
 
     def test_migrate_id_conflict_with_other_device(self):
-        """Lines 1309-1315: another device already has this ID → 409."""
+        """Lines 1309-1315: another device already has this ID → htmx error toast (200)."""
         view = self._make_view()
         req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
         conflict_dev = MagicMock()
@@ -3245,10 +3334,12 @@ class TestMigrateLibreNMSIdTransactionPaths:
                             with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=conflict_dev):
                                 response = view.post(req, device_id=42)
 
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Another device already has librenms_id" in response.content
 
     def test_migrate_migration_fails(self):
-        """Lines 1316-1320: migrate_legacy_librenms_id returns False → 400."""
+        """Lines 1316-1320: migrate_legacy_librenms_id returns False → htmx error toast (200)."""
         view = self._make_view()
         req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
 
@@ -3263,15 +3354,17 @@ class TestMigrateLibreNMSIdTransactionPaths:
                                 ):
                                     response = view.post(req, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Migration failed" in response.content
 
     def test_migrate_save_error(self):
-        """Line 1321-1322: _save_device returns error."""
+        """Migrate path saves only librenms_id field; IntegrityError on save → htmx toast."""
         view = self._make_view()
         req, mock_ex, libre, val, locked, MockDevice, DNE, mock_tx = self._make_valid_migrate_context(view)
-        from django.http import HttpResponse
+        from django.db import IntegrityError
 
-        err = HttpResponse("save error", status=400)
+        locked.save.side_effect = IntegrityError("dup")
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device", MockDevice):
@@ -3282,12 +3375,11 @@ class TestMigrateLibreNMSIdTransactionPaths:
                                 with patch(
                                     "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=True
                                 ):
-                                    with patch(
-                                        "netbox_librenms_plugin.views.imports.actions._save_device", return_value=err
-                                    ):
-                                        response = view.post(req, device_id=42)
+                                    response = view.post(req, device_id=42)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Unable to migrate the LibreNMS mapping" in response.content
 
     def test_migrate_success_renders_row(self):
         """Lines 1323+: successful migration renders row."""
@@ -3604,6 +3696,37 @@ class TestBulkImportDevicesMorePaths:
 
         mock_redirect.assert_called()
 
+    def test_vc_detection_disabled_in_post_is_passed_to_device_import(self):
+        """vc_detection_enabled=off from POST must propagate to bulk import call."""
+        view = self._make_view()
+        request = self._make_base_request(["1"])
+        request.POST.get = MagicMock(side_effect=lambda k, d=None: "off" if k == "enable_vc_detection" else None)
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                    return_value={"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0},
+                ) as mock_bulk_import:
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+                        return_value={"success": [], "failed": [], "skipped": []},
+                    ):
+                        with patch(
+                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                            return_value={"device_id": 1},
+                        ):
+                            with patch("netbox_librenms_plugin.views.imports.actions.messages"):
+                                with patch(
+                                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
+                                ):
+                                    view.post(request)
+
+        call_kwargs = mock_bulk_import.call_args.kwargs
+        assert call_kwargs["sync_options"]["vc_detection_enabled"] is False
+
     def test_invalid_role_and_rack_values_log_warning(self):
         """Lines 534-535, 544-546: invalid role_id/rack_id → warning."""
         view = self._make_view()
@@ -3906,11 +4029,15 @@ class TestBulkImportEdgePaths:
                 "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
-                    "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
-                    side_effect=DjPD("No permission"),
+                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                    return_value={"device_id": 1, "hostname": "test-device"},
                 ):
-                    with patch("netbox_librenms_plugin.views.imports.actions.messages"):
-                        response = view.post(request)
+                    with patch(
+                        "netbox_librenms_plugin.views.imports.actions.bulk_import_devices",
+                        side_effect=DjPD("No permission"),
+                    ):
+                        with patch("netbox_librenms_plugin.views.imports.actions.messages"):
+                            response = view.post(request)
 
         assert response.headers.get("HX-Redirect") is not None
 

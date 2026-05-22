@@ -1,0 +1,28 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <table class="table table-hover attr-table">
+        <thead>
+          <tr>
+            <th>LibreNMS Model</th>
+            <th>NetBox Module Type</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{{ object.librenms_model }}</td>
+            <td><a href="{{ object.netbox_module_type.get_absolute_url }}">{{ object.netbox_module_type }}</a></td>
+            <td>{{ object.description|default:"—" }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

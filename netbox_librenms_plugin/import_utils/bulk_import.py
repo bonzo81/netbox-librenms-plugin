@@ -228,7 +228,7 @@ def bulk_import_devices_shared(
                             for m in vc_data.get("members", [])
                         )
                         if member_parts:
-                            fingerprint = hashlib.md5(",".join(member_parts).encode()).hexdigest()[:12]
+                            fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
                             vc_domain = f"librenms-stack-{fingerprint}"
                         else:
                             vc_domain = f"librenms-{device_id}"
@@ -357,7 +357,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 if hasattr(refreshed, "role") and refreshed.role:
                     apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
                 elif not validation.get("import_as_vm"):
-                    validation["device_role"] = {"found": False, "role": None}
+                    validation["device_role"] = {
+                        "found": False,
+                        "role": None,
+                        "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                    }
                     remove_validation_issue(validation, "role")
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                 # Re-assert non-importable state: recalculate bases can_import on
@@ -374,7 +378,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # Guard: VMs don't use device_role for readiness, so preserve any
                 # user-selected role rather than silently dropping it.
                 if not validation.get("import_as_vm"):
-                    validation["device_role"] = {"found": False, "role": None}
+                    validation["device_role"] = {
+                        "found": False,
+                        "role": None,
+                        "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                    }
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"
@@ -446,8 +454,16 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
                 apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:
-                validation["device_role"] = {"found": False, "role": None}
+                validation["device_role"] = {
+                    "found": False,
+                    "role": None,
+                    "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                }
             recalculate_validation_status(validation, is_vm=actual_is_vm)
+            # Re-assert non-importable: recalculate sets can_import from issues list,
+            # but a late-found existing match must never be import-ready.
+            validation["can_import"] = False
+            validation["is_ready"] = False
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
 

@@ -501,8 +501,10 @@ class TestLibreNMSAPIDeviceLookup:
         device.cf = {"librenms_id": ""}
         device.primary_ip = None
 
-        with patch.object(api, "get_device_id_by_hostname", return_value=None):
-            result = api.get_librenms_id(device)
+        with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
+            mock_cache.get.return_value = None
+            with patch.object(api, "get_device_id_by_hostname", return_value=None):
+                result = api.get_librenms_id(device)
         assert result is None
 
     @patch("netbox_librenms_plugin.librenms_api.cache")
@@ -1345,3 +1347,380 @@ class TestVlanEntryDictGuard:
 
         assert result["tagged_vlans"] == [30]
         assert result["untagged_vlan"] is None
+
+
+# ====================================================================================
+# Response-shape regression tests for get_device_transceivers / get_device_info /
+# get_device_vlans / get_port_vlan_details. These guard the malformed-payload
+# branches that were tightened up alongside the inventory/transceiver work.
+# ====================================================================================
+
+
+class TestGetDeviceInfoResponseShape:
+    """Cover response-shape branches in get_device_info()."""
+
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_non_dict_device_entry_returns_failure(self, mock_get, mock_librenms_config):
+        """A non-dict entry in the devices list must not propagate as truthy data."""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"status": "ok", "devices": ["not-a-dict"]}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_info(device_id=1)
+
+        assert success is False
+        assert data is None
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_missing_devices_key_returns_failure(self, mock_get, mock_librenms_config):
+        """KeyError on missing 'devices' must be caught and return (False, None)."""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"status": "ok"}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_info(device_id=1)
+
+        assert success is False
+        assert data is None
+
+
+class TestGetDeviceTransceiversResponseShape:
+    """Cover response-shape branches in get_device_transceivers()."""
+
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_success_returns_transceiver_list(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "transceivers": [
+                {"port_id": 1, "type": "QSFP28", "serial": "SN1"},
+                {"port_id": 2, "type": "SFP+", "serial": "SN2"},
+            ],
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_transceivers(device_id=123)
+
+        assert success is True
+        assert len(data) == 2
+        assert data[0]["serial"] == "SN1"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_invalid_json_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.side_effect = ValueError("bad json")
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_transceivers(device_id=123)
+
+        assert success is False
+        assert "Invalid JSON" in msg
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = ["unexpected", "list"]
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_transceivers(device_id=123)
+
+        assert success is False
+        assert "Unexpected" in msg
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_missing_transceivers_key_uses_server_message(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"status": "ok", "message": "no transceivers MIB"}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_transceivers(device_id=123)
+
+        assert success is False
+        assert msg == "no transceivers MIB"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_status_not_ok_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "error",
+            "transceivers": [],
+            "message": "device offline",
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_transceivers(device_id=123)
+
+        assert success is False
+        assert msg == "device offline"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_transceivers_not_list_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "transceivers": {"port_id": 1},
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_transceivers(device_id=123)
+
+        assert success is False
+        assert "Unexpected" in msg
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_malformed_transceiver_entry_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "transceivers": [{"port_id": 1}, None],
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_transceivers(device_id=123)
+
+        assert success is False
+        assert "Malformed" in msg
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_request_exception_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.side_effect = requests.exceptions.ConnectionError("boom")
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_transceivers(device_id=123)
+
+        assert success is False
+        assert "boom" in msg
+
+
+class TestGetDeviceVlansResponseShape:
+    """Cover response-shape branches in get_device_vlans()."""
+
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_success_filters_by_device_id(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "vlans": [
+                {"vlan_id": 1, "device_id": 7, "vlan_vlan": 10, "vlan_name": "DATA"},
+                {"vlan_id": 2, "device_id": 8, "vlan_vlan": 20, "vlan_name": "VOICE"},
+            ],
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, vlans = api.get_device_vlans(device_id=7)
+
+        assert success is True
+        assert len(vlans) == 1
+        assert vlans[0]["vlan_vlan"] == 10
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_vlans_not_list_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "vlans": "oops",
+            "message": "bad payload",
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_vlans(device_id=7)
+
+        assert success is False
+        assert msg == "bad payload"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_non_dict_item_in_vlans_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "vlans": [{"vlan_id": 1, "device_id": 7}, "not-a-dict"],
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_vlans(device_id=7)
+
+        assert success is False
+        assert "invalid item shape" in msg
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_status_not_ok_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"status": "error", "message": "nope"}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_vlans(device_id=7)
+
+        assert success is False
+        assert msg == "nope"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = ["unexpected"]
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_vlans(device_id=7)
+
+        assert success is False
+        assert msg == "Unexpected response format"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_http_404_returns_dedicated_message(self, mock_get, mock_librenms_config):
+        response = MagicMock(status_code=404)
+        mock_get.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError(response=response)
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_vlans(device_id=7)
+
+        assert success is False
+        assert msg == "VLANs resource not found"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_value_error_returns_connection_message(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.side_effect = ValueError("bad json")
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_device_vlans(device_id=7)
+
+        assert success is False
+        assert "Error connecting to LibreNMS" in msg
+
+
+class TestGetPortVlanDetailsResponseShape:
+    """Cover response-shape branches in get_port_vlan_details()."""
+
+    pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_success_returns_port_dict(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok",
+            "port": [{"port_id": 11, "ifName": "Te1/1/1", "vlans": [{"vlan": 10, "untagged": 1}]}],
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, port = api.get_port_vlan_details(port_id=11)
+
+        assert success is True
+        assert port["port_id"] == 11
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = ["unexpected"]
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_port_vlan_details(port_id=11)
+
+        assert success is False
+        assert msg == "Unexpected response format"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_status_not_ok_uses_server_message(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"status": "error", "message": "no port"}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_port_vlan_details(port_id=11)
+
+        assert success is False
+        assert msg == "no port"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_missing_port_list_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"status": "ok", "port": {"port_id": 11}}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_port_vlan_details(port_id=11)
+
+        assert success is False
+        assert "missing 'port' list" in msg
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_empty_port_list_returns_not_found(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"status": "ok", "port": []}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_port_vlan_details(port_id=11)
+
+        assert success is False
+        assert msg == "Port not found"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_non_dict_port_entry_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"status": "ok", "port": ["bad-entry"]}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_port_vlan_details(port_id=11)
+
+        assert success is False
+        assert "invalid 'port' entry" in msg
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_request_exception_returns_failure(self, mock_get, mock_librenms_config):
+        mock_get.side_effect = requests.exceptions.ConnectionError("net down")
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, msg = api.get_port_vlan_details(port_id=11)
+
+        assert success is False
+        assert "net down" in msg

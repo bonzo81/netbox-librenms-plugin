@@ -1,0 +1,28 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <table class="table table-hover attr-table">
+        <thead>
+          <tr>
+            <th>LibreNMS OS</th>
+            <th>NetBox Platform</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>{{ object.librenms_os }}</code></td>
+            <td>{% if object.netbox_platform %}<a href="{{ object.netbox_platform.get_absolute_url }}">{{ object.netbox_platform }}</a>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            <td>{{ object.description|default:"—" }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

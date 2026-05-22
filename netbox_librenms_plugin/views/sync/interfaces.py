@@ -1,5 +1,7 @@
 from urllib.parse import quote_plus
 
+import logging
+
 from dcim.models import Device, Interface, MACAddress
 from django.contrib import messages
 from django.core.cache import cache
@@ -25,6 +27,8 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SyncInterfacesView(
@@ -382,8 +386,9 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                         errors.append(f"Error deleting interface {interface_name or interface_id}: {str(exc)}")
                         continue
 
-        except Exception as exc:  # pragma: no cover
-            return JsonResponse({"error": f"Transaction failed: {str(exc)}"}, status=500)
+        except Exception:  # pragma: no cover
+            logger.exception("DeleteNetBoxInterfacesView transaction failed")
+            return JsonResponse({"error": "Transaction failed. Please check server logs."}, status=500)
 
         response_data = {
             "status": "success",

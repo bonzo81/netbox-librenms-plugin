@@ -198,7 +198,112 @@
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     </span>
                   {% else %}
-                    <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
+                    {% if libre_device.hardware and libre_device.hardware != "-" %}
+                      <div>
+                        <span class="text-danger d-block"><i class="mdi mdi-close-circle"></i> No matching type</span>
+                        <form hx-post="{% url 'plugins:netbox_librenms_plugin:add_device_type_mapping' device_id=libre_device.device_id %}"
+                              hx-swap="none"
+                              hx-include="[name=role_{{ libre_device.device_id }}], [name=rack_{{ libre_device.device_id }}], [name=cluster_{{ libre_device.device_id }}], #use-sysname-toggle, #strip-domain-toggle"
+                              class="mt-1"
+                              id="dt-mapping-form-{{ libre_device.device_id }}">
+                          {% csrf_token %}
+                          <input type="hidden" name="server_key" value="{{ server_key }}">
+                          <div class="position-relative">
+                            <label for="dt-search-{{ libre_device.device_id }}" class="visually-hidden">
+                              Search device types
+                            </label>
+                            <input type="text"
+                                   class="form-control form-control-sm"
+                                   id="dt-search-{{ libre_device.device_id }}"
+                                   placeholder="Search device types…"
+                                   autocomplete="off">
+                            <input type="hidden"
+                                   name="device_type_id"
+                                   id="dt-id-{{ libre_device.device_id }}">
+                            <div id="dt-dropdown-{{ libre_device.device_id }}"
+                                 class="dropdown-menu w-100 shadow"
+                                 style="z-index:1050; max-height:200px; overflow-y:auto; display:none;"></div>
+                          </div>
+                          <button type="submit"
+                                  id="dt-submit-{{ libre_device.device_id }}"
+                                  class="btn btn-sm btn-primary mt-1 w-100"
+                                  disabled>Add Mapping</button>
+                        </form>
+                      </div>
+                      <script>
+                        (function () {
+                          var searchEl = document.getElementById("dt-search-{{ libre_device.device_id }}");
+                          var dropdownEl = document.getElementById("dt-dropdown-{{ libre_device.device_id }}");
+                          var hiddenEl = document.getElementById("dt-id-{{ libre_device.device_id }}");
+                          var submitBtn = document.getElementById("dt-submit-{{ libre_device.device_id }}");
+                          if (!searchEl) return;
+                          var timer = null;
+                          var requestSeq = 0;
+
+                          searchEl.addEventListener("input", function () {
+                            clearTimeout(timer);
+                            hiddenEl.value = "";
+                            submitBtn.disabled = true;
+                            var q = this.value.trim();
+                            if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
+                            timer = setTimeout(function () {
+                              var seq = ++requestSeq;
+                              fetch("{% url 'dcim-api:devicetype-list' %}?q=" + encodeURIComponent(q) + "&limit=20")
+                                .then(function (r) {
+                                  if (!r.ok) {
+                                    throw new Error("DeviceType search failed: HTTP " + r.status);
+                                  }
+                                  return r.json();
+                                })
+                                .then(function (data) {
+                                  if (seq !== requestSeq) return;
+                                  dropdownEl.innerHTML = "";
+                                  if (!data.results || data.results.length === 0) {
+                                    dropdownEl.innerHTML = '<a class="dropdown-item small py-1 text-muted disabled">No results</a>';
+                                  } else {
+                                    data.results.forEach(function (dt) {
+                                      var a = document.createElement("a");
+                                      a.className = "dropdown-item small py-1";
+                                      a.href = "#";
+                                      // dt.display already includes the manufacturer
+                                      // (e.g. "Cisco ISR4321"), so don't prepend it again.
+                                      a.textContent = dt.display;
+                                      a.addEventListener("click", function (e) {
+                                        e.preventDefault();
+                                        searchEl.value = dt.display;
+                                        hiddenEl.value = dt.id;
+                                        submitBtn.disabled = false;
+                                        dropdownEl.style.display = "none";
+                                      });
+                                      dropdownEl.appendChild(a);
+                                    });
+                                  }
+                                  dropdownEl.style.display = "block";
+                                })
+                                .catch(function (err) {
+                                  if (window.console && console.warn) {
+                                    console.warn("DeviceType autocomplete failed:", err);
+                                  }
+                                  dropdownEl.style.display = "none";
+                                });
+                            }, 300);
+                          });
+
+                          function handleDocumentClick(e) {
+                            if (!document.body.contains(dropdownEl)) {
+                              document.removeEventListener("click", handleDocumentClick);
+                              return;
+                            }
+                            if (!searchEl.contains(e.target) && !dropdownEl.contains(e.target)) {
+                              dropdownEl.style.display = "none";
+                            }
+                          }
+                          document.addEventListener("click", handleDocumentClick);
+                        })();
+                      </script>
+                    {% else %}
+                      <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
+                    {% endif %}
                   {% endif %}
                 </td>
                 <td>{{ libre_device.hardware|default:"—" }}</td>
@@ -293,16 +398,24 @@
                         <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
                           <i class="mdi mdi-alert-outline"></i>
                         </span>
+                        {% if libre_device.os and libre_device.os != "-" %}
+                        <button type="button" class="btn btn-sm btn-warning py-0 px-1 ms-1"
+                                hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
+                                hx-target="#htmx-modal-content"
+                                hx-swap="innerHTML"
+                                title="Create platform for {{ libre_device.os }}"
+                                aria-label="Create platform for {{ libre_device.os }}">
+                          <i class="mdi mdi-plus"></i>
+                        </button>
+                        {% endif %}
                       {% endif %}
                     {% elif sync_info and sync_info.platform_synced %}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
-                  {% elif validation.platform.platform %}
-                    {{ validation.platform.platform.name }}
-                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
-                  {% elif sync_info and sync_info.platform_info.platform_exists %}
+                  {% elif validation.existing_device %}
+                    {# Existing device with no platform assigned — show Not set + sync button #}
                     <span class="text-muted">Not set</span>
-                    {% if validation.existing_device %}
+                    {% if validation.platform.platform or sync_info and sync_info.platform_info.platform_exists %}
                     <form style="display:inline" class="ms-1"
                           hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                           hx-swap="none">
@@ -314,9 +427,31 @@
                         <i class="mdi mdi-sync"></i>
                       </button>
                     </form>
+                    {% elif libre_device.os and libre_device.os != "-" %}
+                    <button type="button" class="btn btn-sm btn-outline-warning py-0 px-1"
+                            hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
+                            hx-target="#htmx-modal-content"
+                            hx-swap="innerHTML"
+                            title="Create platform for {{ libre_device.os }}">
+                      <i class="mdi mdi-plus"></i> Create Platform
+                    </button>
                     {% endif %}
+                  {% elif validation.platform.platform %}
+                    {# New import — platform will be assigned on import #}
+                    {{ validation.platform.platform.name }}
+                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                   {% else %}
+                    {% if libre_device.os and libre_device.os != "-" %}
+                    <button type="button" class="btn btn-sm btn-outline-warning py-0 px-1"
+                            hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
+                            hx-target="#htmx-modal-content"
+                            hx-swap="innerHTML"
+                            title="Create platform for {{ libre_device.os }}">
+                      <i class="mdi mdi-plus"></i> Create Platform
+                    </button>
+                    {% else %}
                     <span class="text-muted">Optional</span>
+                    {% endif %}
                   {% endif %}
                 </td>
                 <td>{{ libre_device.os|default:"—" }}</td>

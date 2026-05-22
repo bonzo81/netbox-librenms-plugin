@@ -73,6 +73,7 @@
                 <td class="text-end pe-3">
                     {% if not mapping.is_configured %}
                     {% if lookup_device_model_name == "device" or lookup_device_model_name == "virtualmachine" %}
+                    {% if lookup_device_pk == object.pk %}
                     <form method="post"
                           action="{% url 'plugins:netbox_librenms_plugin:remove_server_mapping' pk=lookup_device_pk %}"
                           style="display:inline"
@@ -85,6 +86,11 @@
                             <i class="mdi mdi-trash-can-outline"></i> Remove
                         </button>
                     </form>
+                    {% else %}
+                    <span class="text-muted small" title="Mapping belongs to VC sync device {{ librenms_sync_device|escape }} — navigate there to remove it">
+                        <i class="mdi mdi-information-outline me-1"></i>Managed by VC sync device
+                    </span>
+                    {% endif %}
                     {% endif %}
                     {% endif %}
                 </td>
@@ -621,6 +627,14 @@
         </li>
         {% endif %}
         {% endwith %}
+        {% if module_sync and object|meta:"model_name" == "device" %}
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="modules-tab" data-tab="modules" data-bs-toggle="tab"
+                data-bs-target="#modules" type="button" role="tab" aria-controls="modules">
+                Modules
+            </button>
+        </li>
+        {% endif %}
     </ul>
     <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top"
         title="Select preferred interface name field"
@@ -649,6 +663,13 @@
         data-tab-id="ipaddresses">
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
+
+    {% if module_sync and object|meta:"model_name" == "device" %}
+    <div class="tab-pane fade" id="modules" role="tabpanel" aria-labelledby="modules-tab"
+        data-tab-id="modules">
+        {% include 'netbox_librenms_plugin/_module_sync.html' %}
+    </div>
+    {% endif %}
 
     {% with model_name=object|meta:"model_name" %}
     {% if model_name == "device" %}
@@ -708,6 +729,19 @@
 
 <!-- Add to LibreNMS Modal Placeholder-->
 <div id="modal-div"></div>
+
+<!-- Shared HTMX Modal (used by module replace and other dynamic content flows) -->
+<div class="modal fade" id="htmx-modal" tabindex="-1" aria-labelledby="htmx-modal-label" aria-hidden="true">
+    <span id="htmx-modal-label" class="visually-hidden">Dialog</span>
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content" id="htmx-modal-content">
+            <div class="modal-body text-center py-3">
+                <i class="mdi mdi-loading mdi-spin mdi-36px"></i>
+                <p class="mt-2">Loading…</p>
+            </div>
+        </div>
+    </div>
+</div>
 
 {% if mismatched_device %}
 <!-- Device Identity Mismatch Modal -->
@@ -967,49 +1001,14 @@
 <div class="modal fade" id="create-platform-modal" tabindex="-1" aria-labelledby="createPlatformModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="createPlatformModalLabel">
-                    <i class="mdi mdi-alert"></i> Create New Platform
-                </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <form method="post" action="{% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk %}">
-                {% csrf_token %}
-                <div class="modal-body">
-                    <div class="alert alert-warning">
-                        <i class="mdi mdi-information"></i>
-                        The platform <strong>{{ platform_info.platform_name }}</strong> does not exist in NetBox.
-                    </div>
-                    <p>This will:</p>
-                    <ol>
-                        <li>Create a new Platform named <strong>{{ platform_info.platform_name }}</strong></li>
-                        <li>Assign it to this device</li>
-                    </ol>
-                    <div class="mb-3">
-                        <label for="platform_name" class="form-label">Platform Name</label>
-                        <input type="text" class="form-control" id="platform_name" name="platform_name"
-                               value="{{ platform_info.platform_name }}" required>
-                    </div>
-                    <div class="mb-3">
-                        <label for="manufacturer" class="form-label">Manufacturer (optional)</label>
-                        <select name="manufacturer" class="form-select">
-                            <option value="">Select manufacturer...</option>
-                            {% for manufacturer in manufacturers %}
-                            <option value="{{ manufacturer.pk }}" {% if object.device_type and object.device_type.manufacturer.pk == manufacturer.pk %}selected{% endif %}>
-                                {{ manufacturer }}
-                            </option>
-                            {% endfor %}
-                        </select>
-                        <small class="form-text text-muted">Optionally associate with device manufacturer</small>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-primary">
-                        <i class="mdi mdi-plus"></i> Create & Assign
-                    </button>
-                </div>
-            </form>
+            {% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk as _create_platform_url %}
+            {% include "netbox_librenms_plugin/htmx/create_platform_modal.html" with
+                librenms_os=platform_info.librenms_os
+                platform_name=platform_info.platform_name
+                form_action=_create_platform_url
+                device_pk=object.pk
+                selected_manufacturer_pk=object.device_type.manufacturer_id
+            %}
         </div>
     </div>
 </div>

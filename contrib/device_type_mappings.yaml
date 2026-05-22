@@ -1,0 +1,73 @@
+# Device Type Mappings
+#
+# Maps LibreNMS hardware strings to NetBox device types.
+# Import via: LibreNMS Plugin > Device Type Mappings > Import
+#
+# Fields:
+#   librenms_hardware    — Hardware string exactly as shown in LibreNMS
+#   netbox_device_type   — NetBox DeviceType (matched by model name or ID)
+#   description          — Optional note
+#
+# The librenms_hardware value is matched case-insensitively.
+# These mappings are checked BEFORE the built-in part_number/model fallback.
+
+# Juniper — LibreNMS reports verbose marketing names
+- librenms_hardware: "Juniper MX480 Internet Backbone Router"
+  netbox_device_type: "MX480"
+  description: "Juniper MX480 chassis"
+
+- librenms_hardware: "Juniper MX960 Internet Backbone Router"
+  netbox_device_type: "MX960"
+  description: "Juniper MX960 chassis"
+
+- librenms_hardware: "Juniper MX304 Edge Router"
+  netbox_device_type: "MX304"
+  description: "Juniper MX304 edge router"
+
+- librenms_hardware: "JNP10008 [PTX10008]"
+  netbox_device_type: "PTX10008"
+  description: "Juniper PTX10008 core router"
+
+- librenms_hardware: "JNP7100-32C [ACX7100-32C]"
+  netbox_device_type: "ACX7100-32C"
+  description: "Juniper ACX7100-32C"
+
+- librenms_hardware: "JNP7024 [ACX7024]"
+  netbox_device_type: "ACX7024"
+  description: "Juniper ACX7024"
+
+- librenms_hardware: "Juniper JNP10008 Internet Backbone Router"
+  netbox_device_type: "PTX10008"
+  description: "Juniper PTX10008 (alternate hardware string)"
+
+- librenms_hardware: "Juniper VRR Internet Backbone Router"
+  netbox_device_type: "VRR"
+  description: "Juniper Virtual Route Reflector"
+
+# Nokia — model string matches directly in most cases
+- librenms_hardware: "7750 SR-7s"
+  netbox_device_type: "7750 SR-7s"
+  description: "Nokia 7750 SR-7s service router"
+
+# Cisco — often matches by part_number but not always
+- librenms_hardware: "WS-C4900M"
+  netbox_device_type: "WS-C4900M"
+  description: "Cisco Catalyst 4900M"
+
+# Cisco IOS XR
+- librenms_hardware: "8201-SYS"
+  netbox_device_type: "8201"
+  description: "Cisco 8201 (hardware string differs from model)"
+
+# UfiSpace — LibreNMS reports SONiC/ONIE platform names
+- librenms_hardware: "x86-64-ufispace-s9610-36d-r0"
+  netbox_device_type: "S9610-36D"
+  description: "UfiSpace S9610-36D"
+
+- librenms_hardware: "x86-64-ufispace-s9610-46dx-r0"
+  netbox_device_type: "S9610-46DX"
+  description: "UfiSpace S9610-46DX"
+
+- librenms_hardware: "x86-64-ufispace-s9700-53dx-r9"
+  netbox_device_type: "S9700-53DX"
+  description: "UfiSpace S9700-53DX"

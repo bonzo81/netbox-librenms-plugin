@@ -128,6 +128,9 @@ class TestDetectVCCiscoStack:
         assert result is not None
         positions = [m["position"] for m in result["members"]]
         assert positions == [1, 2, 3]
+        # Verify serial/position pairs are correctly associated after sorting
+        member_pairs = [(m["serial"], m["position"]) for m in result["members"]]
+        assert member_pairs == [("SN-1", 1), ("SN-2", 2), ("SN-3", 3)]
 
     def test_position_zero_falls_back_to_idx_plus_one(self, mock_server):
         """position=0 in entPhysicalParentRelPos → fallback to idx+1 (never 0)."""
@@ -154,6 +157,9 @@ class TestDetectVCCiscoStack:
         positions = [m["position"] for m in result["members"]]
         # Both had position=0, so they fall back to idx+1: positions [1, 2]
         assert all(p >= 1 for p in positions)
+        # Verify each fallback position is uniquely paired with its serial
+        member_pairs = [(m["serial"], m["position"]) for m in result["members"]]
+        assert member_pairs == [("SN-X", 1), ("SN-Y", 2)]
 
     def test_member_fields_extracted_correctly(self, mock_server):
         """serial, model, name, description all extracted from chassis entries."""
@@ -852,3 +858,56 @@ class TestVCPortFetch:
         assert port["ifAlias"] == "server-link"
         assert port["ifSpeed"] == 1_000_000_000
         assert port["ifMtu"] == 9000
+
+
+class TestCrossServerCacheIsolation:
+    """Cache keys are scoped per server_key — data from one server must not bleed into another."""
+
+    def test_different_server_keys_use_isolated_cache_entries(self, mock_server):
+        """Data cached via server-a must not be returned when querying the same device via server-b."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        device_id = 300
+
+        api_a = _make_api(mock_server.url, server_key="server-a")
+        api_b = _make_api(mock_server.url, server_key="server-b")
+
+        # Register 2-member VC for server-a path
+        mock_server.device_info_response(device_id=device_id, hostname="sw-server-a")
+        root_items = [_stack_root(index=1)]
+        member_items = [_chassis(100, "SN-A1", position=1), _chassis(200, "SN-A2", position=2)]
+        mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
+
+        cache_store = {}
+
+        def mock_cache_set(key, val, timeout=None):
+            cache_store[key] = val
+
+        def mock_cache_get(key):
+            return cache_store.get(key)
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
+            mock_cache.get.side_effect = mock_cache_get
+            mock_cache.set.side_effect = mock_cache_set
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
+                # Warm cache via server-a
+                result_a = get_virtual_chassis_data(api_a, device_id)
+
+                # Query same device via server-b — cache must miss (different key)
+                result_b = get_virtual_chassis_data(api_b, device_id)
+
+        # server-a result is a 2-member VC
+        assert result_a is not None
+        assert result_a.get("member_count") == 2
+
+        # server-b was registered with the same mock routes, so it also fetches a 2-member VC.
+        # The key assertion is that TWO separate cache entries exist — one per server_key.
+        server_a_keys = [k for k in cache_store if "server-a" in k]
+        server_b_keys = [k for k in cache_store if "server-b" in k]
+        assert len(server_a_keys) >= 1, "server-a cache entry expected"
+        assert len(server_b_keys) >= 1, "server-b cache entry expected"
+        assert server_a_keys[0] != server_b_keys[0], "cache keys must differ between servers"
+        assert result_a is not result_b, "must not return the same cached object for different servers"

@@ -132,6 +132,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = []
 
@@ -155,6 +156,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = []
 
@@ -178,6 +180,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = []
 
@@ -201,6 +204,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = []
 
@@ -243,6 +247,29 @@ class TestFilterDevicesJob:
         mock_api_class.assert_called_once_with(server_key="secondary")
         # Verify server_key stored in job data
         assert job.job.data["server_key"] == "secondary"
+
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
+    def test_filter_job_stores_server_key(self, mock_process, mock_api_class):
+        """Job stores resolved api.server_key, not raw input parameter."""
+        from netbox_librenms_plugin.jobs import FilterDevicesJob
+
+        mock_api = MagicMock()
+        mock_api.cache_timeout = 300
+        mock_api.server_key = "resolved-default"
+        mock_api_class.return_value = mock_api
+        mock_process.return_value = [{"device_id": 1, "hostname": "test1"}]
+
+        job = create_mock_job_runner(FilterDevicesJob)
+        job.run(
+            filters={},
+            vc_detection_enabled=False,
+            clear_cache=False,
+            show_disabled=False,
+            server_key=None,
+        )
+
+        assert job.job.data["server_key"] == "resolved-default"
 
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
     @patch("netbox_librenms_plugin.import_utils.process_device_filters")
@@ -678,6 +705,32 @@ class TestImportDevicesJob:
 
         assert ImportDevicesJob.Meta.name == "LibreNMS Device Import"
 
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_import_job_stores_server_key(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """Import job stores resolved api.server_key in job metadata and forwards it to bulk_import_devices_shared."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api = MagicMock()
+        mock_api.server_key = "resolved-default"
+        mock_api_class.return_value = mock_api
+        mock_bulk_devices.return_value = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "virtual_chassis_created": 0,
+        }
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob)
+        job.run(device_ids=[1], vm_imports={}, server_key=None)
+
+        assert job.job.data["server_key"] == "resolved-default"
+        mock_bulk_devices.assert_called_once()
+        call_kwargs = mock_bulk_devices.call_args[1]
+        assert call_kwargs.get("server_key") == "resolved-default"
+
 
 class TestLoadJobResults:
     """Test loading results from completed background jobs."""
@@ -926,42 +979,155 @@ class TestLoadJobResults:
 class TestGracefulFallback:
     """Test graceful fallback when RQ workers unavailable."""
 
+    def _make_view_with_request(self, superuser=True, query_params=None):
+        """Helper to set up a LibreNMSImportView with a mock request."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        view = object.__new__(LibreNMSImportView)
+        request = MagicMock()
+        request.user.is_superuser = superuser
+        request.user.username = "testuser"
+        request.GET = dict(query_params or {})
+        view.request = request
+        return view, request
+
     @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")
     def test_no_workers_triggers_synchronous_processing(self, mock_get_workers):
-        """No RQ workers triggers synchronous fallback."""
+        """No RQ workers: view falls back to synchronous processing, FilterDevicesJob.enqueue not called."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
         mock_get_workers.return_value = 0
 
-        # This test verifies the condition check, not full request handling
-        from netbox_librenms_plugin.views.imports.list import get_workers_for_queue
+        view, request = self._make_view_with_request(
+            superuser=True,
+            query_params={"apply_filters": "1", "librenms_location": "DC1"},
+        )
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
 
-        workers = get_workers_for_queue("default")
-        assert workers == 0
+        with (
+            patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)),
+            patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings,
+            patch("netbox_librenms_plugin.views.imports.list.get_user_pref", return_value=None),
+            patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache,
+            patch("netbox_librenms_plugin.import_utils.get_cache_metadata_key", return_value="meta_key"),
+            patch("netbox_librenms_plugin.import_utils.get_device_count_for_filters", return_value=5),
+            patch("netbox_librenms_plugin.views.imports.list.render") as mock_render,
+            patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"),
+            patch("netbox_librenms_plugin.views.imports.list.get_active_cached_searches", return_value=[]),
+            patch("netbox_librenms_plugin.jobs.FilterDevicesJob") as mock_job_cls,
+            patch("netbox_librenms_plugin.views.imports.list.messages"),
+            patch("netbox_librenms_plugin.views.imports.list.process_device_filters") as mock_pdf,
+        ):
+            mock_settings.objects.first.return_value = None
+            mock_settings.objects.get_or_create.return_value = (None, False)
+            mock_cache.get.return_value = None
+            mock_render.return_value = MagicMock()
 
-        # When workers == 0, the code path skips job enqueuing
-        # and falls through to synchronous get_queryset processing
+            mock_form_cls = MagicMock()
+            mock_form = MagicMock()
+            mock_form.is_valid.return_value = True
+            mock_form.cleaned_data = {"enable_vc_detection": False, "clear_cache": False, "use_background_job": True}
+            mock_form_cls.return_value = mock_form
+            view.filterset_form = mock_form_cls
+            mock_pdf.return_value = ([], False)
+
+            with patch.object(view, "get_server_info", return_value={}):
+                view.get(request)
+
+        # Workers == 0 means synchronous fallback — enqueue must not be called
+        mock_job_cls.enqueue.assert_not_called()
+        mock_render.assert_called_once()
+        mock_pdf.assert_called_once()
 
     @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")
     def test_workers_available_allows_background_job(self, mock_get_workers):
-        """Available workers allow background job enqueue."""
+        """Available workers: view enqueues FilterDevicesJob and returns JSON response."""
+        from django.http import JsonResponse
+
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
         mock_get_workers.return_value = 2
 
-        from netbox_librenms_plugin.views.imports.list import get_workers_for_queue
+        view, request = self._make_view_with_request(
+            superuser=True,
+            query_params={"apply_filters": "1", "librenms_location": "DC1"},
+        )
+        mock_api = MagicMock()
+        mock_api.server_key = "server-2"
 
-        workers = get_workers_for_queue("default")
-        assert workers > 0
-        # When workers > 0, the code path proceeds to FilterDevicesJob.enqueue()
+        with (
+            patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)),
+            patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings,
+            patch("netbox_librenms_plugin.views.imports.list.get_user_pref", return_value=None),
+            patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache,
+            patch("netbox_librenms_plugin.import_utils.get_cache_metadata_key", return_value="meta_key"),
+            patch("netbox_librenms_plugin.import_utils.get_device_count_for_filters", return_value=10),
+            patch("netbox_librenms_plugin.jobs.FilterDevicesJob") as mock_job_cls,
+        ):
+            mock_settings.objects.first.return_value = None
+            mock_cache.get.return_value = None
+            mock_job = MagicMock()
+            mock_job.pk = 99
+            mock_job.job_id = "uuid-99"
+            mock_job_cls.enqueue.return_value = mock_job
+
+            mock_form_cls = MagicMock()
+            mock_form = MagicMock()
+            mock_form.is_valid.return_value = True
+            mock_form.cleaned_data = {"enable_vc_detection": False, "clear_cache": False, "use_background_job": True}
+            mock_form_cls.return_value = mock_form
+            view.filterset_form = mock_form_cls
+
+            result = view.get(request)
+
+        # Workers > 0 means background job should have been enqueued
+        mock_job_cls.enqueue.assert_called_once()
+        # Verify the non-default server_key was forwarded to the background job
+        assert mock_job_cls.enqueue.call_args.kwargs["server_key"] == "server-2"
+        assert isinstance(result, JsonResponse)
 
     @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")
-    @patch("netbox_librenms_plugin.views.imports.list.logger")
-    def test_fallback_logs_warning(self, mock_logger, mock_get_workers):
-        """Warning logged when falling back (checked via worker count)."""
+    @patch("netbox_librenms_plugin.views.imports.list.messages")
+    def test_fallback_logs_warning(self, mock_messages, mock_get_workers):
+        """No workers: view logs a warning message when falling back to synchronous mode."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
         mock_get_workers.return_value = 0
 
-        # Verify the function returns 0 workers which would trigger fallback
-        from netbox_librenms_plugin.views.imports.list import get_workers_for_queue
+        view, request = self._make_view_with_request(
+            superuser=True,
+            query_params={"apply_filters": "1", "librenms_location": "DC1"},
+        )
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
 
-        workers = get_workers_for_queue("default")
-        assert workers == 0
+        with (
+            patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)),
+            patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings,
+            patch("netbox_librenms_plugin.views.imports.list.get_user_pref", return_value=None),
+            patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache,
+            patch("netbox_librenms_plugin.import_utils.get_cache_metadata_key", return_value="meta_key"),
+            patch("netbox_librenms_plugin.import_utils.get_device_count_for_filters", return_value=3),
+            patch("netbox_librenms_plugin.views.imports.list.render") as mock_render,
+            patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"),
+            patch("netbox_librenms_plugin.views.imports.list.get_active_cached_searches", return_value=[]),
+            patch("netbox_librenms_plugin.jobs.FilterDevicesJob"),
+        ):
+            mock_settings.objects.first.return_value = None
+            mock_settings.objects.get_or_create.return_value = (None, False)
+            mock_cache.get.return_value = None
+            mock_render.return_value = MagicMock()
 
-        # The view would log a warning when it detects no workers and falls back
-        # This test verifies the condition that triggers the fallback path
+            mock_form_cls = MagicMock()
+            mock_form = MagicMock()
+            mock_form.is_valid.return_value = True
+            mock_form.cleaned_data = {"enable_vc_detection": False, "clear_cache": False, "use_background_job": True}
+            mock_form_cls.return_value = mock_form
+            view.filterset_form = mock_form_cls
+
+            with patch.object(view, "get_server_info", return_value={}):
+                view.get(request)
+
+        # A warning should be emitted when falling back to sync due to no workers
+        mock_messages.warning.assert_called_once()

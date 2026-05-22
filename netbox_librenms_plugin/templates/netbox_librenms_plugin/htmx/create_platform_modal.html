@@ -1,0 +1,93 @@
+{# Shared partial for the Create Platform modal content. Used in two contexts: #}
+{#   Device sync page (use_htmx not set): regular POST via method="post", redirects on success. #}
+{#   Import page (use_htmx=True): hx-post, returns OOB swaps on success. #}
+{# Expected context variables: #}
+{#   librenms_os             - LibreNMS OS string, e.g. "ios" #}
+{#   platform_name           - Suggested platform name (typically same as librenms_os) #}
+{#   manufacturers           - Queryset/list of Manufacturer objects #}
+{#   form_action             - URL the form POSTs to #}
+{#   device_pk               - (optional) NetBox Device/VM pk to also assign the platform to #}
+{#   selected_manufacturer_pk - (optional) Pre-selected manufacturer pk #}
+{#   use_htmx                - (optional) When True adds hx-post/hx-swap attributes #}
+{#   htmx_include            - (optional) CSS selector string for hx-include #}
+{#   server_key              - (optional) LibreNMS server key, forwarded as hidden field #}
+<div class="modal-header">
+    <h5 class="modal-title" id="createPlatformModalLabel">
+        <i class="mdi mdi-alert"></i> Create New Platform
+    </h5>
+    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<form{% if use_htmx %} hx-post="{{ form_action }}" hx-swap="none"{% if htmx_include %} hx-include="{{ htmx_include }}"{% endif %}{% else %} method="post" action="{{ form_action }}"{% endif %}>
+    {% csrf_token %}
+    <input type="hidden" name="librenms_os" value="{{ librenms_os }}">
+    {% if server_key %}
+    <input type="hidden" name="server_key" value="{{ server_key }}">
+    {% endif %}
+    {% if device_pk %}
+    <input type="hidden" name="device_pk" value="{{ device_pk }}">
+    {% endif %}
+    <div class="modal-body">
+        <div class="alert alert-warning">
+            <i class="mdi mdi-information"></i>
+            No NetBox platform matches LibreNMS OS <strong>{{ librenms_os }}</strong>.
+        </div>
+        <p>This will:</p>
+        <ol>
+            <li>Create a new Platform with the name below (defaults to the LibreNMS OS name)</li>
+            {% if device_pk %}<li>Assign it to this device</li>{% endif %}
+            <li>Optionally add a platform mapping so future syncs match correctly</li>
+        </ol>
+        <div class="mb-3">
+            <label for="platform_name" class="form-label">Platform Name</label>
+            <input type="text" class="form-control" id="platform_name" name="platform_name"
+                   value="{{ platform_name }}" required
+                   data-librenms-os="{{ librenms_os }}">
+        </div>
+        <div class="mb-3">
+            <label for="manufacturer" class="form-label">Manufacturer (optional)</label>
+            <select name="manufacturer" id="manufacturer" class="form-select">
+                <option value="">Select manufacturer...</option>
+                {% for manufacturer in manufacturers %}
+                <option value="{{ manufacturer.pk }}"{% if selected_manufacturer_pk and manufacturer.pk == selected_manufacturer_pk %} selected{% endif %}>
+                    {{ manufacturer }}
+                </option>
+                {% endfor %}
+            </select>
+            <small class="form-text text-muted">Optionally associate with device manufacturer</small>
+        </div>
+        <div class="mb-3">
+            <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="create_mapping"
+                       id="create_mapping" value="1" checked>
+                <label class="form-check-label" for="create_mapping">
+                    Add platform mapping
+                    (<code>{{ librenms_os }}</code> &rarr; new platform)
+                </label>
+            </div>
+            <small class="form-text text-warning fw-semibold" id="mapping-name-mismatch-note" style="display:none;">
+                <i class="mdi mdi-alert-outline"></i>
+                Name differs from LibreNMS OS &mdash; mapping is required for future matching
+            </small>
+        </div>
+    </div>
+    <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-plus"></i> Create{% if device_pk %} &amp; Assign{% endif %}
+        </button>
+    </div>
+</form>
+<script>
+(function () {
+    var input = document.getElementById('platform_name');
+    var note = document.getElementById('mapping-name-mismatch-note');
+    if (!input || !note) return;
+    var original = (input.dataset.librenmsOs || '').toLowerCase();
+    function updateNote() {
+        var differs = input.value.trim().toLowerCase() !== original;
+        note.style.display = differs ? '' : 'none';
+    }
+    input.addEventListener('input', updateNote);
+    updateNote();
+})();
+</script>
