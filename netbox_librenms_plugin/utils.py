@@ -824,6 +824,13 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
             obj,
         )
         return  # Don't persist an invalid entry
+    if int_id <= 0:
+        logger.warning(
+            "librenms_id device_id %r must be a positive integer on %r; not storing.",
+            device_id,
+            obj,
+        )
+        return
     # Preserve any existing OOB sub-object when rewriting the main device id.
     existing_entry = cf_value.get(server_key)
     if isinstance(existing_entry, dict) and "oob" in existing_entry:

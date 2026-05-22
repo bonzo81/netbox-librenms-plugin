@@ -1879,7 +1879,12 @@ class AddPlatformMappingView(
             return error
 
         from dcim.models import Platform
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.models import PlatformMapping
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
         if not libre_device:

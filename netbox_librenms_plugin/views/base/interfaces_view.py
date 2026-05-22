@@ -106,20 +106,25 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                 oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
                 for port in oob_enriched:
                     port["_source"] = "oob"
-                # Detect shared-LOM: same MAC seen on both main and OOB sides
-                mac_index = {}
+                # Detect shared-LOM: same MAC seen on BOTH main and OOB sides.
+                # Build separate per-source MAC sets so that within-source
+                # duplicates are not falsely flagged as cross-source conflicts.
+                main_macs: set[str] = set()
                 for port in enriched_ports:
                     mac = (port.get("ifPhysAddress") or "").lower().strip()
                     if mac:
-                        mac_index.setdefault(mac, []).append(port)
+                        main_macs.add(mac)
+                oob_macs: set[str] = set()
                 for port in oob_enriched:
                     mac = (port.get("ifPhysAddress") or "").lower().strip()
                     if mac:
-                        mac_index.setdefault(mac, []).append(port)
-                for mac, rows in mac_index.items():
-                    if len(rows) > 1:
-                        for row in rows:
-                            row["_dedup_conflict"] = True
+                        oob_macs.add(mac)
+                shared_macs = main_macs & oob_macs
+                if shared_macs:
+                    for port in enriched_ports + oob_enriched:
+                        mac = (port.get("ifPhysAddress") or "").lower().strip()
+                        if mac in shared_macs:
+                            port["_dedup_conflict"] = True
                 librenms_data["ports"] = enriched_ports + oob_enriched
         # Store data in cache (keyed by server to avoid cross-server collisions)
         cache.set(

@@ -16,8 +16,8 @@ block the import and let the user adjust their selection.
 from __future__ import annotations
 
 
-def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str, str]]:
-    """Return [(nb_device_pk, nb_device_name, role)] candidates for a single row.
+def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str, str, str]]:
+    """Return [(nb_device_pk, nb_device_name, role, model_name)] candidates for a single row.
 
     ``role`` is a short human-readable label describing how this LibreNMS
     row would touch the NetBox device:
@@ -32,31 +32,36 @@ def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str, str]]:
       existing NetBox device that currently only has an OOB link
       (``promote_to_host``).
 
-    Duplicate ``(pk, role)`` tuples are de-duplicated; a single row may
-    legitimately surface the same pk under different roles.
-    """
-    candidates: list[tuple[int, str, str]] = []
-    seen: set[tuple[int, str]] = set()
+    ``model_name`` is the Python class name of the NetBox object
+    (e.g. ``"Device"``, ``"VirtualMachine"``) so that two objects of
+    different types that happen to share the same pk are not grouped as
+    collisions.
 
-    def _add(pk, name, role):
+    Duplicate ``(pk, role, model_name)`` tuples are de-duplicated; a
+    single row may legitimately surface the same pk under different roles.
+    """
+    candidates: list[tuple[int, str, str, str]] = []
+    seen: set[tuple[int, str, str]] = set()
+
+    def _add(pk, name, role, model_name="Device"):
         try:
             pk_int = int(pk)
         except (TypeError, ValueError):
             return
-        key = (pk_int, role)
+        key = (pk_int, role, model_name)
         if key in seen:
             return
         seen.add(key)
-        candidates.append((pk_int, str(name or f"device-{pk_int}"), role))
+        candidates.append((pk_int, str(name or f"device-{pk_int}"), role, model_name))
 
     existing = validation.get("existing_device")
     if existing is not None and getattr(existing, "pk", None) is not None:
-        _add(existing.pk, getattr(existing, "name", None), "host")
+        _add(existing.pk, getattr(existing, "name", None), "host", type(existing).__name__)
 
     oob_candidate = validation.get("oob_candidate") or {}
     oob_device = oob_candidate.get("device") if isinstance(oob_candidate, dict) else None
     if oob_device is not None and getattr(oob_device, "pk", None) is not None:
-        _add(oob_device.pk, getattr(oob_device, "name", None), "oob")
+        _add(oob_device.pk, getattr(oob_device, "name", None), "oob", type(oob_device).__name__)
 
     merge = validation.get("merge_candidates") or {}
     if isinstance(merge, dict):
@@ -71,7 +76,7 @@ def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str, str]]:
     if isinstance(promote, dict):
         target = promote.get("existing_device")
         if target is not None and getattr(target, "pk", None) is not None:
-            _add(target.pk, getattr(target, "name", None), "promote_target")
+            _add(target.pk, getattr(target, "name", None), "promote_target", type(target).__name__)
         target_pk = promote.get("existing_device_pk")
         if target_pk is not None:
             _add(target_pk, promote.get("existing_device_name"), "promote_target")
@@ -86,7 +91,7 @@ def detect_bulk_collisions(devices: list[dict]) -> list[dict]:
     each item is a dict with at least ``device_id``, ``device_name`` and
     ``validation`` keys.
 
-    Returns a list of collision groups (one per offending NetBox pk),
+    Returns a list of collision groups (one per offending NetBox device),
     sorted by ``nb_device_pk`` for stable rendering. Each group:
 
     .. code-block:: python
@@ -107,7 +112,9 @@ def detect_bulk_collisions(devices: list[dict]) -> list[dict]:
     A group is only emitted when at least two distinct LibreNMS
     ``device_id`` values target the same NetBox pk.
     """
-    by_nb_pk: dict[int, dict] = {}
+    # Key by (model_name, nb_pk) to avoid false collisions when a Device
+    # and a VirtualMachine happen to share the same integer pk.
+    by_nb_pk: dict[tuple[str, int], dict] = {}
 
     for entry in devices or []:
         validation = entry.get("validation") or {}
@@ -117,9 +124,10 @@ def detect_bulk_collisions(devices: list[dict]) -> list[dict]:
             continue
         hostname = entry.get("device_name") or f"device-{libre_id}"
 
-        for nb_pk, nb_name, role in _candidate_pks_for_row(validation):
+        for nb_pk, nb_name, role, model_name in _candidate_pks_for_row(validation):
+            bucket_key = (model_name, nb_pk)
             bucket = by_nb_pk.setdefault(
-                nb_pk,
+                bucket_key,
                 {"nb_device_pk": nb_pk, "nb_device_name": nb_name, "_rows": {}},
             )
             # Keep the first non-default name we see — rows often disagree
@@ -136,8 +144,8 @@ def detect_bulk_collisions(devices: list[dict]) -> list[dict]:
                 row["roles"].append(role)
 
     collisions: list[dict] = []
-    for nb_pk in sorted(by_nb_pk.keys()):
-        bucket = by_nb_pk[nb_pk]
+    for _model_name, nb_pk in sorted(by_nb_pk.keys()):
+        bucket = by_nb_pk[(_model_name, nb_pk)]
         rows = list(bucket["_rows"].values())
         if len(rows) < 2:
             continue

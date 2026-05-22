@@ -49,7 +49,10 @@ Optional:
       if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
       timer = setTimeout(function () {
         var seq = ++requestSeq;
-        fetch("{% url 'dcim-api:platform-list' %}?q=" + encodeURIComponent(q) + "&limit=20")
+        var csrfToken = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || "";
+        fetch("{% url 'dcim-api:platform-list' %}?q=" + encodeURIComponent(q) + "&limit=20", {
+          headers: { "X-CSRFToken": csrfToken }
+        })
           .then(function (r) { return r.json(); })
           .then(function (data) {
             if (seq !== requestSeq) return;

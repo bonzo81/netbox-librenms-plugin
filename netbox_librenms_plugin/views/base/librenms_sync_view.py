@@ -183,7 +183,11 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         from dcim.models import Device
 
-        winner = Device.objects.filter(pk=marker["device_id"]).first()
+        try:
+            winner_pk = int(marker.get("device_id"))
+        except (TypeError, ValueError):
+            return {"migrated_to_marker": marker, "migrated_to_winner": None}
+        winner = Device.objects.filter(pk=winner_pk).first()
         return {"migrated_to_marker": marker, "migrated_to_winner": winner}
 
     @staticmethod

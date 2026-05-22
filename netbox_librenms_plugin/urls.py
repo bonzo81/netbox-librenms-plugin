@@ -466,7 +466,7 @@ urlpatterns = [
         name="create_platform_from_import",
     ),
     path(
-        "device-import/add-platform-mapping/<str:device_id>/",
+        "device-import/add-platform-mapping/<int:device_id>/",
         AddPlatformMappingView.as_view(),
         name="add_platform_mapping",
     ),

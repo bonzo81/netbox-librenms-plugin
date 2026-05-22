@@ -487,7 +487,14 @@ class DeviceImportTable(tables.Table):
                 btn_icon = "mdi-chip"
                 btn_label = " OOB"
                 if paired_host_id is not None:
-                    btn_title = f"Linked as OOB controller (paired host: LibreNMS #{int(paired_host_id)})"
+                    try:
+                        paired_host_id_int = int(paired_host_id)
+                    except (TypeError, ValueError):
+                        paired_host_id_int = None
+                    if paired_host_id_int is not None:
+                        btn_title = f"Linked as OOB controller (paired host: LibreNMS #{paired_host_id_int})"
+                    else:
+                        btn_title = "Linked as OOB controller"
                 else:
                     btn_title = "Linked as OOB controller"
             elif has_mismatch:

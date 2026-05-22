@@ -38,7 +38,11 @@ def _resolve_winner_for_donor(donor, server_key="default"):
     marker = get_migrated_to_marker(donor, server_key)
     if not marker:
         return None, None
-    winner = Device.objects.filter(pk=marker["device_id"]).first()
+    try:
+        winner_pk = int(marker.get("device_id"))
+    except (TypeError, ValueError):
+        return None, marker
+    winner = Device.objects.filter(pk=winner_pk).first()
     if winner is None:
         return None, marker
     return winner, marker
