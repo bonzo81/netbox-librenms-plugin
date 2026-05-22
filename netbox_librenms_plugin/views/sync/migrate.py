@@ -16,6 +16,7 @@ from django.contrib import messages
 from django.db import transaction
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
 
@@ -49,6 +50,25 @@ def _server_key_from_request(request, default="default"):
     return sk if isinstance(sk, str) and sk else default
 
 
+def _safe_referer(request):
+    """
+    Return the request's ``Referer`` only when it points back at this
+    site, otherwise ``"/"``.
+
+    ``Referer`` is a client-controlled header, so it must be validated
+    against the current host before being used as a redirect target —
+    trusting it blindly is an open-redirect vector.
+    """
+    referer = request.META.get("HTTP_REFERER")
+    if referer and url_has_allowed_host_and_scheme(
+        referer,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return referer
+    return "/"
+
+
 def _hx_response(request, message, level=messages.SUCCESS, *, status=200):
     """
     Common HTMX response: queue a Django messages flash and emit the
@@ -60,7 +80,7 @@ def _hx_response(request, message, level=messages.SUCCESS, *, status=200):
     messages.add_message(request, level, message)
     if request.headers.get("HX-Request"):
         return HttpResponse(status=status, headers={"HX-Refresh": "true"})
-    return redirect(request.META.get("HTTP_REFERER") or "/")
+    return redirect(_safe_referer(request))
 
 
 class _BaseMoveToWinnerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -133,7 +153,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         if request.headers.get("HX-Request"):
             return JsonResponse({"error": msg}, status=status)
         messages.error(request, msg)
-        return redirect(request.META.get("HTTP_REFERER") or "/")
+        return redirect(_safe_referer(request))
 
 
 class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
@@ -201,7 +221,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         if request.headers.get("HX-Request"):
             return JsonResponse({"error": msg}, status=status)
         messages.error(request, msg)
-        return redirect(request.META.get("HTTP_REFERER") or "/")
+        return redirect(_safe_referer(request))
 
 
 class TransferDeviceIPView(_BaseMoveToWinnerView):
@@ -274,4 +294,4 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
         if request.headers.get("HX-Request"):
             return JsonResponse({"error": msg}, status=status)
         messages.error(request, msg)
-        return redirect(request.META.get("HTTP_REFERER") or "/")
+        return redirect(_safe_referer(request))
