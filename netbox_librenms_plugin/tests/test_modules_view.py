@@ -2260,9 +2260,10 @@ class TestPositionalMatchClassAware:
         return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
 
     @staticmethod
-    def _bay(name):
+    def _bay(name, position=None):
         b = MagicMock()
         b.name = name
+        b.position = position
         return b
 
     @staticmethod
@@ -2356,6 +2357,24 @@ class TestPositionalMatchClassAware:
         )
         assert result is bays["SFP 1"]
 
+    def test_port_matches_typoed_bay_name_via_numeric_position(self):
+        """Numeric bay positions should rescue matching when the bay name is misspelled."""
+        bays = {
+            "SFP 1": self._bay("SFP 1", position="1"),
+            "SFP2": self._bay("SFP2", position="2"),
+        }
+        result = self._walk("port", 2, bays)
+        assert result is bays["SFP2"]
+
+    def test_port_matches_typoed_bay_name_via_alpha_position(self):
+        """Alphabetic bay positions should map sibling order 1->A, 2->B, etc."""
+        bays = {
+            "SFP 1": self._bay("SFP 1", position="A"),
+            "SFP2": self._bay("SFP2", position="B"),
+        }
+        result = self._walk("port", 2, bays)
+        assert result is bays["SFP2"]
+
     def test_unknown_class_returns_none(self):
         """An item with an unknown / empty class doesn't get a positional guess."""
         bays = {"Slot 1": self._bay("Slot 1")}
@@ -2419,6 +2438,15 @@ class TestNoBayWarningHints:
         item = {"entPhysicalClass": "module"}
         msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
         assert "Slot" in msg or "SFP" in msg
+
+    def test_port_class_hint_uses_plain_language(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalClass": "port"}
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        assert "no matching bay in netbox" in msg.lower()
+        assert msg.lower().count("modulebaymapping") == 1
+        assert "if the names differ" in msg.lower()
 
 
 class TestSuggestBayMapping:
@@ -3002,7 +3030,7 @@ class TestBuildRowModelWarning:
             )
         assert row["status"] == "No Bay"
         assert row.get("no_bay_reason") == "interface_child"
-        assert "Install Branch" in row.get("model_warning", "")
+        assert "matching child bay is missing in netbox" in row.get("model_warning", "").lower()
 
     def test_port_row_sets_can_install_and_interface_hint_when_bay_matches(self):
         """Matched port rows expose install action and preserve best interface label hint."""
@@ -3220,11 +3248,11 @@ class TestRenderStatusNoBayOnParent:
         assert "No Bay" in str(html)  # badge text changed but still present as substring
 
     def test_interface_child_label_for_interface_descendants(self):
-        """Status cell shows 'Interface Child' for interface-like no-bay descendants."""
+        """Status cell shows 'Missing Child Bay' for interface-like no-bay descendants."""
         table = self._table()
         record = {"status": "No Bay", "no_bay_reason": "interface_child"}
         html = table.render_status("No Bay", record)
-        assert "Interface Child" in str(html)
+        assert "Missing Child Bay" in str(html)
 
     def test_plain_no_bay_label_without_reason(self):
         """Without no_bay_reason, status cell shows plain 'No Bay'."""
@@ -3285,6 +3313,54 @@ class TestMatchedInterfaceLinking:
 
         assert row["matched_interface_name"] == "TenGigabitEthernet1/1/1"
         assert row["matched_interface_url"] == "/dcim/interfaces/100/"
+        assert row["matched_interface_source"] == "port_id"
+        assert row["matched_interface_confidence"] == "high"
+
+    def test_attach_interface_match_falls_back_to_name_lookup(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        row = {
+            "name": "Te1/1/1",
+            "description": "desc",
+            "librenms_port_id": None,
+            "librenms_ifname": "TenGigabitEthernet1/1/1",
+        }
+        iface = MagicMock()
+        iface.name = "TenGigabitEthernet1/1/1"
+        iface.get_absolute_url.return_value = "/dcim/interfaces/100/"
+        context = {
+            "interfaces_by_port_id": {},
+            "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface},
+        }
+
+        BaseModuleTableView._attach_interface_match(row, context)
+
+        assert row["matched_interface_name"] == "TenGigabitEthernet1/1/1"
+        assert row["matched_interface_url"] == "/dcim/interfaces/100/"
+        assert row["matched_interface_source"] == "name"
+        assert row["matched_interface_confidence"] == "medium"
+
+    def test_attach_interface_match_marks_installed_row_for_interface_update(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        row = {
+            "name": "Te1/1/1",
+            "librenms_port_id": 42,
+            "installed_module_id": 555,
+        }
+        iface = MagicMock()
+        iface.pk = 100
+        iface.name = "TenGigabitEthernet1/1/1"
+        iface.module_id = None
+        iface.get_absolute_url.return_value = "/dcim/interfaces/100/"
+        context = {"interfaces_by_port_id": {42: iface}, "server_key": "default"}
+
+        with patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_device_id", return_value=None):
+            BaseModuleTableView._attach_interface_match(row, context)
+
+        assert row["matched_interface_id"] == 100
+        assert row["matched_interface_module_id"] is None
+        assert row["can_update_interface_binding"] is True
 
     def test_attach_interface_match_ignores_missing_port(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -3308,6 +3384,8 @@ class TestMatchedInterfaceLinking:
                     "depth": 1,
                     "matched_interface_name": "TenGigabitEthernet1/1/1",
                     "matched_interface_url": "/dcim/interfaces/100/",
+                    "matched_interface_source": "port_id",
+                    "matched_interface_confidence": "high",
                 },
             )
         )
@@ -3315,6 +3393,7 @@ class TestMatchedInterfaceLinking:
         assert "TenGigabitEthernet1/1/1" in html
         assert "/dcim/interfaces/100/" in html
         assert "<a href=" in html
+        assert "Matched by port id, confidence high" in html
 
     def test_render_module_bay_indents_child_module_rows(self):
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
@@ -4242,3 +4321,35 @@ class TestRenderActionsPortIdentityFields:
 
         assert 'name="librenms_ifname" value="TenGigabitEthernet1/1/1"' in html
         assert 'name="librenms_ifdescr" value="Te1/1/1"' in html
+
+    def test_interface_child_row_does_not_render_install_action(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        table.device = MagicMock(pk=24)
+        table.csrf_token = "csrf123"
+        table.server_key = "default"
+        table.has_write_permission = True
+        table.can_add_module = True
+        table.can_change_module = False
+        table.can_delete_module = False
+
+        record = {
+            "can_install": False,
+            "no_bay_reason": "interface_child",
+            "selected_device_id": 24,
+            "ent_physical_index": 77,
+            "librenms_port_id": 56284,
+            "librenms_ifname": "TenGigabitEthernet1/1/1",
+            "librenms_ifdescr": "Te1/1/1",
+            "name": "Te1/1/1",
+            "description": "10G transceiver",
+            "module_bay_id": "",
+            "module_type_id": 5,
+            "serial": "SN-1",
+        }
+
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/plugins/install-module/"):
+            html = str(table.render_actions("", record))
+
+        assert '<i class="mdi mdi-download"></i> Install' not in html

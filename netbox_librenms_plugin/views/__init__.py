@@ -18,6 +18,7 @@ from .sync.modules import (  # noqa: F401
     MoveModuleView,
     ModuleMismatchPreviewView,
     ReplaceModuleView,
+    UpdateModuleInterfaceView,
     UpdateModuleSerialView,
 )
 from .base.vlan_table_view import BaseVLANTableView  # noqa: F401

@@ -58,6 +58,7 @@ class LibreNMSModuleTable(tables.Table):
         has_write_permission=False,
         can_add_module=False,
         can_change_module=False,
+        can_change_interface=False,
         can_delete_module=False,
         can_add_module_bay_template=False,
         can_add_module_type=False,
@@ -73,6 +74,7 @@ class LibreNMSModuleTable(tables.Table):
         self.has_write_permission = has_write_permission
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
+        self.can_change_interface = can_change_interface
         self.can_delete_module = can_delete_module
         self.can_add_module_bay_template = can_add_module_bay_template
         self.can_add_module_type = can_add_module_type
@@ -125,8 +127,23 @@ class LibreNMSModuleTable(tables.Table):
         display_name = value or "-"
         matched_interface_url = record.get("matched_interface_url")
         matched_interface_name = record.get("matched_interface_name") or display_name
+        matched_interface_source = record.get("matched_interface_source")
+        matched_interface_confidence = record.get("matched_interface_confidence")
+        source_label = str(matched_interface_source or "").replace("_", " ").strip()
+        confidence_label = str(matched_interface_confidence or "").replace("_", " ").strip()
+        title_parts = []
+        if source_label:
+            title_parts.append(f"Matched by {source_label}")
+        if confidence_label:
+            title_parts.append(f"confidence {confidence_label}")
+        title = ", ".join(title_parts)
         if matched_interface_url:
-            rendered_name = format_html('<a href="{}">{}</a>', matched_interface_url, matched_interface_name)
+            rendered_name = format_html(
+                '<a href="{}" title="{}">{}</a>',
+                matched_interface_url,
+                title,
+                matched_interface_name,
+            )
         else:
             rendered_name = display_name
 
@@ -228,7 +245,7 @@ class LibreNMSModuleTable(tables.Table):
         if no_bay_reason == "empty_parent_bays":
             display_text = "No Bay on Parent"
         elif no_bay_reason == "interface_child":
-            display_text = "Interface Child"
+            display_text = "Missing Child Bay"
         else:
             display_text = value
 
@@ -478,6 +495,43 @@ class LibreNMSModuleTable(tables.Table):
                     record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
                     record.get("serial") or "",
+                )
+            )
+
+        if (
+            getattr(self, "can_change_interface", False)
+            and record.get("can_update_interface_binding")
+            and record.get("installed_module_id")
+        ):
+            url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
+            buttons.append(
+                format_html(
+                    '<form method="post" action="{}" style="display:inline">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="server_key" value="{}">'
+                    '<input type="hidden" name="selected_device_id" value="{}">'
+                    '<input type="hidden" name="module_id" value="{}">'
+                    '<input type="hidden" name="ent_index" value="{}">'
+                    '<input type="hidden" name="librenms_port_id" value="{}">'
+                    '<input type="hidden" name="librenms_ifname" value="{}">'
+                    '<input type="hidden" name="librenms_ifdescr" value="{}">'
+                    '<input type="hidden" name="inventory_name" value="{}">'
+                    '<input type="hidden" name="inventory_descr" value="{}">'
+                    '<button type="submit" class="btn btn-sm btn-outline-warning ms-1"'
+                    ' title="Associate matching NetBox interface with installed module">'
+                    '<i class="mdi mdi-link-variant"></i> Update Interface'
+                    "</button></form>",
+                    url,
+                    self.csrf_token,
+                    self.server_key,
+                    record.get("selected_device_id") or self.device.pk,
+                    record["installed_module_id"],
+                    record.get("ent_physical_index", ""),
+                    record.get("librenms_port_id", ""),
+                    record.get("librenms_ifname") or "",
+                    record.get("librenms_ifdescr") or "",
+                    record.get("name") or "",
+                    record.get("description") or "",
                 )
             )
 

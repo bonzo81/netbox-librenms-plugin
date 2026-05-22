@@ -16,6 +16,7 @@ class TestLibreNMSModuleTable:
         device=None,
         can_add_module=True,
         can_change_module=True,
+        can_change_interface=True,
         can_delete_module=True,
         can_add_module_bay_template=True,
         can_add_module_type=True,
@@ -33,6 +34,7 @@ class TestLibreNMSModuleTable:
         table.has_write_permission = True
         table.can_add_module = can_add_module
         table.can_change_module = can_change_module
+        table.can_change_interface = can_change_interface
         table.can_delete_module = can_delete_module
         table.can_add_module_bay_template = can_add_module_bay_template
         table.can_add_module_type = can_add_module_type
@@ -544,6 +546,43 @@ class TestLibreNMSModuleTable:
             result = table.render_actions(None, record)
 
         assert result == ""
+
+    def test_render_actions_can_update_interface_renders_button(self):
+        """Installed row with a safe interface candidate renders Update Interface."""
+        device = MagicMock()
+        device.pk = 81
+        table = self._make_table(device=device, can_change_interface=True)
+        record = {
+            "can_update_interface_binding": True,
+            "installed_module_id": 42,
+            "ent_physical_index": 77,
+            "librenms_port_id": 56284,
+            "librenms_ifname": "TenGigabitEthernet1/1/1",
+            "librenms_ifdescr": "Te1/1/1",
+            "name": "Te1/1/1",
+            "description": "10G transceiver",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Update Interface" in result
+        assert "mdi-link-variant" in result
+        assert 'name="module_id" value="42"' in result
+
+    def test_render_actions_update_interface_requires_permission(self):
+        """Update Interface button is hidden without change-interface permission."""
+        device = MagicMock()
+        device.pk = 82
+        table = self._make_table(device=device, can_change_interface=False)
+        record = {
+            "can_update_interface_binding": True,
+            "installed_module_id": 42,
+            "ent_physical_index": 77,
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Update Interface" not in result
 
     def test_render_actions_can_replace_renders_replace_button(self):
         """can_replace=True with installed_module_id renders a Replace button."""

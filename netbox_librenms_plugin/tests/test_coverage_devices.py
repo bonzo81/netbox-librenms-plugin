@@ -900,6 +900,7 @@ class TestDeviceModuleTableView:
                 in {
                     "dcim.add_module",
                     "dcim.change_module",
+                    "dcim.change_interface",
                     "dcim.delete_module",
                     "dcim.add_modulebaytemplate",
                     "dcim.add_moduletype",
@@ -929,6 +930,7 @@ class TestDeviceModuleTableView:
             has_write_permission=True,
             can_add_module=True,
             can_change_module=True,
+            can_change_interface=True,
             can_delete_module=True,
             can_add_module_bay_template=True,
             can_add_module_type=True,
