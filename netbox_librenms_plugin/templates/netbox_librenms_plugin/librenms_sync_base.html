@@ -1003,7 +1003,7 @@
 </div>
 {% endif %}
 
-{% if not platform_info.platform_exists and platform_info.platform_name and found_in_librenms %}
+{% if object_model_name == "device" and not platform_info.platform_exists and platform_info.platform_name and found_in_librenms %}
 <!-- Create Platform Modal -->
 <div class="modal fade" id="create-platform-modal" tabindex="-1" aria-labelledby="createPlatformModalLabel" aria-hidden="true">
     <div class="modal-dialog">
