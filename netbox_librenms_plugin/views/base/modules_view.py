@@ -1355,14 +1355,30 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         raw_parts = [part.strip() for part in label.split("/")]
         coordinates = []
         for part in raw_parts:
-            match = re.search(r"(\d+)\s*$", part)
-            if not match:
+            suffix = BaseModuleTableView._extract_trailing_digits(part)
+            if suffix is None:
                 return []
             try:
-                coordinates.append(int(match.group(1)))
+                coordinates.append(int(suffix))
             except (TypeError, ValueError):
                 return []
         return coordinates
+
+    @staticmethod
+    def _extract_trailing_digits(value):
+        """Return the trailing digit run from a string, or None when absent."""
+        if not value:
+            return None
+
+        trimmed = value.rstrip()
+        end = len(trimmed)
+        start = end
+        while start > 0 and trimmed[start - 1].isdigit():
+            start -= 1
+
+        if start == end:
+            return None
+        return trimmed[start:end]
 
     @staticmethod
     def _extract_port_index_from_label(label):
@@ -1375,10 +1391,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if tail_segment.isdigit():
                 return int(tail_segment)
 
-        trailing_match = re.search(r"(\d+)\s*$", label)
-        if trailing_match:
+        trailing_digits = BaseModuleTableView._extract_trailing_digits(label)
+        if trailing_digits is not None:
             try:
-                return int(trailing_match.group(1))
+                return int(trailing_digits)
             except ValueError:
                 return None
         return None

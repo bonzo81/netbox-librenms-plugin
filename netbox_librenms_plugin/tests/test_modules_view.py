@@ -2357,6 +2357,17 @@ class TestPositionalMatchClassAware:
         )
         assert result is bays["SFP 1"]
 
+    def test_extract_interface_numeric_coordinates_preserves_existing_suffix_behavior(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        result = BaseModuleTableView._extract_interface_numeric_coordinates("xe-2/1/0   ")
+        assert result == [2, 1, 0]
+
+    def test_extract_port_index_from_label_preserves_existing_suffix_behavior(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        assert BaseModuleTableView._extract_port_index_from_label("Eth42   ") == 42
+
     def test_port_matches_typoed_bay_name_via_numeric_position(self):
         """Numeric bay positions should rescue matching when the bay name is misspelled."""
         bays = {
