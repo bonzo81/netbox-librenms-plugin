@@ -1541,6 +1541,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         try:
             conflict_removed_msg = None
             bind_result = None
+            adopted_interfaces = 0
+            vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
             with transaction.atomic():
                 # Re-fetch with row lock to prevent concurrent modifications
                 installed_module = (
@@ -1599,8 +1601,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     serial=serial,
                     status="active",
                 )
+                adopted_interfaces = _count_adoptable_interfaces(target_device, new_module)
+                new_module._adopt_components = True
                 new_module.full_clean()
                 new_module.save()
+                vc_adjustments = _normalize_module_interface_names_for_vc_member(target_device, new_module)
 
             if server_key:
                 try:
@@ -1619,6 +1624,18 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 + (f" (serial: {serial})" if serial else "")
                 + ".",
             )
+            if adopted_interfaces:
+                messages.warning(
+                    request,
+                    "Module sync authority applied: adopted "
+                    f"{adopted_interfaces} existing standalone interface(s) into the module.",
+                )
+            vc_summary = _format_vc_adjustment_summary(vc_adjustments)
+            if vc_summary:
+                messages.warning(
+                    request,
+                    f"VC member interface normalization applied: {vc_summary}.",
+                )
             if bind_result and bind_result.get("status") == "bound":
                 messages.info(
                     request,
@@ -1637,7 +1654,14 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 "Please resolve the conflict manually.",
             )
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Replace failed: {e}")
+            error_msg = str(e)
+            if "dcim_interface_unique_device_name" in error_msg:
+                error_msg = (
+                    "duplicate interface name — this module type's interface template "
+                    "uses the '{module}' token which resolves to the same name for all siblings. "
+                    "An interface naming plugin with a rewrite rule for this module type can fix this."
+                )
+            messages.error(request, f"Replace failed: {error_msg}")
 
         return _modules_redirect_response(request, sync_url)
 

@@ -1762,6 +1762,13 @@ class TestSingleInstallInterfaceBinding:
             ),
             patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=matched_type),
             patch(
+                "netbox_librenms_plugin.views.sync.modules._count_adoptable_interfaces", return_value=2
+            ) as mock_count,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._normalize_module_interface_names_for_vc_member",
+                return_value={"renamed": 1, "adopted": 0, "removed": 0, "skipped": 0},
+            ) as mock_normalize,
+            patch(
                 "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
                 return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
             ) as mock_bind,
@@ -1788,6 +1795,9 @@ class TestSingleInstallInterfaceBinding:
 
             response = view.post(request, pk=24)
 
+        mock_count.assert_called_once_with(device, new_module)
+        assert new_module._adopt_components is True
+        mock_normalize.assert_called_once_with(device, new_module)
         mock_bind.assert_called_once()
         bind_call = mock_bind.call_args
         assert bind_call.args[0] is device
@@ -1795,6 +1805,12 @@ class TestSingleInstallInterfaceBinding:
         assert bind_call.args[2] == 654
         assert bind_call.args[3] == "production"
         mock_messages.success.assert_called_once()
+        warning_messages = [call.args[1] for call in mock_messages.warning.call_args_list]
+        assert (
+            "Module sync authority applied: adopted 2 existing standalone interface(s) into the module."
+            in warning_messages
+        )
+        assert "VC member interface normalization applied: renamed 1." in warning_messages
         mock_messages.info.assert_called()
         assert response == "redirected"
 
