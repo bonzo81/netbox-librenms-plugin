@@ -173,7 +173,7 @@ class LibreNMSAPI:
     def get_librenms_id(self, obj):
         """
         Args:
-            obj: NetBox device or VM object
+            obj: NetBox object with a librenms_id custom field or discovery identity
 
         Returns:
             int: LibreNMS device ID if found, None otherwise
@@ -202,10 +202,12 @@ class LibreNMSAPI:
         if librenms_id is not None:
             return librenms_id
 
-        # Determine dynamically from API
-        ip_address = obj.primary_ip.address.ip if obj.primary_ip else None
-        dns_name = obj.primary_ip.dns_name if obj.primary_ip else None
-        hostname = obj.name if obj.name else None
+        # Determine dynamically from API when the object exposes device identity fields.
+        primary_ip = getattr(obj, "primary_ip", None)
+        primary_ip_address = getattr(primary_ip, "address", None)
+        ip_address = getattr(primary_ip_address, "ip", None) if primary_ip else None
+        dns_name = getattr(primary_ip, "dns_name", None) if primary_ip else None
+        hostname = getattr(obj, "name", None) or None
 
         # Try IP address
         if ip_address:

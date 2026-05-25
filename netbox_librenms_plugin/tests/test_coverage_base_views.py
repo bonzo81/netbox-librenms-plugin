@@ -1081,6 +1081,68 @@ class TestBaseInterfaceTableViewGetContextData:
         # get_virtual_chassis_member should have been called with obj and the port name
         mock_get_vc_member.assert_called_once_with(obj, "Gi0/0")
 
+    def test_cache_hit_non_vc_ignores_duplicate_librenms_ids(self):
+        """Conflicting interface librenms_id values must not create an arbitrary port-id match."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.virtual_chassis = None
+        obj.id = 1
+        request = _mock_request()
+
+        cached_data = {
+            "ports": [
+                {
+                    "port_id": 101,
+                    "ifName": "Gi0/99",
+                    "ifAdminStatus": "up",
+                    "ifAlias": None,
+                    "ifDescr": "Gi0/99",
+                }
+            ]
+        }
+
+        interface_a = MagicMock()
+        interface_a.id = 10
+        interface_a.name = "Gi0/0"
+        interface_b = MagicMock()
+        interface_b.id = 11
+        interface_b.name = "Gi0/1"
+
+        mock_ifaces_qs = MagicMock()
+        mock_ifaces_qs.select_related.return_value = [interface_a, interface_b]
+
+        rows_store = {}
+
+        def capture_table(rows, *_args, **_kwargs):
+            rows_store["rows"] = rows
+            table = MagicMock()
+            table.configure = MagicMock()
+            return table
+
+        with (
+            patch.object(view, "get_cache_key", return_value="key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
+            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
+            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
+            patch.object(view, "_add_vlan_group_selection"),
+            patch.object(view, "_add_missing_vlans_info"),
+            patch.object(view, "get_table", side_effect=capture_table),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
+        ):
+            view._librenms_api.get_librenms_id.side_effect = lambda interface: 101
+            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
+            mock_cache.ttl.return_value = 300
+            mock_tz.now.return_value = MagicMock()
+            mock_tz.timedelta.return_value = MagicMock()
+            view.get_context_data(request, obj, "ifName")
+
+        assert rows_store["rows"][0]["exists_in_netbox"] is False
+        assert rows_store["rows"][0]["netbox_interface"] is None
+
 
 class TestBaseInterfaceTableViewAddVlanGroupSelection:
     """Tests for BaseInterfaceTableView._add_vlan_group_selection."""

@@ -6,7 +6,6 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
-    get_librenms_device_id,
     get_virtual_chassis_member,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -80,6 +79,37 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         except (TypeError, ValueError):
             return None
         return int_value if int_value > 0 else None
+
+    def _get_object_librenms_id(self, obj):
+        """Resolve a cached/stored LibreNMS ID for any NetBox object without dynamic fallback noise."""
+        librenms_id = self.librenms_api.get_librenms_id(obj)
+        if not isinstance(librenms_id, (int, str)) or isinstance(librenms_id, bool):
+            return None
+        return self._normalize_port_id(librenms_id)
+
+    def _build_interface_lookup_maps(self, obj):
+        """Build name and LibreNMS ID indexes, dropping conflicting IDs entirely."""
+        by_name = {}
+        by_librenms_id = {}
+        duplicate_librenms_ids = set()
+
+        for interface in self.get_interfaces(obj).select_related(self.get_select_related_field(obj)):
+            by_name[interface.name] = interface
+            librenms_id = self._get_object_librenms_id(interface)
+            if librenms_id is None:
+                continue
+            if librenms_id in by_librenms_id:
+                duplicate_librenms_ids.add(librenms_id)
+                continue
+            by_librenms_id[librenms_id] = interface
+
+        for librenms_id in duplicate_librenms_ids:
+            by_librenms_id.pop(librenms_id, None)
+
+        return {
+            "by_name": by_name,
+            "by_librenms_id": by_librenms_id,
+        }
 
     def post(self, request, pk):
         """Handle POST request to fetch and cache LibreNMS interface data for an object."""
@@ -181,33 +211,9 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             interfaces_by_device = {}
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 for member in obj.virtual_chassis.members.all():
-                    by_name = {}
-                    by_librenms_id = {}
-                    for interface in self.get_interfaces(member).select_related(self.get_select_related_field(obj)):
-                        by_name[interface.name] = interface
-                        librenms_id = self._normalize_port_id(
-                            get_librenms_device_id(interface, server_key, auto_save=False)
-                        )
-                        if librenms_id is not None and librenms_id not in by_librenms_id:
-                            by_librenms_id[librenms_id] = interface
-                    interfaces_by_device[member.id] = {
-                        "by_name": by_name,
-                        "by_librenms_id": by_librenms_id,
-                    }
+                    interfaces_by_device[member.id] = self._build_interface_lookup_maps(member)
             else:
-                by_name = {}
-                by_librenms_id = {}
-                for interface in self.get_interfaces(obj).select_related(self.get_select_related_field(obj)):
-                    by_name[interface.name] = interface
-                    librenms_id = self._normalize_port_id(
-                        get_librenms_device_id(interface, server_key, auto_save=False)
-                    )
-                    if librenms_id is not None and librenms_id not in by_librenms_id:
-                        by_librenms_id[librenms_id] = interface
-                interfaces_by_device[obj.id] = {
-                    "by_name": by_name,
-                    "by_librenms_id": by_librenms_id,
-                }
+                interfaces_by_device[obj.id] = self._build_interface_lookup_maps(obj)
 
             for port in ports_data:
                 port["enabled"] = (
