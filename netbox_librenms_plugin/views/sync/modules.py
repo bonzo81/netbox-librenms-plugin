@@ -465,7 +465,18 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key):
             candidate = module_interfaces.filter(name__in=interface_names).first()
         if candidate is None:
             module_interface_list = list(module_interfaces)
-            if not module_interface_list:
+            if module_interface_list:
+                coordinate_candidate = _select_module_interface_by_coordinates(device, module_interface_list, item)
+                if coordinate_candidate is not None:
+                    candidate = coordinate_candidate
+                elif len(module_interface_list) == 1:
+                    candidate = module_interface_list[0]
+                elif len(module_interface_list) > 1:
+                    return {
+                        "status": "skipped",
+                        "reason": f"multiple module interfaces found for port_id {port_id}; manual mapping required",
+                    }
+            else:
                 interface_count = module_interfaces.count()
                 if interface_count == 1:
                     candidate = module_interfaces.first()
@@ -474,16 +485,6 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key):
                         "status": "skipped",
                         "reason": f"multiple module interfaces found for port_id {port_id}; manual mapping required",
                     }
-            coordinate_candidate = _select_module_interface_by_coordinates(device, module_interface_list, item)
-            if coordinate_candidate is not None:
-                candidate = coordinate_candidate
-            elif len(module_interface_list) == 1:
-                candidate = module_interface_list[0]
-            elif len(module_interface_list) > 1:
-                return {
-                    "status": "skipped",
-                    "reason": f"multiple module interfaces found for port_id {port_id}; manual mapping required",
-                }
 
     if candidate is None:
         return {

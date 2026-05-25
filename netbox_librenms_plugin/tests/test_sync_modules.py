@@ -1155,6 +1155,42 @@ class TestBindInterfaceLibrenmsId:
         mock_set.assert_called_once_with(candidate, 42, "default")
         candidate.save.assert_called_once_with(update_fields=["custom_field_data"])
 
+    def test_binds_single_iterable_module_interface(self):
+        from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
+
+        device = MagicMock()
+        device.pk = 1
+
+        candidate = MagicMock()
+        candidate.name = "uplink-a"
+        candidate.module_id = 123
+
+        by_name_qs = MagicMock()
+        by_name_qs.first.return_value = None
+
+        module_qs = MagicMock()
+        module_qs.filter.return_value.first.return_value = None
+        module_qs.__iter__.return_value = iter([candidate])
+
+        with (
+            patch("dcim.models.Interface") as mock_interface_model,
+            patch("netbox_librenms_plugin.views.sync.modules.find_by_librenms_id", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.set_librenms_device_id") as mock_set,
+        ):
+            mock_interface_model.objects.filter.side_effect = [by_name_qs, module_qs]
+            result = _bind_interface_librenms_id(
+                device,
+                {"_librenms_port_id": 43, "_librenms_ifname": "Unknown-Port"},
+                module_pk=123,
+                server_key="default",
+            )
+
+        assert result["status"] == "bound"
+        assert result["interface"] == "uplink-a"
+        mock_set.assert_called_once_with(candidate, 43, "default")
+        candidate.save.assert_called_once_with(update_fields=["custom_field_data"])
+
     def test_conflict_when_port_id_owned_by_other_device(self):
         from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 
@@ -1667,6 +1703,100 @@ class TestSingleInstallInterfaceBinding:
         mock_bind.assert_called_once()
         mock_messages.success.assert_called_once()
         assert response is not None
+
+    def test_replace_module_view_binds_interface_after_replace(self):
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        view = object.__new__(ReplaceModuleView)
+        view.required_object_permissions = {}
+        device = _make_device()
+
+        target_bay = MagicMock()
+        target_bay.name = "SFP 1"
+
+        installed_module = MagicMock()
+        installed_module.pk = 321
+        installed_module.module_type.model = "OLD-SFP"
+        installed_module.module_bay = target_bay
+
+        matched_type = MagicMock()
+        matched_type.model = "NEW-SFP"
+
+        new_module = MagicMock()
+        new_module.pk = 654
+
+        request = _make_request(
+            "POST",
+            data={
+                "module_id": "321",
+                "ent_index": "77",
+                "server_key": "production",
+            },
+        )
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        installed_filter_qs = MagicMock()
+        installed_filter_qs.select_related.return_value.first.return_value = installed_module
+
+        conflict_filter_qs = MagicMock()
+        conflict_filter_qs.exclude.return_value.select_related.return_value = []
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, installed_module],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+            patch.object(view, "get_cache_key", return_value="inv-key"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
+                return_value={"NEW-SFP": matched_type},
+            ),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=matched_type),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+            ) as mock_bind,
+            patch("dcim.models.Module") as mock_module_cls,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_cache.get.return_value = {
+                "inventory": [
+                    {
+                        "entPhysicalIndex": 77,
+                        "entPhysicalModelName": "NEW-SFP",
+                        "entPhysicalSerialNum": "SN-42",
+                        "_librenms_port_id": 42,
+                        "_librenms_ifname": "Te1/1/1",
+                    }
+                ]
+            }
+            mock_module_cls.return_value = new_module
+            mock_module_cls.objects.select_related.return_value = MagicMock()
+            mock_module_cls.objects.select_for_update.return_value.filter.side_effect = [
+                installed_filter_qs,
+                conflict_filter_qs,
+            ]
+
+            response = view.post(request, pk=24)
+
+        mock_bind.assert_called_once()
+        bind_call = mock_bind.call_args
+        assert bind_call.args[0] is device
+        assert bind_call.args[1]["_librenms_port_id"] == 42
+        assert bind_call.args[2] == 654
+        assert bind_call.args[3] == "production"
+        mock_messages.success.assert_called_once()
+        mock_messages.info.assert_called()
+        assert response == "redirected"
 
 
 class TestVCMemberInterfaceNormalization:
