@@ -179,6 +179,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return ""
         return serial
 
+    @staticmethod
+    def _normalize_port_id(value):
+        """Normalize LibreNMS port_id to a positive integer, or None."""
+        if not isinstance(value, (int, str)) or isinstance(value, bool):
+            return None
+        try:
+            int_value = int(value)
+        except (TypeError, ValueError):
+            return None
+        return int_value if int_value > 0 else None
+
+    def _get_interface_port_id(self, interface):
+        """Resolve an interface's LibreNMS port_id through the API helper."""
+        return self._normalize_port_id(self.librenms_api.get_librenms_id(interface))
+
     def _infer_vc_member_for_item(self, obj, item, index_map, vc_members):
         """
         Infer VC member ownership for an inventory item using LibreNMS ENTITY data.
@@ -289,7 +304,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Fetch ports once and reuse in subsequent enrichment steps.
         ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
+        ports_error = None
         if not ports_success or not isinstance(ports_data, dict):
+            ports_error = str(ports_data) if ports_data else "unknown error"
             ports_data = {}
 
         # Fetch transceiver data and merge with inventory
@@ -306,10 +323,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         )
 
         context = self._build_context(request, obj, inventory_data)
+        if ports_error:
+            logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
+            messages.warning(
+                request,
+                "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
+                " See server logs for details.",
+            )
         if txr_error:
             logger.warning("Transceiver fetch failed for device %s: %s", self.librenms_id, txr_error)
             messages.warning(request, "Inventory refreshed, but transceiver fetch failed; see server logs for details.")
-        else:
+        elif not ports_error:
             messages.success(request, "Inventory data refreshed successfully.")
         return render(
             request,
@@ -646,20 +670,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _get_interfaces_by_port_id(self, member):
         """Build an index of device interfaces keyed by LibreNMS port_id."""
         interface_map = {}
-        server_key = self.librenms_api.server_key
+        duplicate_port_ids = set()
 
         interface_manager = getattr(member, "interfaces", None)
         if interface_manager is None or not hasattr(interface_manager, "all"):
             return interface_map
 
         for interface in interface_manager.all():
-            port_id = get_librenms_device_id(interface, server_key, auto_save=False)
-            try:
-                port_id = int(port_id)
-            except (TypeError, ValueError):
+            port_id = self._get_interface_port_id(interface)
+            if port_id is None:
                 continue
-            if port_id > 0 and port_id not in interface_map:
-                interface_map[port_id] = interface
+
+            if port_id in interface_map:
+                duplicate_port_ids.add(port_id)
+                continue
+
+            interface_map[port_id] = interface
+
+        for port_id in duplicate_port_ids:
+            interface_map.pop(port_id, None)
+
         return interface_map
 
     def _get_interfaces_by_name(self, member):

@@ -300,6 +300,43 @@ class TestMergeTransceiverDataPortIdentity:
         assert mock_merge.call_args.kwargs.get("ports_data") == ports_payload
         assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
 
+    def test_post_warns_when_ports_fetch_fails(self):
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": view._librenms_api.server_key,
+            }
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_inventory.return_value = (True, [])
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (False, "ports api unavailable")
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache"),
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+        ):
+            view.post(request, pk=1)
+
+        mock_messages.warning.assert_called_once_with(
+            request,
+            "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
+            " See server logs for details.",
+        )
+        mock_messages.success.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Inventory data factories
@@ -3310,6 +3347,21 @@ class TestRenderStatusNoBayOnParent:
 
 class TestMatchedInterfaceLinking:
     """Rows should expose matched NetBox interface metadata and render as links."""
+
+    def test_get_interfaces_by_port_id_ignores_duplicate_port_ids(self):
+        view = _make_view()
+        interface_a = MagicMock()
+        interface_b = MagicMock()
+        interface_c = MagicMock()
+        member = MagicMock()
+        member.interfaces.all.return_value = [interface_a, interface_b, interface_c]
+
+        view._librenms_api.get_librenms_id.side_effect = [42, 42, 43]
+
+        interface_map = view._get_interfaces_by_port_id(member)
+
+        assert 42 not in interface_map
+        assert interface_map[43] is interface_c
 
     def test_attach_interface_match_sets_name_and_url(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
