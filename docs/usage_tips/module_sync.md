@@ -35,7 +35,7 @@ Each row in the table shows:
 
 ## Carrier Modules
 
-Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without the intermediate carrier/holder module that must first be installed in NetBox before the children become visible. When a CarrierAutoInstallRule matches, a **Suggest Carrier** button appears — clicking it installs the carrier module into the appropriate empty bay, after which the children can be synced normally.
+Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without the intermediate carrier/holder module that must first be installed in NetBox before the children become visible. When a CarrierAutoInstallRule matches, an **Install Carrier** button appears — clicking it installs the carrier module into the appropriate empty bay, after which the children can be synced normally.
 
 ## Virtual Chassis Support
 
