@@ -363,9 +363,10 @@
                     {% else %}
                     <span class="text-muted">Optional</span>
                     {% endif %}
-                    {% if libre_device.os and libre_device.os != "-" and sync_info and not sync_info.platform_info.platform_exists %}
-                      {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" with preselect_platform=validation.existing_device.platform %}
+                    {% if libre_device.os and libre_device.os != "-" %}
+                      {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" %}
                     {% endif %}
+                  {% endif %}
                   </td>
                   <td>{{ libre_device.os|default:"—" }}</td>
               </tr>
