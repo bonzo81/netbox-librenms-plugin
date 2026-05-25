@@ -1,0 +1,110 @@
+{% comment %}
+Reusable "Add Platform Mapping" form for the import validation modal.
+
+Required context:
+  - libre_device (dict-like with device_id, os)
+Optional:
+  - preselect_platform: a Platform instance to pre-fill the typeahead.
+  - submit_label
+{% endcomment %}
+<form hx-post="{% url 'plugins:netbox_librenms_plugin:add_platform_mapping' device_id=libre_device.device_id %}"
+      hx-swap="none"
+      hx-include="[name=role_{{ libre_device.device_id }}], [name=rack_{{ libre_device.device_id }}], [name=cluster_{{ libre_device.device_id }}], #use-sysname-toggle, #strip-domain-toggle"
+      class="mt-1"
+      id="plat-mapping-form-{{ libre_device.device_id }}">
+  {% csrf_token %}
+  <div class="position-relative">
+    <label for="plat-search-{{ libre_device.device_id }}" class="visually-hidden">
+      Search platforms
+    </label>
+    <input type="text"
+           class="form-control form-control-sm"
+           id="plat-search-{{ libre_device.device_id }}"
+           placeholder="Search platforms…"
+           autocomplete="off"
+           {% if preselect_platform %}value="{{ preselect_platform.name }}"{% endif %}>
+    <input type="hidden"
+           name="platform_id"
+           id="plat-id-{{ libre_device.device_id }}"
+           value="{% if preselect_platform %}{{ preselect_platform.pk }}{% endif %}">
+    <div id="plat-dropdown-{{ libre_device.device_id }}"
+         class="dropdown-menu w-100 shadow"
+         style="z-index:1050; max-height:200px; overflow-y:auto; display:none;"></div>
+  </div>
+  {# Disabled until a typeahead item is chosen (or a preselect value is present). #}
+  <button type="submit"
+          id="plat-submit-{{ libre_device.device_id }}"
+          class="btn btn-sm btn-primary mt-1 w-100"
+          {% if not preselect_platform %}disabled{% endif %}>{{ submit_label|default:"Add Mapping" }}</button>
+</form>
+<script>
+  (function () {
+    var searchEl = document.getElementById("plat-search-{{ libre_device.device_id }}");
+    var dropdownEl = document.getElementById("plat-dropdown-{{ libre_device.device_id }}");
+    var hiddenEl = document.getElementById("plat-id-{{ libre_device.device_id }}");
+    var submitBtn = document.getElementById("plat-submit-{{ libre_device.device_id }}");
+    if (!searchEl) return;
+    var timer = null;
+    var requestSeq = 0;
+
+    searchEl.addEventListener("input", function () {
+      clearTimeout(timer);
+      hiddenEl.value = "";
+      submitBtn.disabled = true;
+      var q = this.value.trim();
+      if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
+      timer = setTimeout(function () {
+        var seq = ++requestSeq;
+        var csrfToken = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || "";
+        fetch("{% url 'dcim-api:platform-list' %}?q=" + encodeURIComponent(q) + "&limit=20", {
+          headers: { "X-CSRFToken": csrfToken }
+        })
+          .then(function (r) {
+            if (!r.ok) { throw new Error("HTTP " + r.status); }
+            return r.json();
+          })
+          .then(function (data) {
+            if (seq !== requestSeq) return;
+            dropdownEl.innerHTML = "";
+            if (!data.results || data.results.length === 0) {
+              dropdownEl.innerHTML = '<a class="dropdown-item small py-1 text-muted disabled">No results</a>';
+            } else {
+              data.results.forEach(function (p) {
+                var a = document.createElement("a");
+                a.className = "dropdown-item small py-1";
+                a.href = "#";
+                a.textContent = p.display || p.name;
+                a.addEventListener("click", function (e) {
+                  e.preventDefault();
+                  searchEl.value = p.display || p.name;
+                  hiddenEl.value = p.id;
+                  submitBtn.disabled = false;
+                  dropdownEl.style.display = "none";
+                });
+                dropdownEl.appendChild(a);
+              });
+            }
+            dropdownEl.style.display = "block";
+          })
+          .catch(function (error) {
+            console.debug("Platform lookup failed:", error.message);
+            dropdownEl.style.display = "none";
+          });
+      }, 300);
+    });
+
+    // Outside-click hides the dropdown. The listener self-removes once the
+    // form leaves the DOM (HTMX swap, modal teardown) so handlers don't
+    // accumulate on document each time this template re-renders.
+    function onDocClick(e) {
+      if (!document.body.contains(searchEl)) {
+        document.removeEventListener("click", onDocClick);
+        return;
+      }
+      if (!searchEl.contains(e.target) && !dropdownEl.contains(e.target)) {
+        dropdownEl.style.display = "none";
+      }
+    }
+    document.addEventListener("click", onDocClick);
+  })();
+</script>

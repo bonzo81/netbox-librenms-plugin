@@ -349,8 +349,8 @@
      * Persists toggle state to user preferences on change.
      */
     function initializeTogglePrefs() {
-        const sysname = document.getElementById('use-sysname-toggle');
-        const strip = document.getElementById('strip-domain-toggle');
+        const sysname = document.getElementById('use-sysname-toggle-cb');
+        const strip = document.getElementById('strip-domain-toggle-cb');
         if (sysname) sysname.addEventListener('change', function () { savePref('use_sysname', this.checked); });
         if (strip) strip.addEventListener('change', function () { savePref('strip_domain', this.checked); });
     }
@@ -1199,10 +1199,14 @@
 
             const dismissTrigger = event.target.closest('[data-bs-dismiss="modal"]');
             if (dismissTrigger) {
-                event.preventDefault();
-
-                // Check if it's in the HTMX modal
-                if (modalElement.contains(dismissTrigger)) {
+                // Only handle dismiss triggers whose nearest .modal ancestor IS
+                // the outer HTMX modal. Buttons inside nested modals (e.g. the
+                // Promote-to-host modal rendered inside #htmx-modal-content)
+                // must be left for Bootstrap's own dismiss handler so they
+                // close the inner modal, not the outer one.
+                const nearestModal = dismissTrigger.closest('.modal');
+                if (nearestModal === modalElement) {
+                    event.preventDefault();
                     hideModal(modalElement, fallbackBackdropRef);
                 }
             }

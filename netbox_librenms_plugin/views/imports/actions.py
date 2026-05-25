@@ -1789,3 +1789,107 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
 
         save_user_pref(request, self.ALLOWED_PREFS[key], value)
         return JsonResponse({"status": "ok"})
+
+
+class AddPlatformMappingView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """HTMX view to create a PlatformMapping from the import validation modal."""
+
+    def post(self, request, device_id):
+        """Create a PlatformMapping linking the LibreNMS OS string to a NetBox Platform."""
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Platform
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        libre_device = fetch_device_with_cache(device_id, self.librenms_api)
+        if not libre_device:
+            return HttpResponse(
+                '<span class="text-danger small">Device not found in LibreNMS.</span>',
+                status=404,
+            )
+
+        librenms_os = (libre_device.get("os") or "").strip()
+        if not librenms_os:
+            return HttpResponse(
+                '<span class="text-danger small">Device has no OS string -- cannot create mapping.</span>',
+                status=400,
+            )
+
+        platform_id = request.POST.get("platform_id", "").strip()
+        if not platform_id:
+            return HttpResponse(
+                '<span class="text-danger small">Please select a platform before submitting.</span>',
+                status=400,
+            )
+
+        try:
+            platform_id = int(platform_id)
+        except (ValueError, TypeError):
+            return HttpResponse(
+                '<span class="text-danger small">Invalid platform selection.</span>',
+                status=400,
+            )
+
+        try:
+            platform = Platform.objects.get(pk=platform_id)
+        except Platform.DoesNotExist:
+            return HttpResponse(
+                '<span class="text-danger small">Selected platform not found.</span>',
+                status=404,
+            )
+
+        existing_mapping = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
+        self.required_object_permissions = {
+            "POST": [("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping)]
+        }
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        try:
+            with transaction.atomic():
+                mapping, created = PlatformMapping.objects.get_or_create(
+                    librenms_os=librenms_os.lower(),
+                    defaults={"netbox_platform": platform},
+                )
+                if not created and existing_mapping is None and mapping.netbox_platform_id != platform_id:
+                    self.required_object_permissions = {"POST": [("change", PlatformMapping)]}
+                    if error := self.require_object_permissions("POST"):
+                        return error
+                if not created and mapping.netbox_platform_id != platform_id:
+                    mapping.netbox_platform = platform
+                    mapping.save()
+        except Exception as exc:
+            logger.warning("AddPlatformMappingView: failed to save mapping: %s", exc)
+            return HttpResponse(
+                f'<span class="text-danger small">Error saving mapping: {escape(str(exc))}</span>',
+                status=500,
+            )
+
+        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
+        cache.delete(cache_key)
+
+        detail_view = DeviceValidationDetailsView()
+        detail_view._librenms_api = self._librenms_api
+        modal_html = detail_view.get(request, device_id).content.decode("utf-8")
+        oob_modal = format_html(
+            '<div id="htmx-modal-content" hx-swap-oob="innerHTML">{}</div>',
+            mark_safe(modal_html),
+        )
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if libre_device is not None and validation is not None:
+            row_response = self.render_device_row(request, libre_device, validation, selections)
+            row_html = row_response.content.decode("utf-8")
+            row_html = format_html("<table><tbody>{}</tbody></table>", mark_safe(row_html))
+        else:
+            row_html = mark_safe("")
+
+        return HttpResponse(oob_modal + row_html, content_type="text/html")
