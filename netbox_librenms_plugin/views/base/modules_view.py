@@ -194,6 +194,33 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """Resolve an interface's stored LibreNMS port_id without discovery fallback."""
         return self._normalize_port_id(self.librenms_api.get_stored_librenms_id(interface))
 
+    def _count_adoptable_template_interfaces(self, module):
+        """Count standalone interfaces that match an installed module's interface templates."""
+        from dcim.models import Interface
+
+        template_manager = getattr(getattr(module, "module_type", None), "interfacetemplates", None)
+        if template_manager is None or not hasattr(template_manager, "all"):
+            return 0
+
+        device = getattr(module, "device", None)
+        if device is None:
+            return 0
+
+        template_names = []
+        for template in template_manager.all():
+            try:
+                instance = template.instantiate(device=device, module=module)
+            except Exception:
+                continue
+            name = (getattr(instance, "name", "") or "").strip()
+            if name and name not in template_names:
+                template_names.append(name)
+
+        if not template_names:
+            return 0
+
+        return Interface.objects.filter(device=device, module__isnull=True, name__in=template_names).count()
+
     def _infer_vc_member_for_item(self, obj, item, index_map, vc_members):
         """
         Infer VC member ownership for an inventory item using LibreNMS ENTITY data.
@@ -2248,6 +2275,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 row["module_url"] = installed.get_absolute_url()
                 row["installed_module_id"] = installed.pk
                 self._apply_installed_status(row, installed, matched_type, serial)
+                if matched_type is not None and installed.module_type_id == matched_type.pk:
+                    adoptable_interface_count = self._count_adoptable_template_interfaces(installed)
+                    if adoptable_interface_count:
+                        row["can_update_interface_binding"] = True
+                        row["adoptable_interface_count"] = adoptable_interface_count
             elif matched_type:
                 # Bay exists, type matched, no module installed → can install
                 row["can_install"] = True

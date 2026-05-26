@@ -224,9 +224,18 @@ def _count_adoptable_interfaces(device, module):
     """Count standalone interfaces that would be adopted during module install."""
     from dcim.models import Interface
 
+    template_names = _get_template_interface_names(device, module)
+    if not template_names:
+        return 0
+
+    return Interface.objects.filter(device=device, module__isnull=True, name__in=template_names).count()
+
+
+def _get_template_interface_names(device, module):
+    """Return unique instantiated interface names for a module's interface templates."""
     template_manager = getattr(module.module_type, "interfacetemplates", None)
     if template_manager is None or not hasattr(template_manager, "all"):
-        return 0
+        return []
 
     template_names = []
     for template in template_manager.all():
@@ -238,10 +247,38 @@ def _count_adoptable_interfaces(device, module):
         if name and name not in template_names:
             template_names.append(name)
 
-    if not template_names:
-        return 0
+    return template_names
 
-    return Interface.objects.filter(device=device, module__isnull=True, name__in=template_names).count()
+
+def _adopt_existing_template_interfaces(device, module):
+    """Adopt existing standalone interfaces into an already-installed module by template name."""
+    from dcim.models import Interface
+
+    template_names = _get_template_interface_names(device, module)
+    if not template_names:
+        return {
+            "status": "skipped",
+            "reason": "this module type has no interface templates to match against",
+        }
+
+    interfaces = list(Interface.objects.filter(device=device, module__isnull=True, name__in=template_names))
+    if not interfaces:
+        return {
+            "status": "skipped",
+            "reason": "no matching standalone interfaces found for this module's interface templates",
+        }
+
+    adopted_names = []
+    for interface in interfaces:
+        interface.module = module
+        interface.save(update_fields=["module"])
+        adopted_names.append(interface.name)
+
+    return {
+        "status": "bound",
+        "adopted_count": len(adopted_names),
+        "interfaces": adopted_names,
+    }
 
 
 _VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
@@ -1322,12 +1359,13 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             return _modules_redirect_response(request, sync_url)
 
         module = get_object_or_404(Module, pk=module_id, device=target_device)
-        if not bind_item or not server_key:
-            messages.error(request, "No LibreNMS interface identity is available for this row.")
-            return _modules_redirect_response(request, sync_url)
 
         try:
-            bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
+            bind_result = None
+            if bind_item and server_key:
+                bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
+            if bind_result is None:
+                bind_result = _adopt_existing_template_interfaces(target_device, module)
         except Exception:
             bind_result = {
                 "status": "failed",
@@ -1337,10 +1375,18 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         if bind_result is None:
             messages.error(request, "No LibreNMS interface identity is available for this row.")
         elif bind_result.get("status") == "bound":
-            messages.success(
-                request,
-                f"Updated interface {bind_result['interface']} for {module.module_type.model} in {module.module_bay.name}.",
-            )
+            adopted_count = bind_result.get("adopted_count")
+            if adopted_count:
+                messages.success(
+                    request,
+                    f"Updated interfaces for {module.module_type.model} in {module.module_bay.name}: "
+                    f"adopted {adopted_count} existing standalone interface(s).",
+                )
+            else:
+                messages.success(
+                    request,
+                    f"Updated interface {bind_result['interface']} for {module.module_type.model} in {module.module_bay.name}.",
+                )
         else:
             messages.warning(
                 request,

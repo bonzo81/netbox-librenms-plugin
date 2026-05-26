@@ -1466,6 +1466,32 @@ class TestBuildRowSerialMismatch:
         assert "row_class" not in row
         assert not row.get("can_update_serial")
 
+    def test_installed_row_sets_update_interface_when_template_matches_exist(self):
+        """Installed non-port rows expose Update Interface when standalone template matches exist."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="NS225161205")
+        matched_type = MagicMock()
+        matched_type.model = "XCM-7s-b"
+        matched_type.pk = 5
+        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+
+        with (
+            patch.object(view, "_match_module_bay", return_value=bay),
+            patch.object(view, "_count_adoptable_template_interfaces", return_value=2),
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+        ):
+            row = view._build_row(
+                self._make_item(serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Installed"
+        assert row["can_update_interface_binding"] is True
+        assert row["adoptable_interface_count"] == 2
+
     def test_serial_mismatch_sets_can_update_serial(self):
         """When serials differ, can_update_serial=True and installed_module_id set."""
         view = self._view()
