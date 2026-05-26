@@ -1140,6 +1140,8 @@ class TestBaseInterfaceTableViewGetContextData:
             mock_tz.timedelta.return_value = MagicMock()
             view.get_context_data(request, obj, "ifName")
 
+        assert "rows" in rows_store
+        assert len(rows_store["rows"]) == 1
         assert rows_store["rows"][0]["exists_in_netbox"] is False
         assert rows_store["rows"][0]["netbox_interface"] is None
         assert view._librenms_api.get_stored_librenms_id.call_count == 2
