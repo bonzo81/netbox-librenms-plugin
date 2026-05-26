@@ -15,7 +15,7 @@
     - Map LibreNMS OS strings to NetBox Platform objects
     - Ensures correct platform assignment during device import and sync
 
-4. [Multi Server Configuration](multi_server_configuration.md)
+4. [Multi-Server Configuration](multi_server_configuration.md)
     - Configure multiple LibreNMS instances in your NetBox configuration
     - Switch between different LibreNMS servers through the web interface
     - Maintain backward compatibility with single-server configurations
