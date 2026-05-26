@@ -191,8 +191,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return int_value if int_value > 0 else None
 
     def _get_interface_port_id(self, interface):
-        """Resolve an interface's LibreNMS port_id through the API helper."""
-        return self._normalize_port_id(self.librenms_api.get_librenms_id(interface))
+        """Resolve an interface's stored LibreNMS port_id without discovery fallback."""
+        return self._normalize_port_id(self.librenms_api.get_stored_librenms_id(interface))
 
     def _infer_vc_member_for_item(self, obj, item, index_map, vc_members):
         """

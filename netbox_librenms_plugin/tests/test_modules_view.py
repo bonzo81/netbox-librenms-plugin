@@ -3356,12 +3356,13 @@ class TestMatchedInterfaceLinking:
         member = MagicMock()
         member.interfaces.all.return_value = [interface_a, interface_b, interface_c]
 
-        view._librenms_api.get_librenms_id.side_effect = [42, 42, 43]
+        view._librenms_api.get_stored_librenms_id.side_effect = [42, 42, 43]
 
         interface_map = view._get_interfaces_by_port_id(member)
 
         assert 42 not in interface_map
         assert interface_map[43] is interface_c
+        view._librenms_api.get_librenms_id.assert_not_called()
 
     def test_attach_interface_match_sets_name_and_url(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
