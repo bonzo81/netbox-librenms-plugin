@@ -1855,23 +1855,39 @@ class AddPlatformMappingView(
 
         try:
             with transaction.atomic():
-                mapping, created = PlatformMapping.objects.get_or_create(
-                    librenms_os=librenms_os.lower(),
-                    defaults={"netbox_platform": platform},
-                )
-                if not created and existing_mapping is None and mapping.netbox_platform_id != platform_id:
-                    self.required_object_permissions = {"POST": [("change", PlatformMapping)]}
+                # Lock the row to close the TOCTOU window between the upfront
+                # permission check and the actual write. select_for_update cannot
+                # lock absent rows, so the create branch handles IntegrityError.
+                locked = PlatformMapping.objects.select_for_update().filter(librenms_os__iexact=librenms_os).first()
+                if locked and not existing_mapping:
+                    # Concurrent request created the mapping after our upfront read.
+                    # Only escalate to change permission if we would actually mutate.
+                    if locked.netbox_platform_id != platform_id:
+                        self.required_object_permissions = {"POST": [("change", PlatformMapping)]}
+                        if error := self.require_object_permissions("POST"):
+                            return error
+                if existing_mapping and not locked:
+                    # Mapping was deleted between our upfront read and the lock.
+                    # We are about to CREATE a new row, so require add permission.
+                    self.required_object_permissions = {"POST": [("add", PlatformMapping)]}
                     if error := self.require_object_permissions("POST"):
                         return error
-                if not created and mapping.netbox_platform_id != platform_id:
-                    mapping.netbox_platform = platform
-                    mapping.save()
+                if locked:
+                    if locked.netbox_platform_id != platform_id:
+                        locked.netbox_platform = platform
+                        locked.full_clean()
+                        locked.save()
+                else:
+                    try:
+                        PlatformMapping.objects.create(
+                            librenms_os=librenms_os.lower(),
+                            netbox_platform=platform,
+                        )
+                    except IntegrityError:
+                        return _htmx_error_response("Mapping was created concurrently. Please try again.")
         except Exception as exc:
             logger.warning("AddPlatformMappingView: failed to save mapping: %s", exc)
-            return HttpResponse(
-                f'<span class="text-danger small">Error saving mapping: {escape(str(exc))}</span>',
-                status=500,
-            )
+            return _htmx_error_response("Error saving mapping. Please try again.")
 
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)
