@@ -269,10 +269,11 @@ def _adopt_existing_template_interfaces(device, module):
         }
 
     adopted_names = []
-    for interface in interfaces:
-        interface.module = module
-        interface.save(update_fields=["module"])
-        adopted_names.append(interface.name)
+    with transaction.atomic():
+        for interface in interfaces:
+            interface.module = module
+            interface.save(update_fields=["module"])
+            adopted_names.append(interface.name)
 
     return {
         "status": "bound",
@@ -423,51 +424,6 @@ def _format_vc_adjustment_summary(adjustments):
     return ", ".join(parts)
 
 
-def _infer_port_bay_slot_index(item):
-    """Infer child bay slot index for port-class inventory rows."""
-    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-    indices = BaseModuleTableView._extract_interface_port_indices(item)
-    if indices:
-        return indices[0]
-
-    rel_pos = item.get("entPhysicalParentRelPos")
-    try:
-        rel_pos = int(rel_pos)
-    except (TypeError, ValueError):
-        rel_pos = None
-    if rel_pos and rel_pos > 0:
-        return rel_pos
-    return None
-
-
-def _resolve_or_create_port_child_bay(device, parent_module_id, item, module_bays, ModuleBay):
-    """Resolve a child module bay for a port row under an installed parent module."""
-    if not parent_module_id:
-        return None
-
-    if (item.get("entPhysicalClass") or "").strip().lower() != "port":
-        return None
-
-    slot_index = _infer_port_bay_slot_index(item)
-    if not slot_index:
-        return None
-
-    candidate_names = [f"SFP {slot_index}", f"Port {slot_index}", f"Bay {slot_index}", f"Slot {slot_index}"]
-
-    for candidate_name in candidate_names:
-        bay = module_bays.get(candidate_name)
-        if bay is not None:
-            return bay
-
-    # Try DB lookup first (covers concurrent creates and pre-existing bays that
-    # were not loaded in the original scoped dict).
-    existing = ModuleBay.objects.filter(device=device, module_id=parent_module_id, name__in=candidate_names).first()
-    if existing is not None:
-        return existing
-    return None
-
-
 def _bind_interface_librenms_id(device, item, module_pk, server_key):
     """
     Bind LibreNMS ``port_id`` to the best matching NetBox interface.
@@ -509,15 +465,6 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key):
                 elif len(module_interface_list) == 1:
                     candidate = module_interface_list[0]
                 elif len(module_interface_list) > 1:
-                    return {
-                        "status": "skipped",
-                        "reason": f"multiple module interfaces found for port_id {port_id}; manual mapping required",
-                    }
-            else:
-                interface_count = module_interfaces.count()
-                if interface_count == 1:
-                    candidate = module_interfaces.first()
-                elif interface_count > 1:
                     return {
                         "status": "skipped",
                         "reason": f"multiple module interfaces found for port_id {port_id}; manual mapping required",

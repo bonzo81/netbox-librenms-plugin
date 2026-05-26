@@ -1141,7 +1141,15 @@ class TestAdoptExistingTemplateInterfaces:
         iface_b = MagicMock()
         iface_b.name = "Te1/1/2"
 
-        with patch("dcim.models.Interface") as mock_interface_model:
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        with (
+            patch("dcim.models.Interface") as mock_interface_model,
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+        ):
+            mock_tx.atomic = noop_atomic
             mock_interface_model.objects.filter.return_value = [iface_a, iface_b]
             result = _adopt_existing_template_interfaces(device, module)
 
@@ -1151,6 +1159,53 @@ class TestAdoptExistingTemplateInterfaces:
         assert iface_b.module is module
         iface_a.save.assert_called_once_with(update_fields=["module"])
         iface_b.save.assert_called_once_with(update_fields=["module"])
+
+    def test_adoption_runs_inside_atomic_transaction(self):
+        from netbox_librenms_plugin.views.sync.modules import _adopt_existing_template_interfaces
+
+        device = MagicMock()
+        module = MagicMock()
+        module.module_type.interfacetemplates.all.return_value = [MagicMock(), MagicMock()]
+
+        instantiated_a = MagicMock()
+        instantiated_a.name = "Te1/1/1"
+        instantiated_b = MagicMock()
+        instantiated_b.name = "Te1/1/2"
+        module.module_type.interfacetemplates.all.return_value[0].instantiate.return_value = instantiated_a
+        module.module_type.interfacetemplates.all.return_value[1].instantiate.return_value = instantiated_b
+
+        iface_a = MagicMock()
+        iface_a.name = "Te1/1/1"
+        iface_b = MagicMock()
+        iface_b.name = "Te1/1/2"
+        iface_a.save.side_effect = RuntimeError("boom")
+
+        atomic_events = []
+
+        @contextmanager
+        def tracking_atomic():
+            atomic_events.append("enter")
+            try:
+                yield
+            finally:
+                atomic_events.append("exit")
+
+        with (
+            patch("dcim.models.Interface") as mock_interface_model,
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+        ):
+            mock_tx.atomic = tracking_atomic
+            mock_interface_model.objects.filter.return_value = [iface_a, iface_b]
+
+            try:
+                _adopt_existing_template_interfaces(device, module)
+                assert False, "Expected adoption failure to propagate"
+            except RuntimeError as exc:
+                assert str(exc) == "boom"
+
+        assert atomic_events == ["enter", "exit"]
+        iface_a.save.assert_called_once_with(update_fields=["module"])
+        iface_b.save.assert_not_called()
 
     def test_binds_unique_module_interface(self):
         from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
@@ -1166,9 +1221,7 @@ class TestAdoptExistingTemplateInterfaces:
         by_name_qs.first.return_value = None
 
         module_qs = MagicMock()
-        module_qs.filter.return_value.first.return_value = None
-        module_qs.count.return_value = 1
-        module_qs.first.return_value = candidate
+        module_qs.filter.return_value.first.return_value = candidate
 
         with (
             patch("dcim.models.Interface") as mock_interface_model,
@@ -1186,6 +1239,7 @@ class TestAdoptExistingTemplateInterfaces:
 
         assert result["status"] == "bound"
         assert result["port_id"] == 42
+        assert result["interface"] == "Te1/0/1"
         mock_set.assert_called_once_with(candidate, 42, "default")
         candidate.save.assert_called_once_with(update_fields=["custom_field_data"])
 
