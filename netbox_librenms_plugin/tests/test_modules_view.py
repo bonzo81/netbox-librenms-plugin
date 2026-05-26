@@ -3390,6 +3390,35 @@ class TestMatchedInterfaceLinking:
         assert interface_map[43] is interface_c
         view._librenms_api.get_librenms_id.assert_not_called()
 
+    def test_get_interfaces_by_name_ignores_duplicate_names(self):
+        view = _make_view()
+        interface_a = MagicMock()
+        interface_a.name = "Te1/1/1"
+        interface_b = MagicMock()
+        interface_b.name = "Te1/1/1"
+        interface_c = MagicMock()
+        interface_c.name = "Te1/1/2"
+        member = MagicMock()
+        member.interfaces.all.return_value = [interface_a, interface_b, interface_c]
+
+        interface_map = view._get_interfaces_by_name(member)
+
+        assert "Te1/1/1" not in interface_map
+        assert interface_map["Te1/1/2"] is interface_c
+
+    def test_build_member_contexts_builds_interface_indexes_once_per_member(self):
+        view = _make_view()
+        member = MagicMock()
+        member.id = 100
+        member.interfaces.all.return_value = []
+
+        with patch.object(view, "_get_module_bays", return_value=({}, {})):
+            context = view._build_member_contexts(member, vc_members=[])
+
+        assert context[100]["interfaces_by_port_id"] == {}
+        assert context[100]["interfaces_by_name"] == {}
+        member.interfaces.all.assert_called_once_with()
+
     def test_attach_interface_match_sets_name_and_url(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 

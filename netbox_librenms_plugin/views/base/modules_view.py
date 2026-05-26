@@ -682,64 +682,60 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         context_members = vc_members if vc_members else [obj]
         for member in context_members:
             device_bays, module_scoped_bays = self._get_module_bays(member)
+            interfaces_by_port_id, interfaces_by_name = self._build_interface_indexes(member)
             member_contexts[member.id] = {
                 "device": member,
                 "device_bays": device_bays,
                 "module_scoped_bays": module_scoped_bays,
                 "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
-                "interfaces_by_port_id": self._get_interfaces_by_port_id(member),
-                "interfaces_by_name": self._get_interfaces_by_name(member),
+                "interfaces_by_port_id": interfaces_by_port_id,
+                "interfaces_by_name": interfaces_by_name,
                 "server_key": self.librenms_api.server_key,
             }
         return member_contexts
 
-    def _get_interfaces_by_port_id(self, member):
-        """Build an index of device interfaces keyed by LibreNMS port_id."""
-        interface_map = {}
+    def _build_interface_indexes(self, member):
+        """Build unique interface indexes keyed by LibreNMS port_id and name."""
+        interfaces_by_port_id = {}
+        interfaces_by_name = {}
         duplicate_port_ids = set()
-
-        interface_manager = getattr(member, "interfaces", None)
-        if interface_manager is None or not hasattr(interface_manager, "all"):
-            return interface_map
-
-        for interface in interface_manager.all():
-            port_id = self._get_interface_port_id(interface)
-            if port_id is None:
-                continue
-
-            if port_id in interface_map:
-                duplicate_port_ids.add(port_id)
-                continue
-
-            interface_map[port_id] = interface
-
-        for port_id in duplicate_port_ids:
-            interface_map.pop(port_id, None)
-
-        return interface_map
-
-    def _get_interfaces_by_name(self, member):
-        """Build an index of device interfaces keyed by unique interface names."""
-        interface_map = {}
         duplicate_names = set()
 
         interface_manager = getattr(member, "interfaces", None)
         if interface_manager is None or not hasattr(interface_manager, "all"):
-            return interface_map
+            return interfaces_by_port_id, interfaces_by_name
 
         for interface in interface_manager.all():
+            port_id = self._get_interface_port_id(interface)
+            if port_id is not None:
+                if port_id in interfaces_by_port_id:
+                    duplicate_port_ids.add(port_id)
+                else:
+                    interfaces_by_port_id[port_id] = interface
+
             name = (getattr(interface, "name", "") or "").strip()
-            if not name:
-                continue
-            if name in interface_map:
-                duplicate_names.add(name)
-                continue
-            interface_map[name] = interface
+            if name:
+                if name in interfaces_by_name:
+                    duplicate_names.add(name)
+                else:
+                    interfaces_by_name[name] = interface
 
-        for duplicate_name in duplicate_names:
-            interface_map.pop(duplicate_name, None)
+        for port_id in duplicate_port_ids:
+            interfaces_by_port_id.pop(port_id, None)
+        for name in duplicate_names:
+            interfaces_by_name.pop(name, None)
 
+        return interfaces_by_port_id, interfaces_by_name
+
+    def _get_interfaces_by_port_id(self, member):
+        """Build an index of device interfaces keyed by LibreNMS port_id."""
+        interface_map, _ = self._build_interface_indexes(member)
+        return interface_map
+
+    def _get_interfaces_by_name(self, member):
+        """Build an index of device interfaces keyed by unique interface names."""
+        _, interface_map = self._build_interface_indexes(member)
         return interface_map
 
     @staticmethod
