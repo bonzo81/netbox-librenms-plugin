@@ -82,7 +82,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
     def _get_object_librenms_id(self, obj):
         """Resolve a cached/stored LibreNMS ID for any NetBox object without dynamic fallback noise."""
-        librenms_id = self.librenms_api.get_librenms_id(obj)
+        librenms_id = self.librenms_api.get_stored_librenms_id(obj)
         if not isinstance(librenms_id, (int, str)) or isinstance(librenms_id, bool):
             return None
         return self._normalize_port_id(librenms_id)

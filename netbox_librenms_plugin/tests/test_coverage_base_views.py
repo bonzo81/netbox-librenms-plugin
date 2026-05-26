@@ -1133,7 +1133,7 @@ class TestBaseInterfaceTableViewGetContextData:
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
         ):
-            view._librenms_api.get_librenms_id.side_effect = lambda interface: 101
+            view._librenms_api.get_stored_librenms_id.side_effect = lambda interface: 101
             mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
             mock_cache.ttl.return_value = 300
             mock_tz.now.return_value = MagicMock()
@@ -1142,6 +1142,8 @@ class TestBaseInterfaceTableViewGetContextData:
 
         assert rows_store["rows"][0]["exists_in_netbox"] is False
         assert rows_store["rows"][0]["netbox_interface"] is None
+        assert view._librenms_api.get_stored_librenms_id.call_count == 2
+        view._librenms_api.get_librenms_id.assert_not_called()
 
 
 class TestBaseInterfaceTableViewAddVlanGroupSelection:

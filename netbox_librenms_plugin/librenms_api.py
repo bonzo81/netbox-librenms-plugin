@@ -170,6 +170,33 @@ class LibreNMSAPI:
                 return {"default": f"Default Server ({legacy_url})"}
             return {"default": "Default Server"}
 
+    def get_stored_librenms_id(self, obj):
+        """
+        Return the stored or cached LibreNMS ID for an object without discovery.
+
+        This helper is safe for generic NetBox objects such as interfaces,
+        where IP/hostname-based discovery would be expensive or incorrect.
+
+        Args:
+            obj: NetBox object with a librenms_id custom field or cache identity
+
+        Returns:
+            int: LibreNMS ID if found in the custom field or cache, None otherwise
+        """
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
+        if librenms_id is not None:
+            return librenms_id
+
+        # Check cache
+        cache_key = self._get_cache_key(obj)
+        librenms_id = cache.get(cache_key)
+        if librenms_id is not None:
+            return librenms_id
+
+        return None
+
     def get_librenms_id(self, obj):
         """
         Args:
@@ -190,15 +217,7 @@ class LibreNMSAPI:
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
         """
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
-        if librenms_id is not None:
-            return librenms_id
-
-        # Check cache
-        cache_key = self._get_cache_key(obj)
-        librenms_id = cache.get(cache_key)
+        librenms_id = self.get_stored_librenms_id(obj)
         if librenms_id is not None:
             return librenms_id
 
