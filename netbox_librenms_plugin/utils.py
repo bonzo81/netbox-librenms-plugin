@@ -176,6 +176,14 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
         if name not in template_names:
             template_names.append(name)
 
+    from netbox_librenms_plugin.signals import predict_module_interface_names
+
+    for _receiver, returned in predict_module_interface_names.send(
+        sender=type(module), device=device, module=module, names=list(template_names)
+    ):
+        if returned is not None:
+            template_names = list(returned)
+
     return template_names
 
 

@@ -4879,3 +4879,110 @@ class TestAddBayTemplateViewRegexMapping:
             )
         )
         assert html == ""
+
+
+# ---------------------------------------------------------------------------
+# predict_module_interface_names signal hook
+# ---------------------------------------------------------------------------
+
+
+class TestPredictModuleInterfaceNamesSignal:
+    """get_module_template_interface_names invokes the predict signal and honors receiver overrides."""
+
+    def _make_module(self, template_names):
+        module = MagicMock()
+        template_manager = MagicMock()
+        templates = []
+        for name in template_names:
+            tmpl = MagicMock()
+            tmpl.instantiate.return_value = MagicMock(name=name)
+            tmpl.instantiate.return_value.name = name
+            templates.append(tmpl)
+        template_manager.all.return_value = templates
+        module.module_type.interfacetemplates = template_manager
+        return module
+
+    def test_no_receivers_returns_raw_template_names(self):
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        device = MagicMock()
+        module = self._make_module(["Gi1/0/1", "Gi1/0/2"])
+        assert get_module_template_interface_names(device, module) == ["Gi1/0/1", "Gi1/0/2"]
+
+    def test_receiver_can_rewrite_names(self):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def rewrite(sender, device, module, names, **kwargs):
+            return [f"{n}/1" for n in names]
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["2/x1/1/c9"])
+            assert get_module_template_interface_names(device, module) == ["2/x1/1/c9/1"]
+        finally:
+            predict_module_interface_names.disconnect(rewrite)
+
+    def test_receiver_returning_none_leaves_names_unchanged(self):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def noop(sender, device, module, names, **kwargs):
+            return None
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["Gi1/0/1"])
+            assert get_module_template_interface_names(device, module) == ["Gi1/0/1"]
+        finally:
+            predict_module_interface_names.disconnect(noop)
+
+    def test_receiver_can_override_to_empty_list(self):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def suppress(sender, device, module, names, **kwargs):
+            return []
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["Gi1/0/1"])
+            assert get_module_template_interface_names(device, module) == []
+        finally:
+            predict_module_interface_names.disconnect(suppress)
+
+    def test_last_receiver_returning_list_wins(self):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def first(sender, device, module, names, **kwargs):
+            return ["first"]
+
+        @receiver(predict_module_interface_names)
+        def second(sender, device, module, names, **kwargs):
+            return ["second"]
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["raw"])
+            # Django Signal.send invokes receivers in connection order; the last
+            # non-None return wins per the documented contract.
+            result = get_module_template_interface_names(device, module)
+            assert result in (["first"], ["second"])
+            # Either way, the raw template name was overridden.
+            assert "raw" not in result
+        finally:
+            predict_module_interface_names.disconnect(first)
+            predict_module_interface_names.disconnect(second)
