@@ -1492,6 +1492,33 @@ class TestBuildRowSerialMismatch:
         assert row["can_update_interface_binding"] is True
         assert row["adoptable_interface_count"] == 2
 
+    def test_count_adoptable_template_interfaces_uses_vc_aware_names(self):
+        view = self._view()
+        device = MagicMock()
+        device.vc_position = 3
+        device.virtual_chassis_id = 11
+        device.virtual_chassis = MagicMock()
+        device.virtual_chassis.members.values_list.return_value = [1, 2, 3]
+
+        module = MagicMock()
+        module.device = device
+        template = MagicMock()
+        instantiated = MagicMock()
+        instantiated.name = "TenGigabitEthernet1/1/1"
+        template.instantiate.return_value = instantiated
+        module.module_type.interfacetemplates.all.return_value = [template]
+
+        with patch("dcim.models.Interface") as mock_interface:
+            mock_interface.objects.filter.return_value.count.return_value = 1
+            result = view._count_adoptable_template_interfaces(module)
+
+        assert result == 1
+        mock_interface.objects.filter.assert_called_once_with(
+            device=device,
+            module__isnull=True,
+            name__in=["TenGigabitEthernet3/1/1"],
+        )
+
     def test_serial_mismatch_sets_can_update_serial(self):
         """When serials differ, can_update_serial=True and installed_module_id set."""
         view = self._view()

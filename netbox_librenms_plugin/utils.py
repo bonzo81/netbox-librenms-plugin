@@ -13,6 +13,9 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 logger = logging.getLogger(__name__)
 
 
+_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
+
+
 def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
     """
     Convert speed from bits per second to kilobits per second.
@@ -75,6 +78,105 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
         return device.virtual_chassis.members.get(vc_position=vc_position)
     except (re.error, ValueError, ObjectDoesNotExist):
         return device
+
+
+def get_vc_member_positions(device: Device) -> set[int]:
+    """Return known VC member positions for a device, including the device itself."""
+    positions = set()
+
+    own_position = getattr(device, "vc_position", None)
+    if isinstance(own_position, int) and own_position > 0:
+        positions.add(own_position)
+
+    vc = getattr(device, "virtual_chassis", None)
+    members = getattr(vc, "members", None) if vc is not None else None
+    if members is None or not hasattr(members, "values_list"):
+        return positions
+
+    try:
+        raw_positions = members.values_list("vc_position", flat=True)
+    except Exception:
+        return positions
+
+    try:
+        iterator = iter(raw_positions)
+    except TypeError:
+        return positions
+
+    for raw_position in iterator:
+        try:
+            parsed = int(raw_position)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            positions.add(parsed)
+
+    return positions
+
+
+def rewrite_interface_name_for_vc_member(
+    interface_name: str, vc_position: int, member_positions: set[int] | None = None
+) -> str | None:
+    """Rewrite a template/interface name to the selected VC member position when appropriate."""
+    if not interface_name or not isinstance(vc_position, int) or vc_position < 1:
+        return None
+    match = _VC_MEMBER_INTERFACE_PATTERN.match(interface_name)
+    if not match:
+        return None
+
+    try:
+        current_position = int(match.group("member"))
+    except (TypeError, ValueError):
+        return None
+
+    if member_positions is not None and current_position not in member_positions:
+        return None
+
+    if current_position == vc_position:
+        return interface_name
+
+    return f"{match.group('prefix')}{vc_position}{match.group('suffix')}"
+
+
+def get_module_template_interface_names(device: Device, module) -> list[str]:
+    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
+    if device is None:
+        return []
+
+    template_manager = getattr(getattr(module, "module_type", None), "interfacetemplates", None)
+    if template_manager is None or not hasattr(template_manager, "all"):
+        return []
+
+    vc_position = getattr(device, "vc_position", None)
+    vc_id = getattr(device, "virtual_chassis_id", None)
+    member_positions = None
+    if isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
+        member_positions = get_vc_member_positions(device)
+
+    template_names = []
+    for template in template_manager.all():
+        try:
+            instance = template.instantiate(device=device, module=module)
+        except Exception:
+            continue
+
+        name = (getattr(instance, "name", "") or "").strip()
+        if not name:
+            continue
+
+        if member_positions is not None:
+            rewritten_name = rewrite_interface_name_for_vc_member(
+                name,
+                vc_position,
+                member_positions=member_positions,
+            )
+            if rewritten_name:
+                name = rewritten_name
+
+        if name not in template_names:
+            template_names.append(name)
+
+    return template_names
 
 
 def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional[Device]:

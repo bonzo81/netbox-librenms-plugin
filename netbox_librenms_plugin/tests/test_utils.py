@@ -538,6 +538,26 @@ class TestVirtualChassisHelpers:
 
         assert result == member_pos1  # lowest vc_position wins
 
+    def test_get_module_template_interface_names_rewrites_for_vc_member(self):
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        device = MagicMock()
+        device.vc_position = 3
+        device.virtual_chassis_id = 11
+        device.virtual_chassis = MagicMock()
+        device.virtual_chassis.members.values_list.return_value = [1, 2, 3]
+
+        module = MagicMock()
+        template = MagicMock()
+        instantiated = MagicMock()
+        instantiated.name = "TenGigabitEthernet1/1/1"
+        template.instantiate.return_value = instantiated
+        module.module_type.interfacetemplates.all.return_value = [template]
+
+        result = get_module_template_interface_names(device, module)
+
+        assert result == ["TenGigabitEthernet3/1/1"]
+
     def test_zero_id_is_not_a_valid_librenms_id(self):
         """LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
         A member whose resolved ID is 0 must be skipped so a real ID is preferred."""

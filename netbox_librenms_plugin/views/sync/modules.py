@@ -15,7 +15,10 @@ from netbox_librenms_plugin.utils import (
     find_by_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
+    get_module_template_interface_names,
+    get_vc_member_positions,
     get_module_types_indexed,
+    rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.base.modules_view import _PLACEHOLDER_VALUES
@@ -224,37 +227,18 @@ def _count_adoptable_interfaces(device, module):
     """Count standalone interfaces that would be adopted during module install."""
     from dcim.models import Interface
 
-    template_names = _get_template_interface_names(device, module)
+    template_names = get_module_template_interface_names(device, module)
     if not template_names:
         return 0
 
     return Interface.objects.filter(device=device, module__isnull=True, name__in=template_names).count()
 
 
-def _get_template_interface_names(device, module):
-    """Return unique instantiated interface names for a module's interface templates."""
-    template_manager = getattr(module.module_type, "interfacetemplates", None)
-    if template_manager is None or not hasattr(template_manager, "all"):
-        return []
-
-    template_names = []
-    for template in template_manager.all():
-        try:
-            instance = template.instantiate(device=device, module=module)
-        except Exception:
-            continue
-        name = (getattr(instance, "name", "") or "").strip()
-        if name and name not in template_names:
-            template_names.append(name)
-
-    return template_names
-
-
 def _adopt_existing_template_interfaces(device, module):
     """Adopt existing standalone interfaces into an already-installed module by template name."""
     from dcim.models import Interface
 
-    template_names = _get_template_interface_names(device, module)
+    template_names = get_module_template_interface_names(device, module)
     if not template_names:
         return {
             "status": "skipped",
@@ -282,66 +266,18 @@ def _adopt_existing_template_interfaces(device, module):
     }
 
 
-_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
-
-
 def _get_vc_member_positions(device):
-    """Return known VC member positions for a device, including the device itself."""
-    positions = set()
-
-    own_position = getattr(device, "vc_position", None)
-    if isinstance(own_position, int) and own_position > 0:
-        positions.add(own_position)
-
-    vc = getattr(device, "virtual_chassis", None)
-    members = getattr(vc, "members", None) if vc is not None else None
-    if members is None or not hasattr(members, "values_list"):
-        return positions
-
-    try:
-        raw_positions = members.values_list("vc_position", flat=True)
-    except Exception:
-        return positions
-
-    try:
-        iterator = iter(raw_positions)
-    except TypeError:
-        return positions
-
-    for raw_position in iterator:
-        try:
-            parsed = int(raw_position)
-        except (TypeError, ValueError):
-            continue
-        if parsed > 0:
-            positions.add(parsed)
-
-    return positions
+    """Compatibility wrapper for VC member position lookups."""
+    return get_vc_member_positions(device)
 
 
 def _rewrite_interface_name_for_vc_member(interface_name, vc_position, member_positions=None):
-    """Rewrite leading member index in interface names for VC member installs."""
-    if not interface_name or not isinstance(vc_position, int) or vc_position < 1:
-        return None
-    match = _VC_MEMBER_INTERFACE_PATTERN.match(interface_name)
-    if not match:
-        return None
-
-    try:
-        current_position = int(match.group("member"))
-    except (TypeError, ValueError):
-        return None
-
-    if member_positions is not None:
-        # Treat first-number matching as a VC-member fallback only when the
-        # parsed number corresponds to a known member position.
-        if current_position not in member_positions:
-            return None
-
-    if current_position == vc_position:
-        return interface_name
-
-    return f"{match.group('prefix')}{vc_position}{match.group('suffix')}"
+    """Compatibility wrapper for VC-aware interface name rewriting."""
+    return rewrite_interface_name_for_vc_member(
+        interface_name,
+        vc_position,
+        member_positions=member_positions,
+    )
 
 
 def _normalize_module_interface_names_for_vc_member(device, module):

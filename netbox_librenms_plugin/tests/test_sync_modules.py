@@ -1207,6 +1207,46 @@ class TestAdoptExistingTemplateInterfaces:
         iface_a.save.assert_called_once_with(update_fields=["module"])
         iface_b.save.assert_not_called()
 
+    def test_adopts_matching_vc_rewritten_template_interfaces(self):
+        from netbox_librenms_plugin.views.sync.modules import _adopt_existing_template_interfaces
+
+        device = MagicMock()
+        device.vc_position = 3
+        device.virtual_chassis_id = 11
+        device.virtual_chassis = MagicMock()
+        device.virtual_chassis.members.values_list.return_value = [1, 2, 3]
+
+        module = MagicMock()
+        template = MagicMock()
+        instantiated = MagicMock()
+        instantiated.name = "TenGigabitEthernet1/1/1"
+        template.instantiate.return_value = instantiated
+        module.module_type.interfacetemplates.all.return_value = [template]
+
+        iface = MagicMock()
+        iface.name = "TenGigabitEthernet3/1/1"
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        with (
+            patch("dcim.models.Interface") as mock_interface_model,
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_interface_model.objects.filter.return_value = [iface]
+            result = _adopt_existing_template_interfaces(device, module)
+
+        assert result["status"] == "bound"
+        assert result["adopted_count"] == 1
+        assert result["interfaces"] == ["TenGigabitEthernet3/1/1"]
+        mock_interface_model.objects.filter.assert_called_once_with(
+            device=device,
+            module__isnull=True,
+            name__in=["TenGigabitEthernet3/1/1"],
+        )
+
     def test_binds_unique_module_interface(self):
         from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 

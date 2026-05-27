@@ -7,7 +7,11 @@ from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.utils import get_librenms_device_id, get_librenms_sync_device
+from netbox_librenms_plugin.utils import (
+    get_librenms_device_id,
+    get_librenms_sync_device,
+    get_module_template_interface_names,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -198,24 +202,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """Count standalone interfaces that match an installed module's interface templates."""
         from dcim.models import Interface
 
-        template_manager = getattr(getattr(module, "module_type", None), "interfacetemplates", None)
-        if template_manager is None or not hasattr(template_manager, "all"):
-            return 0
-
         device = getattr(module, "device", None)
         if device is None:
             return 0
 
-        template_names = []
-        for template in template_manager.all():
-            try:
-                instance = template.instantiate(device=device, module=module)
-            except Exception:
-                continue
-            name = (getattr(instance, "name", "") or "").strip()
-            if name and name not in template_names:
-                template_names.append(name)
-
+        template_names = get_module_template_interface_names(device, module)
         if not template_names:
             return 0
 
