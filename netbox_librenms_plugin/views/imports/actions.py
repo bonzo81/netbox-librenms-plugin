@@ -1811,40 +1811,25 @@ class AddPlatformMappingView(
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
         if not libre_device:
-            return HttpResponse(
-                '<span class="text-danger small">Device not found in LibreNMS.</span>',
-                status=404,
-            )
+            return _htmx_error_response("Device not found in LibreNMS.")
 
         librenms_os = (libre_device.get("os") or "").strip()
-        if not librenms_os:
-            return HttpResponse(
-                '<span class="text-danger small">Device has no OS string -- cannot create mapping.</span>',
-                status=400,
-            )
+        if not librenms_os or librenms_os == "-":
+            return _htmx_error_response("Device has no OS string — cannot create mapping.")
 
         platform_id = request.POST.get("platform_id", "").strip()
         if not platform_id:
-            return HttpResponse(
-                '<span class="text-danger small">Please select a platform before submitting.</span>',
-                status=400,
-            )
+            return _htmx_error_response("Please select a platform before submitting.")
 
         try:
             platform_id = int(platform_id)
         except (ValueError, TypeError):
-            return HttpResponse(
-                '<span class="text-danger small">Invalid platform selection.</span>',
-                status=400,
-            )
+            return _htmx_error_response("Invalid platform selection.")
 
         try:
             platform = Platform.objects.get(pk=platform_id)
         except Platform.DoesNotExist:
-            return HttpResponse(
-                '<span class="text-danger small">Selected platform not found.</span>',
-                status=404,
-            )
+            return _htmx_error_response("Selected platform not found.")
 
         existing_mapping = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
         self.required_object_permissions = {
