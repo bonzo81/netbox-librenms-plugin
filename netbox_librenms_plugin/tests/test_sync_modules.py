@@ -4932,7 +4932,7 @@ class TestVCNormalizationReportView:
             response = view.get(request, pk=24)
 
         assert response.status_code == 400
-        assert b"nothing to report" in response.content.lower() if b"nothing" in response.content.lower() else True
+        assert b"nothing to report" in response.content.lower()
 
     def test_get_renders_template_when_noop_detected(self):
         from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
@@ -4975,6 +4975,153 @@ class TestVCNormalizationReportView:
         ctx = mock_render.call_args[0][2]
         assert "**VC interface normalization — no match**" in ctx["report_markdown"]
         assert "nokia" in ctx["report_markdown"]
+
+    def test_get_warns_on_invalid_selected_device_id(self):
+        """Invalid selected_device_id triggers the standard warn helper but still proceeds."""
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        module = MagicMock()
+        request = _make_request("GET", data={"module_id": "321", "selected_device_id": "bogus"})
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
+                return_value=(device, True),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._warn_invalid_selected_device",
+            ) as mock_warn,
+            patch(
+                "netbox_librenms_plugin.utils.detect_vc_normalization_noop",
+                return_value=None,
+            ),
+        ):
+            response = view.get(request, pk=24)
+
+        mock_warn.assert_called_once_with(request)
+        assert response.status_code == 400
+
+    def test_get_returns_400_when_module_id_non_numeric(self):
+        """Non-numeric module_id is treated the same as missing — returns 400."""
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        request = _make_request("GET", data={"module_id": "not-a-number"})
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                return_value=device,
+            ),
+        ):
+            response = view.get(request, pk=24)
+
+        assert response.status_code == 400
+
+
+class TestVCNormalizationE2E:
+    """End-to-end: production code path (get_module_template_interface_names → detect_vc_normalization_noop).
+
+    Exercises the real regex against vendor-realistic name shapes without DB
+    fixtures. Catches regressions if either piece changes how it processes names.
+    """
+
+    @staticmethod
+    def _device(vc_position=3, vc_id=11, member_positions=(1, 2, 3, 4)):
+        d = MagicMock()
+        d.vc_position = vc_position
+        d.virtual_chassis_id = vc_id
+        d.virtual_chassis = MagicMock()
+        d.virtual_chassis.members.values_list.return_value = list(member_positions)
+        d.device_type = MagicMock()
+        return d
+
+    @staticmethod
+    def _module(instantiated_names):
+        m = MagicMock()
+        templates = []
+        for name in instantiated_names:
+            tmpl = MagicMock()
+            tmpl.name = "{module}"
+            inst = MagicMock()
+            inst.name = name
+            tmpl.instantiate.return_value = inst
+            templates.append(tmpl)
+        m.module_type.interfacetemplates.all.return_value = templates
+        m.module_type.manufacturer.slug = "vendor"
+        m.module_type.model = "MOD"
+        m.module_bay.name = "Bay X"
+        return m
+
+    def test_cisco_shape_does_not_trigger_diagnostic(self):
+        """A Cisco-style name (TenGigabitEthernet1/1/1) matches the regex → no diagnostic."""
+        from netbox_librenms_plugin.utils import (
+            detect_vc_normalization_noop,
+            get_module_template_interface_names,
+        )
+
+        device = self._device(vc_position=3)
+        module = self._module(["TenGigabitEthernet1/1/1"])
+
+        # Production path: prediction returns the VC-rewritten name.
+        names = get_module_template_interface_names(device, module)
+        assert names == ["TenGigabitEthernet3/1/1"]
+
+        # Detector sees the (pre-rewrite) instantiated name, which DOES match the regex.
+        assert detect_vc_normalization_noop(device, module) is None
+
+    def test_nokia_shape_triggers_diagnostic(self):
+        """A Nokia-style name (2/x1/1/c9) doesn't match the regex → diagnostic returned."""
+        from netbox_librenms_plugin.utils import (
+            detect_vc_normalization_noop,
+            get_module_template_interface_names,
+        )
+
+        device = self._device(vc_position=2, member_positions=(1, 2))
+        module = self._module(["2/x1/1/c9"])
+
+        # Production path: prediction returns the name unchanged (no rewrite applied).
+        names = get_module_template_interface_names(device, module)
+        assert names == ["2/x1/1/c9"]
+
+        # Detector flags this as a vendor-support issue worth reporting.
+        diag = detect_vc_normalization_noop(device, module)
+        assert diag is not None
+        assert diag["vc_position"] == 2
+        assert diag["template_pairs"] == [("{module}", "2/x1/1/c9")]
+
+    def test_juniper_shape_triggers_diagnostic(self):
+        """Juniper xe-0/0/0 names don't match the regex (prefix breaks on '-') → diagnostic."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._device(vc_position=3, member_positions=(1, 2, 3, 4))
+        module = self._module(["xe-0/0/0", "xe-0/0/1"])
+
+        diag = detect_vc_normalization_noop(device, module)
+        assert diag is not None
+        assert {pair[1] for pair in diag["template_pairs"]} == {"xe-0/0/0", "xe-0/0/1"}
+
+    def test_mixed_shapes_with_one_matching_returns_none(self):
+        """If at least one template name matches the regex, the row is not flagged."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._device()
+        # One Cisco-shaped name (matches regex) alongside one Nokia-shaped (doesn't).
+        # Detector should NOT flag — at least one rewrite path is working.
+        module = self._module(["Te1/0/1", "2/x1/1/c9"])
+
+        assert detect_vc_normalization_noop(device, module) is None
 
 
 class TestPredictModuleInterfaceNamesSignal:

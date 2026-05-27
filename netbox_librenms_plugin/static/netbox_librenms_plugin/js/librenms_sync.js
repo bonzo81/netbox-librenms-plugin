@@ -1763,6 +1763,55 @@ function initializeModuleReplaceButtons() {
 }
 
 /**
+ * Tracks the in-flight AbortController for the VC report fetch.
+ * Cancelled when a new VC report button is clicked before the previous fetch completes,
+ * so spam-clicks don't race.
+ */
+let _activeVCReportController = null;
+
+/**
+ * Wire the copy-to-clipboard button inside the VC report modal body.
+ * Uses navigator.clipboard.writeText when available; falls back to the
+ * textarea+execCommand path for older browsers / non-HTTPS contexts.
+ * Called once after the fragment is injected into the modal.
+ */
+function initializeVCReportCopyButton() {
+    const btn = document.getElementById('vc-report-copy-btn');
+    if (!btn || btn.dataset.copyInitialized) return;
+    btn.dataset.copyInitialized = 'true';
+
+    const targetId = btn.dataset.target || 'vc-report-textarea';
+    const idleHtml = '<i class="mdi mdi-content-copy me-1"></i>Copy to clipboard';
+    const doneHtml = '<i class="mdi mdi-check me-1"></i>Copied';
+    const errHtml = '<i class="mdi mdi-alert me-1"></i>Copy failed';
+
+    const flash = (html, ms = 1500) => {
+        btn.innerHTML = html;
+        setTimeout(() => { btn.innerHTML = idleHtml; }, ms);
+    };
+
+    btn.addEventListener('click', () => {
+        const ta = document.getElementById(targetId);
+        if (!ta) return;
+        const text = ta.value;
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(text)
+                .then(() => flash(doneHtml))
+                .catch(() => flash(errHtml));
+            return;
+        }
+        // Fallback for older browsers or insecure contexts.
+        try {
+            ta.select();
+            const ok = document.execCommand('copy');
+            flash(ok ? doneHtml : errHtml);
+        } catch (e) {
+            flash(errHtml);
+        }
+    });
+}
+
+/**
  * Initialize "Report VC issue" buttons on the module sync table.
  * Each button carries module/server/device data; click fetches a diagnostic
  * fragment that's swapped into the shared htmx-modal for copy-paste filing.
@@ -1773,6 +1822,13 @@ function initializeVCReportButtons() {
         btn.dataset.vcReportInitialized = 'true';
 
         btn.addEventListener('click', function () {
+            // Cancel any in-flight VC report fetch before starting a new one
+            if (_activeVCReportController) {
+                _activeVCReportController.abort();
+            }
+            _activeVCReportController = new AbortController();
+            const signal = _activeVCReportController.signal;
+
             const reportUrl = this.dataset.reportUrl;
             const moduleId = this.dataset.moduleId;
             const selectedDeviceId = this.dataset.selectedDeviceId;
@@ -1802,7 +1858,7 @@ function initializeVCReportButtons() {
             if (csrfToken) {
                 fetchHeaders['X-CSRFToken'] = csrfToken;
             }
-            fetch(`${reportUrl}?${params.toString()}`, { headers: fetchHeaders })
+            fetch(`${reportUrl}?${params.toString()}`, { signal, headers: fetchHeaders })
                 .then(response => {
                     if (!response.ok) return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
                     return response.text();
@@ -1811,9 +1867,11 @@ function initializeVCReportButtons() {
                     if (modalContent) {
                         modalContent.innerHTML = html;
                         updateHtmxModalLabel();
+                        initializeVCReportCopyButton();
                     }
                 })
                 .catch(err => {
+                    if (err.name === 'AbortError') return; // Superseded by a newer click — ignore
                     const modalBody = document.getElementById('htmx-modal-body');
                     if (modalBody) {
                         const alert = document.createElement('div');
@@ -1835,6 +1893,11 @@ function closeHtmxModal() {
     if (typeof _activeReplaceController !== 'undefined' && _activeReplaceController) {
         _activeReplaceController.abort();
         _activeReplaceController = null;
+    }
+    // Abort any in-flight VC report fetch
+    if (typeof _activeVCReportController !== 'undefined' && _activeVCReportController) {
+        _activeVCReportController.abort();
+        _activeVCReportController = null;
     }
     hideModal(document.getElementById('htmx-modal'));
 }

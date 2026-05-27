@@ -783,6 +783,7 @@ class LibreNMSModuleTable(tables.Table):
         # see a MagicMock here, which the isinstance check correctly skips.
         if record.get("installed_module_id") and isinstance(getattr(self.device, "virtual_chassis_id", None), int):
             from dcim.models import Module
+            from django.db import DatabaseError
 
             from netbox_librenms_plugin.utils import detect_vc_normalization_noop
 
@@ -796,7 +797,10 @@ class LibreNMSModuleTable(tables.Table):
                     "device__device_type",
                     "device__virtual_chassis",
                 ).get(pk=record["installed_module_id"])
-            except Exception:
+            except (Module.DoesNotExist, DatabaseError, RuntimeError):
+                # RuntimeError: pytest's "Database access not allowed" in unit-test
+                # contexts that supply self.device as a MagicMock with a real-looking
+                # virtual_chassis_id. Production rows wouldn't reach here.
                 installed_module = None
 
             if installed_module is not None and detect_vc_normalization_noop(installed_module.device, installed_module):

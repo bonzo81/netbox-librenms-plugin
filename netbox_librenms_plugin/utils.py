@@ -204,6 +204,9 @@ def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
     """
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
+    # bool is a subclass of int; reject explicitly so True/False can't masquerade.
+    if isinstance(vc_position, bool) or isinstance(vc_id, bool):
+        return None
     if not (isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int)):
         return None
 
@@ -261,9 +264,9 @@ def build_vc_normalization_report(diagnostic: dict) -> str:
     from netbox_librenms_plugin import __version__ as plugin_version
 
     try:
-        from netbox.config import get_config
+        from django.conf import settings
 
-        netbox_version = getattr(get_config(), "RELEASE", None) or "?"
+        netbox_version = getattr(settings, "RELEASE", None) or getattr(settings, "VERSION", None) or "?"
     except Exception:
         netbox_version = "?"
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"

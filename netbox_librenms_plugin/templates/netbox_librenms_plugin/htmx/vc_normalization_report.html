@@ -13,14 +13,8 @@
         Lines marked <em>(optional)</em> identify hardware catalog items — strip them if you'd rather not share.
     </p>
     <div class="d-flex justify-content-end mb-2">
-        <button type="button" class="btn btn-sm btn-outline-primary"
-                onclick="(function(btn){
-                    const ta = document.getElementById('vc-report-textarea');
-                    ta.select();
-                    document.execCommand('copy');
-                    btn.innerHTML = '<i class=\'mdi mdi-check me-1\'></i>Copied';
-                    setTimeout(() => { btn.innerHTML = '<i class=\'mdi mdi-content-copy me-1\'></i>Copy to clipboard'; }, 1500);
-                })(this)">
+        <button type="button" id="vc-report-copy-btn" class="btn btn-sm btn-outline-primary"
+                data-target="vc-report-textarea">
             <i class="mdi mdi-content-copy me-1"></i>Copy to clipboard
         </button>
     </div>
