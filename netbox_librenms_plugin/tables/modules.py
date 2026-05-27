@@ -776,6 +776,49 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        # Report-VC-normalization-issue button: appears only on installed-module rows when
+        # the page device is a VC member AND template-name VC rewriting would no-op for
+        # the installed module's interface templates (typically: unsupported vendor naming).
+        # `virtual_chassis_id` is an int in production (or None); MagicMock-only tests
+        # see a MagicMock here, which the isinstance check correctly skips.
+        if record.get("installed_module_id") and isinstance(getattr(self.device, "virtual_chassis_id", None), int):
+            from dcim.models import Module
+
+            from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+            installed_module = None
+            try:
+                installed_module = Module.objects.select_related(
+                    "module_type",
+                    "module_type__manufacturer",
+                    "module_bay",
+                    "device",
+                    "device__device_type",
+                    "device__virtual_chassis",
+                ).get(pk=record["installed_module_id"])
+            except Exception:
+                installed_module = None
+
+            if installed_module is not None and detect_vc_normalization_noop(installed_module.device, installed_module):
+                report_url = reverse(
+                    "plugins:netbox_librenms_plugin:vc_normalization_report",
+                    kwargs={"pk": self.device.pk},
+                )
+                buttons.append(
+                    format_html(
+                        '<button type="button" class="btn btn-sm btn-outline-secondary ms-1 vc-report-btn"'
+                        ' data-report-url="{}" data-module-id="{}" data-selected-device-id="{}"'
+                        ' title="Report VC naming-convention issue — opens a copyable diagnostic'
+                        " for a GitHub issue"
+                        '">'
+                        '<i class="mdi mdi-bug-outline"></i> Report VC issue'
+                        "</button>",
+                        report_url,
+                        record["installed_module_id"],
+                        record.get("selected_device_id") or self.device.pk,
+                    )
+                )
+
         return mark_safe("".join(buttons)) if buttons else ""
 
     def format_module_data(self, record):

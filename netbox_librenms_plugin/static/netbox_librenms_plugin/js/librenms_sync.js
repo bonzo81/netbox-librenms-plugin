@@ -1111,6 +1111,7 @@ function handleModuleChange(select, value) {
             // Re-bind listeners because row controls (select/buttons/forms) were replaced.
             initializeVCMemberSelect();
             initializeModuleReplaceButtons();
+            initializeVCReportButtons();
         })
         .catch(error => {
             if (error.name === 'AbortError') return;
@@ -1761,6 +1762,74 @@ function initializeModuleReplaceButtons() {
     });
 }
 
+/**
+ * Initialize "Report VC issue" buttons on the module sync table.
+ * Each button carries module/server/device data; click fetches a diagnostic
+ * fragment that's swapped into the shared htmx-modal for copy-paste filing.
+ */
+function initializeVCReportButtons() {
+    document.querySelectorAll('.vc-report-btn').forEach(btn => {
+        if (btn.dataset.vcReportInitialized) return;
+        btn.dataset.vcReportInitialized = 'true';
+
+        btn.addEventListener('click', function () {
+            const reportUrl = this.dataset.reportUrl;
+            const moduleId = this.dataset.moduleId;
+            const selectedDeviceId = this.dataset.selectedDeviceId;
+
+            const params = new URLSearchParams({
+                module_id: moduleId,
+                selected_device_id: selectedDeviceId,
+            });
+
+            const modalContent = document.getElementById('htmx-modal-content');
+            if (modalContent) {
+                modalContent.innerHTML =
+                    '<div class="modal-header">' +
+                    '<h5 id="htmx-modal-label" class="modal-title"><i class="mdi mdi-bug-outline me-1"></i>Report VC normalization issue</h5>' +
+                    '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
+                    '</div>' +
+                    '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
+                    '<i class="mdi mdi-loading mdi-spin mdi-36px"></i>' +
+                    '<p class="mt-2">Loading…</p>' +
+                    '</div>';
+            }
+
+            showModal(document.getElementById('htmx-modal'));
+
+            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
+            const fetchHeaders = {};
+            if (csrfToken) {
+                fetchHeaders['X-CSRFToken'] = csrfToken;
+            }
+            fetch(`${reportUrl}?${params.toString()}`, { headers: fetchHeaders })
+                .then(response => {
+                    if (!response.ok) return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
+                    return response.text();
+                })
+                .then(html => {
+                    if (modalContent) {
+                        modalContent.innerHTML = html;
+                        updateHtmxModalLabel();
+                    }
+                })
+                .catch(err => {
+                    const modalBody = document.getElementById('htmx-modal-body');
+                    if (modalBody) {
+                        const alert = document.createElement('div');
+                        alert.className = 'alert alert-danger';
+                        const icon = document.createElement('i');
+                        icon.className = 'mdi mdi-alert me-1';
+                        alert.appendChild(icon);
+                        alert.appendChild(document.createTextNode(err.message || 'Failed to load report.'));
+                        modalBody.textContent = '';
+                        modalBody.appendChild(alert);
+                    }
+                });
+        });
+    });
+}
+
 function closeHtmxModal() {
     // Abort any in-flight module-replace preview request
     if (typeof _activeReplaceController !== 'undefined' && _activeReplaceController) {
@@ -1797,6 +1866,7 @@ function initializeScripts() {
     initializeVlanSyncGroupSelects();
     initializeInstallSelectedForm();
     initializeModuleReplaceButtons();
+    initializeVCReportButtons();
 }
 
 

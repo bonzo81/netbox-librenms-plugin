@@ -187,6 +187,117 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
     return template_names
 
 
+def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
+    """Return a diagnostic dict when VC member-name rewriting would no-op for this module.
+
+    "No-op" here means: the device is a VC member but none of the module's
+    instantiated template names match the VC member-position regex, so
+    rewrite_interface_name_for_vc_member can't transform them. This is the
+    signature of an unsupported vendor naming convention and is what a user
+    would want to report so support can be added.
+
+    Returns None when:
+      - The device isn't a VC member
+      - The module has no instantiatable templates
+      - At least one instantiated name matches the regex (rewriting is working
+        or unnecessary)
+    """
+    vc_position = getattr(device, "vc_position", None)
+    vc_id = getattr(device, "virtual_chassis_id", None)
+    if not (isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int)):
+        return None
+
+    template_manager = getattr(getattr(module, "module_type", None), "interfacetemplates", None)
+    if template_manager is None or not hasattr(template_manager, "all"):
+        return None
+
+    template_pairs = []
+    any_regex_match = False
+    for template in template_manager.all():
+        raw_name = (getattr(template, "name", "") or "").strip()
+        try:
+            instance = template.instantiate(device=device, module=module)
+        except Exception:
+            continue
+        instantiated_name = (getattr(instance, "name", "") or "").strip()
+        if not instantiated_name:
+            continue
+        if _VC_MEMBER_INTERFACE_PATTERN.match(instantiated_name):
+            any_regex_match = True
+        template_pairs.append((raw_name, instantiated_name))
+
+    if not template_pairs or any_regex_match:
+        return None
+
+    module_type = getattr(module, "module_type", None)
+    manufacturer = getattr(module_type, "manufacturer", None)
+    device_type = getattr(device, "device_type", None)
+    module_bay = getattr(module, "module_bay", None)
+
+    return {
+        "manufacturer_slug": getattr(manufacturer, "slug", None),
+        "device_type_model": getattr(device_type, "model", None),
+        "module_type_model": getattr(module_type, "model", None),
+        "module_bay_name": getattr(module_bay, "name", None),
+        "vc_position": vc_position,
+        "vc_member_positions": sorted(get_vc_member_positions(device)),
+        "template_pairs": template_pairs,
+        "regex": _VC_MEMBER_INTERFACE_PATTERN.pattern,
+    }
+
+
+_OPTIONAL_SUFFIX = " _(optional, you can remove this line)_"
+
+
+def build_vc_normalization_report(diagnostic: dict) -> str:
+    """Render a VC-normalization no-op diagnostic as a markdown blob for a GitHub issue.
+
+    Catalog identifiers (manufacturer/device type/module type/bay name) get an
+    "(optional, you can remove this line)" suffix so users who treat their HW
+    inventory as confidential can strip them before pasting.
+    """
+    import sys
+
+    from netbox_librenms_plugin import __version__ as plugin_version
+
+    try:
+        from netbox.config import get_config
+
+        netbox_version = getattr(get_config(), "RELEASE", None) or "?"
+    except Exception:
+        netbox_version = "?"
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+
+    def _line(label, value, optional=False):
+        if value in (None, ""):
+            value = "_(unknown)_"
+        else:
+            value = f"`{value}`"
+        suffix = _OPTIONAL_SUFFIX if optional else ""
+        return f"- {label}: {value}{suffix}"
+
+    pairs_block = "\n".join(
+        f"  - `{raw or '_(no raw template name)_'}` → `{instantiated}`"
+        for raw, instantiated in diagnostic.get("template_pairs", [])
+    )
+
+    lines = [
+        "**VC interface normalization — no match**",
+        "",
+        _line("Manufacturer", diagnostic.get("manufacturer_slug"), optional=True),
+        _line("Device type", diagnostic.get("device_type_model"), optional=True),
+        _line("Module type", diagnostic.get("module_type_model"), optional=True),
+        _line("Module bay", diagnostic.get("module_bay_name"), optional=True),
+        f"- VC position (target): {diagnostic.get('vc_position')}",
+        f"- VC member positions: {list(diagnostic.get('vc_member_positions') or [])}",
+        "- Template names (raw → instantiated):",
+        pairs_block or "  - _(no templates)_",
+        f"- Regex tried: `{diagnostic.get('regex', '')}`",
+        f"- Plugin: {plugin_version} / NetBox: {netbox_version} / Python: {python_version}",
+    ]
+    return "\n".join(lines)
+
+
 def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional[Device]:
     """
     Determine which Virtual Chassis member should handle LibreNMS sync operations.

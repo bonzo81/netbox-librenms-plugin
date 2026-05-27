@@ -916,3 +916,166 @@ class TestSaveUserPrefView:
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
         assert issubclass(SaveUserPrefView, LibreNMSPermissionMixin)
+
+
+class TestDetectVCNormalizationNoop:
+    """detect_vc_normalization_noop flags only the no-vendor-support case."""
+
+    def _make_device(self, vc_position=3, vc_id=11, member_positions=(1, 2, 3, 4)):
+        device = MagicMock()
+        device.vc_position = vc_position
+        device.virtual_chassis_id = vc_id
+        if vc_id is None:
+            device.virtual_chassis = None
+        else:
+            device.virtual_chassis = MagicMock()
+            device.virtual_chassis.members.values_list.return_value = list(member_positions)
+        return device
+
+    def _make_module(self, instantiated_names, raw_names=None):
+        module = MagicMock()
+        templates = []
+        for idx, name in enumerate(instantiated_names):
+            tmpl = MagicMock()
+            raw = (raw_names or [None] * len(instantiated_names))[idx]
+            tmpl.name = raw or name
+            instance = MagicMock()
+            instance.name = name
+            tmpl.instantiate.return_value = instance
+            templates.append(tmpl)
+        module.module_type.interfacetemplates.all.return_value = templates
+        module.module_type.manufacturer.slug = "vendor"
+        module.module_type.model = "MODEL-X"
+        module.module_bay.name = "Bay 0"
+        return module
+
+    def test_returns_none_when_device_not_in_vc(self):
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device(vc_position=None, vc_id=None)
+        module = self._make_module(["2/x1/1/c9"])
+        assert detect_vc_normalization_noop(device, module) is None
+
+    def test_returns_none_when_a_name_matches_regex(self):
+        """Cisco-style name matches the rewrite regex → not a vendor-support issue."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device()
+        device.device_type.model = "C9300-48T"
+        module = self._make_module(["TenGigabitEthernet1/1/1"])
+        assert detect_vc_normalization_noop(device, module) is None
+
+    def test_returns_diagnostic_when_no_names_match_regex(self):
+        """Nokia-style name doesn't match the rewrite regex → flag for reporting."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device(vc_position=3, member_positions=(1, 2, 3, 4))
+        device.device_type.model = "7250-IXR"
+        module = self._make_module(["2/x1/1/c9"], raw_names=["{module}"])
+
+        diag = detect_vc_normalization_noop(device, module)
+        assert diag is not None
+        assert diag["vc_position"] == 3
+        assert diag["vc_member_positions"] == [1, 2, 3, 4]
+        assert diag["template_pairs"] == [("{module}", "2/x1/1/c9")]
+        assert diag["device_type_model"] == "7250-IXR"
+        assert diag["module_type_model"] == "MODEL-X"
+        assert diag["manufacturer_slug"] == "vendor"
+        assert diag["module_bay_name"] == "Bay 0"
+        assert "regex" in diag
+
+    def test_returns_none_when_no_templates(self):
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device()
+        module = self._make_module([])
+        assert detect_vc_normalization_noop(device, module) is None
+
+    def test_template_instantiate_exception_is_skipped(self):
+        """Templates that raise on instantiate are skipped; no false positive if all skip."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device()
+        module = MagicMock()
+        bad_template = MagicMock()
+        bad_template.instantiate.side_effect = ValueError("boom")
+        module.module_type.interfacetemplates.all.return_value = [bad_template]
+        assert detect_vc_normalization_noop(device, module) is None
+
+
+class TestBuildVCNormalizationReport:
+    """Markdown formatter produces a stable, copyable block with optional-strip suffixes."""
+
+    def test_contains_all_diagnostic_fields(self):
+        from netbox_librenms_plugin.utils import build_vc_normalization_report
+
+        diagnostic = {
+            "manufacturer_slug": "nokia",
+            "device_type_model": "7250-IXR",
+            "module_type_model": "QSFP-DD",
+            "module_bay_name": "Bay c9",
+            "vc_position": 3,
+            "vc_member_positions": [1, 2, 3, 4],
+            "template_pairs": [("{module}", "2/x1/1/c9")],
+            "regex": "^[A-Za-z][A-Za-z0-9]*\\d+[/:].+$",
+        }
+        out = build_vc_normalization_report(diagnostic)
+        assert "**VC interface normalization — no match**" in out
+        assert "`nokia`" in out
+        assert "`7250-IXR`" in out
+        assert "`QSFP-DD`" in out
+        assert "`Bay c9`" in out
+        assert "VC position (target): 3" in out
+        assert "[1, 2, 3, 4]" in out
+        assert "`{module}` → `2/x1/1/c9`" in out
+        assert "Plugin:" in out
+
+    def test_catalog_lines_get_optional_strip_suffix(self):
+        from netbox_librenms_plugin.utils import build_vc_normalization_report
+
+        out = build_vc_normalization_report(
+            {
+                "manufacturer_slug": "v",
+                "device_type_model": "d",
+                "module_type_model": "m",
+                "module_bay_name": "b",
+                "vc_position": 1,
+                "vc_member_positions": [1],
+                "template_pairs": [("a", "b")],
+                "regex": "x",
+            }
+        )
+        catalog_lines = [
+            line
+            for line in out.splitlines()
+            if line.startswith("- Manufacturer:")
+            or line.startswith("- Device type:")
+            or line.startswith("- Module type:")
+            or line.startswith("- Module bay:")
+        ]
+        assert len(catalog_lines) == 4
+        assert all("(optional, you can remove this line)" in line for line in catalog_lines)
+        # VC + template lines must NOT carry the suffix.
+        for line in out.splitlines():
+            if line.startswith("- VC ") or line.startswith("  - `"):
+                assert "(optional" not in line
+
+    def test_missing_catalog_value_renders_unknown(self):
+        from netbox_librenms_plugin.utils import build_vc_normalization_report
+
+        out = build_vc_normalization_report(
+            {
+                "manufacturer_slug": None,
+                "device_type_model": "",
+                "module_type_model": "m",
+                "module_bay_name": "b",
+                "vc_position": 2,
+                "vc_member_positions": [1, 2],
+                "template_pairs": [],
+                "regex": "x",
+            }
+        )
+        assert "Manufacturer: _(unknown)_" in out
+        assert "Device type: _(unknown)_" in out
+        # Template pairs section falls back to a no-templates note.
+        assert "_(no templates)_" in out

@@ -4886,6 +4886,97 @@ class TestAddBayTemplateViewRegexMapping:
 # ---------------------------------------------------------------------------
 
 
+class TestVCNormalizationReportView:
+    """VCNormalizationReportView returns 400 when there's nothing to report, HTML when there is."""
+
+    def test_get_returns_400_when_module_id_missing(self):
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        request = _make_request("GET", data={})
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                return_value=device,
+            ),
+        ):
+            response = view.get(request, pk=24)
+
+        assert response.status_code == 400
+        assert b"module_id" in response.content
+
+    def test_get_returns_400_when_no_noop_detected(self):
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        module = MagicMock()
+        request = _make_request("GET", data={"module_id": "321"})
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch(
+                "netbox_librenms_plugin.utils.detect_vc_normalization_noop",
+                return_value=None,
+            ),
+        ):
+            response = view.get(request, pk=24)
+
+        assert response.status_code == 400
+        assert b"nothing to report" in response.content.lower() if b"nothing" in response.content.lower() else True
+
+    def test_get_renders_template_when_noop_detected(self):
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        module = MagicMock()
+        request = _make_request("GET", data={"module_id": "321"})
+
+        diagnostic = {
+            "manufacturer_slug": "nokia",
+            "device_type_model": "7250-IXR",
+            "module_type_model": "QSFP-DD",
+            "module_bay_name": "Bay c9",
+            "vc_position": 3,
+            "vc_member_positions": [1, 2, 3, 4],
+            "template_pairs": [("{module}", "2/x1/1/c9")],
+            "regex": "x",
+        }
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch(
+                "netbox_librenms_plugin.utils.detect_vc_normalization_noop",
+                return_value=diagnostic,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.render",
+                return_value="rendered",
+            ) as mock_render,
+        ):
+            response = view.get(request, pk=24)
+
+        assert response == "rendered"
+        ctx = mock_render.call_args[0][2]
+        assert "**VC interface normalization — no match**" in ctx["report_markdown"]
+        assert "nokia" in ctx["report_markdown"]
+
+
 class TestPredictModuleInterfaceNamesSignal:
     """get_module_template_interface_names invokes the predict signal and honors receiver overrides."""
 
