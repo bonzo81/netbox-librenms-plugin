@@ -71,6 +71,7 @@ class TestLibreNMSModuleTable:
         result = table.render_name("Card", {"depth": 2})
         result_str = str(result)
         assert "padding-left:40px" in result_str  # 2 * 20 = 40
+        assert "white-space: nowrap;" in result_str
         assert "└─" in result_str
         assert "Card" in result_str
 
