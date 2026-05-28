@@ -14,7 +14,6 @@ All tests follow the project conventions:
 
 from unittest.mock import MagicMock, patch
 
-
 # =============================================================================
 # Helpers
 # =============================================================================
