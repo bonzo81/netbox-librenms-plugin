@@ -224,8 +224,9 @@ class TestSingleInterfaceVerifyView:
     """Tests for SingleInterfaceVerifyView."""
 
     def _make_view(self):
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
         from unittest.mock import MagicMock
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         view = object.__new__(SingleInterfaceVerifyView)
         view._librenms_api = MagicMock()

@@ -11,6 +11,7 @@ from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     get_librenms_sync_device,
     get_module_template_interface_names,
+    normalize_librenms_port_id,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -183,20 +184,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return ""
         return serial
 
-    @staticmethod
-    def _normalize_port_id(value):
-        """Normalize LibreNMS port_id to a positive integer, or None."""
-        if not isinstance(value, (int, str)) or isinstance(value, bool):
-            return None
-        try:
-            int_value = int(value)
-        except (TypeError, ValueError):
-            return None
-        return int_value if int_value > 0 else None
-
     def _get_interface_port_id(self, interface):
         """Resolve an interface's stored LibreNMS port_id without discovery fallback."""
-        return self._normalize_port_id(self.librenms_api.get_stored_librenms_id(interface))
+        return normalize_librenms_port_id(self.librenms_api.get_stored_librenms_id(interface))
 
     def _count_adoptable_template_interfaces(self, module):
         """Count standalone interfaces that match an installed module's interface templates."""
@@ -1615,8 +1605,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _get_carrier_install_rules(self, manufacturer):
         """Return CarrierAutoInstallRule rows applicable to this device."""
-        from django.db.models import Q
         from dcim.models import Manufacturer as _Manufacturer
+        from django.db.models import Q
 
         from netbox_librenms_plugin.models import CarrierAutoInstallRule
 

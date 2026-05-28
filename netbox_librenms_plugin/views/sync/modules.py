@@ -16,8 +16,8 @@ from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     get_librenms_sync_device,
     get_module_template_interface_names,
-    get_vc_member_positions,
     get_module_types_indexed,
+    get_vc_member_positions,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
 )

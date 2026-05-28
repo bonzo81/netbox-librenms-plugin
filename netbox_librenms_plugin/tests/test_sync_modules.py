@@ -279,14 +279,14 @@ class TestInstallModuleViewWiring:
     """InstallModuleView must have correct mixins and attributes."""
 
     def test_has_librenms_permission_mixin(self):
-        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         assert LibreNMSPermissionMixin in InstallModuleView.__mro__
 
     def test_has_netbox_object_permission_mixin(self):
-        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
         from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         assert NetBoxObjectPermissionMixin in InstallModuleView.__mro__
 
@@ -304,14 +304,14 @@ class TestInstallBranchViewWiring:
     """InstallBranchView must have CacheMixin for cache key generation."""
 
     def test_has_cache_mixin(self):
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
         from netbox_librenms_plugin.views.mixins import CacheMixin
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         assert CacheMixin in InstallBranchView.__mro__
 
     def test_has_netbox_object_permission_mixin(self):
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
         from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         assert NetBoxObjectPermissionMixin in InstallBranchView.__mro__
 
@@ -1677,6 +1677,7 @@ class TestSingleInstallInterfaceBinding:
         from contextlib import contextmanager
 
         from dcim.models import ModuleBay
+
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         view = object.__new__(InstallModuleView)

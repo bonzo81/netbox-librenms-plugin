@@ -7,6 +7,7 @@ from django.views import View
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_virtual_chassis_member,
+    normalize_librenms_port_id,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -69,23 +70,12 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         """
         raise NotImplementedError("Subclasses must implement get_table()")
 
-    @staticmethod
-    def _normalize_port_id(value):
-        """Normalize LibreNMS port_id to a positive integer, or None."""
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            int_value = int(value)
-        except (TypeError, ValueError):
-            return None
-        return int_value if int_value > 0 else None
-
     def _get_object_librenms_id(self, obj):
         """Resolve a cached/stored LibreNMS ID for any NetBox object without dynamic fallback noise."""
         librenms_id = self.librenms_api.get_stored_librenms_id(obj)
         if not isinstance(librenms_id, (int, str)) or isinstance(librenms_id, bool):
             return None
-        return self._normalize_port_id(librenms_id)
+        return normalize_librenms_port_id(librenms_id)
 
     def _build_interface_lookup_maps(self, obj):
         """Build name and LibreNMS ID indexes, dropping conflicting IDs entirely."""
@@ -234,7 +224,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                 else:
                     device_interfaces = interfaces_by_device.get(obj.id, {"by_name": {}, "by_librenms_id": {}})
 
-                port_id = self._normalize_port_id(port.get("port_id"))
+                port_id = normalize_librenms_port_id(port.get("port_id"))
                 netbox_interface = device_interfaces["by_librenms_id"].get(port_id) if port_id else None
                 if not netbox_interface:
                     netbox_interface = device_interfaces["by_name"].get(port.get(interface_name_field))

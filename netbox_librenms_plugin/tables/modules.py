@@ -1,6 +1,5 @@
-from urllib.parse import urlencode, urlparse
-
 import re
+from urllib.parse import urlencode, urlparse
 
 import django_tables2 as tables
 from django.urls import reverse
@@ -153,7 +152,12 @@ class LibreNMSModuleTable(tables.Table):
         # Build visual tree prefix based on nesting depth
         padding_px = depth * 20
         prefix = "└─ "
-        return format_html('<span style="padding-left:{}px">{}{}</span>', padding_px, prefix, rendered_name)
+        return format_html(
+            '<span style="padding-left:{}px"><span style="white-space: nowrap;">{}{}</span></span>',
+            padding_px,
+            prefix,
+            rendered_name,
+        )
 
     def render_model(self, value, record):
         """Render model with link to module type if matched."""
