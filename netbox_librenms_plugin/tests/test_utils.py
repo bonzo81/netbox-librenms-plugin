@@ -351,6 +351,23 @@ class TestConversionHelpers:
         result = format_mac_address(None)
         assert result == ""
 
+    def test_normalize_librenms_port_id_accepts_positive_int_and_str(self):
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        assert normalize_librenms_port_id(42) == 42
+        assert normalize_librenms_port_id("42") == 42
+
+    def test_normalize_librenms_port_id_rejects_invalid_values(self):
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        assert normalize_librenms_port_id(None) is None
+        assert normalize_librenms_port_id(True) is None
+        assert normalize_librenms_port_id(False) is None
+        assert normalize_librenms_port_id(0) is None
+        assert normalize_librenms_port_id(-1) is None
+        assert normalize_librenms_port_id("abc") is None
+        assert normalize_librenms_port_id(1.5) is None
+
 
 # =============================================================================
 # TestVirtualChassisHelpers - 4 tests

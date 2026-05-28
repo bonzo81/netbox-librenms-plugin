@@ -53,6 +53,17 @@ def format_mac_address(mac_address: str) -> str:
     return formatted_mac.upper()
 
 
+def normalize_librenms_port_id(value) -> int | None:
+    """Normalize a LibreNMS port_id to a positive integer, or None."""
+    if not isinstance(value, (int, str)) or isinstance(value, bool):
+        return None
+    try:
+        int_value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return int_value if int_value > 0 else None
+
+
 def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
     """
     Determines the likely virtual chassis member based on the device's vc_position and port name.

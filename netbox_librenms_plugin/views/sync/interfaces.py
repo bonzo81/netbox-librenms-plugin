@@ -1,6 +1,5 @@
-from urllib.parse import quote_plus
-
 import logging
+from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface, MACAddress
 from django.contrib import messages
@@ -19,6 +18,7 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
+    normalize_librenms_port_id,
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -152,7 +152,7 @@ class SyncInterfacesView(
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         """Create or update a single NetBox interface from LibreNMS data."""
         interface_name = librenms_interface.get(interface_name_field)
-        port_id = self._normalize_port_id(librenms_interface.get("port_id"))
+        port_id = normalize_librenms_port_id(librenms_interface.get("port_id"))
 
         if isinstance(obj, Device):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
@@ -204,17 +204,6 @@ class SyncInterfacesView(
         # Sync VLANs if not excluded
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
-
-    @staticmethod
-    def _normalize_port_id(value):
-        """Normalize LibreNMS port_id to a positive integer, or None."""
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            int_value = int(value)
-        except (TypeError, ValueError):
-            return None
-        return int_value if int_value > 0 else None
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key):
         """Resolve a device interface using port_id first, then safe name fallback."""
@@ -309,7 +298,7 @@ class SyncInterfacesView(
         port_id = librenms_interface.get("port_id")
         if port_id is not None:
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            normalized_port_id = self._normalize_port_id(port_id)
+            normalized_port_id = normalize_librenms_port_id(port_id)
             if normalized_port_id is not None:
                 existing_owner = find_by_librenms_id(interface.__class__, normalized_port_id, server_key)
                 if existing_owner is None or existing_owner.pk == interface.pk:
