@@ -1,0 +1,22 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Location Mappings</h4>
+        <p>Map values parsed from the LibreNMS <code>location</code> string to NetBox
+           organisation objects (Region, Site, Location, Rack, or Tenant). During
+           device import, the plugin first tries an exact, case-insensitive match
+           against NetBox object names and only falls back to these mappings when
+           no exact match exists. This is useful when LibreNMS uses a value that
+           differs from the corresponding NetBox object name.</p>
+        <p>Example: LibreNMS value <code>NYC</code> → NetBox Site <code>New York</code>.</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:locationmapping_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

@@ -5,6 +5,7 @@ from .models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -123,6 +124,15 @@ from .views import (
     PlatformMappingEditView,
     PlatformMappingListView,
     PlatformMappingView,
+    LocationMappingBulkDeleteView,
+    LocationMappingBulkExportYAMLView,
+    LocationMappingBulkImportView,
+    LocationMappingChangeLogView,
+    LocationMappingCreateView,
+    LocationMappingDeleteView,
+    LocationMappingEditView,
+    LocationMappingListView,
+    LocationMappingView,
     RemoveServerMappingView,
     SaveUserPrefView,
     SingleCableVerifyView,
@@ -833,6 +843,53 @@ urlpatterns = [
         "platform-mappings/export-yaml/",
         PlatformMappingBulkExportYAMLView.as_view(),
         name="platformmapping_bulk_export_yaml",
+    ),
+    # Location Mapping URLs
+    path(
+        "location-mappings/",
+        LocationMappingListView.as_view(),
+        name="locationmapping_list",
+    ),
+    path(
+        "location-mappings/<int:pk>/",
+        LocationMappingView.as_view(),
+        name="locationmapping_detail",
+    ),
+    path(
+        "location-mappings/add/",
+        LocationMappingCreateView.as_view(),
+        name="locationmapping_add",
+    ),
+    path(
+        "location-mappings/import/",
+        LocationMappingBulkImportView.as_view(),
+        name="locationmapping_bulk_import",
+    ),
+    path(
+        "location-mappings/<int:pk>/delete/",
+        LocationMappingDeleteView.as_view(),
+        name="locationmapping_delete",
+    ),
+    path(
+        "location-mappings/<int:pk>/edit/",
+        LocationMappingEditView.as_view(),
+        name="locationmapping_edit",
+    ),
+    path(
+        "location-mappings/<int:pk>/changelog/",
+        LocationMappingChangeLogView.as_view(),
+        name="locationmapping_changelog",
+        kwargs={"model": LocationMapping},
+    ),
+    path(
+        "location-mappings/delete/",
+        LocationMappingBulkDeleteView.as_view(),
+        name="locationmapping_bulk_delete",
+    ),
+    path(
+        "location-mappings/export-yaml/",
+        LocationMappingBulkExportYAMLView.as_view(),
+        name="locationmapping_bulk_export_yaml",
     ),
     # Carrier Auto-Install Rule URLs
     path(
