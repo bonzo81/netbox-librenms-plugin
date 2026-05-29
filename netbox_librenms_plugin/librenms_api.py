@@ -368,9 +368,9 @@ class LibreNMSAPI:
             device_data = response.json()["devices"][0]
             if not isinstance(device_data, dict):
                 return False, None
-            # Newer LibreNMS versions return the full location relationship
-            # object (e.g. {"id": 33, "location": "CYP", "lat": ...}) instead
-            # of a flat location name string. Normalise to the name so
+            # LibreNMS 26.5.0 returns the full location relationship object
+            # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
+            # instead of a flat location name string. Normalise to the name so
             # downstream consumers receive a consistent value.
             location = device_data.get("location")
             if isinstance(location, dict):
