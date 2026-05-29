@@ -1003,19 +1003,13 @@
 </div>
 {% endif %}
 
-{% if not platform_info.platform_exists and platform_info.platform_name and found_in_librenms %}
+{% if object_model_name == "device" and not platform_info.platform_exists and platform_info.platform_name and found_in_librenms %}
 <!-- Create Platform Modal -->
 <div class="modal fade" id="create-platform-modal" tabindex="-1" aria-labelledby="createPlatformModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
-            {% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk as _create_platform_url %}
-            {% include "netbox_librenms_plugin/htmx/create_platform_modal.html" with
-                librenms_os=platform_info.librenms_os
-                platform_name=platform_info.platform_name
-                form_action=_create_platform_url
-                device_pk=object.pk
-                selected_manufacturer_pk=object.device_type.manufacturer_id
-            %}
+            {% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk as create_platform_url %}
+            {% include "netbox_librenms_plugin/htmx/create_platform_modal.html" with librenms_os=platform_info.librenms_os platform_name=platform_info.platform_name form_action=create_platform_url device_pk=object.pk selected_manufacturer_pk=object.device_type.manufacturer_id %}
         </div>
     </div>
 </div>
