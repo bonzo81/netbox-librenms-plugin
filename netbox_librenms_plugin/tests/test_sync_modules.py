@@ -5219,9 +5219,7 @@ class TestPredictModuleInterfaceNamesSignal:
             # Django Signal.send invokes receivers in connection order; the last
             # non-None return wins per the documented contract.
             result = get_module_template_interface_names(device, module)
-            assert result in (["first"], ["second"])
-            # Either way, the raw template name was overridden.
-            assert "raw" not in result
+            assert result == ["second"]
         finally:
             predict_module_interface_names.disconnect(first)
             predict_module_interface_names.disconnect(second)
