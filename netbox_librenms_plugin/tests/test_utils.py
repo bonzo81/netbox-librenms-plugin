@@ -204,17 +204,53 @@ class TestSiteMatching:
 
     @patch("dcim.models.Site")
     def test_find_site_for_location_not_found(self, mock_site_model):
-        """Returns None when no match."""
+        """Returns None when no match and no mapping applies."""
         mock_site_model.DoesNotExist = Exception
         mock_site_model.objects.get.side_effect = mock_site_model.DoesNotExist
 
         from netbox_librenms_plugin.utils import find_matching_site
 
-        result = find_matching_site("Unknown Location")
+        with patch("netbox_librenms_plugin.utils.resolve_location_mapping", return_value=None):
+            result = find_matching_site("Unknown Location")
 
         assert result["found"] is False
         assert result["site"] is None
         assert result["confidence"] == 0.0
+
+    @patch("dcim.models.Site")
+    def test_find_site_falls_back_to_mapping(self, mock_site_model):
+        """Falls back to a LocationMapping when no exact Site match exists."""
+        mock_site_model.DoesNotExist = Exception
+        mock_site_model.objects.get.side_effect = mock_site_model.DoesNotExist
+        mapped_site = MagicMock(id=7, name="New York")
+
+        from netbox_librenms_plugin.utils import find_matching_site
+
+        with patch(
+            "netbox_librenms_plugin.utils.resolve_location_mapping",
+            return_value=mapped_site,
+        ) as mock_resolve:
+            result = find_matching_site("NYC")
+
+        mock_resolve.assert_called_once_with("site", "NYC")
+        assert result["found"] is True
+        assert result["site"] == mapped_site
+        assert result["match_type"] == "mapping"
+        assert result["confidence"] == 1.0
+
+    @patch("dcim.models.Site")
+    def test_find_site_exact_match_skips_mapping(self, mock_site_model):
+        """Exact Site match wins and the mapping fallback is not consulted."""
+        mock_site = MagicMock(id=1, name="DC1")
+        mock_site_model.objects.get.return_value = mock_site
+
+        from netbox_librenms_plugin.utils import find_matching_site
+
+        with patch("netbox_librenms_plugin.utils.resolve_location_mapping") as mock_resolve:
+            result = find_matching_site("DC1")
+
+        mock_resolve.assert_not_called()
+        assert result["match_type"] == "exact"
 
     def test_find_site_for_location_empty(self):
         """Empty location returns None."""
