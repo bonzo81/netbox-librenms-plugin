@@ -524,6 +524,51 @@ class TestLibreNMSAPIDeviceLookup:
         assert result == 99
 
     @patch("netbox_librenms_plugin.librenms_api.cache")
+    def test_get_librenms_id_handles_objects_without_device_identity_attrs(self, mock_cache, mock_librenms_config):
+        """Objects like interfaces should return None cleanly when they have no stored or cached ID."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        interface = SimpleNamespace(
+            cf={},
+            _meta=SimpleNamespace(model_name="interface"),
+            pk=123,
+        )
+
+        mock_cache.get.return_value = None
+
+        result = api.get_librenms_id(interface)
+
+        assert result is None
+
+    @patch("netbox_librenms_plugin.librenms_api.cache")
+    def test_get_stored_librenms_id_skips_hostname_lookup(self, mock_cache, mock_librenms_config):
+        """Stored-only helper must not trigger discovery lookups for interface-like objects."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+
+        interface = SimpleNamespace(
+            cf={},
+            name="GigabitEthernet1/0/1",
+            _meta=SimpleNamespace(model_name="interface"),
+            pk=123,
+        )
+
+        mock_cache.get.return_value = None
+
+        with patch.object(api, "get_device_id_by_hostname") as mock_hostname_lookup:
+            result = api.get_stored_librenms_id(interface)
+
+        assert result is None
+        mock_hostname_lookup.assert_not_called()
+
+    @patch("netbox_librenms_plugin.librenms_api.cache")
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_librenms_id_by_ip_lookup(self, mock_get, mock_cache, mock_librenms_config):
         """Performs IP lookup and caches result."""

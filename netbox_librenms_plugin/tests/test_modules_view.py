@@ -7,7 +7,6 @@ comparison logic in _build_row.
 
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -101,6 +100,241 @@ def _load_contrib_bay_mappings():
     exact = [m for m in mappings if not m.is_regex]
     regex = [m for m in mappings if m.is_regex]
     return exact, regex
+
+
+class TestMergeTransceiverDataPortIdentity:
+    """Transceiver merge should preserve stable port identity metadata."""
+
+    def test_synthetic_item_includes_port_identity_metadata(self):
+        view = _make_view()
+        view.librenms_id = 100
+        view._librenms_api.get_device_transceivers.return_value = (
+            True,
+            [
+                {
+                    "entity_physical_index": 200,
+                    "model": "SFP-10G-SR",
+                    "serial": "TX-200",
+                    "type": "SFP",
+                    "port_id": 42,
+                }
+            ],
+        )
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 42, "ifName": "Te1/0/1"}]})
+
+        inventory, error = view._merge_transceiver_data([])
+
+        assert error is None
+        assert len(inventory) == 1
+        item = inventory[0]
+        assert item["_from_transceiver_api"] is True
+        assert item["_librenms_port_id"] == 42
+        assert item["_librenms_ifname"] == "Te1/0/1"
+        assert item["entPhysicalName"] == "Te1/0/1"
+
+    def test_existing_inventory_item_gets_port_identity_metadata(self):
+        view = _make_view()
+        view.librenms_id = 101
+        view._librenms_api.get_device_transceivers.return_value = (
+            True,
+            [
+                {
+                    "entity_physical_index": 300,
+                    "model": "",
+                    "serial": "",
+                    "type": "SFP",
+                    "port_id": 99,
+                }
+            ],
+        )
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 99, "ifName": "Eth2/1"}]})
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 300,
+                "entPhysicalName": "Transceiver slot",
+                "entPhysicalModelName": "builtin",
+                "entPhysicalSerialNum": "-",
+                "entPhysicalClass": "port",
+                "entPhysicalContainedIn": 0,
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(inventory_seed)
+
+        assert error is None
+        assert len(inventory) == 1
+        item = inventory[0]
+        assert item["_librenms_port_id"] == 99
+        assert item["_librenms_ifname"] == "Eth2/1"
+
+    def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self):
+        view = _make_view()
+        view.librenms_id = 102
+        view._librenms_api.get_ports.return_value = (
+            True,
+            {
+                "ports": [
+                    {
+                        "port_id": 56284,
+                        "ifName": "TenGigabitEthernet1/1/1",
+                        "ifDescr": "Te1/1/1",
+                    }
+                ]
+            },
+        )
+
+        inventory = [
+            {
+                "entPhysicalClass": "port",
+                "entPhysicalName": "Te1/1/1",
+                "entPhysicalDescr": "TenGigabitEthernet1/1/1",
+            }
+        ]
+
+        view._enrich_inventory_port_identity(inventory)
+
+        assert inventory[0]["_librenms_port_id"] == 56284
+        assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
+        assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
+
+    def test_enrich_inventory_port_identity_skips_ambiguous_labels(self):
+        view = _make_view()
+        view.librenms_id = 103
+        view._librenms_api.get_ports.return_value = (
+            True,
+            {
+                "ports": [
+                    {"port_id": 10, "ifName": "Te1/1/1", "ifDescr": "Uplink A"},
+                    {"port_id": 11, "ifName": "Te1/1/1", "ifDescr": "Uplink B"},
+                ]
+            },
+        )
+
+        inventory = [{"entPhysicalClass": "port", "entPhysicalName": "Te1/1/1"}]
+
+        view._enrich_inventory_port_identity(inventory)
+
+        assert "_librenms_port_id" not in inventory[0]
+
+    def test_build_port_name_map_uses_provided_ports_payload_without_api_fetch(self):
+        view = _make_view()
+        view.librenms_id = 104
+        view._librenms_api.get_ports.side_effect = AssertionError("get_ports should not be called")
+
+        port_map = view._build_port_name_map(
+            [{"port_id": 42}],
+            ports_data={
+                "ports": [
+                    {
+                        "port_id": 42,
+                        "ifName": "Te1/0/1",
+                        "ifDescr": "TenGigabitEthernet1/0/1",
+                    }
+                ]
+            },
+        )
+
+        assert port_map[42]["ifName"] == "Te1/0/1"
+        assert port_map[42]["ifDescr"] == "TenGigabitEthernet1/0/1"
+
+    def test_enrich_inventory_port_identity_uses_provided_ports_payload_without_api_fetch(self):
+        view = _make_view()
+        view.librenms_id = 105
+        view._librenms_api.get_ports.side_effect = AssertionError("get_ports should not be called")
+
+        inventory = [{"entPhysicalClass": "port", "entPhysicalName": "Te1/1/1"}]
+        view._enrich_inventory_port_identity(
+            inventory,
+            ports_data={
+                "ports": [
+                    {
+                        "port_id": 56284,
+                        "ifName": "TenGigabitEthernet1/1/1",
+                        "ifDescr": "Te1/1/1",
+                    }
+                ]
+            },
+        )
+
+        assert inventory[0]["_librenms_port_id"] == 56284
+        assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
+        assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
+
+    def test_post_fetches_ports_once_and_reuses_payload(self):
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": view._librenms_api.server_key,
+            }
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_inventory.return_value = (True, [])
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        ports_payload = {"ports": []}
+        view._librenms_api.get_ports.return_value = (True, ports_payload)
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache"),
+            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch.object(view, "_merge_transceiver_data", wraps=view._merge_transceiver_data) as mock_merge,
+            patch.object(
+                view, "_enrich_inventory_port_identity", wraps=view._enrich_inventory_port_identity
+            ) as mock_enrich,
+        ):
+            view.post(request, pk=1)
+
+        assert view._librenms_api.get_ports.call_count == 1
+        assert mock_merge.call_args.kwargs.get("ports_data") == ports_payload
+        assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
+
+    def test_post_warns_when_ports_fetch_fails(self):
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": view._librenms_api.server_key,
+            }
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_inventory.return_value = (True, [])
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (False, "ports api unavailable")
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache"),
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+        ):
+            view.post(request, pk=1)
+
+        mock_messages.warning.assert_called_once_with(
+            request,
+            "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
+            " See server logs for details.",
+        )
+        mock_messages.success.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1231,6 +1465,59 @@ class TestBuildRowSerialMismatch:
         assert "row_class" not in row
         assert not row.get("can_update_serial")
 
+    def test_installed_row_sets_update_interface_when_template_matches_exist(self):
+        """Installed non-port rows expose Update Interface when standalone template matches exist."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="NS225161205")
+        matched_type = MagicMock()
+        matched_type.model = "XCM-7s-b"
+        matched_type.pk = 5
+        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+
+        with (
+            patch.object(view, "_match_module_bay", return_value=bay),
+            patch.object(view, "_count_adoptable_template_interfaces", return_value=2),
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+        ):
+            row = view._build_row(
+                self._make_item(serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Installed"
+        assert row["can_update_interface_binding"] is True
+        assert row["adoptable_interface_count"] == 2
+
+    def test_count_adoptable_template_interfaces_uses_vc_aware_names(self):
+        view = self._view()
+        device = MagicMock()
+        device.vc_position = 3
+        device.virtual_chassis_id = 11
+        device.virtual_chassis = MagicMock()
+        device.virtual_chassis.members.values_list.return_value = [1, 2, 3]
+
+        module = MagicMock()
+        module.device = device
+        template = MagicMock()
+        instantiated = MagicMock()
+        instantiated.name = "TenGigabitEthernet1/1/1"
+        template.instantiate.return_value = instantiated
+        module.module_type.interfacetemplates.all.return_value = [template]
+
+        with patch("dcim.models.Interface") as mock_interface:
+            mock_interface.objects.filter.return_value.count.return_value = 1
+            result = view._count_adoptable_template_interfaces(module)
+
+        assert result == 1
+        mock_interface.objects.filter.assert_called_once_with(
+            device=device,
+            module__isnull=True,
+            name__in=["TenGigabitEthernet3/1/1"],
+        )
+
     def test_serial_mismatch_sets_can_update_serial(self):
         """When serials differ, can_update_serial=True and installed_module_id set."""
         view = self._view()
@@ -2062,10 +2349,51 @@ class TestPositionalMatchClassAware:
         return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
 
     @staticmethod
-    def _bay(name):
+    def _bay(name, position=None):
         b = MagicMock()
         b.name = name
+        b.position = position
         return b
+
+    @staticmethod
+    def _walk_port_label_fallback(item_name, slot_num, bays, ifname=None, ifdescr=None):
+        """Build a topology where positional slot differs from interface label index."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalModelName": "REAL-CHASSIS",
+                "entPhysicalClass": "chassis",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalParentRelPos": 0,
+            },
+        ]
+        for n in range(1, slot_num + 1):
+            inventory.append(
+                {
+                    "entPhysicalIndex": 100 + n,
+                    "entPhysicalModelName": "",
+                    "entPhysicalClass": "container",
+                    "entPhysicalContainedIn": 1,
+                    "entPhysicalParentRelPos": n,
+                }
+            )
+
+        item = {
+            "entPhysicalIndex": 999,
+            "entPhysicalModelName": "SFP-10G-SR",
+            "entPhysicalClass": "port",
+            "entPhysicalName": item_name,
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 100 + slot_num,
+            "entPhysicalParentRelPos": 0,
+            "_librenms_ifname": ifname,
+            "_librenms_ifdescr": ifdescr,
+        }
+        inventory.append(item)
+        index_map = {i["entPhysicalIndex"]: i for i in inventory}
+        return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
 
     def test_fan_does_not_match_slot_bay(self):
         """A fan (class=fan) must not land in a 'Slot 1' bay even when positional says slot 1."""
@@ -2099,6 +2427,53 @@ class TestPositionalMatchClassAware:
         bays = {"Slot 1": self._bay("Slot 1")}
         result = self._walk("module", 1, bays)
         assert result is bays["Slot 1"]
+
+    def test_port_label_infers_slot_from_ifname_suffix(self):
+        """Port rows should infer bay index from ifName when positional slot does not match."""
+        bays = {"SFP 1": self._bay("SFP 1")}
+        result = self._walk_port_label_fallback("Te1/1/1", 5, bays)
+        assert result is bays["SFP 1"]
+
+    def test_port_label_infers_slot_from_ifdescr_suffix(self):
+        """Long-form labels (ifDescr) should infer the same slot index as short ifName labels."""
+        bays = {"SFP 1": self._bay("SFP 1")}
+        result = self._walk_port_label_fallback(
+            "Port-Unknown",
+            4,
+            bays,
+            ifname="",
+            ifdescr="TenGigabitEthernet1/1/1",
+        )
+        assert result is bays["SFP 1"]
+
+    def test_extract_interface_numeric_coordinates_preserves_existing_suffix_behavior(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        result = BaseModuleTableView._extract_interface_numeric_coordinates("xe-2/1/0   ")
+        assert result == [2, 1, 0]
+
+    def test_extract_port_index_from_label_preserves_existing_suffix_behavior(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        assert BaseModuleTableView._extract_port_index_from_label("Eth42   ") == 42
+
+    def test_port_matches_typoed_bay_name_via_numeric_position(self):
+        """Numeric bay positions should rescue matching when the bay name is misspelled."""
+        bays = {
+            "SFP 1": self._bay("SFP 1", position="1"),
+            "SFP2": self._bay("SFP2", position="2"),
+        }
+        result = self._walk("port", 2, bays)
+        assert result is bays["SFP2"]
+
+    def test_port_matches_typoed_bay_name_via_alpha_position(self):
+        """Alphabetic bay positions should map sibling order 1->A, 2->B, etc."""
+        bays = {
+            "SFP 1": self._bay("SFP 1", position="A"),
+            "SFP2": self._bay("SFP2", position="B"),
+        }
+        result = self._walk("port", 2, bays)
+        assert result is bays["SFP2"]
 
     def test_unknown_class_returns_none(self):
         """An item with an unknown / empty class doesn't get a positional guess."""
@@ -2163,6 +2538,15 @@ class TestNoBayWarningHints:
         item = {"entPhysicalClass": "module"}
         msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
         assert "Slot" in msg or "SFP" in msg
+
+    def test_port_class_hint_uses_plain_language(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        item = {"entPhysicalClass": "port"}
+        msg = BaseModuleTableView._build_no_bay_warning(item, {"Slot 1": MagicMock()})
+        assert "no matching bay in netbox" in msg.lower()
+        assert msg.lower().count("modulebaymapping") == 1
+        assert "if the names differ" in msg.lower()
 
 
 class TestSuggestBayMapping:
@@ -2721,6 +3105,69 @@ class TestBuildRowModelWarning:
         assert row["status"] == "No Bay"
         assert row.get("no_bay_reason") == "empty_parent_bays"
 
+    def test_no_bay_port_child_uses_interface_child_reason(self):
+        """Port-class child rows under empty installed-parent scope should not be tagged as missing bay templates."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._match_module_bay = MagicMock(return_value=None)
+        item = {
+            "entPhysicalName": "Ethernet1/1",
+            "entPhysicalClass": "port",
+            "entPhysicalModelName": "SFP-10G-SR",
+        }
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=MagicMock(model="SFP-10G-SR", pk=1)),
+        ):
+            row = view._build_row(
+                item,
+                {},
+                {},
+                {"SFP-10G-SR": MagicMock(pk=1)},
+                scope_empty_installed_bays=True,
+            )
+        assert row["status"] == "No Bay"
+        assert row.get("no_bay_reason") == "interface_child"
+        assert "matching child bay is missing in netbox" in row.get("model_warning", "").lower()
+
+    def test_port_row_sets_can_install_and_interface_hint_when_bay_matches(self):
+        """Matched port rows expose install action and preserve best interface label hint."""
+        view = self._view()
+        bay = MagicMock()
+        bay.name = "SFP 1"
+        bay.installed_module = None
+        bay.pk = 10
+        bay.get_absolute_url.return_value = "/dcim/module-bays/10/"
+        view._match_module_bay = MagicMock(return_value=bay)
+
+        module_type = MagicMock()
+        module_type.model = "SFP-10G-SR"
+        module_type.pk = 200
+        module_type.get_absolute_url.return_value = "/dcim/module-types/200/"
+
+        item = {
+            "entPhysicalName": "Port-Unknown",
+            "entPhysicalClass": "port",
+            "entPhysicalModelName": "SFP-10G-SR",
+            "_librenms_ifname": "Te1/1/1",
+            "_librenms_ifdescr": "TenGigabitEthernet1/1/1",
+            "_librenms_port_id": 1234,
+        }
+
+        with (
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+            patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=module_type),
+        ):
+            row = view._build_row(item, {}, {"SFP 1": bay}, {"SFP-10G-SR": module_type})
+
+        assert row["can_install"] is True
+        assert row["interface_name_hint"] == "Te1/1/1"
+        assert row["librenms_port_id"] == 1234
+        assert row["librenms_ifname"] == "Te1/1/1"
+        assert row["librenms_ifdescr"] == "TenGigabitEthernet1/1/1"
+
     def test_no_bay_default_scope_empty_flag_does_not_set_reason(self):
         """Without scope_empty_installed_bays, plain empty scope gives no reason tag."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -2900,6 +3347,13 @@ class TestRenderStatusNoBayOnParent:
         assert "No Bay on Parent" in str(html)
         assert "No Bay" in str(html)  # badge text changed but still present as substring
 
+    def test_interface_child_label_for_interface_descendants(self):
+        """Status cell shows 'Missing Child Bay' for interface-like no-bay descendants."""
+        table = self._table()
+        record = {"status": "No Bay", "no_bay_reason": "interface_child"}
+        html = table.render_status("No Bay", record)
+        assert "Missing Child Bay" in str(html)
+
     def test_plain_no_bay_label_without_reason(self):
         """Without no_bay_reason, status cell shows plain 'No Bay'."""
         table = self._table()
@@ -2941,6 +3395,187 @@ class TestRenderStatusNoBayOnParent:
         record = {"status": "Installed"}
         html = str(table.render_status("Installed", record))
         assert "Fix Model" not in html
+
+
+class TestMatchedInterfaceLinking:
+    """Rows should expose matched NetBox interface metadata and render as links."""
+
+    def test_get_interfaces_by_port_id_ignores_duplicate_port_ids(self):
+        view = _make_view()
+        interface_a = MagicMock()
+        interface_b = MagicMock()
+        interface_c = MagicMock()
+        member = MagicMock()
+        member.interfaces.all.return_value = [interface_a, interface_b, interface_c]
+
+        view._librenms_api.get_stored_librenms_id.side_effect = [42, 42, 43]
+
+        interface_map = view._get_interfaces_by_port_id(member)
+
+        assert 42 not in interface_map
+        assert interface_map[43] is interface_c
+        view._librenms_api.get_librenms_id.assert_not_called()
+
+    def test_get_interfaces_by_name_ignores_duplicate_names(self):
+        view = _make_view()
+        interface_a = MagicMock()
+        interface_a.name = "Te1/1/1"
+        interface_b = MagicMock()
+        interface_b.name = "Te1/1/1"
+        interface_c = MagicMock()
+        interface_c.name = "Te1/1/2"
+        member = MagicMock()
+        member.interfaces.all.return_value = [interface_a, interface_b, interface_c]
+
+        interface_map = view._get_interfaces_by_name(member)
+
+        assert "Te1/1/1" not in interface_map
+        assert interface_map["Te1/1/2"] is interface_c
+
+    def test_build_member_contexts_builds_interface_indexes_once_per_member(self):
+        view = _make_view()
+        member = MagicMock()
+        member.id = 100
+        member.interfaces.all.return_value = []
+
+        with patch.object(view, "_get_module_bays", return_value=({}, {})):
+            context = view._build_member_contexts(member, vc_members=[])
+
+        assert context[100]["interfaces_by_port_id"] == {}
+        assert context[100]["interfaces_by_name"] == {}
+        member.interfaces.all.assert_called_once_with()
+
+    def test_attach_interface_match_sets_name_and_url(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        row = {"name": "Te1/1/1", "librenms_port_id": 42}
+        iface = MagicMock()
+        iface.name = "TenGigabitEthernet1/1/1"
+        iface.get_absolute_url.return_value = "/dcim/interfaces/100/"
+        context = {"interfaces_by_port_id": {42: iface}}
+
+        BaseModuleTableView._attach_interface_match(row, context)
+
+        assert row["matched_interface_name"] == "TenGigabitEthernet1/1/1"
+        assert row["matched_interface_url"] == "/dcim/interfaces/100/"
+        assert row["matched_interface_source"] == "port_id"
+        assert row["matched_interface_confidence"] == "high"
+
+    def test_attach_interface_match_falls_back_to_name_lookup(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        row = {
+            "name": "Te1/1/1",
+            "description": "desc",
+            "librenms_port_id": None,
+            "librenms_ifname": "TenGigabitEthernet1/1/1",
+        }
+        iface = MagicMock()
+        iface.name = "TenGigabitEthernet1/1/1"
+        iface.get_absolute_url.return_value = "/dcim/interfaces/100/"
+        context = {
+            "interfaces_by_port_id": {},
+            "interfaces_by_name": {"TenGigabitEthernet1/1/1": iface},
+        }
+
+        BaseModuleTableView._attach_interface_match(row, context)
+
+        assert row["matched_interface_name"] == "TenGigabitEthernet1/1/1"
+        assert row["matched_interface_url"] == "/dcim/interfaces/100/"
+        assert row["matched_interface_source"] == "name"
+        assert row["matched_interface_confidence"] == "medium"
+
+    def test_attach_interface_match_marks_installed_row_for_interface_update(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        row = {
+            "name": "Te1/1/1",
+            "librenms_port_id": 42,
+            "installed_module_id": 555,
+        }
+        iface = MagicMock()
+        iface.pk = 100
+        iface.name = "TenGigabitEthernet1/1/1"
+        iface.module_id = None
+        iface.get_absolute_url.return_value = "/dcim/interfaces/100/"
+        context = {"interfaces_by_port_id": {42: iface}, "server_key": "default"}
+
+        with patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_device_id", return_value=None):
+            BaseModuleTableView._attach_interface_match(row, context)
+
+        assert row["matched_interface_id"] == 100
+        assert row["matched_interface_module_id"] is None
+        assert row["can_update_interface_binding"] is True
+
+    def test_attach_interface_match_ignores_missing_port(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        row = {"name": "Te1/1/1", "librenms_port_id": None}
+        context = {"interfaces_by_port_id": {42: MagicMock()}}
+
+        BaseModuleTableView._attach_interface_match(row, context)
+
+        assert "matched_interface_name" not in row
+        assert "matched_interface_url" not in row
+
+    def test_render_name_links_to_matched_interface(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        html = str(
+            table.render_name(
+                "Te1/1/1",
+                {
+                    "depth": 1,
+                    "matched_interface_name": "TenGigabitEthernet1/1/1",
+                    "matched_interface_url": "/dcim/interfaces/100/",
+                    "matched_interface_source": "port_id",
+                    "matched_interface_confidence": "high",
+                },
+            )
+        )
+
+        assert "TenGigabitEthernet1/1/1" in html
+        assert "/dcim/interfaces/100/" in html
+        assert "<a href=" in html
+        assert "Matched by port id, confidence high" in html
+
+    def test_render_module_bay_indents_child_module_rows(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        html = str(
+            table.render_module_bay(
+                "SFP 1",
+                {
+                    "depth": 1,
+                    "item_class": "module",
+                    "module_bay_url": "/dcim/module-bays/10/",
+                },
+            )
+        )
+
+        assert "└─" in html
+        assert "padding-left:20px" in html
+        assert "/dcim/module-bays/10/" in html
+
+    def test_render_module_bay_indents_child_port_rows(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        html = str(
+            table.render_module_bay(
+                "SFP 1",
+                {
+                    "depth": 1,
+                    "item_class": "port",
+                    "module_bay_url": "/dcim/module-bays/10/",
+                },
+            )
+        )
+
+        assert "└─" in html
+        assert "padding-left:20px" in html
 
 
 class TestDeviceTypeIncompleteFlag:
@@ -3795,3 +4430,71 @@ class TestNestSyntheticTransceivers:
         BaseModuleTableView._nest_synthetic_transceivers(inv)
         # No parent name ends with '/1/1' or ' 1/1', but 'Slot 1' ends with ' 1'
         assert inv[1]["entPhysicalContainedIn"] == 50
+
+
+class TestRenderActionsPortIdentityFields:
+    """Install action form should preserve distinct ifName/ifDescr hidden values."""
+
+    def test_install_form_includes_distinct_ifname_and_ifdescr(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        table.device = MagicMock(pk=24)
+        table.csrf_token = "csrf123"
+        table.server_key = "default"
+        table.has_write_permission = True
+        table.can_add_module = True
+        table.can_change_module = False
+        table.can_delete_module = False
+
+        record = {
+            "can_install": True,
+            "selected_device_id": 24,
+            "ent_physical_index": 77,
+            "librenms_port_id": 56284,
+            "librenms_ifname": "TenGigabitEthernet1/1/1",
+            "librenms_ifdescr": "Te1/1/1",
+            "name": "Te1/1/1",
+            "description": "10G transceiver",
+            "module_bay_id": 10,
+            "module_type_id": 5,
+            "serial": "SN-1",
+        }
+
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/plugins/install-module/"):
+            html = str(table.render_actions("", record))
+
+        assert 'name="librenms_ifname" value="TenGigabitEthernet1/1/1"' in html
+        assert 'name="librenms_ifdescr" value="Te1/1/1"' in html
+
+    def test_interface_child_row_does_not_render_install_action(self):
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        table = object.__new__(LibreNMSModuleTable)
+        table.device = MagicMock(pk=24)
+        table.csrf_token = "csrf123"
+        table.server_key = "default"
+        table.has_write_permission = True
+        table.can_add_module = True
+        table.can_change_module = False
+        table.can_delete_module = False
+
+        record = {
+            "can_install": False,
+            "no_bay_reason": "interface_child",
+            "selected_device_id": 24,
+            "ent_physical_index": 77,
+            "librenms_port_id": 56284,
+            "librenms_ifname": "TenGigabitEthernet1/1/1",
+            "librenms_ifdescr": "Te1/1/1",
+            "name": "Te1/1/1",
+            "description": "10G transceiver",
+            "module_bay_id": "",
+            "module_type_id": 5,
+            "serial": "SN-1",
+        }
+
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/plugins/install-module/"):
+            html = str(table.render_actions("", record))
+
+        assert '<i class="mdi mdi-download"></i> Install' not in html

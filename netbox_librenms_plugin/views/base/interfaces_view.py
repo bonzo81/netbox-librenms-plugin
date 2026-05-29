@@ -7,6 +7,7 @@ from django.views import View
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_virtual_chassis_member,
+    normalize_librenms_port_id,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -68,6 +69,37 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             vlan_groups: List of VLANGroup objects for VLAN group dropdowns
         """
         raise NotImplementedError("Subclasses must implement get_table()")
+
+    def _get_object_librenms_id(self, obj):
+        """Resolve a cached/stored LibreNMS ID for any NetBox object without dynamic fallback noise."""
+        librenms_id = self.librenms_api.get_stored_librenms_id(obj)
+        if not isinstance(librenms_id, (int, str)) or isinstance(librenms_id, bool):
+            return None
+        return normalize_librenms_port_id(librenms_id)
+
+    def _build_interface_lookup_maps(self, obj):
+        """Build name and LibreNMS ID indexes, dropping conflicting IDs entirely."""
+        by_name = {}
+        by_librenms_id = {}
+        duplicate_librenms_ids = set()
+
+        for interface in self.get_interfaces(obj).select_related(self.get_select_related_field(obj)):
+            by_name[interface.name] = interface
+            librenms_id = self._get_object_librenms_id(interface)
+            if librenms_id is None:
+                continue
+            if librenms_id in by_librenms_id:
+                duplicate_librenms_ids.add(librenms_id)
+                continue
+            by_librenms_id[librenms_id] = interface
+
+        for librenms_id in duplicate_librenms_ids:
+            by_librenms_id.pop(librenms_id, None)
+
+        return {
+            "by_name": by_name,
+            "by_librenms_id": by_librenms_id,
+        }
 
     def post(self, request, pk):
         """Handle POST request to fetch and cache LibreNMS interface data for an object."""
@@ -163,20 +195,15 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         if cached_data:
             ports_data = cached_data.get("ports", [])
+            matched_interface_ids = set()
 
             # Pre-fetch all interfaces for all potential chassis members
             interfaces_by_device = {}
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 for member in obj.virtual_chassis.members.all():
-                    interfaces_by_device[member.id] = {
-                        interface.name: interface
-                        for interface in self.get_interfaces(member).select_related(self.get_select_related_field(obj))
-                    }
+                    interfaces_by_device[member.id] = self._build_interface_lookup_maps(member)
             else:
-                interfaces_by_device[obj.id] = {
-                    interface.name: interface
-                    for interface in self.get_interfaces(obj).select_related(self.get_select_related_field(obj))
-                }
+                interfaces_by_device[obj.id] = self._build_interface_lookup_maps(obj)
 
             for port in ports_data:
                 port["enabled"] = (
@@ -191,13 +218,20 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     chassis_member = get_virtual_chassis_member(obj, port.get(interface_name_field))
-                    device_interfaces = interfaces_by_device.get(chassis_member.id, {})
+                    device_interfaces = interfaces_by_device.get(
+                        chassis_member.id, {"by_name": {}, "by_librenms_id": {}}
+                    )
                 else:
-                    device_interfaces = interfaces_by_device[obj.id]
+                    device_interfaces = interfaces_by_device.get(obj.id, {"by_name": {}, "by_librenms_id": {}})
 
-                netbox_interface = device_interfaces.get(port.get(interface_name_field))
+                port_id = normalize_librenms_port_id(port.get("port_id"))
+                netbox_interface = device_interfaces["by_librenms_id"].get(port_id) if port_id else None
+                if not netbox_interface:
+                    netbox_interface = device_interfaces["by_name"].get(port.get(interface_name_field))
                 port["exists_in_netbox"] = bool(netbox_interface)
                 port["netbox_interface"] = netbox_interface
+                if netbox_interface is not None:
+                    matched_interface_ids.add(netbox_interface.id)
 
                 if port.get("ifAlias") in (port.get("ifDescr"), port.get("ifName")):
                     port["ifAlias"] = ""
@@ -217,8 +251,10 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             }
 
             netbox_only_interfaces = []
-            for device_id, device_interfaces in interfaces_by_device.items():
-                for interface_name, interface in device_interfaces.items():
+            for device_id, device_interface_maps in interfaces_by_device.items():
+                for interface_name, interface in device_interface_maps["by_name"].items():
+                    if interface.id in matched_interface_ids:
+                        continue
                     if interface_name not in librenms_interface_names:
                         # Get device name for the interface
                         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
