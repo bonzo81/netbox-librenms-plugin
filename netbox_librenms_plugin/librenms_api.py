@@ -1521,6 +1521,14 @@ class LibreNMSAPI:
                     return False, msg or "Unexpected response format: missing 'devices' list"
                 if not all(isinstance(item, dict) for item in devices):
                     return False, "Unexpected response format: invalid item shape in 'devices'"
+                # LibreNMS 26.5.0 returns the full location relationship object
+                # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
+                # instead of a flat location name string. Normalise each device's
+                # location to the name so downstream consumers receive a consistent value.
+                for device in devices:
+                    location = device.get("location")
+                    if isinstance(location, dict):
+                        device["location"] = location.get("location")
                 return True, devices
 
             # LibreNMS API v0 always returns JSON objects, so result is always
