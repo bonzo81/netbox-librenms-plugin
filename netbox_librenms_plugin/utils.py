@@ -936,7 +936,9 @@ def find_matching_site(librenms_location: str) -> dict:
     """
     Find exact matching NetBox site for a LibreNMS location.
 
-    Only performs exact name matching (case-insensitive).
+    Tries an exact, case-insensitive name match first, then falls back to a
+    ``LocationMapping`` (field_type='site') for when the LibreNMS value differs
+    from the NetBox Site name.
 
     Args:
         librenms_location (str): Location string from LibreNMS
@@ -945,11 +947,12 @@ def find_matching_site(librenms_location: str) -> dict:
         dict: Dictionary containing:
             - found (bool): Whether a match was found
             - site (Site|None): The matched Site object
-            - match_type (str|None): Always 'exact' if found, None otherwise
-            - confidence (float): Always 1.0 if found, 0.0 otherwise
+            - match_type (str|None): 'exact', 'mapping', or None
+            - confidence (float): 1.0 if found, 0.0 otherwise
     """
     from dcim.models import Site
 
+    librenms_location = _normalise_location_value(librenms_location)
     if not librenms_location or librenms_location == "-":
         return {"found": False, "site": None, "match_type": None, "confidence": 0.0}
 
@@ -963,7 +966,188 @@ def find_matching_site(librenms_location: str) -> dict:
         site = Site.objects.filter(name__iexact=librenms_location).first()
         return {"found": True, "site": site, "match_type": "exact", "confidence": 1.0}
 
+    # Fall back to LocationMapping for when the LibreNMS value differs from the Site name
+    mapped_site = resolve_location_mapping("site", librenms_location)
+    if mapped_site is not None:
+        return {"found": True, "site": mapped_site, "match_type": "mapping", "confidence": 1.0}
+
     return {"found": False, "site": None, "match_type": None, "confidence": 0.0}
+
+
+def resolve_location_mapping(field_type: str, librenms_value: str, parent_site=None):
+    """
+    Resolve a parsed LibreNMS location value to a NetBox object via LocationMapping.
+
+    Args:
+        field_type (str): One of 'region', 'site', 'location', 'rack', 'tenant'.
+        librenms_value (str): The value parsed from the LibreNMS location string.
+        parent_site (Site|None): For 'location'/'rack', restrict the match to
+            objects belonging to this site (NetBox scopes these to a parent site).
+
+    Returns:
+        The matched NetBox object, or None if no mapping applies.
+    """
+    if not librenms_value:
+        return None
+
+    try:
+        from netbox_librenms_plugin.models import LocationMapping
+    except ImportError:
+        return None
+
+    mappings = LocationMapping.objects.filter(
+        field_type=field_type,
+        librenms_value__iexact=librenms_value,
+    ).select_related("content_type")
+
+    for mapping in mappings:
+        obj = mapping.netbox_object
+        if obj is None:
+            continue
+        if parent_site is not None and field_type in ("location", "rack"):
+            obj_site_id = _get_object_site_id(obj)
+            if obj_site_id != parent_site.pk:
+                continue
+        return obj
+
+    return None
+
+
+def _get_object_site_id(obj):
+    """Return the site id an object belongs to (directly or via its location)."""
+    site_id = getattr(obj, "site_id", None)
+    if site_id is None:
+        location = getattr(obj, "location", None)
+        site_id = getattr(location, "site_id", None)
+    return site_id
+
+
+# Placeholder tokens supported by the LibreNMS location parse pattern.
+LOCATION_PARSE_TOKENS = ("region", "site", "location", "rack", "tenant")
+_LOCATION_TOKEN_RE = re.compile(r"\{(region|site|location|rack|tenant)\}")
+
+
+def _normalise_location_value(location):
+    """Return the location name as a string.
+
+    LibreNMS 26.5.0 returns the location as a relationship object
+    (e.g. ``{"id": 1, "location": "Site A", "lat": ..., "lng": ...}``)
+    rather than a flat name string. This coerces either shape to the
+    plain name so all downstream matching/parsing works consistently,
+    including for any device data cached before the API change was handled.
+    """
+    if isinstance(location, dict):
+        return location.get("location") or ""
+    return location or ""
+
+
+def _placeholder_pattern_to_regex(pattern: str) -> str:
+    """
+    Convert a placeholder pattern (e.g. '{site} - {rack}') into an anchored regex.
+
+    Literal text between placeholders is escaped and treated as a separator.
+    Each placeholder becomes a non-greedy named capture group.
+    """
+    regex = ""
+    last_end = 0
+    for match in _LOCATION_TOKEN_RE.finditer(pattern):
+        regex += re.escape(pattern[last_end : match.start()])
+        regex += f"(?P<{match.group(1)}>.+?)"
+        last_end = match.end()
+    regex += re.escape(pattern[last_end:])
+    return f"^{regex}$"
+
+
+def parse_librenms_location(location_string: str, pattern: str, is_regex: bool = False) -> dict:
+    """
+    Parse a LibreNMS location string into region/site/location/rack/tenant tokens.
+
+    Args:
+        location_string (str): The raw LibreNMS location value.
+        pattern (str): Placeholder pattern (e.g. '{site} - {rack}') or, when
+            ``is_regex`` is True, a raw regex with named groups.
+        is_regex (bool): Treat ``pattern`` as a raw regular expression.
+
+    Returns:
+        dict: Mapping of each supported token to its parsed value (or None).
+    """
+    result = {name: None for name in LOCATION_PARSE_TOKENS}
+    if not location_string or not pattern:
+        return result
+
+    try:
+        if is_regex:
+            compiled = re.compile(pattern)
+            match = compiled.search(location_string)
+        else:
+            compiled = re.compile(_placeholder_pattern_to_regex(pattern))
+            match = compiled.match(location_string)
+    except re.error:
+        logger.warning("Invalid LibreNMS location parse pattern: %r", pattern)
+        return result
+
+    if not match:
+        return result
+
+    for name, value in match.groupdict().items():
+        if name in result and value is not None:
+            result[name] = value.strip() or None
+    return result
+
+
+def get_location_parse_settings():
+    """Return the configured (pattern, is_regex) for parsing LibreNMS locations.
+
+    Falls back to ("", False) — i.e. whole-string matching — if the settings
+    row cannot be read, so import behaviour degrades gracefully rather than
+    raising.
+    """
+    try:
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings = LibreNMSSettings.objects.filter(pk=1).first()
+    except Exception:  # noqa: BLE001 — optional config read; default on any failure
+        logger.debug("Could not read LibreNMS location parse settings; using defaults", exc_info=True)
+        return "", False
+
+    if settings is None:
+        return "", False
+    return settings.location_parse_pattern or "", bool(settings.location_parse_is_regex)
+
+
+def parse_location_for_import(location_string: str) -> dict:
+    """
+    Parse a LibreNMS location string using the configured plugin settings.
+
+    When no parse pattern is configured, the whole string is used for both the
+    site and location tokens (preserving the plugin's original behaviour).
+
+    Args:
+        location_string (str): The raw LibreNMS location value.
+
+    Returns:
+        dict: Mapping of each supported token to its parsed value (or None).
+    """
+    location_string = _normalise_location_value(location_string)
+    pattern, is_regex = get_location_parse_settings()
+    whole = (location_string or "").strip() or None
+    if not pattern:
+        return {
+            "region": None,
+            "site": whole,
+            "location": whole,
+            "rack": None,
+            "tenant": None,
+        }
+    parsed = parse_librenms_location(location_string, pattern, is_regex)
+    # A global parse pattern is best-effort: if this particular location does
+    # not match the pattern (no site token resolved), fall back to whole-string
+    # matching so locations that don't fit the pattern still resolve a site.
+    if not parsed.get("site"):
+        parsed["site"] = whole
+        if not parsed.get("location"):
+            parsed["location"] = whole
+    return parsed
 
 
 def find_matching_platform(librenms_os: str) -> dict:

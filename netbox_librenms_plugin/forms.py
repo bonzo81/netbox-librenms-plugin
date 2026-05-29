@@ -3,9 +3,20 @@ import logging
 import re
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, ModuleType, Platform, Rack, Site
+from dcim.models import (
+    Device,
+    DeviceRole,
+    DeviceType,
+    Location,
+    Manufacturer,
+    ModuleType,
+    Platform,
+    Rack,
+    Region,
+    Site,
+)
 from django import forms
-from django.db.models import Case, IntegerField, Value, When
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
@@ -14,6 +25,7 @@ from netbox.forms import (
     NetBoxModelImportForm,
 )
 from netbox.plugins import get_plugin_config
+from tenancy.models import Tenant
 from utilities.forms.fields import (
     CSVChoiceField,
     CSVModelChoiceField,
@@ -28,6 +40,7 @@ from .models import (
     InterfaceTypeMapping,
     InventoryIgnoreRule,
     LibreNMSSettings,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -162,12 +175,35 @@ class ImportSettingsForm(NetBoxModelForm):
         help_text="Remove domain suffix from device names during import",
     )
 
+    location_parse_pattern = forms.CharField(
+        label="Location Parse Pattern",
+        max_length=255,
+        required=False,
+        strip=False,  # Preserve separators that may include whitespace
+        widget=forms.TextInput(
+            attrs={
+                "placeholder": "{site} - {rack}",
+            }
+        ),
+        help_text="How to split the LibreNMS location string into NetBox fields. "
+        "Leave blank to match the whole string against site and location.",
+    )
+
+    location_parse_is_regex = forms.BooleanField(
+        label="Use regex",
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+        help_text="Treat the pattern as a raw regular expression with named groups",
+    )
+
     class Meta:
         model = LibreNMSSettings
         fields = [
             "vc_member_name_pattern",
             "use_sysname_default",
             "strip_domain_default",
+            "location_parse_pattern",
+            "location_parse_is_regex",
         ]
 
     def clean_vc_member_name_pattern(self):
@@ -224,6 +260,67 @@ class ImportSettingsForm(NetBoxModelForm):
             raise forms.ValidationError(f"Invalid pattern syntax: {str(e)}")
 
         return pattern
+
+    def clean(self):
+        """Validate the location parse pattern against its placeholder/regex mode."""
+        super().clean()
+        cleaned_data = self.cleaned_data
+        pattern = cleaned_data.get("location_parse_pattern")
+        is_regex = cleaned_data.get("location_parse_is_regex")
+
+        if not pattern:
+            return cleaned_data
+
+        valid_tokens = {"region", "site", "location", "rack", "tenant"}
+
+        if is_regex:
+            try:
+                compiled = re.compile(pattern)
+            except re.error as exc:
+                self.add_error("location_parse_pattern", f"Invalid regular expression: {exc}")
+                return cleaned_data
+            group_names = set(compiled.groupindex.keys())
+            if not group_names:
+                self.add_error(
+                    "location_parse_pattern",
+                    "The regex must define at least one named group, e.g. (?P<site>...).",
+                )
+            invalid = group_names - valid_tokens
+            if invalid:
+                self.add_error(
+                    "location_parse_pattern",
+                    f"Invalid named group(s): {', '.join(sorted(invalid))}. "
+                    f"Valid groups are: {', '.join(sorted(valid_tokens))}.",
+                )
+        else:
+            found = set(re.findall(r"\{(\w+)\}", pattern))
+            invalid = found - valid_tokens
+            if invalid:
+                invalid_list = ", ".join(f"{{{p}}}" for p in sorted(invalid))
+                valid_list = ", ".join(f"{{{t}}}" for t in sorted(valid_tokens))
+                self.add_error(
+                    "location_parse_pattern",
+                    f"Invalid placeholder(s): {invalid_list}. Valid options are: {valid_list}.",
+                )
+            elif not found:
+                self.add_error(
+                    "location_parse_pattern",
+                    "The pattern must include at least one placeholder, e.g. {site}.",
+                )
+            else:
+                # Detect malformed/unbalanced braces (e.g. "{location" missing
+                # its closing brace) by stripping out valid {token} placeholders
+                # and checking for any leftover brace characters.
+                leftover = re.sub(r"\{(\w+)\}", "", pattern)
+                if "{" in leftover or "}" in leftover:
+                    valid_list = ", ".join(f"{{{t}}}" for t in sorted(valid_tokens))
+                    self.add_error(
+                        "location_parse_pattern",
+                        "Malformed placeholder: check for an unbalanced or unclosed brace. "
+                        f"Use complete placeholders like {valid_list}.",
+                    )
+
+        return cleaned_data
 
 
 # Keep for backward compatibility if needed elsewhere
@@ -703,6 +800,145 @@ class PlatformMappingFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = PlatformMapping
+
+
+class LocationMappingForm(NetBoxModelForm):
+    """Form for creating and editing LibreNMS location-value to NetBox-object mappings.
+
+    The target object is stored as a generic foreign key. The form exposes one
+    optional selector per supported NetBox type; the selector matching the chosen
+    ``field_type`` is required and used to populate the generic foreign key.
+    """
+
+    region = DynamicModelChoiceField(queryset=Region.objects.all(), required=False, label="NetBox Region")
+    site = DynamicModelChoiceField(queryset=Site.objects.all(), required=False, label="NetBox Site")
+    location = DynamicModelChoiceField(queryset=Location.objects.all(), required=False, label="NetBox Location")
+    rack = DynamicModelChoiceField(queryset=Rack.objects.all(), required=False, label="NetBox Rack")
+    tenant = DynamicModelChoiceField(queryset=Tenant.objects.all(), required=False, label="NetBox Tenant")
+
+    class Meta:
+        """Meta options for LocationMappingForm."""
+
+        model = LocationMapping
+        fields = ["field_type", "librenms_value", "description"]
+
+    def __init__(self, *args, **kwargs):
+        """Pre-populate the relevant object selector when editing an existing mapping."""
+        super().__init__(*args, **kwargs)
+        obj = getattr(self.instance, "netbox_object", None)
+        field_type = getattr(self.instance, "field_type", None)
+        if obj is not None and field_type in self.fields:
+            self.initial[field_type] = obj.pk
+
+    def clean(self):
+        """Resolve the selected object for the chosen field type and set the generic FK."""
+        super().clean()
+        cleaned_data = self.cleaned_data
+        field_type = cleaned_data.get("field_type")
+        if not field_type:
+            return cleaned_data
+
+        target = cleaned_data.get(field_type)
+        if not target:
+            self.add_error(field_type, f"Select the NetBox {field_type} this value maps to.")
+            return cleaned_data
+
+        self.instance.netbox_object = target
+        return cleaned_data
+
+
+class LocationMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing location mappings.
+
+    ``netbox_object`` is the name of the target object. For ``location`` and
+    ``rack`` field types, supply ``parent_site`` to disambiguate names that are
+    not unique across sites.
+    """
+
+    field_type = CSVChoiceField(
+        choices=LocationMapping.FIELD_TYPE_CHOICES,
+        help_text="Type of NetBox object the value maps to (region, site, location, rack, tenant)",
+    )
+    netbox_object = forms.CharField(help_text="Name of the target NetBox object")
+    parent_site = CSVModelChoiceField(
+        queryset=Site.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Parent site name (required for location/rack when the name is not unique)",
+    )
+
+    class Meta:
+        """Meta options for LocationMappingImportForm."""
+
+        model = LocationMapping
+        fields = ["field_type", "librenms_value", "description"]
+
+    def clean(self):
+        """Resolve the named target object into a generic foreign key on the instance."""
+        super().clean()
+        cleaned_data = self.cleaned_data
+        field_type = cleaned_data.get("field_type")
+        name = cleaned_data.get("netbox_object")
+        if not field_type or not name:
+            return cleaned_data
+
+        parent_site = cleaned_data.get("parent_site")
+        obj = self._resolve_object(field_type, name, parent_site)
+        if obj is not None:
+            self.instance.netbox_object = obj
+        return cleaned_data
+
+    def _resolve_object(self, field_type, name, parent_site):
+        """Look up the target NetBox object by name, scoping location/rack to a site."""
+        model_map = {
+            "region": Region,
+            "site": Site,
+            "location": Location,
+            "rack": Rack,
+            "tenant": Tenant,
+        }
+        model = model_map.get(field_type)
+        if model is None:
+            self.add_error("field_type", f"Unknown field type '{field_type}'.")
+            return None
+
+        queryset = model.objects.filter(name__iexact=name)
+        if field_type in ("location", "rack"):
+            if parent_site is not None:
+                if field_type == "rack":
+                    queryset = queryset.filter(Q(site=parent_site) | Q(location__site=parent_site))
+                else:
+                    queryset = queryset.filter(site=parent_site)
+
+        matches = list(queryset[:2])
+        if not matches:
+            self.add_error("netbox_object", f"No {field_type} named '{name}' found.")
+            return None
+        if len(matches) > 1:
+            self.add_error(
+                "netbox_object",
+                f"Multiple {field_type} objects named '{name}' found; specify parent_site to disambiguate.",
+            )
+            return None
+        return matches[0]
+
+
+class LocationMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering location mappings."""
+
+    field_type = forms.ChoiceField(
+        required=False,
+        label="Field Type",
+        choices=[("", "---------")] + list(LocationMapping.FIELD_TYPE_CHOICES),
+    )
+    librenms_value = forms.CharField(required=False, label="LibreNMS Value")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = LocationMapping
 
 
 class BaseSNMPForm(forms.Form):
