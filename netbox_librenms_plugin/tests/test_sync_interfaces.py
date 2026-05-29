@@ -150,8 +150,9 @@ class TestUpdateInterfaceAttributes:
         librenms_data = {"ifName": "eth0", "port_id": 77}
 
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set:
-                view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
+            with patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=None):
+                with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set:
+                    view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
 
         mock_set.assert_called_once_with(iface, 77, view._librenms_api.server_key)
 
@@ -211,6 +212,25 @@ class TestUpdateInterfaceAttributes:
             view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
 
         iface.save.assert_called_once()
+
+    def test_update_interface_attributes_preserves_existing_module_link(self, view):
+        """Interface sync should not clear or rewrite existing module assignment."""
+        from dcim.models import Interface
+
+        iface = MagicMock()
+        iface.__class__ = Interface
+        iface.cf = {}
+        iface.mac_addresses = MagicMock()
+        existing_module = MagicMock()
+        iface.module = existing_module
+        iface.module_id = 321
+        librenms_data = {"ifName": "eth0", "ifAlias": "uplink"}
+
+        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
+            view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
+
+        assert iface.module is existing_module
+        assert iface.module_id == 321
 
     def test_excludes_mac_address_when_in_excluded(self, view):
         from dcim.models import Interface

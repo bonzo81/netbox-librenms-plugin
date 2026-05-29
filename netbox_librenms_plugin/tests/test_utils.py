@@ -351,6 +351,23 @@ class TestConversionHelpers:
         result = format_mac_address(None)
         assert result == ""
 
+    def test_normalize_librenms_port_id_accepts_positive_int_and_str(self):
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        assert normalize_librenms_port_id(42) == 42
+        assert normalize_librenms_port_id("42") == 42
+
+    def test_normalize_librenms_port_id_rejects_invalid_values(self):
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        assert normalize_librenms_port_id(None) is None
+        assert normalize_librenms_port_id(True) is None
+        assert normalize_librenms_port_id(False) is None
+        assert normalize_librenms_port_id(0) is None
+        assert normalize_librenms_port_id(-1) is None
+        assert normalize_librenms_port_id("abc") is None
+        assert normalize_librenms_port_id(1.5) is None
+
 
 # =============================================================================
 # TestVirtualChassisHelpers - 4 tests
@@ -537,6 +554,26 @@ class TestVirtualChassisHelpers:
         result = get_librenms_sync_device(member_pos2, server_key="prod")
 
         assert result == member_pos1  # lowest vc_position wins
+
+    def test_get_module_template_interface_names_rewrites_for_vc_member(self):
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        device = MagicMock()
+        device.vc_position = 3
+        device.virtual_chassis_id = 11
+        device.virtual_chassis = MagicMock()
+        device.virtual_chassis.members.values_list.return_value = [1, 2, 3]
+
+        module = MagicMock()
+        template = MagicMock()
+        instantiated = MagicMock()
+        instantiated.name = "TenGigabitEthernet1/1/1"
+        template.instantiate.return_value = instantiated
+        module.module_type.interfacetemplates.all.return_value = [template]
+
+        result = get_module_template_interface_names(device, module)
+
+        assert result == ["TenGigabitEthernet3/1/1"]
 
     def test_zero_id_is_not_a_valid_librenms_id(self):
         """LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
