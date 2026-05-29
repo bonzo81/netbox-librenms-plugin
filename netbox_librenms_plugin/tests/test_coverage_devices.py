@@ -224,8 +224,9 @@ class TestSingleInterfaceVerifyView:
     """Tests for SingleInterfaceVerifyView."""
 
     def _make_view(self):
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
         from unittest.mock import MagicMock
+
+        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         view = object.__new__(SingleInterfaceVerifyView)
         view._librenms_api = MagicMock()
@@ -372,6 +373,108 @@ class TestSingleInterfaceVerifyView:
         mock_get_sync_device.assert_not_called()
         # The cache key builder was called with mock_device directly
         assert get_cache_key_mock.call_args[0][0] is mock_device
+
+
+class TestSingleModuleVerifyView:
+    """Tests for SingleModuleVerifyView."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
+
+        view = object.__new__(SingleModuleVerifyView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        view.has_write_permission = MagicMock(return_value=True)
+        view.require_object_permissions_json = MagicMock(return_value=None)
+        view.get_cache_key = MagicMock(return_value="test_key")
+        return view
+
+    def test_success_propagates_can_change_interface_to_verify_table(self):
+        """Verify-row table keeps Update Interface available for users with change permission."""
+        import json
+
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 1, "ent_physical_index": 10, "server_key": "default"}).encode()
+        request.user.has_perm = MagicMock(
+            side_effect=lambda perm: (
+                perm
+                in {
+                    "dcim.add_module",
+                    "dcim.change_module",
+                    "dcim.change_interface",
+                    "dcim.delete_module",
+                    "dcim.add_modulebaytemplate",
+                    "dcim.add_moduletype",
+                    "netbox_librenms_plugin.add_carrierautoinstallrule",
+                    "netbox_librenms_plugin.add_modulebaymapping",
+                    "netbox_librenms_plugin.add_moduletypemapping",
+                }
+            )
+        )
+
+        selected_device = MagicMock()
+        selected_device.virtual_chassis = None
+        selected_device.device_type = MagicMock()
+        selected_device.device_type.manufacturer = MagicMock()
+        inventory_data = [{"entPhysicalIndex": 10, "entPhysicalContainedIn": 0, "entPhysicalName": "Module 1"}]
+        row = {"ent_physical_index": 10, "depth": 0, "status": "Installed"}
+
+        mock_table = MagicMock()
+        mock_table.format_module_data.return_value = "<tr>row</tr>"
+
+        with (
+            patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=selected_device),
+            patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache,
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.LibreNMSModuleTable", return_value=mock_table
+            ) as mock_table_cls,
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._get_module_types",
+                return_value={},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._find_transparent_indices",
+                return_value=set(),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._collect_top_items",
+                return_value=inventory_data,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._build_table_rows_for_member",
+                return_value=[row],
+            ),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._detect_serial_conflicts",
+                return_value=None,
+            ),
+        ):
+            mock_cache.get.return_value = {"inventory": inventory_data}
+            response = view.post(request)
+
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 200
+        mock_table_cls.assert_called_once_with(
+            [],
+            device=selected_device,
+            server_key="default",
+            has_write_permission=True,
+            can_add_module=True,
+            can_change_module=True,
+            can_change_interface=True,
+            can_delete_module=True,
+            can_add_module_bay_template=True,
+            can_add_module_type=True,
+            can_add_carrier_rule=True,
+            can_add_module_bay_mapping=True,
+            can_add_module_type_mapping=True,
+        )
 
 
 class TestSingleVlanGroupVerifyView:
@@ -900,6 +1003,7 @@ class TestDeviceModuleTableView:
                 in {
                     "dcim.add_module",
                     "dcim.change_module",
+                    "dcim.change_interface",
                     "dcim.delete_module",
                     "dcim.add_modulebaytemplate",
                     "dcim.add_moduletype",
@@ -929,6 +1033,7 @@ class TestDeviceModuleTableView:
             has_write_permission=True,
             can_add_module=True,
             can_change_module=True,
+            can_change_interface=True,
             can_delete_module=True,
             can_add_module_bay_template=True,
             can_add_module_type=True,

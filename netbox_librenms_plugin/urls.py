@@ -55,6 +55,7 @@ from .views import (
     ModuleMismatchPreviewView,
     MoveModuleView,
     ReplaceModuleView,
+    UpdateModuleInterfaceView,
     UpdateModuleSerialView,
     AddBayTemplateView,
     InterfaceTypeMappingBulkDeleteView,
@@ -182,6 +183,11 @@ urlpatterns = [
         "devices/<int:pk>/update-module-serial/",
         UpdateModuleSerialView.as_view(),
         name="update_module_serial",
+    ),
+    path(
+        "devices/<int:pk>/update-module-interface/",
+        UpdateModuleInterfaceView.as_view(),
+        name="update_module_interface",
     ),
     path(
         "devices/<int:pk>/module-mismatch-preview/",
