@@ -23,6 +23,8 @@ from ..utils import (
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     normalize_serial,
+    parse_location_for_import,
+    resolve_location_mapping,
     set_librenms_device_id,
 )
 from ..constants import normalize_oob_type
@@ -1282,7 +1284,9 @@ def validate_device_for_import(
         else:
             # 2. For Devices: Validate Site (required)
             location = libre_device.get("location", "")
-            site_match = find_matching_site(location)
+            parsed_location = parse_location_for_import(location)
+            site_token = parsed_location.get("site") or ""
+            site_match = find_matching_site(site_token)
             result["site"] = site_match
 
             if not site_match["found"]:
@@ -1690,11 +1694,15 @@ def import_single_device(
                 device_data["serial"] = serial
 
             location_name = libre_device.get("location", "")
-            if location_name and location_name != "-":
+            parsed_location = parse_location_for_import(location_name)
+            location_token = parsed_location.get("location")
+            if location_token and location_token != "-":
                 from dcim.models import Location
 
-                # Try to find matching location within the site
-                location = Location.objects.filter(site=site, name__iexact=location_name).first()
+                # Try to find matching location within the site, then fall back to a mapping
+                location = Location.objects.filter(site=site, name__iexact=location_token).first()
+                if location is None:
+                    location = resolve_location_mapping("location", location_token, parent_site=site)
                 if location:
                     device_data["location"] = location
 
