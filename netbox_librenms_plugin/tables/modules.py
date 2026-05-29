@@ -198,7 +198,12 @@ class LibreNMSModuleTable(tables.Table):
 
     def render_module_bay(self, value, record):
         """Render module bay with link if found in NetBox."""
-        if not value or value == "-":
+        if record.get("status") == "Integrated":
+            # Informational rows for components fused into a parent module have
+            # no bay of their own; show a plain placeholder, not a red warning,
+            # to match the muted status badge and absent actions on these rows.
+            rendered_value = "-"
+        elif not value or value == "-":
             rendered_value = format_html('<span class="text-danger">{}</span>', "No matching bay")
         elif url := record.get("module_bay_url"):
             rendered_value = format_html('<a href="{}">{}</a>', url, value)
