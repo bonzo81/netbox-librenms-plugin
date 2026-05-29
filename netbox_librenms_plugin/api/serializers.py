@@ -5,6 +5,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -119,6 +120,23 @@ class PlatformMappingSerializer(NetBoxModelSerializer):
         model = PlatformMapping
         fields = ["id", "url", "display", "librenms_os", "netbox_platform", "description"]
         brief_fields = ("id", "url", "display", "librenms_os", "netbox_platform", "description")
+
+
+class LocationMappingSerializer(NetBoxModelSerializer):
+    """Serialize LocationMapping model for REST API."""
+
+    class Meta:
+        """Meta options for LocationMappingSerializer."""
+
+        model = LocationMapping
+        fields = [
+            "id",
+            "field_type",
+            "librenms_value",
+            "content_type",
+            "object_id",
+            "description",
+        ]
 
 
 class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):

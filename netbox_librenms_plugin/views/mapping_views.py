@@ -8,6 +8,7 @@ from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
     InventoryIgnoreRuleFilterSet,
+    LocationMappingFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
     NormalizationRuleFilterSet,
@@ -27,6 +28,9 @@ from netbox_librenms_plugin.forms import (
     InventoryIgnoreRuleFilterForm,
     InventoryIgnoreRuleForm,
     InventoryIgnoreRuleImportForm,
+    LocationMappingFilterForm,
+    LocationMappingForm,
+    LocationMappingImportForm,
     ModuleBayMappingFilterForm,
     ModuleBayMappingForm,
     ModuleBayMappingImportForm,
@@ -48,6 +52,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -59,6 +64,7 @@ from netbox_librenms_plugin.tables.mappings import (
     DeviceTypeMappingTable,
     InterfaceTypeMappingTable,
     InventoryIgnoreRuleTable,
+    LocationMappingTable,
     ModuleBayMappingTable,
     ModuleTypeMappingTable,
     NormalizationRuleTable,
@@ -506,6 +512,10 @@ class PlatformMappingBulkExportYAMLView(BulkExportYAMLView):
     queryset = PlatformMapping.objects.select_related("netbox_platform")
 
 
+class LocationMappingBulkExportYAMLView(BulkExportYAMLView):
+    queryset = LocationMapping.objects.all()
+
+
 # --- PlatformMapping views ---
 
 
@@ -564,6 +574,66 @@ class PlatformMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChange
     """Provides a view for displaying the change log of a specific PlatformMapping object."""
 
     queryset = PlatformMapping.objects.all()
+
+
+# --- LocationMapping views ---
+
+
+class LocationMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all LocationMapping objects."""
+
+    queryset = LocationMapping.objects.all()
+    table = LocationMappingTable
+    filterset = LocationMappingFilterSet
+    filterset_form = LocationMappingFilterForm
+    template_name = "netbox_librenms_plugin/locationmapping_list.html"
+
+
+class LocationMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new LocationMapping object."""
+
+    queryset = LocationMapping.objects.all()
+    form = LocationMappingForm
+
+
+@register_model_view(LocationMapping, "bulk_import", path="import", detail=False)
+class LocationMappingBulkImportView(LibreNMSWritePermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing LocationMapping objects."""
+
+    queryset = LocationMapping.objects.all()
+    model_form = LocationMappingImportForm
+
+
+class LocationMappingView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific LocationMapping object."""
+
+    queryset = LocationMapping.objects.all()
+
+
+class LocationMappingEditView(LibreNMSWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific LocationMapping object."""
+
+    queryset = LocationMapping.objects.all()
+    form = LocationMappingForm
+
+
+class LocationMappingDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific LocationMapping object."""
+
+    queryset = LocationMapping.objects.all()
+
+
+class LocationMappingBulkDeleteView(LibreNMSWritePermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple LocationMapping objects."""
+
+    queryset = LocationMapping.objects.all()
+    table = LocationMappingTable
+
+
+class LocationMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific LocationMapping object."""
+
+    queryset = LocationMapping.objects.all()
 
 
 # --- CarrierAutoInstallRule views ---

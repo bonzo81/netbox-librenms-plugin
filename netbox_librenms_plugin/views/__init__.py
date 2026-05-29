@@ -10,18 +10,6 @@ from .base.cables_view import BaseCableTableView, SingleCableVerifyView  # noqa:
 from .base.interfaces_view import BaseInterfaceTableView  # noqa: F401
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView  # noqa: F401
 from .base.librenms_sync_view import BaseLibreNMSSyncView  # noqa: F401
-from .sync.modules import (  # noqa: F401
-    AddBayTemplateView,
-    InstallBranchView,
-    InstallModuleView,
-    InstallSelectedView,
-    MoveModuleView,
-    ModuleMismatchPreviewView,
-    ReplaceModuleView,
-    UpdateModuleInterfaceView,
-    UpdateModuleSerialView,
-    VCNormalizationReportView,
-)
 from .base.vlan_table_view import BaseVLANTableView  # noqa: F401
 from .imports import (  # noqa: F401
     BulkImportConfirmView,
@@ -36,6 +24,13 @@ from .imports import (  # noqa: F401
     LibreNMSImportView,
     SaveUserPrefView,
 )
+from .imports.actions import (  # noqa: F401
+    AddAsOOBView,
+    AddDeviceTypeMappingView,
+    AddPlatformMappingView,
+    MergeNetBoxDevicesView,
+    PromoteToHostView,
+)
 from .mapping_views import (  # noqa: F401
     CarrierAutoInstallRuleBulkDeleteView,
     CarrierAutoInstallRuleBulkExportYAMLView,
@@ -47,6 +42,7 @@ from .mapping_views import (  # noqa: F401
     CarrierAutoInstallRuleListView,
     CarrierAutoInstallRuleView,
     DeviceTypeMappingBulkDeleteView,
+    DeviceTypeMappingBulkExportYAMLView,
     DeviceTypeMappingBulkImportView,
     DeviceTypeMappingChangeLogView,
     DeviceTypeMappingCreateView,
@@ -55,6 +51,7 @@ from .mapping_views import (  # noqa: F401
     DeviceTypeMappingListView,
     DeviceTypeMappingView,
     InterfaceTypeMappingBulkDeleteView,
+    InterfaceTypeMappingBulkExportYAMLView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
     InterfaceTypeMappingCreateView,
@@ -62,7 +59,26 @@ from .mapping_views import (  # noqa: F401
     InterfaceTypeMappingEditView,
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
+    InventoryIgnoreRuleBulkDeleteView,
+    InventoryIgnoreRuleBulkExportYAMLView,
+    InventoryIgnoreRuleBulkImportView,
+    InventoryIgnoreRuleChangeLogView,
+    InventoryIgnoreRuleCreateView,
+    InventoryIgnoreRuleDeleteView,
+    InventoryIgnoreRuleEditView,
+    InventoryIgnoreRuleListView,
+    InventoryIgnoreRuleView,
+    LocationMappingBulkDeleteView,
+    LocationMappingBulkExportYAMLView,
+    LocationMappingBulkImportView,
+    LocationMappingChangeLogView,
+    LocationMappingCreateView,
+    LocationMappingDeleteView,
+    LocationMappingEditView,
+    LocationMappingListView,
+    LocationMappingView,
     ModuleBayMappingBulkDeleteView,
+    ModuleBayMappingBulkExportYAMLView,
     ModuleBayMappingBulkImportView,
     ModuleBayMappingChangeLogView,
     ModuleBayMappingCreateView,
@@ -71,6 +87,7 @@ from .mapping_views import (  # noqa: F401
     ModuleBayMappingListView,
     ModuleBayMappingView,
     ModuleTypeMappingBulkDeleteView,
+    ModuleTypeMappingBulkExportYAMLView,
     ModuleTypeMappingBulkImportView,
     ModuleTypeMappingChangeLogView,
     ModuleTypeMappingCreateView,
@@ -79,6 +96,7 @@ from .mapping_views import (  # noqa: F401
     ModuleTypeMappingListView,
     ModuleTypeMappingView,
     NormalizationRuleBulkDeleteView,
+    NormalizationRuleBulkExportYAMLView,
     NormalizationRuleBulkImportView,
     NormalizationRuleChangeLogView,
     NormalizationRuleCreateView,
@@ -86,20 +104,6 @@ from .mapping_views import (  # noqa: F401
     NormalizationRuleEditView,
     NormalizationRuleListView,
     NormalizationRuleView,
-    InventoryIgnoreRuleBulkDeleteView,
-    InventoryIgnoreRuleBulkImportView,
-    InventoryIgnoreRuleChangeLogView,
-    InventoryIgnoreRuleCreateView,
-    InventoryIgnoreRuleDeleteView,
-    InventoryIgnoreRuleEditView,
-    InventoryIgnoreRuleListView,
-    InventoryIgnoreRuleView,
-    DeviceTypeMappingBulkExportYAMLView,
-    InterfaceTypeMappingBulkExportYAMLView,
-    ModuleBayMappingBulkExportYAMLView,
-    ModuleTypeMappingBulkExportYAMLView,
-    NormalizationRuleBulkExportYAMLView,
-    InventoryIgnoreRuleBulkExportYAMLView,
     PlatformMappingBulkDeleteView,
     PlatformMappingBulkExportYAMLView,
     PlatformMappingBulkImportView,
@@ -118,13 +122,6 @@ from .mapping_views import (  # noqa: F401
     PortStackLagPatternEditView,
     PortStackLagPatternListView,
     PortStackLagPatternView,
-)
-from .imports.actions import (  # noqa: F401
-    AddAsOOBView,
-    AddDeviceTypeMappingView,
-    AddPlatformMappingView,
-    MergeNetBoxDevicesView,
-    PromoteToHostView,
 )
 from .object_sync import (  # noqa: F401
     DeviceCableTableView,
@@ -158,9 +155,9 @@ from .sync.device_fields import (  # noqa: F401
 from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView  # noqa: F401
 from .sync.interfaces import (  # noqa: F401
     DeleteNetBoxInterfacesView,
-    SyncInterfacesView,
     SyncInterfaceLagView,
     SyncInterfaceParentView,
+    SyncInterfacesView,
 )
 from .sync.ip_addresses import SyncIPAddressesView  # noqa: F401
 from .sync.locations import SyncSiteLocationView  # noqa: F401
@@ -168,5 +165,17 @@ from .sync.migrate import (  # noqa: F401
     MoveInterfaceToWinnerView,
     MoveIPAddressToWinnerView,
     TransferDeviceIPView,
+)
+from .sync.modules import (  # noqa: F401
+    AddBayTemplateView,
+    InstallBranchView,
+    InstallModuleView,
+    InstallSelectedView,
+    ModuleMismatchPreviewView,
+    MoveModuleView,
+    ReplaceModuleView,
+    UpdateModuleInterfaceView,
+    UpdateModuleSerialView,
+    VCNormalizationReportView,
 )
 from .sync.vlans import SyncVLANsView  # noqa: F401

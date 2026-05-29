@@ -17,6 +17,7 @@ from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
     InventoryIgnoreRuleFilterSet,
+    LocationMappingFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
     NormalizationRuleFilterSet,
@@ -29,6 +30,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -41,6 +43,7 @@ from .serializers import (
     DeviceTypeMappingSerializer,
     InterfaceTypeMappingSerializer,
     InventoryIgnoreRuleSerializer,
+    LocationMappingSerializer,
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
     NormalizationRuleSerializer,
@@ -135,6 +138,16 @@ class PlatformMappingViewSet(NetBoxModelViewSet):
 
     queryset = PlatformMapping.objects.select_related("netbox_platform")
     serializer_class = PlatformMappingSerializer
+
+
+class LocationMappingViewSet(NetBoxModelViewSet):
+    """API viewset for LocationMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = LocationMappingFilterSet
+
+    queryset = LocationMapping.objects.select_related("content_type")
+    serializer_class = LocationMappingSerializer
 
 
 class CarrierAutoInstallRuleViewSet(NetBoxModelViewSet):
