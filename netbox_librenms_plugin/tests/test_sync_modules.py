@@ -2541,6 +2541,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch.object(InstallBranchView, "_install_single", return_value=install_result),
             patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
@@ -2589,6 +2590,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
@@ -2688,6 +2690,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch.object(InstallBranchView, "_install_single", return_value=install_result),
             patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
             patch("netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id") as mock_bind,
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
@@ -2735,6 +2738,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
             patch("netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id") as mock_bind,
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
@@ -2782,6 +2786,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch.object(InstallBranchView, "_install_single", return_value=install_result),
             patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
@@ -2838,6 +2843,7 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
             patch(
                 "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
                 return_value={"status": "bound"},
@@ -3450,6 +3456,40 @@ class TestMatchBayLogic:
             result = InstallBranchView._match_bay(child, index_map, {}, [], [])
 
         assert result is None
+
+    def test_normalized_candidate_matches_when_rules_preloaded(self):
+        """When module_bay normalization rules are supplied, _match_bay considers
+        normalized candidate names too — mirroring the table/UI matcher so installs
+        don't skip bays that appear matched in the UI."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalName": "Slot 0/1",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "module",
+            "entPhysicalContainedIn": 0,
+        }
+        index_map = {2: child}
+
+        # Bay only matches the normalized form ("Slot 1"), not the raw name.
+        bay = MagicMock()
+        bay.name = "Slot 1"
+        module_bays = {"Slot 1": bay}
+        exact = [self._make_exact_mapping("Slot 1", "Slot 1")]
+
+        # A normalization rule that strips the "0/" prefix: "Slot 0/1" -> "Slot 1".
+        rule = MagicMock()
+        rule.match_pattern = r"Slot 0/"
+        rule.replacement = "Slot "
+        norm_rules_bay = {("module_bay", None): [rule]}
+
+        # Without rules the raw name doesn't match the mapping -> no bay.
+        assert InstallBranchView._match_bay(child, index_map, module_bays, exact, []) is None
+
+        # With preloaded rules the normalized candidate matches the mapping.
+        result = InstallBranchView._match_bay(child, index_map, module_bays, exact, [], norm_rules_bay=norm_rules_bay)
+        assert result is bay
 
 
 # ---------------------------------------------------------------------------

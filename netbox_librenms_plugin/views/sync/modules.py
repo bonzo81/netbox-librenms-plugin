@@ -661,6 +661,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         exact_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(exact_mappings, mfr_id)
         regex_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(regex_mappings, mfr_id)
 
+        # Preload module_bay normalization rules once so _match_bay considers the
+        # same normalized candidate names as the table/UI matcher.
+        from netbox_librenms_plugin.utils import preload_normalization_rules
+
+        norm_rules_bay = preload_normalization_rules("module_bay")
+
         # Install top-down: each install may create new child bays
         installed = []
         skipped = []
@@ -679,6 +685,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         Module,
                         exact_mappings=exact_mappings,
                         regex_mappings=regex_mappings,
+                        manufacturer_id=mfr_id,
+                        norm_rules_bay=norm_rules_bay,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -797,6 +805,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Module,
         exact_mappings=None,
         regex_mappings=None,
+        manufacturer_id=None,
+        norm_rules_bay=None,
     ):
         """
         Try to install a single inventory item.
@@ -839,7 +849,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             bay_dict = {bay.name: bay for bay in bays if not bay.module_id}
 
         # Match module bay using preloaded mapping data
-        matched_bay = InstallBranchView._match_bay(item, index_map, bay_dict, exact_mappings, regex_mappings)
+        matched_bay = InstallBranchView._match_bay(
+            item,
+            index_map,
+            bay_dict,
+            exact_mappings,
+            regex_mappings,
+            manufacturer_id=manufacturer_id,
+            norm_rules_bay=norm_rules_bay,
+        )
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
 
@@ -991,7 +1009,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             current = parent
 
     @staticmethod
-    def _match_bay(item, index_map, module_bays, exact_mappings, regex_mappings):
+    def _match_bay(
+        item,
+        index_map,
+        module_bays,
+        exact_mappings,
+        regex_mappings,
+        manufacturer_id=None,
+        norm_rules_bay=None,
+    ):
         """Match an inventory item to a module bay (same logic as BaseModuleTableView)."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
@@ -999,17 +1025,32 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Build candidates using the same parent/label extraction path as the
         # table-side matcher to keep install outcomes aligned with UI state.
-        candidate_names = BaseModuleTableView._build_bay_candidate_names(item, index_map, include_normalized=False)
+        # When preloaded module_bay normalization rules are supplied, include the
+        # normalized candidate variants too — this mirrors
+        # BaseModuleTableView._match_module_bay so installs don't skip bays that
+        # appear matched in the UI when normalization rules are in play. Rules are
+        # required as a preloaded dict (callers preload once) to avoid per-item DB
+        # queries inside install loops.
+        candidate_names = BaseModuleTableView._build_bay_candidate_names(
+            item,
+            index_map,
+            include_normalized=norm_rules_bay is not None,
+            norm_rules_bay=norm_rules_bay,
+        )
 
         # Check mapping for each candidate (exact match)
         for name in candidate_names:
-            bay = BaseModuleTableView._lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings)
+            bay = BaseModuleTableView._lookup_exact_bay_mapping(
+                name, phys_class, module_bays, exact_mappings, manufacturer_id
+            )
             if bay:
                 return bay
 
         # Regex pattern matching using preloaded list
         for name in candidate_names:
-            bay = BaseModuleTableView._lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings)
+            bay = BaseModuleTableView._lookup_regex_bay_mapping(
+                name, phys_class, module_bays, regex_mappings, manufacturer_id
+            )
             if bay:
                 return bay
 
@@ -1097,6 +1138,12 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         module_types = get_module_types_indexed()
         all_exact, all_regex = load_bay_mappings()
 
+        # Preload module_bay normalization rules once so _match_bay considers the
+        # same normalized candidate names as the table/UI matcher.
+        from netbox_librenms_plugin.utils import preload_normalization_rules
+
+        norm_rules_bay = preload_normalization_rules("module_bay")
+
         installed, skipped, failed = [], [], []
 
         invalid_selection_seen = False
@@ -1135,6 +1182,8 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         Module,
                         exact_mappings=exact_mappings,
                         regex_mappings=regex_mappings,
+                        manufacturer_id=mfr_id,
+                        norm_rules_bay=norm_rules_bay,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
