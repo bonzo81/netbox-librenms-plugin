@@ -34,6 +34,7 @@ def _mock_obj(model_name="device", pk=1, name="test-device"):
     obj.pk = pk
     obj.id = pk
     obj.name = name
+    obj.consoleserverports.exists.return_value = False
     return obj
 
 
