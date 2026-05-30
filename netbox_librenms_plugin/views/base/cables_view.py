@@ -2,7 +2,7 @@ import logging
 import re
 from urllib.parse import quote_plus
 
-from dcim.models import Device, Interface
+from dcim.models import ConsoleServerPort, Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import MultipleObjectsReturned
@@ -204,6 +204,11 @@ _RAW_LINK_KEYS = frozenset(
         "remote_port_id",
         "remote_device_id",
         "_source",
+        # Serial-specific source fields (not derived; must survive the cache strip so the
+        # read-only Avocent serial rows on the Cables tab re-render after a cached replay).
+        "sensor_id",
+        "sensor_index_int",
+        "is_configured",
     }
 )
 
@@ -489,6 +494,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             links_data, lookup_device, server_key, interface_name_field, alt_name_field
         )
 
+        # Append serial console-server port rows if the device has any CSPs.
+        if hasattr(obj, "consoleserverports") and obj.consoleserverports.exists():
+            from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+            serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(self.librenms_id)
+            if serial_success and serial_sensors:
+                links_data.extend(map_sensors_to_serial_links(serial_sensors))
+
         # Distinguish a *successful* zero-row refresh ([] — flows through to the success path in
         # _prepare_context(), where an OOB-fetch warning can still be surfaced) from a genuine
         # fetch failure (None — mislabeled "No links found" otherwise). A refresh is a failure
@@ -577,6 +590,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         if link.get("_source") == "oob":
             return
         if local_port := link.get("local_port"):
+            # Serial rows map to ConsoleServerPort, not Interface
+            if link.get("_source") == "serial":
+                csp = obj.consoleserverports.filter(name=local_port).first()
+                if csp:
+                    link["local_port_url"] = reverse("dcim:consoleserverport", args=[csp.pk])
+                    link["netbox_local_interface_id"] = csp.pk
+                return
+
             interface = None
             local_port_id = link.get("local_port_id")
             if server_key is None:
@@ -681,6 +702,29 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         return link
 
+    def check_serial_cable_status(self, link):
+        """Check cable status for a serial ConsoleServerPort row (Phase 2, read-only)."""
+        csp_id = link.get("netbox_local_interface_id")
+        link["can_create_cable"] = False  # sync action added in Phase 3
+        if not csp_id:
+            link["cable_status"] = "Console Server Port Not Found in NetBox"
+            return link
+        try:
+            csp = ConsoleServerPort.objects.get(pk=csp_id)
+        except ConsoleServerPort.DoesNotExist:
+            link["cable_status"] = "Console Server Port Not Found in NetBox"
+            return link
+        if csp.cable:
+            link.update(
+                {
+                    "cable_status": "Cable Found",
+                    "cable_url": reverse("dcim:cable", args=[csp.cable.pk]),
+                }
+            )
+        else:
+            link["cable_status"] = "No Cable"
+        return link
+
     def process_remote_device(self, link, remote_hostname, remote_device_id, server_key=None):
         """Process remote device data and add remote device URL if device exists in NetBox."""
         device, found, error_message = self.get_device_by_id_or_name(
@@ -709,6 +753,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         for link in links_data:
             self.enrich_local_port(link, obj, server_key=server_key)
             link["device_id"] = obj.id
+
+            # Serial rows: cable check against the ConsoleServerPort; no remote lookup.
+            if link.get("_source") == "serial":
+                self.check_serial_cable_status(link)
+                continue
 
             if remote_hostname := link.get("remote_device"):
                 link = self.process_remote_device(

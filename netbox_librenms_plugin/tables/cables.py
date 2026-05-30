@@ -2,6 +2,7 @@ import re
 
 import django_tables2 as tables
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
@@ -59,18 +60,28 @@ class LibreNMSCableTable(tables.Table):
         """Render remote device name as a link if URL is available."""
         if url := record.get("remote_device_url"):
             return format_html('<a href="{}">{}</a>', url, value)
+        # Serial rows: dim unconfigured ports (label was never customised)
+        if record.get("_source") == "serial" and not record.get("is_configured"):
+            return format_html('<span class="text-muted fst-italic">{}</span>', value)
         return value
 
     def render_local_port(self, value, record):
         """Render local port name as a link if URL is available."""
         # Leading space: the badge follows the port name.
         oob_badge = oob_badge_html(record, leading_space=True)
+        # Static trusted markup — use mark_safe, not format_html (which requires
+        # interpolation args and raises TypeError when given a bare string in Django 6+).
+        serial_badge = (
+            mark_safe(' <span class="badge bg-teal text-white ms-1" title="Serial console port">Serial</span>')
+            if record.get("_source") == "serial"
+            else ""
+        )
         # Normalize None to "" in both branches; otherwise the linked branch
         # renders the literal "None" as the link text when value is missing.
         display_value = value or ""
         if url := record.get("local_port_url"):
-            return format_html('<a href="{}">{}</a>{}', url, display_value, oob_badge)
-        return format_html("{}{}", display_value, oob_badge)
+            return format_html('<a href="{}">{}</a>{}{}', url, display_value, oob_badge, serial_badge)
+        return format_html("{}{}{}", display_value, oob_badge, serial_badge)
 
     def render_remote_port(self, value, record):
         """Render remote port name as a link if URL is available."""
