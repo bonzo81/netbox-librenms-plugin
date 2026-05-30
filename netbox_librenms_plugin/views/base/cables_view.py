@@ -703,9 +703,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         return link
 
     def check_serial_cable_status(self, link):
-        """Check cable status for a serial ConsoleServerPort row (Phase 2, read-only)."""
+        """Check cable status for a serial ConsoleServerPort row."""
         csp_id = link.get("netbox_local_interface_id")
-        link["can_create_cable"] = False  # sync action added in Phase 3
+        link["can_create_cable"] = False
         if not csp_id:
             link["cable_status"] = "Console Server Port Not Found in NetBox"
             return link
@@ -724,6 +724,37 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         else:
             link["cable_status"] = "No Cable"
         return link
+
+    def enrich_serial_remote(self, link):
+        """
+        Resolve the remote ConsolePort for a serial row using the Avocent port label.
+
+        Only called when the local ConsoleServerPort is found and has no cable.
+        Tries to match the label to a NetBox device by name, then picks the first
+        uncabled ConsolePort on that device.  If successful, sets
+        ``netbox_remote_interface_id`` and ``can_create_cable = True`` so the
+        existing sync action can create the cable in Phase 3.
+        """
+
+        label = link.get("remote_device")
+        if not label:
+            return
+
+        device, found, _ = self.get_device_by_id_or_name(None, label)
+        if not found:
+            return
+
+        link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
+        link["netbox_remote_device_id"] = device.pk
+
+        uncabled_cp = device.consoleports.filter(cable__isnull=True).first()
+        if uncabled_cp:
+            link["netbox_remote_interface_id"] = uncabled_cp.pk
+            link["remote_port_name"] = uncabled_cp.name
+            link["remote_port_url"] = reverse("dcim:consoleport", args=[uncabled_cp.pk])
+            link["can_create_cable"] = True
+        else:
+            link["cable_status"] = "Console Port Not Found in NetBox"
 
     def process_remote_device(self, link, remote_hostname, remote_device_id, server_key=None):
         """Process remote device data and add remote device URL if device exists in NetBox."""
@@ -754,9 +785,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             self.enrich_local_port(link, obj, server_key=server_key)
             link["device_id"] = obj.id
 
-            # Serial rows: cable check against the ConsoleServerPort; no remote lookup.
+            # Serial rows: check CSP cable status, then try to resolve remote ConsolePort.
             if link.get("_source") == "serial":
                 self.check_serial_cable_status(link)
+                # If CSP is found and has no cable, try to match remote device + ConsolePort.
+                if link.get("netbox_local_interface_id") and link.get("cable_status") == "No Cable":
+                    self.enrich_serial_remote(link)
                 continue
 
             if remote_hostname := link.get("remote_device"):

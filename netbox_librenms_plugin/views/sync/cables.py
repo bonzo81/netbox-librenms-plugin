@@ -1,7 +1,7 @@
 import logging
 from urllib.parse import quote_plus
 
-from dcim.models import Cable, Device, Interface
+from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
 from django.contrib import messages
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
@@ -172,6 +172,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     def handle_cable_creation(self, link_data, interface):
         """Create a cable from link data and return the operation result."""
+        # Serial rows use ConsoleServerPort ↔ ConsolePort instead of Interface ↔ Interface.
+        if link_data.get("_source") == "serial":
+            return self.handle_serial_cable_creation(link_data, interface)
+
         display_name = link_data.get("local_port") or interface.get("local_port_id", "")
         if not self.verify_cable_creation_requirements(link_data):
             if not link_data.get("netbox_remote_device_id") or not link_data.get("netbox_remote_interface_id"):
@@ -222,6 +226,29 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         if self.create_cable(local_interface, remote_interface, self.request):
             return {"status": "valid", "interface": display_name}
         return {"status": "invalid", "interface": display_name}  # pragma: no cover
+
+    def handle_serial_cable_creation(self, link_data, interface):
+        """Create a ConsoleServerPort ↔ ConsolePort cable for a serial row."""
+        display_name = link_data.get("local_port") or interface.get("local_port_id", "")
+        csp_id = link_data.get("netbox_local_interface_id")
+        cp_id = link_data.get("netbox_remote_interface_id")
+
+        if not csp_id or not cp_id:
+            return {"status": "missing_remote", "interface": display_name}
+
+        try:
+            csp = ConsoleServerPort.objects.get(pk=csp_id)
+            cp = ConsolePort.objects.get(pk=cp_id)
+
+            if csp.cable or cp.cable:
+                return {"status": "duplicate", "interface": display_name}
+
+            if self.create_cable(csp, cp, self.request):
+                return {"status": "valid", "interface": display_name}
+            return {"status": "invalid", "interface": display_name}  # pragma: no cover
+
+        except (ConsoleServerPort.DoesNotExist, ConsolePort.DoesNotExist):
+            return {"status": "missing_remote", "interface": display_name}
 
     def process_interface_sync(self, selected_interfaces, cached_links):
         """

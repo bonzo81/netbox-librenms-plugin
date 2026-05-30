@@ -454,3 +454,338 @@ class TestCableTableSerialRendering:
         html = str(table.render_local_port("ttyS7", record))
         assert 'href="/dcim/csp/99/"' in html
         assert "Serial" in html
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: enrich_serial_remote
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichSerialRemote:
+    """enrich_serial_remote resolves remote device + ConsolePort."""
+
+    def test_label_matches_device_with_uncabled_cp(self):
+        """When label matches device and device has an uncabled ConsolePort, sets can_create_cable."""
+        view = _make_view()
+
+        cp = MagicMock()
+        cp.pk = 77
+        cp.name = "con0"
+
+        device = MagicMock()
+        device.pk = 42
+        device.consoleports = MagicMock()
+        device.consoleports.filter.return_value.first.return_value = cp
+
+        link = {
+            "local_port": "ttyS7",
+            "local_port_id": "serial:1007",
+            "_source": "serial",
+            "remote_device": "prod-router-01",
+            "netbox_local_interface_id": 99,
+            "cable_status": "No Cable",
+        }
+
+        with (
+            patch.object(view, "get_device_by_id_or_name", return_value=(device, True, None)),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.reverse",
+                side_effect=lambda name, args=None: f"/{args[0]}/",
+            ),
+        ):
+            view.enrich_serial_remote(link)
+
+        assert link["netbox_remote_interface_id"] == 77
+        assert link["remote_port_name"] == "con0"
+        assert link["can_create_cable"] is True
+        assert link["netbox_remote_device_id"] == 42
+
+    def test_device_not_found_leaves_link_unchanged(self):
+        """When device lookup fails, link is not modified."""
+        view = _make_view()
+
+        link = {
+            "remote_device": "unknown-device",
+            "cable_status": "No Cable",
+        }
+
+        with patch.object(view, "get_device_by_id_or_name", return_value=(None, False, None)):
+            view.enrich_serial_remote(link)
+
+        assert "netbox_remote_device_id" not in link
+        assert "can_create_cable" not in link
+
+    def test_no_label_returns_early(self):
+        """When remote_device is empty/None, method returns immediately."""
+        view = _make_view()
+        link = {"remote_device": None, "cable_status": "No Cable"}
+
+        with patch.object(view, "get_device_by_id_or_name") as mock_lookup:
+            view.enrich_serial_remote(link)
+
+        mock_lookup.assert_not_called()
+
+    def test_all_cps_cabled_sets_not_found_status(self):
+        """When all ConsolePorts are already cabled, sets 'Console Port Not Found'."""
+        view = _make_view()
+
+        device = MagicMock()
+        device.pk = 42
+        device.consoleports = MagicMock()
+        device.consoleports.filter.return_value.first.return_value = None  # no uncabled CP
+
+        link = {
+            "remote_device": "prod-router-01",
+            "cable_status": "No Cable",
+        }
+
+        with (
+            patch.object(view, "get_device_by_id_or_name", return_value=(device, True, None)),
+            patch("netbox_librenms_plugin.views.base.cables_view.reverse", return_value="/x/"),
+        ):
+            view.enrich_serial_remote(link)
+
+        assert link["cable_status"] == "Console Port Not Found in NetBox"
+        assert "can_create_cable" not in link
+
+    def test_enrich_links_data_calls_enrich_serial_remote_when_no_cable(self):
+        """enrich_links_data calls enrich_serial_remote for CSP-found rows with No Cable."""
+        view = _make_view()
+
+        link = {
+            "local_port": "ttyS7",
+            "local_port_id": "serial:1007",
+            "_source": "serial",
+            "remote_device": "prod-router-01",
+            "device_id": None,
+        }
+        obj = _mock_obj()
+
+        with (
+            patch.object(view, "enrich_local_port"),
+            patch.object(
+                view,
+                "check_serial_cable_status",
+                side_effect=lambda lnk: lnk.update(
+                    {
+                        "cable_status": "No Cable",
+                        "netbox_local_interface_id": 99,
+                    }
+                ),
+            ),
+            patch.object(view, "enrich_serial_remote") as mock_enrich_remote,
+        ):
+            view.enrich_links_data([link], obj)
+
+        mock_enrich_remote.assert_called_once_with(link)
+
+    def test_enrich_links_data_skips_enrich_serial_remote_when_cable_found(self):
+        """enrich_serial_remote is NOT called when the CSP already has a cable."""
+        view = _make_view()
+
+        link = {
+            "local_port": "ttyS3",
+            "local_port_id": "serial:1003",
+            "_source": "serial",
+            "remote_device": "some-device",
+            "device_id": None,
+        }
+        obj = _mock_obj()
+
+        with (
+            patch.object(view, "enrich_local_port"),
+            patch.object(
+                view,
+                "check_serial_cable_status",
+                side_effect=lambda lnk: lnk.update(
+                    {
+                        "cable_status": "Cable Found",
+                        "netbox_local_interface_id": 88,
+                    }
+                ),
+            ),
+            patch.object(view, "enrich_serial_remote") as mock_enrich_remote,
+        ):
+            view.enrich_links_data([link], obj)
+
+        mock_enrich_remote.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: SyncCablesView serial handling
+# ---------------------------------------------------------------------------
+
+
+class TestHandleSerialCableCreation:
+    """SyncCablesView.handle_serial_cable_creation creates CSP <-> CP cables."""
+
+    def _make_sync_view(self):
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        view = object.__new__(SyncCablesView)
+        view.request = _mock_request()
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        return view
+
+    def test_creates_cable_when_both_sides_found(self):
+        """When CSP and CP both exist and are uncabled, creates cable and returns valid."""
+        from dcim.models import ConsolePort, ConsoleServerPort
+
+        view = self._make_sync_view()
+
+        csp = MagicMock(spec=ConsoleServerPort)
+        csp.cable = None
+
+        cp = MagicMock(spec=ConsolePort)
+        cp.cable = None
+
+        link_data = {
+            "_source": "serial",
+            "local_port": "ttyS7",
+            "netbox_local_interface_id": 99,
+            "netbox_remote_interface_id": 77,
+        }
+        interface = {"device_id": 1, "local_port_id": "serial:1007"}
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.cables.ConsoleServerPort") as MockCSP,
+            patch("netbox_librenms_plugin.views.sync.cables.ConsolePort") as MockCP,
+            patch.object(view, "create_cable", return_value=True) as mock_create,
+        ):
+            MockCSP.objects.get.return_value = csp
+            MockCSP.DoesNotExist = ConsoleServerPort.DoesNotExist
+            MockCP.objects.get.return_value = cp
+            MockCP.DoesNotExist = ConsolePort.DoesNotExist
+            result = view.handle_serial_cable_creation(link_data, interface)
+
+        assert result["status"] == "valid"
+        assert result["interface"] == "ttyS7"
+        mock_create.assert_called_once_with(csp, cp, view.request)
+
+    def test_missing_csp_id_returns_missing_remote(self):
+        """When netbox_local_interface_id is absent, returns missing_remote."""
+        view = self._make_sync_view()
+
+        link_data = {
+            "_source": "serial",
+            "local_port": "ttyS7",
+            "netbox_remote_interface_id": 77,
+        }
+        interface = {"device_id": 1, "local_port_id": "serial:1007"}
+
+        result = view.handle_serial_cable_creation(link_data, interface)
+        assert result["status"] == "missing_remote"
+
+    def test_missing_cp_id_returns_missing_remote(self):
+        """When netbox_remote_interface_id is absent, returns missing_remote."""
+        view = self._make_sync_view()
+
+        link_data = {
+            "_source": "serial",
+            "local_port": "ttyS7",
+            "netbox_local_interface_id": 99,
+        }
+        interface = {"device_id": 1, "local_port_id": "serial:1007"}
+
+        result = view.handle_serial_cable_creation(link_data, interface)
+        assert result["status"] == "missing_remote"
+
+    def test_existing_cable_on_csp_returns_duplicate(self):
+        """When CSP already has a cable, returns duplicate."""
+        from dcim.models import ConsolePort, ConsoleServerPort
+
+        view = self._make_sync_view()
+
+        csp = MagicMock(spec=ConsoleServerPort)
+        csp.cable = MagicMock()  # has cable
+
+        cp = MagicMock(spec=ConsolePort)
+        cp.cable = None
+
+        link_data = {
+            "_source": "serial",
+            "local_port": "ttyS7",
+            "netbox_local_interface_id": 99,
+            "netbox_remote_interface_id": 77,
+        }
+        interface = {"device_id": 1, "local_port_id": "serial:1007"}
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.cables.ConsoleServerPort") as MockCSP,
+            patch("netbox_librenms_plugin.views.sync.cables.ConsolePort") as MockCP,
+        ):
+            MockCSP.objects.get.return_value = csp
+            MockCSP.DoesNotExist = ConsoleServerPort.DoesNotExist
+            MockCP.objects.get.return_value = cp
+            MockCP.DoesNotExist = ConsolePort.DoesNotExist
+            result = view.handle_serial_cable_creation(link_data, interface)
+
+        assert result["status"] == "duplicate"
+
+    def test_csp_does_not_exist_returns_missing_remote(self):
+        """DoesNotExist on CSP lookup returns missing_remote."""
+        from dcim.models import ConsoleServerPort
+
+        view = self._make_sync_view()
+
+        link_data = {
+            "_source": "serial",
+            "local_port": "ttyS7",
+            "netbox_local_interface_id": 9999,
+            "netbox_remote_interface_id": 77,
+        }
+        interface = {"device_id": 1, "local_port_id": "serial:1007"}
+
+        with patch("netbox_librenms_plugin.views.sync.cables.ConsoleServerPort") as MockCSP:
+            MockCSP.DoesNotExist = ConsoleServerPort.DoesNotExist
+            MockCSP.objects.get.side_effect = ConsoleServerPort.DoesNotExist
+            result = view.handle_serial_cable_creation(link_data, interface)
+
+        assert result["status"] == "missing_remote"
+
+    def test_handle_cable_creation_routes_serial_to_serial_handler(self):
+        """handle_cable_creation dispatches serial _source to handle_serial_cable_creation."""
+        view = self._make_sync_view()
+
+        link_data = {"_source": "serial", "local_port": "ttyS7"}
+        interface = {"device_id": 1, "local_port_id": "serial:1007"}
+
+        with patch.object(
+            view, "handle_serial_cable_creation", return_value={"status": "valid", "interface": "ttyS7"}
+        ) as mock_serial:
+            result = view.handle_cable_creation(link_data, interface)
+
+        mock_serial.assert_called_once_with(link_data, interface)
+        assert result["status"] == "valid"
+
+    def test_handle_cable_creation_non_serial_does_not_route_to_serial(self):
+        """handle_cable_creation does NOT call handle_serial_cable_creation for main rows."""
+        from dcim.models import Interface
+
+        view = self._make_sync_view()
+
+        link_data = {
+            "_source": "main",
+            "local_port": "Gi0/1",
+            "netbox_local_interface_id": 1,
+            "netbox_remote_interface_id": 2,
+            "netbox_remote_device_id": 3,
+        }
+        interface = {"device_id": 1, "local_port_id": 101}
+
+        iface = MagicMock(spec=Interface)
+        iface.device_id = 1
+        iface.cable = None
+
+        with (
+            patch.object(view, "handle_serial_cable_creation") as mock_serial,
+            patch("netbox_librenms_plugin.views.sync.cables.Interface") as MockInterface,
+            patch.object(view, "check_existing_cable", return_value=False),
+            patch.object(view, "create_cable", return_value=True),
+        ):
+            MockInterface.objects.get.return_value = iface
+            MockInterface.DoesNotExist = Interface.DoesNotExist
+            view.handle_cable_creation(link_data, interface)
+
+        mock_serial.assert_not_called()
