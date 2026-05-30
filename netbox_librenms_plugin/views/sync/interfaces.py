@@ -112,6 +112,10 @@ class SyncInterfacesView(
         self._skipped_conflicts = []
         self.sync_selected_interfaces(obj, selected_interfaces, ports_data, exclude_columns, interface_name_field)
 
+        # After all interfaces are created/updated, set LAG and parent relationships
+        relationships = self._get_cached_relationships(obj, server_key)
+        self._sync_lag_and_parent_relationships(obj, selected_interfaces, ports_data, relationships, server_key)
+
         if self._skipped_conflicts:
             skipped = ", ".join(self._skipped_conflicts)
             messages.warning(
@@ -169,6 +173,108 @@ class SyncInterfacesView(
             )
             return None
         return ports_data
+
+    def _get_cached_relationships(self, obj, server_key):
+        """Return port_stack_relationships from the cached port data, or empty dict."""
+        cache_obj = obj
+        if isinstance(obj, Device) and not get_librenms_device_id(obj, server_key, auto_save=False):
+            sync_device = get_librenms_sync_device(obj, server_key=server_key)
+            if sync_device is not None:
+                cache_obj = sync_device
+        cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
+        if cached_data:
+            return cached_data.get("port_stack_relationships", {})
+        return {}
+
+    def _sync_lag_and_parent_relationships(self, obj, selected_interfaces, ports_data, relationships, server_key):
+        """Set LAG member and sub-interface parent relationships for synced interfaces.
+
+        Runs after sync_selected_interfaces() so all interfaces already exist in NetBox.
+        Only processes relationships where this interface is a member/child — the
+        aggregate/parent may or may not be in the selected set (it just needs to exist in NB).
+        """
+        if not relationships:
+            return
+
+        lag_members = relationships.get("lag_members", {})
+        sub_interfaces = relationships.get("sub_interfaces", {})
+        if not lag_members and not sub_interfaces:
+            return
+
+        interface_name_field = self.interface_name_field
+
+        # Build lookups: str(port_id) -> port_dict, and interface_name -> str(port_id)
+        port_by_id = {}
+        port_id_by_name = {}
+        for port in ports_data:
+            pid = port.get("port_id")
+            name = port.get(interface_name_field)
+            if pid is not None:
+                port_by_id[str(pid)] = port
+            if name and pid is not None:
+                port_id_by_name[name] = str(pid)
+
+        selected_set = set(selected_interfaces)
+
+        with transaction.atomic():
+            for iface_name in selected_set:
+                port_id = port_id_by_name.get(iface_name)
+                if not port_id:
+                    continue
+
+                # LAG membership: this interface is a member of a LAG aggregate
+                raw_lag = lag_members.get(port_id, lag_members.get(int(port_id) if port_id.isdigit() else None))
+                if raw_lag is not None:
+                    lag_port_id = str(raw_lag)
+                    lag_entry = port_by_id.get(lag_port_id, {})
+                    lag_name = lag_entry.get("ifName", "")
+
+                    member_iface, err = _resolve_interface_by_port_id(obj, port_id, server_key)
+                    if err:
+                        logger.debug("LAG member lookup failed during bulk sync: %s", err)
+                        continue
+
+                    if not isinstance(member_iface, Interface):
+                        continue  # VMInterface does not support lag
+
+                    agg_iface, err = _resolve_interface_by_port_id(obj, lag_port_id, server_key, name_hint=lag_name)
+                    if err:
+                        logger.debug("LAG aggregate lookup failed during bulk sync: %s", err)
+                        continue
+
+                    if member_iface.lag_id != agg_iface.pk:
+                        if isinstance(agg_iface, Interface) and agg_iface.type != "lag":
+                            agg_iface.type = "lag"
+                            agg_iface.save()
+                        member_iface.lag = agg_iface
+                        member_iface.save()
+                        logger.info("Bulk sync: set %s.lag = %s", member_iface.name, agg_iface.name)
+
+                # Sub-interface parent: this interface is a child of a parent interface
+                raw_parent = sub_interfaces.get(
+                    port_id, sub_interfaces.get(int(port_id) if port_id.isdigit() else None)
+                )
+                if raw_parent is not None:
+                    parent_port_id = str(raw_parent)
+                    parent_entry = port_by_id.get(parent_port_id, {})
+                    parent_name = parent_entry.get("ifName", "")
+
+                    child_iface, err = _resolve_interface_by_port_id(obj, port_id, server_key)
+                    if err:
+                        logger.debug("Sub-iface child lookup failed during bulk sync: %s", err)
+                        continue
+
+                    parent_iface, err = _resolve_interface_by_port_id(
+                        obj, parent_port_id, server_key, name_hint=parent_name
+                    )
+                    if err:
+                        logger.debug("Sub-iface parent lookup failed during bulk sync: %s", err)
+                        continue
+
+                    if child_iface.parent_id != parent_iface.pk:
+                        child_iface.parent = parent_iface
+                        child_iface.save()
+                        logger.info("Bulk sync: set %s.parent = %s", child_iface.name, parent_iface.name)
 
     def sync_selected_interfaces(
         self,
@@ -589,3 +695,156 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
             response_data["message"] += f" with {len(errors)} error(s)"
 
         return JsonResponse(response_data)
+
+
+def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint: str = ""):
+    """Resolve a LibreNMS port_id to a NetBox Interface/VMInterface.
+
+    1. Searches obj's interfaces for one whose librenms_id custom field matches port_id.
+       For Devices in a Virtual Chassis, searches all VC member interfaces.
+    2. Falls back to exact name match when name_hint is provided (e.g. interface was
+       created manually without a librenms_id).
+    Returns (interface, None) on success or (None, error_str) on failure.
+    """
+    if not port_id:
+        return None, "port_id is required"
+
+    if isinstance(obj, Device):
+        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
+            iface_qs = Interface.objects.filter(device__in=member_ids)
+        else:
+            iface_qs = Interface.objects.filter(device=obj)
+    elif isinstance(obj, VirtualMachine):
+        iface_qs = VMInterface.objects.filter(virtual_machine=obj)
+    else:
+        return None, f"Unsupported object type: {type(obj).__name__}"
+
+    target_id = int(port_id) if str(port_id).isdigit() else None
+    for iface in iface_qs:
+        stored_id = get_librenms_device_id(iface, server_key, auto_save=False)
+        if stored_id is not None and target_id is not None and stored_id == target_id:
+            return iface, None
+
+    if name_hint:
+        try:
+            if isinstance(obj, Device):
+                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                    member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
+                    iface = Interface.objects.get(device__in=member_ids, name=name_hint)
+                else:
+                    iface = Interface.objects.get(device=obj, name=name_hint)
+            else:
+                iface = VMInterface.objects.get(virtual_machine=obj, name=name_hint)
+            return iface, None
+        except Exception:
+            pass
+
+    return None, f"Interface with LibreNMS port_id {port_id} not found on {obj}"
+
+
+class _PortIdResolveMixin:
+    """Mixin to resolve a LibreNMS port_id to a NetBox interface by librenms_id custom field, then name fallback."""
+
+    _server_key: str
+
+    def _resolve_interface_by_port_id(self, obj, port_id: str, server_key: str, name_hint: str = ""):
+        return _resolve_interface_by_port_id(obj, port_id, server_key, name_hint)
+
+
+class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Set Interface.lag (member -> aggregate) based on LibreNMS port_stack data."""
+
+    required_object_permissions = {"POST": [("change", Interface)]}
+
+    def _get_object(self, object_type, object_id):
+        if object_type == "device":
+            return get_object_or_404(Device, pk=object_id)
+        if object_type == "virtualmachine":
+            return get_object_or_404(VirtualMachine, pk=object_id)
+        raise Http404("Invalid object type.")
+
+    def post(self, request, object_type, object_id):
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        obj = self._get_object(object_type, object_id)
+        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        port_id = request.POST.get("port_id", "").strip()
+        lag_port_id = request.POST.get("lag_port_id", "").strip()
+        lag_name = request.POST.get("lag_name", "").strip()
+
+        if not port_id or not lag_port_id:
+            return JsonResponse({"error": "port_id and lag_port_id are required"}, status=400)
+
+        member_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(self, obj, port_id, server_key)
+        if err:
+            return JsonResponse({"error": f"Member interface: {err}"}, status=404)
+
+        agg_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
+            self, obj, lag_port_id, server_key, name_hint=lag_name
+        )
+        if err:
+            return JsonResponse({"error": f"Aggregate interface: {err}"}, status=404)
+
+        with transaction.atomic():
+            if not isinstance(member_iface, Interface):
+                return JsonResponse(
+                    {"error": "LAG membership sync is only supported for device interfaces, not VM interfaces"},
+                    status=400,
+                )
+
+            if isinstance(agg_iface, Interface) and agg_iface.type != "lag":
+                agg_iface.type = "lag"
+                agg_iface.save()
+                logger.info("Set interface %s type=lag", agg_iface.name)
+
+            member_iface.lag = agg_iface
+            member_iface.save()
+            logger.info("Set %s.lag = %s", member_iface.name, agg_iface.name)
+
+        return JsonResponse({"status": "success", "message": f"Linked {member_iface.name} to LAG {agg_iface.name}"})
+
+
+class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Set Interface.parent (sub-interface -> parent) based on LibreNMS port_stack data."""
+
+    required_object_permissions = {"POST": [("change", Interface)]}
+
+    def _get_object(self, object_type, object_id):
+        if object_type == "device":
+            return get_object_or_404(Device, pk=object_id)
+        if object_type == "virtualmachine":
+            return get_object_or_404(VirtualMachine, pk=object_id)
+        raise Http404("Invalid object type.")
+
+    def post(self, request, object_type, object_id):
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        obj = self._get_object(object_type, object_id)
+        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        port_id = request.POST.get("port_id", "").strip()
+        parent_port_id = request.POST.get("parent_port_id", "").strip()
+        parent_name = request.POST.get("parent_name", "").strip()
+
+        if not port_id or not parent_port_id:
+            return JsonResponse({"error": "port_id and parent_port_id are required"}, status=400)
+
+        child_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(self, obj, port_id, server_key)
+        if err:
+            return JsonResponse({"error": f"Child interface: {err}"}, status=404)
+
+        parent_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
+            self, obj, parent_port_id, server_key, name_hint=parent_name
+        )
+        if err:
+            return JsonResponse({"error": f"Parent interface: {err}"}, status=404)
+
+        child_iface.parent = parent_iface
+        child_iface.save()
+        logger.info("Set %s.parent = %s", child_iface.name, parent_iface.name)
+
+        return JsonResponse(
+            {"status": "success", "message": f"Linked {child_iface.name} to parent {parent_iface.name}"}
+        )

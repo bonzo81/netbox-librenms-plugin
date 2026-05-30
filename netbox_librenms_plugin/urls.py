@@ -9,6 +9,7 @@ from .models import (
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 from .views import (
     AddDeviceToLibreNMSView,
@@ -123,6 +124,15 @@ from .views import (
     PlatformMappingEditView,
     PlatformMappingListView,
     PlatformMappingView,
+    PortStackLagPatternBulkDeleteView,
+    PortStackLagPatternBulkExportYAMLView,
+    PortStackLagPatternBulkImportView,
+    PortStackLagPatternChangeLogView,
+    PortStackLagPatternCreateView,
+    PortStackLagPatternDeleteView,
+    PortStackLagPatternEditView,
+    PortStackLagPatternListView,
+    PortStackLagPatternView,
     RemoveServerMappingView,
     SaveUserPrefView,
     SingleCableVerifyView,
@@ -134,6 +144,8 @@ from .views import (
     VerifyVlanSyncGroupView,
     SyncCablesView,
     SyncInterfacesView,
+    SyncInterfaceLagView,
+    SyncInterfaceParentView,
     SyncIPAddressesView,
     SyncSiteLocationView,
     SyncVLANsView,
@@ -288,6 +300,18 @@ urlpatterns = [
         "<str:object_type>/<int:object_id>/sync-interfaces/",
         SyncInterfacesView.as_view(),
         name="sync_selected_interfaces",
+    ),
+    # Sync interface LAG membership URL
+    path(
+        "<str:object_type>/<int:object_id>/sync-interface-lag/",
+        SyncInterfaceLagView.as_view(),
+        name="sync_interface_lag",
+    ),
+    # Sync interface parent (sub-interface) URL
+    path(
+        "<str:object_type>/<int:object_id>/sync-interface-parent/",
+        SyncInterfaceParentView.as_view(),
+        name="sync_interface_parent",
     ),
     # Delete NetBox-only interfaces URL
     path(
@@ -880,6 +904,53 @@ urlpatterns = [
         "carrier-auto-install-rules/export-yaml/",
         CarrierAutoInstallRuleBulkExportYAMLView.as_view(),
         name="carrierautoinstallrule_bulk_export_yaml",
+    ),
+    # PortStackLagPattern
+    path(
+        "port-stack-lag-patterns/",
+        PortStackLagPatternListView.as_view(),
+        name="portstacklagpattern_list",
+    ),
+    path(
+        "port-stack-lag-patterns/<int:pk>/",
+        PortStackLagPatternView.as_view(),
+        name="portstacklagpattern_detail",
+    ),
+    path(
+        "port-stack-lag-patterns/add/",
+        PortStackLagPatternCreateView.as_view(),
+        name="portstacklagpattern_add",
+    ),
+    path(
+        "port-stack-lag-patterns/import/",
+        PortStackLagPatternBulkImportView.as_view(),
+        name="portstacklagpattern_bulk_import",
+    ),
+    path(
+        "port-stack-lag-patterns/<int:pk>/edit/",
+        PortStackLagPatternEditView.as_view(),
+        name="portstacklagpattern_edit",
+    ),
+    path(
+        "port-stack-lag-patterns/<int:pk>/delete/",
+        PortStackLagPatternDeleteView.as_view(),
+        name="portstacklagpattern_delete",
+    ),
+    path(
+        "port-stack-lag-patterns/delete/",
+        PortStackLagPatternBulkDeleteView.as_view(),
+        name="portstacklagpattern_bulk_delete",
+    ),
+    path(
+        "port-stack-lag-patterns/export-yaml/",
+        PortStackLagPatternBulkExportYAMLView.as_view(),
+        name="portstacklagpattern_bulk_export_yaml",
+    ),
+    path(
+        "port-stack-lag-patterns/<int:pk>/changelog/",
+        PortStackLagPatternChangeLogView.as_view(),
+        name="portstacklagpattern_changelog",
+        kwargs={"model": PortStackLagPattern},
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

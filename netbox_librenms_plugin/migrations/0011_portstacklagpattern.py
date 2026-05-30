@@ -1,0 +1,71 @@
+import netbox.models.deletion
+import netbox_librenms_plugin.models
+import taggit.managers
+import utilities.json
+from django.db import migrations, models
+
+INITIAL_LAG_PATTERNS = [
+    ("ios", r"^Po\d+$"),
+    ("iosxe", r"^Po\d+$"),
+    ("iosxr", r"^Bundle-Ether\d+$"),
+    ("timos", r"^lag-\d+$"),
+    ("junos", r"^ae\d+$"),
+    ("arcos", r"^bond\d+$"),
+]
+
+
+def populate_patterns(apps, schema_editor):
+    db_alias = schema_editor.connection.alias
+    PortStackLagPattern = apps.get_model("netbox_librenms_plugin", "PortStackLagPattern")
+    for os_name, pattern in INITIAL_LAG_PATTERNS:
+        PortStackLagPattern.objects.using(db_alias).get_or_create(
+            librenms_os=os_name,
+            defaults={"lag_name_pattern": pattern},
+        )
+
+
+def remove_patterns(apps, schema_editor):
+    db_alias = schema_editor.connection.alias
+    PortStackLagPattern = apps.get_model("netbox_librenms_plugin", "PortStackLagPattern")
+    for os_name, pattern in INITIAL_LAG_PATTERNS:
+        PortStackLagPattern.objects.using(db_alias).filter(
+            librenms_os=os_name,
+            lag_name_pattern=pattern,
+        ).delete()
+
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ("extras", "0138_customfieldchoiceset_choice_colors"),
+        ("netbox_librenms_plugin", "0010_inventory_and_mapping_models"),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name="PortStackLagPattern",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False)),
+                ("created", models.DateTimeField(auto_now_add=True, null=True)),
+                ("last_updated", models.DateTimeField(auto_now=True, null=True)),
+                (
+                    "custom_field_data",
+                    models.JSONField(blank=True, default=dict, encoder=utilities.json.CustomFieldJSONEncoder),
+                ),
+                ("librenms_os", models.CharField(max_length=50, unique=True)),
+                ("lag_name_pattern", models.CharField(max_length=200)),
+                ("description", models.TextField(blank=True)),
+                ("tags", taggit.managers.TaggableManager(through="extras.TaggedItem", to="extras.Tag")),
+            ],
+            options={
+                "verbose_name": "Port Stack LAG Pattern",
+                "verbose_name_plural": "Port Stack LAG Patterns",
+                "ordering": ["librenms_os"],
+            },
+            bases=(
+                netbox_librenms_plugin.models.FullCleanOnSaveMixin,
+                netbox.models.deletion.DeleteMixin,
+                models.Model,
+            ),
+        ),
+        migrations.RunPython(populate_patterns, remove_patterns),
+    ]

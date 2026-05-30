@@ -1,0 +1,21 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Port Stack LAG Patterns</h4>
+        <p>Define regular expression patterns to identify LAG (Link Aggregation Group) aggregate
+           interfaces by operating system when the interface type is not <code>ieee8023adLag</code>.
+           These patterns are used as a fallback during interface synchronization to correctly
+           identify parent-child relationships in port stacks.</p>
+        <p>Example: Cisco IOS port-channels have <code>ifType='propVirtual'</code> and need
+           name-based identification via pattern <code>^Po\d+$</code>.</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:portstacklagpattern_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

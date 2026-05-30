@@ -10,9 +10,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-# Import the autouse fixture from helpers
-pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
-
 
 # =============================================================================
 # Test Class 1: Initialization (3 tests)
@@ -2084,3 +2081,200 @@ class TestGetPortVlanDetailsResponseShape:
 
         assert success is False
         assert "net down" in msg
+
+
+# =============================================================================
+# Test Class: get_port_stack() (3 tests)
+# =============================================================================
+
+
+class TestGetPortStack:
+    """Tests for LibreNMSAPI.get_port_stack()."""
+
+    def test_returns_mappings_list_on_success(self, mock_librenms_api):
+        """get_port_stack returns (True, list) on HTTP 200."""
+        from unittest.mock import MagicMock, patch
+
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "status": "ok",
+            "mappings": [
+                {"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2},
+            ],
+        }
+        fake_response.raise_for_status = MagicMock()
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response) as mock_get:
+            success, data = mock_librenms_api.get_port_stack(42)
+
+        assert success is True
+        assert data == [{"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2}]
+        mock_get.assert_called_once()
+        call_url = mock_get.call_args[0][0]
+        assert "/api/v0/devices/42/port_stack" in call_url
+
+    def test_returns_false_on_404(self, mock_librenms_api):
+        """get_port_stack returns (False, error_str) when device not found."""
+        import requests as _requests
+        from unittest.mock import MagicMock, patch
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 404
+        http_error = _requests.exceptions.HTTPError(response=fake_resp)
+        fake_resp.raise_for_status.side_effect = http_error
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_resp):
+            success, data = mock_librenms_api.get_port_stack(99)
+
+        assert success is False
+        assert "not found" in data.lower()
+
+    def test_returns_empty_list_when_no_mappings_key(self, mock_librenms_api):
+        """get_port_stack returns (True, []) if API response omits 'mappings' key."""
+        from unittest.mock import MagicMock, patch
+
+        fake_response = MagicMock()
+        fake_response.json.return_value = {"status": "ok"}
+        fake_response.raise_for_status = MagicMock()
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+            success, data = mock_librenms_api.get_port_stack(5)
+
+        assert success is True
+        assert data == []
+
+
+# =============================================================================
+# Fixture port data for resolve_port_relationships tests
+# =============================================================================
+
+# Fixture port data for resolve_port_relationships tests
+NOKIA_PORTS = [
+    {"port_id": 101, "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
+    {"port_id": 102, "ifName": "lag-1", "ifType": "ieee8023adLag"},
+]
+NOKIA_PORT_STACK = [
+    {"high_port_id": 101, "low_port_id": 102},  # valid LAG membership
+    {"high_port_id": 102, "low_port_id": 200},  # low_id 200 not in ports (missing = skip)
+]
+NOKIA_SAP_PORTS = [
+    {"port_id": 101, "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
+    {"port_id": 102, "ifName": "lag-1", "ifType": "ieee8023adLag"},
+    {"port_id": 200, "ifName": "lag1:0", "ifType": "ipForward"},  # SAP entry with colon
+]
+NOKIA_SAP_PORT_STACK = [
+    {"high_port_id": 101, "low_port_id": 102},  # valid LAG
+    {"high_port_id": 102, "low_port_id": 200},  # SAP — should be excluded
+]
+JUNOS_PORTS = [
+    {"port_id": 201, "ifName": "xe-0/0/0", "ifType": "ethernetCsmacd"},
+    {"port_id": 202, "ifName": "xe-0/0/0.0", "ifType": "propVirtual"},
+    {"port_id": 203, "ifName": "ae1", "ifType": "ieee8023adLag"},
+    {"port_id": 204, "ifName": "ae1.0", "ifType": "ieee8023adLag"},
+    {"port_id": 205, "ifName": "ae10", "ifType": "ieee8023adLag"},
+    {"port_id": 206, "ifName": "ae10.2221", "ifType": "l2vlan"},
+]
+JUNOS_PORT_STACK = [
+    {"high_port_id": 202, "low_port_id": 204},  # xe-0/0/0.0 -> ae1.0 resolves to xe-0/0/0 in ae1
+    {"high_port_id": 205, "low_port_id": 206},  # ae10 -> ae10.2221 (sub-interface)
+]
+CISCO_IOS_PORTS = [
+    {"port_id": 301, "ifName": "Te1/1", "ifType": "ethernetCsmacd"},
+    {"port_id": 302, "ifName": "Po10", "ifType": "propVirtual"},  # IOS port-channel
+    {"port_id": 303, "ifName": "Po10.100", "ifType": "l2vlan"},
+]
+CISCO_IOS_PORT_STACK = [
+    {"high_port_id": 301, "low_port_id": 302},  # LAG membership
+    {"high_port_id": 302, "low_port_id": 303},  # sub-interface
+]
+ARCOS_PORTS = [
+    {"port_id": 401, "ifName": "swp4", "ifType": "ethernetCsmacd"},
+    {"port_id": 402, "ifName": "bond1", "ifType": "ieee8023adLag"},
+    {"port_id": 403, "ifName": "swp15", "ifType": "ethernetCsmacd"},
+    {"port_id": 404, "ifName": "swp15.3", "ifType": "ethernetCsmacd"},  # sub-if, not propVirtual
+]
+ARCOS_PORT_STACK = [
+    {"high_port_id": 401, "low_port_id": 402},  # LAG membership
+    {"high_port_id": 403, "low_port_id": 404},  # sub-interface
+]
+
+
+# =============================================================================
+# Test Class: resolve_port_relationships() (10 tests)
+# =============================================================================
+
+
+@pytest.fixture
+def ios_lag_patterns():
+    """LAG patterns dict for Cisco IOS (propVirtual LAGs identified by name)."""
+    return {"ios": r"^Po\d+$"}
+
+
+@pytest.fixture
+def arcos_lag_patterns():
+    """LAG patterns dict for ArcOS bonds."""
+    return {"arcos": r"^bond\d+$"}
+
+
+@pytest.fixture
+def combined_lag_patterns():
+    """LAG patterns for both Cisco IOS and ArcOS."""
+    return {"ios": r"^Po\d+$", "arcos": r"^bond\d+$"}
+
+
+class TestResolvePortRelationships:
+    """Tests for LibreNMSAPI.resolve_port_relationships()."""
+
+    def test_nokia_lag_membership(self, mock_librenms_api):
+        """Nokia: high=physical, low=lag-1 (ieee8023adLag) -> member in lag_members."""
+        result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, NOKIA_PORT_STACK[:1], lag_patterns={})
+        assert result["lag_members"] == {101: 102}
+        assert result["sub_interfaces"] == {}
+
+    def test_nokia_sap_excluded_when_colon_in_name(self, mock_librenms_api):
+        """Nokia SAP entries (colon in name) must be excluded from output."""
+        result = mock_librenms_api.resolve_port_relationships(NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={})
+        assert result["lag_members"] == {101: 102}
+        assert 200 not in result["lag_members"].values()
+
+    def test_junos_sub_unit_stripping(self, mock_librenms_api):
+        """Junos: xe-0/0/0.0 -> ae1.0 pair strips to xe-0/0/0 member of ae1."""
+        result = mock_librenms_api.resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[:1], lag_patterns={})
+        assert result["lag_members"].get(201) == 203
+
+    def test_junos_ae_sub_interface(self, mock_librenms_api):
+        """Junos: ae10 -> ae10.2221 detected as sub-interface."""
+        result = mock_librenms_api.resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[1:], lag_patterns={})
+        assert result["sub_interfaces"] == {206: 205}
+
+    def test_cisco_ios_lag_via_name_pattern(self, mock_librenms_api, ios_lag_patterns):
+        """Cisco IOS: Po10 has propVirtual type but is a LAG via name pattern."""
+        result = mock_librenms_api.resolve_port_relationships(
+            CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], lag_patterns=ios_lag_patterns
+        )
+        assert result["lag_members"] == {301: 302}
+
+    def test_cisco_ios_sub_interface(self, mock_librenms_api, ios_lag_patterns):
+        """Cisco IOS: Po10 -> Po10.100 detected as sub-interface."""
+        result = mock_librenms_api.resolve_port_relationships(
+            CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[1:], lag_patterns=ios_lag_patterns
+        )
+        assert result["sub_interfaces"] == {303: 302}
+
+    def test_arcos_lag_membership(self, mock_librenms_api):
+        """ArcOS: swp4 member of bond1 (ieee8023adLag)."""
+        result = mock_librenms_api.resolve_port_relationships(ARCOS_PORTS, ARCOS_PORT_STACK[:1], lag_patterns={})
+        assert result["lag_members"] == {401: 402}
+
+    def test_arcos_sub_interface_ethernetcsmacd(self, mock_librenms_api):
+        """ArcOS: swp15.3 sub-interface of swp15 (both ethernetCsmacd -- not propVirtual)."""
+        result = mock_librenms_api.resolve_port_relationships(ARCOS_PORTS, ARCOS_PORT_STACK[1:], lag_patterns={})
+        assert result["sub_interfaces"] == {404: 403}
+
+    def test_empty_port_stack_returns_empty_maps(self, mock_librenms_api):
+        """Empty port_stack returns empty dicts."""
+        result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, [], lag_patterns={})
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
+
+    def test_missing_port_ids_are_skipped(self, mock_librenms_api):
+        """Entries where high_port_id or low_port_id is absent from ports list are skipped."""
+        stack = [{"high_port_id": 9999, "low_port_id": 101}]
+        result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, stack, lag_patterns={})
+        assert result["lag_members"] == {}

@@ -373,6 +373,127 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-module-table');
 }
 
+/**
+ * Auto-select LAG member rows when a LAG row checkbox is toggled.
+ * Reads data-port-id on the LAG row and checks all rows with
+ * data-member-of-lag matching that port_id.
+ *
+ * Also auto-selects the parent interface row when a sub-interface checkbox
+ * is toggled. Reads data-parent-port-id on the sub-interface row and finds
+ * the parent row by tr[data-port-id]. When the parent is on a different page
+ * (not in DOM), a hidden <input name="select"> is injected into the form so
+ * the parent is still included in the sync POST, and a brief notice is shown.
+ *
+ * Both behaviours are controlled by the #autoSelectLagMembers toggle.
+ */
+document.addEventListener('change', function (e) {
+    const checkbox = e.target;
+    if (!checkbox.matches('input[name="select"]')) return;
+
+    const toggle = document.getElementById('autoSelectLagMembers');
+    if (!toggle || !toggle.checked) return;
+
+    const row = checkbox.closest('tr');
+    if (!row) return;
+
+    let changed = false;
+
+    // --- LAG: check/uncheck all members ---
+    const portId = row.dataset.portId;
+    if (portId) {
+        const memberRows = document.querySelectorAll('tr[data-member-of-lag="' + portId + '"]');
+        memberRows.forEach(function (memberRow) {
+            const memberCheckbox = memberRow.querySelector('input[name="select"]');
+            if (memberCheckbox) {
+                memberCheckbox.checked = checkbox.checked;
+                changed = true;
+            }
+        });
+    }
+
+    // --- Sub-interface: select parent when checking ---
+    const parentPortId = row.dataset.parentPortId;
+    if (parentPortId && checkbox.checked) {
+        const parentRow = document.querySelector('tr[data-port-id="' + parentPortId + '"]');
+        if (parentRow) {
+            // Parent is on the same page - check it directly
+            const parentCheckbox = parentRow.querySelector('input[name="select"]');
+            if (parentCheckbox && !parentCheckbox.checked) {
+                parentCheckbox.checked = true;
+                changed = true;
+            }
+        } else {
+            // Parent is on a different page - inject a hidden input into the form
+            const parentName = row.dataset.parentName;
+            if (parentName) {
+                const form = checkbox.closest('form');
+                if (form) {
+                    const hiddenId = 'auto-parent-' + parentPortId;
+                    if (!form.querySelector('#' + hiddenId)) {
+                        const hidden = document.createElement('input');
+                        hidden.type = 'hidden';
+                        hidden.name = 'select';
+                        hidden.value = parentName;
+                        hidden.id = hiddenId;
+                        form.appendChild(hidden);
+                        _showParentCrossPageNotice(parentName);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Sub-interface: remove cross-page hidden input when unchecking ---
+    if (parentPortId && !checkbox.checked) {
+        const form = checkbox.closest('form');
+        if (form) {
+            const hidden = form.querySelector('#auto-parent-' + parentPortId);
+            if (hidden) hidden.remove();
+        }
+    }
+
+    if (changed) {
+        updateBulkActionButton();
+    }
+});
+
+/**
+ * Show a brief inline notice when a sub-interface's parent is auto-included
+ * from a different page (cross-page parent selection).
+ * The notice auto-dismisses after 5 seconds.
+ * @param {string} parentName - Name of the parent interface
+ */
+function _showParentCrossPageNotice(parentName) {
+    const containerId = 'parent-cross-page-notices';
+    let container = document.getElementById(containerId);
+    if (!container) {
+        // Insert before the table (find a stable anchor inside the form)
+        const table = document.getElementById('librenms-interface-table') ||
+                      document.getElementById('librenms-interface-table-vm');
+        if (!table) return;
+        container = document.createElement('div');
+        container.id = containerId;
+        table.parentNode.insertBefore(container, table);
+    }
+
+    // Avoid duplicate notices for the same parent
+    if (container.querySelector('[data-parent="' + CSS.escape(parentName) + '"]')) return;
+
+    const notice = document.createElement('div');
+    notice.className = 'alert alert-info alert-dismissible py-1 px-2 small mb-1';
+    notice.dataset.parent = parentName;
+    notice.innerHTML =
+        '<i class="mdi mdi-information-outline me-1"></i>' +
+        'Parent interface <strong>' + parentName + '</strong> is on another page ' +
+        'and will be included in the sync automatically.' +
+        '<button type="button" class="btn-close btn-sm" data-bs-dismiss="alert"></button>';
+    container.appendChild(notice);
+
+    setTimeout(function () {
+        if (notice.parentNode) notice.parentNode.removeChild(notice);
+    }, 5000);
+}
+
 // ============================================
 // VIRTUAL CHASSIS & VRF HANDLING
 // ============================================
@@ -2088,4 +2209,68 @@ document.addEventListener('htmx:afterSettle', function (event) {
             showModal(htmxModal);
         }
     }
+});
+
+// Event delegation for LAG and parent interface sync buttons.
+// Buttons are rendered inline in the interface table cells (data-col="lag" / "parent")
+// and carry data attributes: port-id, lag-port-id / parent-port-id, object-type, object-id.
+document.addEventListener('click', function (e) {
+    const btn = e.target.closest('.lag-sync-btn, .parent-sync-btn');
+    if (!btn) return;
+    e.preventDefault();
+
+    const isLag = btn.classList.contains('lag-sync-btn');
+    const portId = btn.dataset.portId || '';
+    const relatedPortId = isLag ? (btn.dataset.lagPortId || '') : (btn.dataset.parentPortId || '');
+    const relatedName = btn.dataset.relatedName || '';
+    const objectType = btn.dataset.objectType || '';
+    const objectId = btn.dataset.objectId || '';
+    const relatedKey = isLag ? 'lag_port_id' : 'parent_port_id';
+    const relatedNameKey = isLag ? 'lag_name' : 'parent_name';
+    const urlSuffix = isLag ? 'sync-interface-lag' : 'sync-interface-parent';
+
+    if (!portId || !relatedPortId || !objectType || !objectId) return;
+
+    const url = `/plugins/librenms_plugin/${objectType}/${objectId}/${urlSuffix}/`;
+
+    const csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');
+    const csrf = csrfInput ? csrfInput.value : '';
+
+    const serverKeyInput = document.querySelector('[name=server_key]');
+    const serverKey = serverKeyInput ? serverKeyInput.value : '';
+
+    const body = new URLSearchParams({
+        csrfmiddlewaretoken: csrf,
+        port_id: portId,
+        [relatedKey]: relatedPortId,
+        [relatedNameKey]: relatedName,
+        server_key: serverKey,
+    });
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i>';
+
+    fetch(url, {
+        method: 'POST',
+        headers: { 'X-CSRFToken': csrf, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+    })
+        .then(function (r) {
+            return r.json();
+        })
+        .then(function (data) {
+            if (data.status === 'success') {
+                btn.innerHTML = '<i class="mdi mdi-check text-success"></i>';
+                btn.title = data.message || 'Synced';
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
+                btn.title = data.error || 'Sync failed';
+            }
+        })
+        .catch(function (e) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
+            btn.title = e.message || 'Request failed';
+        });
 });

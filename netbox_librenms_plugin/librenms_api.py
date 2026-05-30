@@ -545,6 +545,155 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
+    def get_port_stack(self, device_id: int):
+        """
+        Fetch ifStackTable relationships from LibreNMS for a device.
+
+        Returns port_stack pairs showing parent/child interface relationships
+        (LAG membership and sub-interface nesting).
+
+        Args:
+            device_id: LibreNMS device ID
+
+        Returns:
+            tuple: (success: bool, data: list[dict] | str)
+                On success: list of {high_port_id, low_port_id, high_ifIndex, low_ifIndex} dicts
+                On failure: error string
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{device_id}/port_stack",
+                headers=self.headers,
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return True, data.get("mappings", [])
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return False, "Device not found in LibreNMS"
+            return False, f"HTTP error: {str(e)}"
+        except requests.exceptions.RequestException as e:
+            return False, f"Error connecting to LibreNMS: {str(e)}"
+
+    def resolve_port_relationships(
+        self,
+        ports: list,
+        port_stack: list,
+        lag_patterns: dict | None = None,
+    ) -> dict:
+        """
+        Resolve LAG membership and sub-interface parent relationships from LibreNMS data.
+
+        Universal rules (vendor-agnostic, hardcoded):
+          1. LAG aggregate is always the 'low' entry in a port_stack pair.
+          2. Skip any pair where either port name contains ':' (Nokia SAP entries).
+          3. Strip '.N' suffix to resolve Junos sub-unit names to physical-level ports.
+          4. Sub-interface detection: if low_name starts with high_name + '.' and the
+             suffix is numeric, it is a sub-interface parent/child pair.
+
+        Configurable via PortStackLagPattern model:
+          - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
+
+        Args:
+            ports: Port dicts from get_ports(), each with port_id, ifName, ifType keys.
+            port_stack: Port stack dicts from get_port_stack(), each with
+                        high_port_id and low_port_id keys.
+            lag_patterns: Optional dict of {librenms_os: pattern_str} overriding DB lookup.
+                          Pass an empty dict to disable name-pattern matching entirely.
+                          When None (default), patterns are fetched from PortStackLagPattern.
+
+        Returns:
+            dict with keys:
+                'lag_members':    {member_port_id: aggregate_port_id}
+                'sub_interfaces': {child_port_id: parent_port_id}
+        """
+        import re as _re
+
+        if lag_patterns is None:
+            from netbox_librenms_plugin.models import PortStackLagPattern
+
+            lag_patterns = {p.librenms_os: p.lag_name_pattern for p in PortStackLagPattern.objects.all()}
+
+        by_id = {p["port_id"]: p for p in ports if p.get("port_id")}
+        by_name = {p["ifName"]: p for p in ports if p.get("ifName")}
+
+        compiled_patterns = []
+        for pattern_str in lag_patterns.values():
+            try:
+                compiled_patterns.append(_re.compile(pattern_str))
+            except _re.error:
+                pass
+
+        lag_members: dict = {}
+        sub_interfaces: dict = {}
+
+        def _is_lag_aggregate(port: dict) -> bool:
+            if port.get("ifType") == "ieee8023adLag":
+                return True
+            name = port.get("ifName", "")
+            return any(pat.search(name) for pat in compiled_patterns)
+
+        def _resolve_physical(name: str):
+            """Strip .N suffix and return the physical-level port if its base name exists."""
+            if "." in name:
+                base = name.rsplit(".", 1)[0]
+                if base in by_name:
+                    return by_name[base]
+            return by_name.get(name)
+
+        for entry in port_stack:
+            if not isinstance(entry, dict):
+                continue
+            high_id = entry.get("high_port_id")
+            low_id = entry.get("low_port_id")
+            if not high_id or not low_id:
+                continue
+
+            high_port = by_id.get(high_id)
+            low_port = by_id.get(low_id)
+            if not high_port or not low_port:
+                continue
+
+            h_name = high_port.get("ifName", "")
+            l_name = low_port.get("ifName", "")
+
+            # Universal rule: skip Nokia SAP entries (colon notation: lag1:0, lag-1:10)
+            if ":" in h_name or ":" in l_name:
+                continue
+
+            # Sub-interface detection: low is child of high when name follows parent.N pattern
+            if l_name.startswith(h_name + "."):
+                suffix = l_name[len(h_name) + 1 :]
+                try:
+                    int(suffix)  # Only numeric suffixes qualify as sub-interfaces
+                    sub_interfaces[low_id] = high_id
+                    continue
+                except ValueError:
+                    pass  # Non-numeric suffix — fall through to LAG check
+
+            # LAG membership: resolve physical-level names (strips Junos sub-unit .N suffix)
+            high_phys = _resolve_physical(h_name)
+            low_phys = _resolve_physical(l_name)
+            if not high_phys or not low_phys:
+                continue
+
+            high_phys_id = high_phys["port_id"]
+            low_phys_id = low_phys["port_id"]
+            if high_phys_id == low_phys_id:
+                continue  # Same port after physical resolution — skip self-references
+
+            low_is_agg = _is_lag_aggregate(low_phys)
+            high_is_agg = _is_lag_aggregate(high_phys)
+
+            if low_is_agg and not high_is_agg:
+                lag_members[high_phys_id] = low_phys_id
+            elif high_is_agg and not low_is_agg:
+                lag_members[low_phys_id] = high_phys_id
+
+        return {"lag_members": lag_members, "sub_interfaces": sub_interfaces}
+
     def add_device(self, data):
         """
         Add a device to LibreNMS.

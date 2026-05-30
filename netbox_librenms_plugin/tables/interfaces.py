@@ -13,7 +13,6 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     format_mac_address,
     get_interface_name_field,
-    get_librenms_device_id,
     get_missing_vlan_warning,
     get_table_paginate_count,
     get_tagged_vlan_css_class,
@@ -42,7 +41,7 @@ class LibreNMSInterfaceTable(tables.Table):
             "mtu",
             "enabled",
             "description",
-            "librenms_id",
+            "parent",
         ]
         attrs = {
             "class": "table table-hover object-list",
@@ -72,6 +71,10 @@ class LibreNMSInterfaceTable(tables.Table):
             "data-enabled": lambda record: (
                 str(record.get("ifAdminStatus")).lower() if record.get("ifAdminStatus") is not None else ""
             ),
+            "data-port-id": lambda record: str(record.get("port_id", "")),
+            "data-member-of-lag": lambda record: str(record.get("librenms_lag_port_id") or ""),
+            "data-parent-port-id": lambda record: str(record.get("librenms_parent_port_id") or ""),
+            "data-parent-name": lambda record: str(record.get("librenms_parent_name") or ""),
         }
 
         super().__init__(*args, **kwargs)
@@ -103,10 +106,11 @@ class LibreNMSInterfaceTable(tables.Table):
         verbose_name="Description",
         attrs={"td": {"data-col": "description"}},
     )
-    librenms_id = tables.Column(
-        accessor="port_id",
-        verbose_name="LibreNMS ID",
-        attrs={"td": {"data-col": "librenms_id"}},
+    parent = tables.Column(
+        verbose_name="Parent / LAG",
+        orderable=False,
+        empty_values=(),
+        attrs={"td": {"data-col": "parent"}},
     )
     vlans = tables.Column(
         verbose_name="VLANs",
@@ -373,34 +377,104 @@ class LibreNMSInterfaceTable(tables.Table):
         """Render MTU with appropriate styling based on comparison with NetBox"""
         return self._render_field(value, record, "ifMtu", "mtu")
 
-    def render_librenms_id(self, value, record):
-        """Render the 'librenms_id' field with appropriate styling based on comparison with NetBox."""
+    def render_parent(self, value, record):
+        """Render combined Parent / LAG relationship column.
 
-        # Same XSS guard as _render_field: value/netbox_librenms_id originate outside NetBox, so
-        # use format_html to auto-escape both the body and the title attribute (issue #105).
-        if not record.get("exists_in_netbox"):
-            return format_html('<span class="text-danger">{}</span>', value)
+        Shows LAG membership (if any) and parent interface (if any) stacked
+        vertically, each prefixed with a small muted label so the type is clear.
+        The sync buttons keep their existing CSS classes (lag-sync-btn /
+        parent-sync-btn) so the JS handler still works without changes.
+        """
+        parts = []
 
-        netbox_interface = record.get("netbox_interface")
-        if not netbox_interface:
-            return format_html('<span class="text-danger">{}</span>', value)
-
-        netbox_librenms_id = get_librenms_device_id(netbox_interface, self.server_key, auto_save=False)
-
-        if netbox_librenms_id is None:
-            return format_html(
-                '<span class="text-danger" title="No librenms_id custom field value found">{}</span>', value
+        lag_status = record.get("lag_sync_status")
+        if lag_status is not None:
+            lag_content = self._render_relationship_column(
+                lnms_name=record.get("librenms_lag_name"),
+                lnms_port_id=record.get("librenms_lag_port_id"),
+                sync_status=lag_status,
+                record=record,
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+            parts.append(
+                format_html(
+                    '<div><span class="text-muted small me-1">LAG</span>{}</div>',
+                    lag_content,
+                )
             )
 
-        # Compare the IDs
-        if str(value) != str(netbox_librenms_id):
-            # IDs do not match
-            return format_html(
-                '<span class="text-warning" title="Existing LibreNMS ID: {}">{}</span>', netbox_librenms_id, value
+        parent_status = record.get("parent_sync_status")
+        if parent_status is not None:
+            parent_content = self._render_relationship_column(
+                lnms_name=record.get("librenms_parent_name"),
+                lnms_port_id=record.get("librenms_parent_port_id"),
+                sync_status=parent_status,
+                record=record,
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
             )
-        else:
-            # IDs match
-            return format_html('<span class="text-success">{}</span>', value)
+            parts.append(
+                format_html(
+                    '<div><span class="text-muted small me-1">Parent</span>{}</div>',
+                    parent_content,
+                )
+            )
+
+        if not parts:
+            return mark_safe("")
+
+        return mark_safe("".join(str(p) for p in parts))
+
+    def _render_relationship_column(self, lnms_name, lnms_port_id, sync_status, record, btn_class, data_related_key):
+        """Shared renderer for LAG and Parent relationship columns."""
+        if sync_status is None:
+            return mark_safe("")
+
+        status_map = {
+            "match": ("bg-success", "Match"),
+            "mismatch": ("bg-warning text-dark", "Mismatch"),
+            "missing_nb": ("bg-info text-dark", "Not in NetBox"),
+            "missing_lnms": ("bg-secondary", "Not in LibreNMS"),
+        }
+        badge_css, badge_label = status_map.get(sync_status, ("bg-secondary", sync_status))
+
+        display_name = escape(lnms_name or "")
+        status_badge = format_html('<span class="badge {}">{}</span>', badge_css, badge_label)
+        name_badge = (
+            format_html(' <span class="badge border text-body-secondary fw-normal">{}</span>', display_name)
+            if display_name
+            else ""
+        )
+        badge = format_html("{}{}", status_badge, name_badge)
+
+        if sync_status == "missing_nb" and lnms_port_id:
+            port_id = record.get("port_id", "")
+            nb_iface = record.get("netbox_interface")
+            object_id = (
+                nb_iface.device_id
+                if nb_iface and hasattr(nb_iface, "device_id")
+                else (self.device.pk if self.device else "")
+            )
+            object_type = "virtualmachine" if hasattr(self.device, "cluster") and self.device.cluster else "device"
+            btn = format_html(
+                ' <button type="button" class="btn btn-sm btn-link p-0 {}" '
+                'data-port-id="{}" {}="{}" '
+                'data-related-name="{}" '
+                'data-object-type="{}" data-object-id="{}" '
+                'title="Sync relationship">'
+                '<i class="mdi mdi-sync"></i></button>',
+                btn_class,
+                port_id,
+                data_related_key,
+                lnms_port_id,
+                lnms_name or "",
+                object_type,
+                object_id,
+            )
+            return format_html("{} {}", badge, btn)
+
+        return badge
 
     def _compare_mac_addresses(self, librenms_mac, netbox_interface):
         """
@@ -617,6 +691,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             "mtu",
             "enabled",
             "description",
+            "parent",
         ]
         attrs = {
             "class": "table table-hover object-list",

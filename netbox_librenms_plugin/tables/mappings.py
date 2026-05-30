@@ -11,6 +11,7 @@ from netbox_librenms_plugin.models import (
     ModuleTypeMapping,
     NormalizationRule,
     PlatformMapping,
+    PortStackLagPattern,
 )
 
 
@@ -323,6 +324,37 @@ class CarrierAutoInstallRuleTable(NetBoxTable):
             "librenms_child_name_pattern",
             "netbox_bay_name_pattern",
             "carrier_module_type",
+            "description",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class PortStackLagPatternTable(NetBoxTable):
+    """Table for displaying PortStackLagPattern data."""
+
+    librenms_os = tables.Column(verbose_name="LibreNMS OS", linkify=True)
+    lag_name_pattern = tables.Column(verbose_name="LAG Name Pattern (regex)")
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for PortStackLagPatternTable."""
+
+        model = PortStackLagPattern
+        fields = (
+            "pk",
+            "id",
+            "librenms_os",
+            "lag_name_pattern",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "pk",
+            "id",
+            "librenms_os",
+            "lag_name_pattern",
             "description",
             "actions",
         )

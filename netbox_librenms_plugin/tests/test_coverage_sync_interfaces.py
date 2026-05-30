@@ -1138,3 +1138,75 @@ class TestSyncInterfacesViewSyncSelected:
 # its coverage lives with the rebind seam in
 # test_coverage_sync_views.TestSyncInterfacesViewServerRebind
 # (test_posted_server_key_is_bound_for_the_sync / test_stale_server_key_fails_closed_without_sync).
+
+# ===========================================================================
+# _resolve_interface_by_port_id: correct librenms_id dict lookup
+# ===========================================================================
+
+
+class TestResolveInterfaceByPortId:
+    """The function must correctly read the nested {'server_key': port_id} dict format."""
+
+    def test_finds_interface_by_server_keyed_dict(self):
+        """When librenms_id = {'production': 42}, resolves for port_id=42 and server_key='production'."""
+        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+        from dcim.models import Device, Interface
+
+        mock_device = MagicMock(spec=Device)
+        mock_iface = MagicMock(spec=Interface)
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id") as mock_get_id,
+        ):
+            mock_intf_cls.objects.filter.return_value = [mock_iface]
+            mock_get_id.return_value = 42  # correctly extracts 42 from {"production": 42}
+
+            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production")
+
+        assert err is None
+        assert iface is mock_iface
+        mock_get_id.assert_called_once_with(mock_iface, "production", auto_save=False)
+
+    def test_returns_error_when_not_found(self):
+        """Returns (None, error) when no interface has matching port_id."""
+        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+        from dcim.models import Device
+
+        mock_device = MagicMock(spec=Device)
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
+        ):
+            mock_intf_cls.objects.filter.return_value = [MagicMock()]
+
+            iface, err = _resolve_interface_by_port_id(mock_device, "99", "production")
+
+        assert iface is None
+        assert err is not None
+
+    def test_name_hint_fallback_when_no_librenms_id(self):
+        """Falls back to name lookup when no interface has matching librenms_id."""
+        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+        from dcim.models import Device, Interface
+
+        mock_device = MagicMock(spec=Device)
+        mock_device.virtual_chassis = None
+        mock_iface_by_name = MagicMock(spec=Interface)
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
+        ):
+            mock_intf_cls.objects.filter.return_value = []
+            mock_intf_cls.objects.get.return_value = mock_iface_by_name
+
+            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
+
+        assert err is None
+        assert iface is mock_iface_by_name
+        mock_intf_cls.objects.get.assert_called_once_with(device=mock_device, name="lag-1")

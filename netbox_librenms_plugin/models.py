@@ -916,3 +916,70 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)
+
+
+class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
+    """Maps LibreNMS OS name to the regex pattern identifying LAG aggregate interfaces.
+
+    Used as fallback when a port's ifType is not 'ieee8023adLag'.
+    Example: Cisco IOS port-channels have ifType='propVirtual' and need name-based
+    identification via pattern '^Po\\d+$'.
+
+    Universal rules (hardcoded, vendor-agnostic):
+      - LAG aggregate is always in the 'low' position of a port_stack pair.
+      - Pairs where either name contains ':' are skipped (Nokia SAP entries).
+      - .N suffix is stripped for name resolution (handles Junos sub-unit pairing).
+    """
+
+    librenms_os = models.CharField(
+        max_length=50,
+        unique=True,
+        help_text="LibreNMS OS identifier (e.g. 'ios', 'timos', 'junos')",
+    )
+    lag_name_pattern = models.CharField(
+        max_length=200,
+        help_text=(
+            "Regular expression matching LAG aggregate interface names. "
+            "Used as fallback when ifType is not 'ieee8023adLag'. "
+            r"Example: ^Po\d+$"
+        ),
+    )
+    description = models.TextField(blank=True)
+
+    def clean(self):
+        """Validate OS name is non-blank and lag_name_pattern is a valid regex."""
+        super().clean()
+        os_name = (self.librenms_os or "").strip().lower()
+        if not os_name:
+            raise ValidationError({"librenms_os": "OS name must not be blank."})
+        self.librenms_os = os_name
+        lag_pattern = (self.lag_name_pattern or "").strip()
+        if not lag_pattern:
+            raise ValidationError({"lag_name_pattern": "Pattern must not be blank."})
+        self.lag_name_pattern = lag_pattern
+        try:
+            re.compile(self.lag_name_pattern)
+        except re.error as exc:
+            raise ValidationError({"lag_name_pattern": f"Invalid regular expression: {exc}"})
+
+    def get_absolute_url(self):
+        """Return URL for this pattern's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:portstacklagpattern_detail", args=[self.pk])
+
+    def to_yaml(self):
+        data = {
+            "librenms_os": self.librenms_os,
+            "lag_name_pattern": self.lag_name_pattern,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+    class Meta:
+        """Meta options for PortStackLagPattern."""
+
+        ordering = ["librenms_os"]
+        verbose_name = "Port Stack LAG Pattern"
+        verbose_name_plural = "Port Stack LAG Patterns"
+
+    def __str__(self):
+        return f"{self.librenms_os} -> {self.lag_name_pattern}"

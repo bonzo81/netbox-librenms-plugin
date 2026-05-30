@@ -805,6 +805,7 @@ class TestPaginationHelpers:
         mock_netbox_paginate.return_value = 25
         mock_request = MagicMock()
         mock_request.GET = {}
+        mock_request.POST = {}
 
         result = get_table_paginate_count(mock_request, "table1_")
 

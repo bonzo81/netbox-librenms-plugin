@@ -41,7 +41,7 @@
     {% endwith %}
     {% block table_actions %}
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
-        <div>
+        <div class="d-flex align-items-center gap-2">
             {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
@@ -52,6 +52,10 @@
                 onclick="event.preventDefault(); showModal(document.getElementById('interfaceTypeHelpModal'))">
                 <i class="mdi mdi-help-circle"></i> info
             </a>
+            <div class="d-flex align-items-center ms-2" title="When enabled, checking a LAG/portchannel row also checks all its member interfaces, and checking a sub-interface also selects its parent interface">
+                <input class="form-check-input form-check-input-sm me-1" type="checkbox" id="autoSelectLagMembers" checked>
+                <label class="form-check-label small mb-0" for="autoSelectLagMembers">Auto-select LAG members &amp; parents</label>
+            </div>
         </div>
         {% if not migrated_to_marker %}
         <div class="ms-auto d-flex align-items-center">

@@ -9,6 +9,7 @@ from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
+    get_librenms_device_id,
     get_librenms_oob,
     get_librenms_sync_device,
     get_virtual_chassis_member,
@@ -322,6 +323,16 @@ class BaseInterfaceTableView(
                     "showing host interfaces only. See server logs for details.",
                 )
                 oob_ports_failed = True
+        # Lazy port_stack fetch — only when device has LAG or sub-interface relationships.
+        # Enriches the host ports we fetched regardless of OOB outcome (it's independent of
+        # the OOB controller); the oob_incomplete tagging below still applies on an OOB failure.
+        all_ports_final = librenms_data.get("ports", [])
+        if self._has_lag_signals(all_ports_final):
+            ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
+            if ps_success:
+                relationships = self.librenms_api.resolve_port_relationships(all_ports_final, ps_data)
+                librenms_data["port_stack_relationships"] = relationships
+
         # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it
         # (which would leave downstream views — SingleInterfaceVerifyView,
         # SaveVlanGroupOverridesView — with no backing snapshot), tag it `oob_incomplete`
@@ -495,6 +506,15 @@ class BaseInterfaceTableView(
                 ports_data = []
             matched_interface_ids = set()
 
+            # Build port_stack relationship maps from cached data
+            port_stack_relationships = cached_data.get("port_stack_relationships", {})
+            lag_members = port_stack_relationships.get("lag_members", {})
+            sub_interfaces = port_stack_relationships.get("sub_interfaces", {})
+            by_port_id = {p["port_id"]: p for p in ports_data if p.get("port_id")}
+
+            # For device interfaces (not VMs), also select lag and parent FKs
+            _extra_related = [] if self.get_select_related_field(obj) == "virtual_machine" else ["lag", "parent"]
+
             # Pre-fetch all interfaces for all potential chassis members
             interfaces_by_device = {}
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
@@ -553,6 +573,11 @@ class BaseInterfaceTableView(
 
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, lookup_maps)
+
+                # Enrich port with LAG/parent relationship context
+                self._enrich_port_with_lag_parent(
+                    port, lag_members, sub_interfaces, by_port_id, interface_name_field, server_key or ""
+                )
 
             table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
             table.configure(request)
@@ -732,3 +757,129 @@ class BaseInterfaceTableView(
                 missing_vlans.append(vid)
 
         port["missing_vlans"] = missing_vlans
+
+    def _has_lag_signals(self, ports: list) -> bool:
+        """Return True if any port appears to be a LAG interface or sub-interface.
+
+        Triggers lazy port_stack API fetch only when needed. Checks:
+          - ifType == 'ieee8023adLag' (definitive)
+          - ifType == 'propVirtual' (Cisco IOS port-channels / Junos sub-units)
+          - Name matches any PortStackLagPattern regex
+          - Any port name ends with '.<digits>' AND the base name also exists
+            (sub-interface detection, e.g. ge-0/0/0.100 with ge-0/0/0 present)
+        """
+        import re as _re
+
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        lag_patterns = []
+        for pat_obj in PortStackLagPattern.objects.all():
+            try:
+                lag_patterns.append(_re.compile(pat_obj.lag_name_pattern))
+            except _re.error:
+                pass
+
+        port_names = {p.get("ifName", "") for p in ports if p.get("ifName")}
+        sub_iface_re = _re.compile(r"^(.+)\.\d+$")
+
+        for port in ports:
+            if_type = port.get("ifType", "")
+            if if_type in ("ieee8023adLag", "propVirtual"):
+                return True
+            name = port.get("ifName", "")
+            if any(pat.search(name) for pat in lag_patterns):
+                return True
+            # Sub-interface: name ends with '.<digits>' and parent name also present
+            m = sub_iface_re.match(name)
+            if m and m.group(1) in port_names:
+                return True
+        return False
+
+    def _enrich_port_with_lag_parent(
+        self,
+        port: dict,
+        port_id_to_lag: dict,
+        port_id_to_parent: dict,
+        by_id: dict,
+        interface_name_field: str = "ifName",
+        server_key: str = "",
+    ) -> None:
+        """Add LAG/parent context keys to a port dict in-place.
+
+        Sets six keys on the port dict:
+          port['librenms_lag_name']       -- name of LAG aggregate in LibreNMS, or None
+          port['librenms_lag_port_id']    -- port_id of LAG aggregate in LibreNMS, or None
+          port['lag_sync_status']         -- 'match'|'mismatch'|'missing_nb'|'missing_lnms'|None
+          port['librenms_parent_name']    -- name of parent interface in LibreNMS, or None
+          port['librenms_parent_port_id'] -- port_id of parent interface in LibreNMS, or None
+          port['parent_sync_status']      -- same values as lag_sync_status
+
+        Matching strategy (most-to-least reliable):
+          1. librenms_id stored on the NetBox related interface equals the LibreNMS port_id
+          2. NetBox interface name matches the LibreNMS ifName field
+          3. NetBox interface name matches the LibreNMS ifDescr field
+        """
+        port_id = port.get("port_id")
+        nb_iface = port.get("netbox_interface")
+
+        def _related_iface_matches(nb_rel_iface, lnms_port_dict) -> bool:
+            """Return True if nb_rel_iface corresponds to lnms_port_dict."""
+            if nb_rel_iface is None or lnms_port_dict is None:
+                return False
+            # Primary: stored librenms_id (port_id) comparison — field-name-independent
+            if server_key:
+                stored_id = get_librenms_device_id(nb_rel_iface, server_key, auto_save=False)
+                lnms_pid = lnms_port_dict.get("port_id")
+                if stored_id is not None and lnms_pid is not None:
+                    target = int(lnms_pid) if str(lnms_pid).isdigit() else None
+                    if target is not None:
+                        return stored_id == target
+            # Fallback: name match — try both name fields to be field-agnostic
+            nb_name = nb_rel_iface.name
+            return nb_name == lnms_port_dict.get("ifName") or nb_name == lnms_port_dict.get("ifDescr")
+
+        # --- LAG ---
+        lnms_lag_port_id = port_id_to_lag.get(port_id) if port_id else None
+        agg_port = by_id.get(lnms_lag_port_id) if lnms_lag_port_id else None
+        lnms_lag_name = agg_port.get(interface_name_field) if agg_port else None
+
+        port["librenms_lag_name"] = lnms_lag_name
+        port["librenms_lag_port_id"] = lnms_lag_port_id
+
+        nb_lag = getattr(nb_iface, "lag", None) if nb_iface else None
+        if lnms_lag_port_id and nb_iface:
+            if nb_lag and _related_iface_matches(nb_lag, agg_port):
+                port["lag_sync_status"] = "match"
+            elif nb_lag:
+                port["lag_sync_status"] = "mismatch"
+            else:
+                port["lag_sync_status"] = "missing_nb"
+        elif lnms_lag_port_id and not nb_iface:
+            port["lag_sync_status"] = "missing_nb"
+        elif not lnms_lag_port_id and nb_lag:
+            port["lag_sync_status"] = "missing_lnms"
+        else:
+            port["lag_sync_status"] = None
+
+        # --- Parent ---
+        lnms_parent_port_id = port_id_to_parent.get(port_id) if port_id else None
+        parent_port = by_id.get(lnms_parent_port_id) if lnms_parent_port_id else None
+        lnms_parent_name = parent_port.get(interface_name_field) if parent_port else None
+
+        port["librenms_parent_name"] = lnms_parent_name
+        port["librenms_parent_port_id"] = lnms_parent_port_id
+
+        nb_parent = getattr(nb_iface, "parent", None) if nb_iface else None
+        if lnms_parent_port_id and nb_iface:
+            if nb_parent and _related_iface_matches(nb_parent, parent_port):
+                port["parent_sync_status"] = "match"
+            elif nb_parent:
+                port["parent_sync_status"] = "mismatch"
+            else:
+                port["parent_sync_status"] = "missing_nb"
+        elif lnms_parent_port_id and not nb_iface:
+            port["parent_sync_status"] = "missing_nb"
+        elif not lnms_parent_port_id and nb_parent:
+            port["parent_sync_status"] = "missing_lnms"
+        else:
+            port["parent_sync_status"] = None

@@ -1723,6 +1723,9 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "_enrich_ports_with_vlan_data", return_value=[]),
+            # No LAG/sub-interface enrichment under test here — short-circuit the
+            # port_stack fetch (which would otherwise hit PortStackLagPattern in the DB).
+            patch.object(view, "_has_lag_signals", return_value=False),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
@@ -1761,6 +1764,9 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            # No LAG/sub-interface enrichment under test here — short-circuit the
+            # port_stack fetch (which would otherwise hit PortStackLagPattern in the DB).
+            patch.object(view, "_has_lag_signals", return_value=False),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
@@ -2021,6 +2027,7 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "_enrich_ports_with_vlan_data", return_value=[]),
+            patch.object(view, "_has_lag_signals", return_value=False),
             patch.object(view, "get_context_data", return_value={}),
             patch.object(view, "get_cache_key", return_value="cache-key") as mock_get_cache_key,
             patch.object(view, "get_last_fetched_key", return_value="last-key") as mock_get_last_fetched_key,
@@ -2028,6 +2035,7 @@ class TestBaseInterfaceTableViewPost:
             # Ports cache scopes to the VC sync device; pin it to obj so this caching test
             # isn't entangled with VC-routing (cache_device == obj for non-VC anyway).
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value=None),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,

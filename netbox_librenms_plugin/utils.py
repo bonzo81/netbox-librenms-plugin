@@ -657,9 +657,12 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
         int: Number of items to display per page
     """
     config = get_config()
-    if f"{table_prefix}per_page" in request.GET:
+    # Check GET first, then POST (HTMX refresh requests send pagination via POST body)
+    param_key = f"{table_prefix}per_page"
+    param_value = request.GET.get(param_key) or request.POST.get(param_key)
+    if param_value:
         try:
-            per_page = int(request.GET.get(f"{table_prefix}per_page"))
+            per_page = int(param_value)
             max_page_size = config.MAX_PAGE_SIZE
             # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
             # would zero the page size, and with None it TypeErrors).
