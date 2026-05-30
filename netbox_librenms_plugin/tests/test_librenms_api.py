@@ -3133,3 +3133,90 @@ class TestResolvePortRelationships:
 
         assert 999 not in result["lag_members"].values()
         assert result["lag_members"] == {201: 204}
+
+
+class TestGetSerialPortSensors:
+    """Cover response-shape branches in get_serial_port_sensors()."""
+
+    def _make_sensor(self, device_id, sensor_type="acsSerialPortTable", port_num=7):
+        return {
+            "sensor_id": 1000 + port_num,
+            "device_id": device_id,
+            "sensor_type": sensor_type,
+            "sensor_index": f"acsSerialPortTableStatus.{port_num}",
+            "sensor_descr": f"device-{port_num} Status",
+            "sensor_current": 2,
+            "group": "Serial Ports",
+        }
+
+    def test_success_filters_by_device_and_type(self, mock_librenms_api, mock_response_factory):
+        import unittest.mock as mock
+
+        sensors = [
+            self._make_sensor(12, port_num=7),
+            self._make_sensor(12, port_num=11),
+            self._make_sensor(99, port_num=3),  # different device
+            self._make_sensor(12, sensor_type="tempSensor", port_num=5),  # wrong type
+        ]
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+        with mock.patch("requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert len(data) == 2
+        assert all(s["device_id"] == 12 for s in data)
+        assert all(s["sensor_type"] == "acsSerialPortTable" for s in data)
+
+    def test_empty_sensor_list_returns_empty(self, mock_librenms_api, mock_response_factory):
+        import unittest.mock as mock
+
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": []})
+        with mock.patch("requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert data == []
+
+    def test_missing_sensors_key_returns_empty(self, mock_librenms_api, mock_response_factory):
+        """When 'sensors' key is absent but status=ok, fall back to empty list (not an error)."""
+        import unittest.mock as mock
+
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "message": "no sensors key"})
+        with mock.patch("requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert data == []
+
+    def test_non_ok_status_returns_error(self, mock_librenms_api, mock_response_factory):
+        import unittest.mock as mock
+
+        mock_resp = mock_response_factory(
+            status_code=200, json_data={"status": "error", "message": "something went wrong"}
+        )
+        with mock.patch("requests.get", return_value=mock_resp):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "wrong" in msg
+
+    def test_404_returns_error(self, mock_librenms_api, mock_response_factory):
+        import unittest.mock as mock
+        import requests as req
+
+        http_err = req.exceptions.HTTPError(response=mock.MagicMock(status_code=404))
+        with mock.patch("requests.get", side_effect=http_err):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "not found" in msg.lower()
+
+    def test_connection_error_returns_error(self, mock_librenms_api):
+        import unittest.mock as mock
+        import requests as req
+
+        with mock.patch("requests.get", side_effect=req.exceptions.ConnectionError("refused")):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "refused" in msg or "error" in msg.lower()

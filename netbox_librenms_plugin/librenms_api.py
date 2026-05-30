@@ -1784,6 +1784,61 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
+    def get_serial_port_sensors(self, device_id: int) -> tuple[bool, list | str]:
+        """
+        Fetch serial-port sensor records for a device from LibreNMS.
+
+        Uses ``/api/v0/resources/sensors`` (instance-wide endpoint) and
+        filters client-side by ``device_id``.  The per-device
+        ``/api/v0/devices/{id}/sensors`` route is known to 500 on some
+        servers; the resources route is more reliable.
+
+        Only sensors whose ``sensor_type`` belongs to the serial-port
+        sensor-type set (``acsSerialPortTable`` for Avocent) are returned.
+        Callers should further pass the list to
+        ``serial_utils.map_sensors_to_serial_links()``.
+
+        Route: /api/v0/resources/sensors
+
+        Args:
+            device_id: LibreNMS device ID.
+
+        Returns:
+            tuple: (success: bool, data: list of sensor dicts or error string)
+        """
+        from netbox_librenms_plugin.serial_utils import AVOCENT_SENSOR_TYPES
+
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/resources/sensors",
+                headers=self.headers,
+                timeout=EXTENDED_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            if isinstance(result, dict) and result.get("status") == "ok":
+                all_sensors = result.get("sensors") or result.get("resources", [])
+                if not isinstance(all_sensors, list):
+                    return False, result.get("message") or "Unexpected response format: missing sensor list"
+                device_sensors = [
+                    s
+                    for s in all_sensors
+                    if str(s.get("device_id")) == str(device_id) and s.get("sensor_type") in AVOCENT_SENSOR_TYPES
+                ]
+                return True, device_sensors
+            if isinstance(result, dict):
+                return False, result.get("message") or "Unexpected response format"
+            return False, "Unexpected response format"
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return False, "Sensors resource endpoint not found"
+            return False, f"HTTP error: {str(e)}"
+        except (requests.exceptions.RequestException, ValueError) as e:
+            return False, f"Error connecting to LibreNMS: {str(e)}"
+
     def get_port_vlan_details(self, port_id: int) -> tuple[bool, dict | str]:
         """
         Fetch detailed VLAN associations for a single port.

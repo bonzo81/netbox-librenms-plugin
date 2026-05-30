@@ -1,0 +1,443 @@
+[
+  {
+    "sensor_id": 1968,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.1",
+    "sensor_descr": "nl-srk03d-sl291 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1969,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.2",
+    "sensor_descr": "nl-srk03d-sl292 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1970,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.3",
+    "sensor_descr": "nl-srk03d-mgmt-sa19 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1971,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.4",
+    "sensor_descr": "prod-lab03d-ra2-RSP0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1972,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.5",
+    "sensor_descr": "prod-lab03d-ra2-RSP1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1973,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.6",
+    "sensor_descr": "PROD-LAB03D-SW1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1974,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.7",
+    "sensor_descr": "NL-LAB03C-RD1-RE0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1975,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.8",
+    "sensor_descr": "NL-LAB03C-RD1-RE1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1976,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.9",
+    "sensor_descr": "PROD-LAB03A-RD1-RE0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1977,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.10",
+    "sensor_descr": "PROD-LAB03A-RD1-RE1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1978,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.11",
+    "sensor_descr": "PROD-LAB03A-RA1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1979,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.12",
+    "sensor_descr": "PROD-LAB03-SW3 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1980,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.13",
+    "sensor_descr": "PROD-LAB03-SW1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1981,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.14",
+    "sensor_descr": "NL-LAB03C-RD2-RE0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1982,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.15",
+    "sensor_descr": "NL-LAB03C-RD2-RE1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1983,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.16",
+    "sensor_descr": "PROD-LAB03B-RD2-RE0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1984,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.17",
+    "sensor_descr": "PROD-LAB03B-RD2-RE1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1985,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.18",
+    "sensor_descr": "PROD-LAB03B-RA1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1986,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.19",
+    "sensor_descr": "PROD-LAB03-SW4 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1987,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.20",
+    "sensor_descr": "PROD-LAB03C-RA2 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1988,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.21",
+    "sensor_descr": "PROD-LAB03-SW2 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1989,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.22",
+    "sensor_descr": "PROD-LAB03A-RI1-RE0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1990,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.23",
+    "sensor_descr": "PROD-LAB03A-RI1-RE1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1991,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.24",
+    "sensor_descr": "PROD-LAB03D-RA1-RSP0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1992,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.25",
+    "sensor_descr": "PROD-LAB03D-RA1-RSP1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1993,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.26",
+    "sensor_descr": "PROD-LAB03B-RI2-RE0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1994,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.27",
+    "sensor_descr": "PROD-LAB03B-RI2-RE1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1995,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.28",
+    "sensor_descr": "Q12025-Juniper-1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1996,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.29",
+    "sensor_descr": "Q12025-Juniper-2 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1997,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.30",
+    "sensor_descr": "prod-lab03d-tms-1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1998,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.31",
+    "sensor_descr": "pr-lab03c-rg01 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 1999,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.32",
+    "sensor_descr": "prod-lab03d-rg02 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2000,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.33",
+    "sensor_descr": "2a-6a-be-p-33 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2001,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.34",
+    "sensor_descr": "ncm-A0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2002,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.35",
+    "sensor_descr": "ncm-B0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2003,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.36",
+    "sensor_descr": "ncf-6 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2004,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.37",
+    "sensor_descr": "ncf-0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2005,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.38",
+    "sensor_descr": "cl2-ncp-0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2006,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.39",
+    "sensor_descr": "80JP79 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2007,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.40",
+    "sensor_descr": "prod-lab03d-rc1-re0 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2008,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.41",
+    "sensor_descr": "prod-lab03d-rc1-re1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2009,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.42",
+    "sensor_descr": "Nokia7750SR-2s-con1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2010,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.43",
+    "sensor_descr": "Nokia7750SR-2s-con2 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2011,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.44",
+    "sensor_descr": "7750SR-7s-con1 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2012,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.45",
+    "sensor_descr": "7750SR-7s-con2 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2013,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.46",
+    "sensor_descr": "2a-6a-be-p-46 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2014,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.47",
+    "sensor_descr": "2a-6a-be-p-47 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2015,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.48",
+    "sensor_descr": "2a-6a-be-p-48 Status",
+    "sensor_current": 2,
+    "group": "Serial Ports"
+  },
+  {
+    "sensor_id": 2016,
+    "device_id": 12,
+    "sensor_type": "acsSerialPortTable",
+    "sensor_index": "acsSerialPortTableStatus.49",
+    "sensor_descr": "ttyS49 Status",
+    "sensor_current": 1,
+    "group": "Serial Ports"
+  }
+]
