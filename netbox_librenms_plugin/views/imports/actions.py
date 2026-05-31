@@ -1831,6 +1831,10 @@ class AddPlatformMappingView(
         except Platform.DoesNotExist:
             return _htmx_error_response("Selected platform not found.")
 
+        if PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).count() > 1:
+            return _htmx_error_response(
+                "Multiple mappings exist for this OS string. Remove duplicates before updating."
+            )
         existing_mapping = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
         self.required_object_permissions = {
             "POST": [("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping)]
@@ -1843,7 +1847,16 @@ class AddPlatformMappingView(
                 # Lock the row to close the TOCTOU window between the upfront
                 # permission check and the actual write. select_for_update cannot
                 # lock absent rows, so the create branch handles IntegrityError.
-                locked = PlatformMapping.objects.select_for_update().filter(librenms_os__iexact=librenms_os).first()
+                # Materialise the locked rows in one query — count() would drop
+                # the FOR UPDATE clause, leaving the rows unlocked.
+                locked_rows = list(
+                    PlatformMapping.objects.select_for_update().filter(librenms_os__iexact=librenms_os)[:2]
+                )
+                if len(locked_rows) > 1:
+                    return _htmx_error_response(
+                        "Multiple mappings exist for this OS string. Remove duplicates before updating."
+                    )
+                locked = locked_rows[0] if locked_rows else None
                 if locked and not existing_mapping:
                     # Concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate.
