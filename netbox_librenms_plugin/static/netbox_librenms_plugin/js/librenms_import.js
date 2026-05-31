@@ -351,10 +351,8 @@
     function initializeTogglePrefs() {
         const sysname = document.getElementById('use-sysname-toggle-cb');
         const strip = document.getElementById('strip-domain-toggle-cb');
-        const ipam = document.getElementById('auto-create-ipam-toggle-cb');
         if (sysname) sysname.addEventListener('change', function () { savePref('use_sysname', this.checked); });
         if (strip) strip.addEventListener('change', function () { savePref('strip_domain', this.checked); });
-        if (ipam) ipam.addEventListener('change', function () { savePref('auto_create_ipam', this.checked); });
     }
 
     // ============================================

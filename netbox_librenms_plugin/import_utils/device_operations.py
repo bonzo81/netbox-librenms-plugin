@@ -750,12 +750,10 @@ def import_single_device(
                     'cables': int,
                     'ip_addresses': int
                 },
-                'created_ips': list[str]
             }
     """
     try:
         api = LibreNMSAPI(server_key=server_key)
-        created_ips: list[str] = []
 
         # Use pre-fetched device data if provided, otherwise fetch from API
         if libre_device is None:
@@ -767,7 +765,6 @@ def import_single_device(
                     "message": "",
                     "error": f"Failed to retrieve device {device_id} from LibreNMS",
                     "synced": {},
-                    "created_ips": [],
                 }
 
         # Validate device if validation not provided
@@ -790,7 +787,6 @@ def import_single_device(
                 "message": "",
                 "error": f"Device already exists: {validation['existing_device'].name}",
                 "synced": {},
-                "created_ips": [],
             }
 
         # Use validation-derived matches, allow manual mappings to override specific fields
@@ -823,7 +819,6 @@ def import_single_device(
                 "message": "",
                 "error": "Site is required but not provided",
                 "synced": {},
-                "created_ips": [],
             }
         if not device_type:
             return {
@@ -832,7 +827,6 @@ def import_single_device(
                 "message": "",
                 "error": "Device type is required but not provided",
                 "synced": {},
-                "created_ips": [],
             }
         if not device_role:
             return {
@@ -841,7 +835,6 @@ def import_single_device(
                 "message": "",
                 "error": "Device role is required but not provided",
                 "synced": {},
-                "created_ips": [],
             }
 
         # Create device in NetBox
@@ -901,27 +894,6 @@ def import_single_device(
             device.full_clean()
             device.save()
 
-            # Pre-create the LibreNMS-known IP in IPAM (global /32 or /128)
-            # so the user can later attach it to an interface and assign as
-            # primary_ip4/6. We do not auto-set primary_ip4 here because
-            # NetBox's Device.clean() requires the IP be assigned to one of
-            # the device's interfaces, which doesn't exist on a fresh import.
-            primary_ip = libre_device.get("ip")
-            if primary_ip:
-                from .ip_helpers import auto_create_ipam_enabled, get_or_create_global_ip
-
-                # Already normalised to a bool by resolve_auto_create_ipam() at
-                # the request boundary; coerce defensively and fall back to the
-                # plugin default when the key is absent (e.g. background paths).
-                _opts = sync_options or {}
-                if "auto_create_ipam" in _opts:
-                    _auto_create = bool(_opts.get("auto_create_ipam"))
-                else:
-                    _auto_create = auto_create_ipam_enabled()
-                _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=_auto_create)
-                if was_created and _ip is not None:
-                    created_ips.append(str(_ip.address.ip))
-
         # Sync additional data based on options
         sync_options = sync_options or {}
         synced = {"interfaces": 0, "cables": 0, "ip_addresses": 0}
@@ -951,7 +923,6 @@ def import_single_device(
             "message": f"Successfully imported device: {device.name}",
             "error": None,
             "synced": synced,
-            "created_ips": created_ips,
         }
 
     except Exception as e:
@@ -962,7 +933,6 @@ def import_single_device(
             "message": "",
             "error": str(e),
             "synced": {},
-            "created_ips": [],
         }
 
 

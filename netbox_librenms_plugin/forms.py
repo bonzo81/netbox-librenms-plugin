@@ -162,24 +162,12 @@ class ImportSettingsForm(NetBoxModelForm):
         help_text="Remove domain suffix from device names during import",
     )
 
-    auto_create_ipam_default = forms.BooleanField(
-        label="Auto-create IPAM entries",
-        required=False,
-        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
-        help_text=(
-            "When enabled, missing IP addresses reported by LibreNMS are auto-created "
-            "as global /32 (IPv4) or /128 (IPv6) IPAM records during initial import, "
-            "OOB-attach, and promote-to-host actions. Existing IPAM records are always reused."
-        ),
-    )
-
     class Meta:
         model = LibreNMSSettings
         fields = [
             "vc_member_name_pattern",
             "use_sysname_default",
             "strip_domain_default",
-            "auto_create_ipam_default",
         ]
 
     def clean_vc_member_name_pattern(self):

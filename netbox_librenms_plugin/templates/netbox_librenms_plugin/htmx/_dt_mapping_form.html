@@ -11,7 +11,7 @@ Optional context:
 {% endcomment %}
 <form hx-post="{% url 'plugins:netbox_librenms_plugin:add_device_type_mapping' device_id=libre_device.device_id %}"
       hx-swap="none"
-      hx-include="[name=role_{{ libre_device.device_id }}], [name=rack_{{ libre_device.device_id }}], [name=cluster_{{ libre_device.device_id }}], #use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle"
+      hx-include="[name=role_{{ libre_device.device_id }}], [name=rack_{{ libre_device.device_id }}], [name=cluster_{{ libre_device.device_id }}], #use-sysname-toggle, #strip-domain-toggle"
       class="mt-1"
       id="dt-mapping-form-{{ libre_device.device_id }}">
   {% csrf_token %}
