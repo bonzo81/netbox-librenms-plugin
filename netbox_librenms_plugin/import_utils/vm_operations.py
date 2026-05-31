@@ -276,6 +276,7 @@ def bulk_import_vms(
                     "device_id": vm_id,
                     "device": vm,
                     "message": f"VM {vm.name} created successfully",
+                    "created_ips": getattr(vm, "_librenms_created_ips", []),
                 }
             )
             log.info(f"Successfully imported VM {vm.name} (ID: {vm_id})")
