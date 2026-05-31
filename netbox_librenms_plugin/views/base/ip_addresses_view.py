@@ -12,7 +12,12 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.utils import get_interface_name_field, get_librenms_device_id, resolve_set_primary_ip
+from netbox_librenms_plugin.utils import (
+    get_interface_name_field,
+    get_librenms_device_id,
+    resolve_set_primary_ip,
+    same_host,
+)
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -99,7 +104,32 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
             enriched_data.append(enriched_ip)
 
+        self._flag_management_ip(enriched_data)
         return enriched_data
+
+    def _flag_management_ip(self, enriched_data):
+        """Mark the entry whose IP equals the device's LibreNMS management IP.
+
+        Used by the "Set Primary IP" toggle on the IP-sync tab to auto-select
+        the right row. Best-effort: a lookup failure simply leaves nothing
+        flagged so the sync table still renders.
+        """
+        librenms_id = getattr(self, "librenms_id", None)
+        if not librenms_id:
+            return
+        try:
+            success, info = self.librenms_api.get_device_info(librenms_id)
+        except Exception:  # pragma: no cover - defensive
+            return
+        if not success or not isinstance(info, dict):
+            return
+        mgmt_ip = (info.get("ip") or "").strip()
+        if not mgmt_ip:
+            return
+        for entry in enriched_data:
+            if same_host(entry.get("ip_address", ""), mgmt_ip):
+                entry["is_mgmt_ip"] = True
+                break
 
     def _prefetch_netbox_data(self, obj):
         """Prefetch all necessary NetBox data to minimize database queries"""

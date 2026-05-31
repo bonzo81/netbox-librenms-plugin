@@ -1,4 +1,3 @@
-from ipaddress import ip_address as _ip_addr
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface
@@ -12,7 +11,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.utils import resolve_set_primary_ip
+from netbox_librenms_plugin.utils import resolve_set_primary_ip, same_host
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -123,10 +122,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     @staticmethod
     def _same_host(a, b):
         """True if two address strings refer to the same host IP."""
-        try:
-            return _ip_addr(a) == _ip_addr(b)
-        except ValueError:
-            return False
+        return same_host(a, b)
 
     @staticmethod
     def _set_primary_ip(obj, ip_obj):

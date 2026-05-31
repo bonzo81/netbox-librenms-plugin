@@ -85,13 +85,29 @@
     </div>
 </form>
 <script>
-  // Persist the "Set as Primary IP" toggle as a user preference so the choice
-  // is remembered across visits. Guarded so it binds once even after HTMX swaps.
+  // "Set Primary IP" toggle behaviour:
+  //  - persist the choice as a user preference (remembered across visits)
+  //  - auto-tick the management-IP row (flagged server-side with data-mgmt-ip)
+  //    so syncing it sets the device/VM Primary IP in one action.
+  // Guarded so it binds once even after HTMX swaps.
   (function () {
     var cb = document.getElementById('set-primary-ip-toggle-cb');
     if (!cb || cb.dataset.prefBound) return;
     cb.dataset.prefBound = '1';
+
+    function mgmtRowCheckboxes() {
+      return document.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]');
+    }
+
+    function syncMgmtSelection() {
+      mgmtRowCheckboxes().forEach(function (box) { box.checked = cb.checked; });
+    }
+
+    // Reflect the initial (pref-restored) toggle state onto the mgmt row.
+    syncMgmtSelection();
+
     cb.addEventListener('change', function () {
+      syncMgmtSelection();
       var url = "{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}";
       var token = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || '';
       fetch(url, {

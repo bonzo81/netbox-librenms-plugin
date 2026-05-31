@@ -363,6 +363,16 @@ def resolve_naming_preferences(request) -> tuple[bool, bool]:
     return use_sysname, strip_domain
 
 
+def same_host(a, b) -> bool:
+    """True if two address strings refer to the same host IP (version-aware)."""
+    from ipaddress import ip_address
+
+    try:
+        return ip_address(a) == ip_address(b)
+    except ValueError:
+        return False
+
+
 def resolve_set_primary_ip(request) -> bool:
     """Resolve the "set Primary IP from the LibreNMS management IP" flag.
 
