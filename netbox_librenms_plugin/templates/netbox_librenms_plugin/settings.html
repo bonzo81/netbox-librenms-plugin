@@ -187,6 +187,18 @@
                                             </div>
                                         </div>
 
+                                        <div class="form-group mb-3">
+                                            <div class="form-check form-switch">
+                                                {{ import_form.auto_create_ipam_default }}
+                                                <label class="form-check-label" for="{{ import_form.auto_create_ipam_default.id_for_label }}">
+                                                    {{ import_form.auto_create_ipam_default.label }}
+                                                </label>
+                                                {% if import_form.auto_create_ipam_default.help_text %}
+                                                    <small class="form-text text-muted d-block">{{ import_form.auto_create_ipam_default.help_text }}</small>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+
                                     </div>
                                 </div>
                             </div>
@@ -299,12 +311,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const saveImportBtn = document.getElementById('save-import-btn');
     const useSysnameCheckbox = document.getElementById('id_use_sysname_default');
     const stripDomainCheckbox = document.getElementById('id_strip_domain_default');
+    const autoCreateIpamCheckbox = document.getElementById('id_auto_create_ipam_default');
 
     // Store the initial values to detect changes
     const initialServerValue = serverSelect.value;
     const initialVcPatternValue = vcPatternInput.value;
     const initialUseSysnameValue = useSysnameCheckbox ? useSysnameCheckbox.checked : true;
     const initialStripDomainValue = stripDomainCheckbox ? stripDomainCheckbox.checked : false;
+    const initialAutoCreateIpamValue = autoCreateIpamCheckbox ? autoCreateIpamCheckbox.checked : false;
 
     // Enable/disable server save button based on changes
     function updateServerSaveButton() {
@@ -319,7 +333,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const vcPatternChanged = vcPatternInput.value !== initialVcPatternValue;
         const useSysnameChanged = useSysnameCheckbox ? (useSysnameCheckbox.checked !== initialUseSysnameValue) : false;
         const stripDomainChanged = stripDomainCheckbox ? (stripDomainCheckbox.checked !== initialStripDomainValue) : false;
-        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged;
+        const autoCreateIpamChanged = autoCreateIpamCheckbox ? (autoCreateIpamCheckbox.checked !== initialAutoCreateIpamValue) : false;
+        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged || autoCreateIpamChanged;
         saveImportBtn.disabled = !hasChanges;
         saveImportBtn.classList.toggle('btn-primary', hasChanges);
         saveImportBtn.classList.toggle('btn-secondary', !hasChanges);
@@ -330,6 +345,7 @@ document.addEventListener('DOMContentLoaded', function() {
     vcPatternInput.addEventListener('input', updateImportSaveButton);
     if (useSysnameCheckbox) useSysnameCheckbox.addEventListener('change', updateImportSaveButton);
     if (stripDomainCheckbox) stripDomainCheckbox.addEventListener('change', updateImportSaveButton);
+    if (autoCreateIpamCheckbox) autoCreateIpamCheckbox.addEventListener('change', updateImportSaveButton);
 
     // Initialize button states
     updateServerSaveButton();

@@ -15,7 +15,7 @@ from netbox_librenms_plugin.import_utils import (
 )
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import get_user_pref
+from netbox_librenms_plugin.utils import get_user_pref, resolve_auto_create_ipam
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -162,9 +162,11 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             _use_sysname = getattr(settings_obj, "use_sysname_default", True) if settings_obj else True
         if _strip_domain is None:
             _strip_domain = getattr(settings_obj, "strip_domain_default", False) if settings_obj else False
+        _auto_create_ipam = resolve_auto_create_ipam(request)
 
         self._use_sysname = _use_sysname
         self._strip_domain = _strip_domain
+        self._auto_create_ipam = _auto_create_ipam
         self._settings = settings_obj
 
         # Determine if new filters are being submitted
@@ -350,6 +352,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             "settings": self._settings,
             "use_sysname": self._use_sysname,
             "strip_domain": self._strip_domain,
+            "auto_create_ipam": self._auto_create_ipam,
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),

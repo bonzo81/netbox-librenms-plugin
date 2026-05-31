@@ -79,6 +79,15 @@ class LibreNMSSettings(models.Model):
         help_text="Remove domain suffix from device names during import",
     )
 
+    auto_create_ipam_default = models.BooleanField(
+        default=False,
+        help_text=(
+            "When enabled, missing IP addresses reported by LibreNMS are auto-created "
+            "as global /32 (IPv4) or /128 (IPv6) IPAM records during initial import, "
+            "OOB-attach, and promote-to-host actions. Existing IPAM records are always reused."
+        ),
+    )
+
     def save(self, *args, **kwargs):
         self.pk = 1
         super().save(*args, **kwargs)

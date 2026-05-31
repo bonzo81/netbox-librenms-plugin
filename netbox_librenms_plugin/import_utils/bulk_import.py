@@ -200,6 +200,7 @@ def bulk_import_devices_shared(
                         "device_id": device_id,
                         "device": result["device"],
                         "message": result["message"],
+                        "created_ips": result.get("created_ips", []),
                     }
                 )
                 # Log progress after each successful import

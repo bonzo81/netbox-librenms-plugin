@@ -35,7 +35,12 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import resolve_naming_preferences, save_user_pref, set_librenms_device_id
+from netbox_librenms_plugin.utils import (
+    resolve_auto_create_ipam,
+    resolve_naming_preferences,
+    save_user_pref,
+    set_librenms_device_id,
+)
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -559,6 +564,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return HttpResponse("Invalid device identifier", status=400)
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
+        auto_create_ipam = resolve_auto_create_ipam(request)
         vc_detection_enabled = _resolve_vc_detection_enabled(request)
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
@@ -567,6 +573,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "vc_detection_enabled": vc_detection_enabled,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
+            "auto_create_ipam": auto_create_ipam,
         }
 
         manual_mappings_per_device: dict[int, dict[str, int]] = {}
@@ -655,8 +662,6 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 )
 
                 # Show notification and redirect - matching NetBox's native pattern
-                from django.utils.safestring import mark_safe
-
                 messages.info(
                     request,
                     mark_safe(
@@ -744,21 +749,43 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         failed_count = len(device_result.get("failed", [])) + len(vm_result.get("failed", []))
         skipped_count = len(device_result.get("skipped", [])) + len(vm_result.get("skipped", []))
 
+        # Build summary messages for both paths.  For HTMX responses, messages.*
+        # is consumed/cleared by device_import_row.html before reaching the browser;
+        # htmx_toasts carries the same text as an explicit OOB swap instead.
+        htmx_toasts = []  # [(bg_class, mdi_class, label, text), ...]
+
         if success_count:
-            messages.success(
-                request,
-                f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}",
+            _msg = f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}"
+            messages.success(request, _msg)
+            htmx_toasts.append(("text-bg-success", "mdi-check-circle", "Success", _msg))
+
+        # Aggregate auto-created IPAM entries across the batch and surface a
+        # single info toast so the user knows a side-effect happened on import.
+        created_ips_all = []
+        for item in device_result.get("success", []):
+            created_ips_all.extend(item.get("created_ips") or [])
+        for item in vm_result.get("success", []):
+            vm_obj = item.get("device") or item.get("vm")
+            ips = getattr(vm_obj, "_librenms_created_ips", None) if vm_obj is not None else None
+            if ips:
+                created_ips_all.extend(ips)
+        if created_ips_all:
+            unique_ips = sorted(set(created_ips_all))
+            preview = ", ".join(unique_ips[:5]) + (f" (+{len(unique_ips) - 5} more)" if len(unique_ips) > 5 else "")
+            _msg = (
+                f"Auto-created {len(unique_ips)} IPAM entr{'y' if len(unique_ips) == 1 else 'ies'} "
+                f"in the global scope (unassigned): {preview}."
             )
+            messages.info(request, _msg)
+            htmx_toasts.append(("text-bg-info", "mdi-information", "Info", _msg))
         if failed_count:
-            messages.error(
-                request,
-                f"Failed to import {failed_count} device{'s' if failed_count != 1 else ''}",
-            )
+            _msg = f"Failed to import {failed_count} device{'s' if failed_count != 1 else ''}"
+            messages.error(request, _msg)
+            htmx_toasts.append(("text-bg-danger", "mdi-alert-circle", "Error", _msg))
         if skipped_count:
-            messages.warning(
-                request,
-                f"Skipped {skipped_count} existing device{'s' if skipped_count != 1 else ''}",
-            )
+            _msg = f"Skipped {skipped_count} existing device{'s' if skipped_count != 1 else ''}"
+            messages.warning(request, _msg)
+            htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", _msg))
 
         if request.headers.get("HX-Request"):
             # Return updated rows for all imported devices using HTMX OOB swaps
@@ -819,7 +846,38 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     ).content.decode("utf-8")
                     updated_rows_html.append(row_html)
 
-            # Return concatenated row HTML with closeModal trigger
+            # Append all summary toasts as a single OOB swap.  The messages.*
+            # queue is consumed/cleared by device_import_row.html, so they never
+            # reach the browser in the HTMX path; this OOB fragment takes over.
+            if htmx_toasts:
+                toast_items = mark_safe(
+                    "".join(
+                        format_html(
+                            '<div class="toast toast-dark border-0 shadow-sm mb-1" role="alert"'
+                            ' aria-live="assertive" aria-atomic="true" data-bs-delay="12000">'
+                            '<div class="toast-header {}">'
+                            '<i class="mdi {} me-1"></i>{}'
+                            '<button type="button" class="btn-close me-0 m-auto"'
+                            ' data-bs-dismiss="toast" aria-label="Close"></button>'
+                            "</div>"
+                            '<div class="toast-body">{}</div>'
+                            "</div>",
+                            bg_cls,
+                            icon_cls,
+                            label,
+                            text,
+                        )
+                        for bg_cls, icon_cls, label, text in htmx_toasts
+                    )
+                )
+                updated_rows_html.append(
+                    format_html(
+                        '<div id="django-messages"'
+                        ' class="toast-container position-fixed bottom-0 end-0 p-3"'
+                        ' hx-swap-oob="true">{}</div>',
+                        toast_items,
+                    )
+                )
             return HttpResponse(
                 "\n".join(updated_rows_html),
                 headers={"HX-Trigger": '{"closeModal": null}'},
@@ -1776,6 +1834,7 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
     ALLOWED_PREFS = {
         "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
         "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
+        "auto_create_ipam": "plugins.netbox_librenms_plugin.auto_create_ipam",
         "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
     }
 

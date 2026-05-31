@@ -9,7 +9,7 @@ Optional:
 {% endcomment %}
 <form hx-post="{% url 'plugins:netbox_librenms_plugin:add_platform_mapping' device_id=libre_device.device_id %}"
       hx-swap="none"
-      hx-include="[name=role_{{ libre_device.device_id }}], [name=rack_{{ libre_device.device_id }}], [name=cluster_{{ libre_device.device_id }}], #use-sysname-toggle, #strip-domain-toggle"
+      hx-include="[name=role_{{ libre_device.device_id }}], [name=rack_{{ libre_device.device_id }}], [name=cluster_{{ libre_device.device_id }}], #use-sysname-toggle, #strip-domain-toggle, #auto-create-ipam-toggle"
       class="mt-1"
       id="plat-mapping-form-{{ libre_device.device_id }}">
   {% csrf_token %}
@@ -53,9 +53,10 @@ Optional:
       hiddenEl.value = "";
       submitBtn.disabled = true;
       var q = this.value.trim();
+      requestSeq += 1;
+      var seq = requestSeq;
       if (q.length < 2) { dropdownEl.style.display = "none"; dropdownEl.innerHTML = ""; return; }
       timer = setTimeout(function () {
-        var seq = ++requestSeq;
         var csrfToken = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || "";
         fetch("{% url 'dcim-api:platform-list' %}?q=" + encodeURIComponent(q) + "&limit=20", {
           headers: { "X-CSRFToken": csrfToken }
