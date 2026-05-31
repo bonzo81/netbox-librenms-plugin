@@ -309,26 +309,13 @@
                         <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
                           <i class="mdi mdi-alert-outline"></i>
                         </span>
-                        {% if libre_device.os and libre_device.os != "-" %}
-                        <button type="button" class="btn btn-sm btn-warning py-0 px-1 ms-1"
-                                hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
-                                hx-target="#htmx-modal-content"
-                                hx-swap="innerHTML"
-                                title="Create platform for {{ libre_device.os }}"
-                                aria-label="Create platform for {{ libre_device.os }}">
-                          <i class="mdi mdi-plus"></i>
-                        </button>
-                        {# Let the user map the LibreNMS OS to the device's current platform instead of creating a duplicate (mirrors the device-type flow). #}
-                        <div class="mt-1">
-                          {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" with preselect_platform=validation.existing_device.platform submit_label="Map LibreNMS OS to current platform" %}
-                        </div>
-                        {% endif %}
                       {% endif %}
                     {% elif sync_info and sync_info.platform_synced %}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
+                    {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% elif validation.existing_device %}
-                    {# Existing device with no platform assigned — show Not set + sync button #}
+                    {# Existing device with no platform assigned #}
                     <span class="text-muted">Not set</span>
                     {% if validation.platform.platform or sync_info and sync_info.platform_info.platform_exists %}
                     <form style="display:inline" class="ms-1"
@@ -342,38 +329,18 @@
                         <i class="mdi mdi-sync"></i>
                       </button>
                     </form>
-                    {% elif libre_device.os and libre_device.os != "-" %}
-                    <button type="button" class="btn btn-sm btn-outline-warning py-0 px-1"
-                            hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
-                            hx-target="#htmx-modal-content"
-                            hx-swap="innerHTML"
-                            title="Create platform for {{ libre_device.os }}">
-                      <i class="mdi mdi-plus"></i> Create Platform
-                    </button>
-                    {# No current platform to preselect, but still let the user map the OS to an existing platform rather than create one. #}
-                    <div class="mt-1">
-                      {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" with submit_label="Map LibreNMS OS to a platform" %}
-                    </div>
                     {% endif %}
+                    {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% elif validation.platform.platform %}
                     {# New import — platform will be assigned on import #}
                     {{ validation.platform.platform.name }}
                     <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% else %}
-                    {% if libre_device.os and libre_device.os != "-" %}
-                    <button type="button" class="btn btn-sm btn-outline-warning py-0 px-1"
-                            hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
-                            hx-target="#htmx-modal-content"
-                            hx-swap="innerHTML"
-                            title="Create platform for {{ libre_device.os }}">
-                      <i class="mdi mdi-plus"></i> Create Platform
-                    </button>
-                    {% else %}
+                    {% if not libre_device.os or libre_device.os == "-" %}
                     <span class="text-muted">Optional</span>
                     {% endif %}
-                    {% if libre_device.os and libre_device.os != "-" %}
-                      {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" %}
-                    {% endif %}
+                    {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% endif %}
                   </td>
                   <td>{{ libre_device.os|default:"—" }}</td>

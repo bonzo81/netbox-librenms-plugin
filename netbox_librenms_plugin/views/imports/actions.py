@@ -1578,10 +1578,12 @@ class CreatePlatformFromImportView(
         _, validation, _ = self.get_validated_device_with_selections(device_id, request)
         device_pk = None
         selected_manufacturer_pk = None
+        current_platform = None
         if validation:
             existing = validation.get("existing_device")
             if existing:
                 device_pk = existing.pk
+                current_platform = getattr(existing, "platform", None)
                 device_type = getattr(existing, "device_type", None)
                 if device_type:
                     selected_manufacturer_pk = device_type.manufacturer_id
@@ -1604,6 +1606,9 @@ class CreatePlatformFromImportView(
                 "server_key": self.librenms_api.server_key,
                 "use_htmx": True,
                 "htmx_include": htmx_include,
+                # Enable the "map to existing platform" section of the combined modal.
+                "libre_device": libre_device,
+                "current_platform": current_platform,
             },
         )
 

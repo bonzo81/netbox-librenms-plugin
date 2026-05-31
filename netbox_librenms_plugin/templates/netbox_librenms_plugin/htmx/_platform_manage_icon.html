@@ -1,0 +1,13 @@
+{# Compact pencil icon that opens the combined "manage platform" modal
+   (map LibreNMS OS to an existing platform, or create a new one). Keeps the
+   platform cell uncluttered. Requires: libre_device, server_key. #}
+{% if libre_device.os and libre_device.os != "-" %}
+<button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1"
+        hx-get="{% url 'plugins:netbox_librenms_plugin:create_platform_from_import' device_id=libre_device.device_id %}?server_key={{ server_key|urlencode }}"
+        hx-target="#htmx-modal-content"
+        hx-swap="innerHTML"
+        title="Map or create platform for '{{ libre_device.os }}'"
+        aria-label="Map or create platform">
+  <i class="mdi mdi-pencil"></i>
+</button>
+{% endif %}

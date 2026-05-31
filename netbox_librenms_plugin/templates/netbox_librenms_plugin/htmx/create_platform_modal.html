@@ -13,10 +13,19 @@
 {#   server_key              - (optional) LibreNMS server key, forwarded as hidden field #}
 <div class="modal-header">
     <h5 class="modal-title" id="createPlatformModalLabel">
-        <i class="mdi mdi-alert"></i> Create New Platform
+        {% if libre_device %}<i class="mdi mdi-cog-outline"></i> Manage platform — <code>{{ librenms_os }}</code>{% else %}<i class="mdi mdi-alert"></i> Create New Platform{% endif %}
     </h5>
     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
 </div>
+{% if libre_device %}
+{# Map the LibreNMS OS to an EXISTING platform (separate form -> add_platform_mapping). #}
+<div class="modal-body pb-2">
+    <h6 class="mb-2">Map <code>{{ librenms_os }}</code> to an existing platform</h6>
+    {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" with preselect_platform=current_platform submit_label="Map to this platform" %}
+    <div class="text-center text-muted small mt-3">— or create a new platform below —</div>
+</div>
+<hr class="my-0">
+{% endif %}
 <form{% if use_htmx %} hx-post="{{ form_action }}" hx-swap="none"{% if htmx_include %} hx-include="{{ htmx_include }}"{% endif %}{% else %} method="post" action="{{ form_action }}"{% endif %}>
     {% csrf_token %}
     <input type="hidden" name="librenms_os" value="{{ librenms_os }}">
@@ -27,9 +36,9 @@
     <input type="hidden" name="device_pk" value="{{ device_pk }}">
     {% endif %}
     <div class="modal-body">
-        <div class="alert alert-warning">
+        <div class="alert alert-info py-2">
             <i class="mdi mdi-information"></i>
-            No NetBox platform matches LibreNMS OS <strong>{{ librenms_os }}</strong>.
+            Create a new NetBox platform for LibreNMS OS <strong>{{ librenms_os }}</strong>.
         </div>
         <p>This will:</p>
         <ol>
