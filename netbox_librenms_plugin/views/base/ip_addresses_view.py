@@ -12,7 +12,7 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.utils import get_interface_name_field, get_librenms_device_id
+from netbox_librenms_plugin.utils import get_interface_name_field, get_librenms_device_id, resolve_set_primary_ip
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -275,6 +275,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": server_key,
+            "set_primary_ip": resolve_set_primary_ip(request),
         }
 
     def get_context_data(self, request, obj):

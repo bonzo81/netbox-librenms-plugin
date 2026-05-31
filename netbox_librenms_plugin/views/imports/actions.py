@@ -1812,6 +1812,7 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
     ALLOWED_PREFS = {
         "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
         "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
+        "set_primary_ip": "plugins.netbox_librenms_plugin.set_primary_ip",
         "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
     }
 

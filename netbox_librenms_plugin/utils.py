@@ -363,6 +363,43 @@ def resolve_naming_preferences(request) -> tuple[bool, bool]:
     return use_sysname, strip_domain
 
 
+def resolve_set_primary_ip(request) -> bool:
+    """Resolve the "set Primary IP from the LibreNMS management IP" flag.
+
+    Cascade (mirrors :func:`resolve_naming_preferences`, minus a settings
+    default since this is a per-sync action choice):
+
+    1. POST/GET ``set-primary-ip-toggle`` (or ``set_primary_ip``) wins
+       -- set by the IP-sync tab toggle.
+    2. Otherwise the user's saved preference
+       ``plugins.netbox_librenms_plugin.set_primary_ip``.
+    3. Otherwise ``False`` (opt-in).
+
+    When enabled, :class:`SyncIPAddressesView` sets ``primary_ip4``/``primary_ip6``
+    on the device/VM for the synced IP that matches the LibreNMS management IP,
+    provided that IP ends up assigned to one of the object's interfaces.
+    """
+    _TRUTHY = frozenset({"on", "true", "1"})
+    _KEYS = ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip")
+
+    def _is_truthy(val):
+        return val.lower() in _TRUTHY if val is not None else False
+
+    post_val = next((request.POST.get(k) for k in _KEYS if k in request.POST), None)
+    get_val = next((request.GET.get(k) for k in _KEYS if k in request.GET), None)
+
+    if post_val is not None:
+        return _is_truthy(post_val)
+    if get_val is not None:
+        return _is_truthy(get_val)
+
+    pref = get_user_pref(request, "plugins.netbox_librenms_plugin.set_primary_ip")
+    if pref is not None:
+        return _is_truthy(pref) if isinstance(pref, str) else bool(pref)
+
+    return False
+
+
 def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
     """
     Get interface name field with request override support.

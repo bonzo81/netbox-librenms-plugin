@@ -10,11 +10,21 @@
     {% if ip_sync.server_key %}<input type="hidden" name="server_key" value="{{ ip_sync.server_key }}">{% endif %}
     <input type="hidden" id="selected_ip" name="select" value="">
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
-        <div>
+        <div class="d-flex align-items-center gap-3">
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected IP Addresses</span>
             </button>
+            <div class="form-check form-switch mb-0">
+                <input type="hidden" name="set-primary-ip-toggle" value="off">
+                <input class="form-check-input" type="checkbox" id="set-primary-ip-toggle-cb"
+                       name="set-primary-ip-toggle" value="on" {% if ip_sync.set_primary_ip %}checked{% endif %}
+                       data-bs-toggle="tooltip"
+                       title="When the synced IP equals the device's LibreNMS management IP and is assigned to an interface, set it as the Primary IP.">
+                <label class="form-check-label small" for="set-primary-ip-toggle-cb">
+                    Set as Primary IP
+                </label>
+            </div>
         </div>
         {% if ip_sync.cache_expiry %}
             <div id="ip-cache-countdown" class="me-3">
@@ -74,6 +84,25 @@
         </div>
     </div>
 </form>
+<script>
+  // Persist the "Set as Primary IP" toggle as a user preference so the choice
+  // is remembered across visits. Guarded so it binds once even after HTMX swaps.
+  (function () {
+    var cb = document.getElementById('set-primary-ip-toggle-cb');
+    if (!cb || cb.dataset.prefBound) return;
+    cb.dataset.prefBound = '1';
+    cb.addEventListener('change', function () {
+      var url = "{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}";
+      var token = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || '';
+      fetch(url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': token },
+        body: JSON.stringify({ key: 'set_primary_ip', value: cb.checked })
+      }).catch(function (e) { console.debug('savePref failed:', e.message); });
+    });
+  })();
+</script>
 {% else %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">

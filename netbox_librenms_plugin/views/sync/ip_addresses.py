@@ -1,3 +1,4 @@
+from ipaddress import ip_address as _ip_addr
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface
@@ -11,6 +12,7 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.utils import resolve_set_primary_ip
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -100,9 +102,57 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         return redirect(self.get_ip_tab_url(obj))
 
+    def get_management_ip(self, obj):
+        """Return the LibreNMS management/polling IP for *obj*, or None.
+
+        Used to decide which synced IP (if any) should become the object's
+        Primary IP. Best-effort: any lookup failure yields None so the sync
+        itself is never blocked.
+        """
+        try:
+            librenms_id = self.librenms_api.get_librenms_id(obj)
+            if not librenms_id:
+                return None
+            success, info = self.librenms_api.get_device_info(librenms_id)
+            if not success or not isinstance(info, dict):
+                return None
+            return (info.get("ip") or "").strip() or None
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    @staticmethod
+    def _same_host(a, b):
+        """True if two address strings refer to the same host IP."""
+        try:
+            return _ip_addr(a) == _ip_addr(b)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _set_primary_ip(obj, ip_obj):
+        """Point obj.primary_ip4/6 (by family) at *ip_obj*. Returns True if changed.
+
+        The caller guarantees ``ip_obj`` is assigned to one of the object's
+        interfaces, so this satisfies NetBox's ``primary_ip`` constraint.
+        """
+        field = "primary_ip6" if ip_obj.family == 6 else "primary_ip4"
+        if getattr(obj, f"{field}_id") == ip_obj.pk:
+            return False
+        setattr(obj, field, ip_obj)
+        obj.save()
+        return True
+
     def process_ip_sync(self, request, selected_ips, cached_ips, obj, object_type):
-        """Create or update IP addresses in NetBox from cached LibreNMS data."""
-        results = {"created": [], "updated": [], "unchanged": [], "failed": []}
+        """Create or update IP addresses in NetBox from cached LibreNMS data.
+
+        When the "set Primary IP" toggle is on, the synced IP that matches the
+        LibreNMS management IP — and ends up assigned to one of the object's
+        interfaces — is also set as the object's ``primary_ip4``/``primary_ip6``.
+        """
+        results = {"created": [], "updated": [], "unchanged": [], "failed": [], "primary_set": []}
+
+        set_primary = resolve_set_primary_ip(request)
+        mgmt_ip = self.get_management_ip(obj) if set_primary else None
 
         with transaction.atomic():
             for ip_address in selected_ips:
@@ -131,14 +181,25 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             results["updated"].append(ip_address)
                         else:
                             results["unchanged"].append(ip_address)
+                        ip_obj = existing_ip
                     else:
-                        IPAddress.objects.create(
+                        ip_obj = IPAddress.objects.create(
                             address=ip_with_mask,
                             assigned_object=interface,
                             status="active",
                             vrf=vrf,
                         )
                         results["created"].append(ip_address)
+
+                    # Primary-IP auto-match: only when the IP is interface-assigned
+                    # (NetBox requires that for primary_ip) and equals the mgmt IP.
+                    if (
+                        mgmt_ip
+                        and interface is not None
+                        and self._same_host(ip_data["ip_address"], mgmt_ip)
+                        and self._set_primary_ip(obj, ip_obj)
+                    ):
+                        results["primary_set"].append(ip_address)
 
                 except Exception:  # pragma: no cover - defensive
                     results["failed"].append(ip_address)
@@ -151,6 +212,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.success(request, f"Created IP addresses: {', '.join(results['created'])}")
         if results["updated"]:
             messages.success(request, f"Updated IP addresses: {', '.join(results['updated'])}")
+        if results.get("primary_set"):
+            messages.success(request, f"Set as Primary IP: {', '.join(results['primary_set'])}")
         if results["unchanged"]:
             messages.warning(
                 request,
