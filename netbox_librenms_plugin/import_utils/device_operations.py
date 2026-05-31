@@ -910,10 +910,12 @@ def import_single_device(
             if primary_ip:
                 from .ip_helpers import auto_create_ipam_enabled, get_or_create_global_ip
 
+                # Already normalised to a bool by resolve_auto_create_ipam() at
+                # the request boundary; coerce defensively and fall back to the
+                # plugin default when the key is absent (e.g. background paths).
                 _opts = sync_options or {}
                 if "auto_create_ipam" in _opts:
-                    _raw = _opts.get("auto_create_ipam")
-                    _auto_create = _raw.strip().lower() in {"1", "true", "on"} if isinstance(_raw, str) else bool(_raw)
+                    _auto_create = bool(_opts.get("auto_create_ipam"))
                 else:
                     _auto_create = auto_create_ipam_enabled()
                 _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=_auto_create)

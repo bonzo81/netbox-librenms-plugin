@@ -174,9 +174,11 @@ def bulk_import_vms(
     # Resolve options once before the loop — they do not change per-VM
     use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
     strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+    # The flag is already normalised to a bool by resolve_auto_create_ipam()
+    # at the request boundary, so we only need a bool() coercion here. When the
+    # key is absent (e.g. background paths), fall back to the plugin default.
     if sync_options and "auto_create_ipam" in sync_options:
-        _raw = sync_options["auto_create_ipam"]
-        auto_create_ipam_opt = _raw.strip().lower() in {"1", "true", "on"} if isinstance(_raw, str) else bool(_raw)
+        auto_create_ipam_opt = bool(sync_options["auto_create_ipam"])
     else:
         from .ip_helpers import auto_create_ipam_enabled
 
