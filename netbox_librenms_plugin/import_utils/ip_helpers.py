@@ -78,7 +78,7 @@ def get_or_create_global_ip(ip_str: str | None, *, auto_create: bool = True) -> 
         logger.debug("get_or_create_global_ip: invalid IP %r", ip_str)
         return None, False
 
-    from django.db import IntegrityError
+    from django.db import IntegrityError, transaction
 
     from ipam.models import IPAddress
 
@@ -91,7 +91,8 @@ def get_or_create_global_ip(ip_str: str | None, *, auto_create: bool = True) -> 
 
     mask = "/128" if parsed.version == 6 else "/32"
     try:
-        return IPAddress.objects.create(address=f"{ip_str}{mask}", status="active"), True
+        with transaction.atomic():
+            return IPAddress.objects.create(address=f"{ip_str}{mask}", status="active"), True
     except IntegrityError:
         # Concurrent create won the race; re-query the global record and return it.
         existing = IPAddress.objects.filter(address__net_host=ip_str, vrf__isnull=True).first()

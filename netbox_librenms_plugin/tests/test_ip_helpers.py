@@ -41,7 +41,8 @@ class TestGetOrCreateGlobalIP:
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
 
         created = MagicMock(name="created-ip")
-        with patch("ipam.models.IPAddress") as mock_model:
+        with patch("ipam.models.IPAddress") as mock_model, patch("django.db.transaction.atomic") as mock_atomic:
+            mock_atomic.return_value.__exit__.return_value = False
             mock_model.objects.filter.return_value.first.return_value = None
             mock_model.objects.create.return_value = created
 
@@ -55,7 +56,8 @@ class TestGetOrCreateGlobalIP:
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
 
         created = MagicMock(name="created-ip-v6")
-        with patch("ipam.models.IPAddress") as mock_model:
+        with patch("ipam.models.IPAddress") as mock_model, patch("django.db.transaction.atomic") as mock_atomic:
+            mock_atomic.return_value.__exit__.return_value = False
             mock_model.objects.filter.return_value.first.return_value = None
             mock_model.objects.create.return_value = created
 
@@ -68,7 +70,8 @@ class TestGetOrCreateGlobalIP:
     def test_strips_whitespace_before_lookup(self):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
 
-        with patch("ipam.models.IPAddress") as mock_model:
+        with patch("ipam.models.IPAddress") as mock_model, patch("django.db.transaction.atomic") as mock_atomic:
+            mock_atomic.return_value.__exit__.return_value = False
             mock_model.objects.filter.return_value.first.return_value = None
             mock_model.objects.create.return_value = MagicMock()
 
@@ -85,7 +88,8 @@ class TestGetOrCreateGlobalIP:
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
 
         racing_winner = MagicMock(name="racing-winner")
-        with patch("ipam.models.IPAddress") as mock_model:
+        with patch("ipam.models.IPAddress") as mock_model, patch("django.db.transaction.atomic") as mock_atomic:
+            mock_atomic.return_value.__exit__.return_value = False
             # First filter (pre-create) → None, second filter (post-IntegrityError) → winner.
             mock_model.objects.filter.return_value.first.side_effect = [None, racing_winner]
             mock_model.objects.create.side_effect = IntegrityError("duplicate key")
@@ -98,7 +102,8 @@ class TestGetOrCreateGlobalIP:
     def test_returns_none_and_logs_when_create_raises(self, caplog):
         from netbox_librenms_plugin.import_utils.ip_helpers import get_or_create_global_ip
 
-        with patch("ipam.models.IPAddress") as mock_model:
+        with patch("ipam.models.IPAddress") as mock_model, patch("django.db.transaction.atomic") as mock_atomic:
+            mock_atomic.return_value.__exit__.return_value = False
             mock_model.objects.filter.return_value.first.return_value = None
             mock_model.objects.create.side_effect = RuntimeError("integrity failure")
 
