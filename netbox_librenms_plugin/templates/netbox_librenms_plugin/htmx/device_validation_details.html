@@ -318,6 +318,10 @@
                                 aria-label="Create platform for {{ libre_device.os }}">
                           <i class="mdi mdi-plus"></i>
                         </button>
+                        {# Let the user map the LibreNMS OS to the device's current platform instead of creating a duplicate (mirrors the device-type flow). #}
+                        <div class="mt-1">
+                          {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" with preselect_platform=validation.existing_device.platform submit_label="Map LibreNMS OS to current platform" %}
+                        </div>
                         {% endif %}
                       {% endif %}
                     {% elif sync_info and sync_info.platform_synced %}
@@ -346,6 +350,10 @@
                             title="Create platform for {{ libre_device.os }}">
                       <i class="mdi mdi-plus"></i> Create Platform
                     </button>
+                    {# No current platform to preselect, but still let the user map the OS to an existing platform rather than create one. #}
+                    <div class="mt-1">
+                      {% include "netbox_librenms_plugin/htmx/_platform_mapping_form.html" with submit_label="Map LibreNMS OS to a platform" %}
+                    </div>
                     {% endif %}
                   {% elif validation.platform.platform %}
                     {# New import — platform will be assigned on import #}
