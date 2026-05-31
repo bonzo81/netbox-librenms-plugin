@@ -115,7 +115,11 @@
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'X-CSRFToken': token },
         body: JSON.stringify({ key: 'set_primary_ip', value: cb.checked })
-      }).catch(function (e) { console.debug('savePref failed:', e.message); });
+      })
+        .then(function (response) {
+          if (!response.ok) { throw new Error('HTTP ' + response.status); }
+        })
+        .catch(function (e) { console.debug('savePref failed:', e.message); });
     });
   })();
 </script>
