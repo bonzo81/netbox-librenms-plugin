@@ -1,0 +1,28 @@
+{% comment %}
+OOB IP interface picker for the "Add as OOB" form.
+
+NetBox requires oob_ip to be assigned to one of the device's interfaces, so the
+user picks (or creates) the interface to hang the OOB IP on. The suggested
+interface (idrac/ilo/bmc-style by name) is pre-selected; the OOB IP is often not
+physically on the matched interface, so this is overridable.
+
+Context: libre_device, validation, oob_interfaces, oob_suggested_interface_id,
+oob_default_new_name.
+{% endcomment %}
+<div class="mb-2 text-start">
+  <label class="form-label small mb-1" for="oob-iface-{{ libre_device.device_id }}">OOB IP interface</label>
+  <select name="oob_interface_id" id="oob-iface-{{ libre_device.device_id }}" class="form-select form-select-sm"
+          onchange="document.getElementById('oob-new-iface-{{ libre_device.device_id }}').style.display = (this.value === '__new__' ? 'block' : 'none');">
+    {% for iface in oob_interfaces %}
+      <option value="{{ iface.pk }}" {% if iface.pk == oob_suggested_interface_id %}selected{% endif %}>{{ iface.name }}</option>
+    {% endfor %}
+    <option value="__new__" {% if not oob_suggested_interface_id %}selected{% endif %}>+ Create new interface…</option>
+  </select>
+  <div id="oob-new-iface-{{ libre_device.device_id }}" class="mt-1"{% if oob_suggested_interface_id %} style="display:none"{% endif %}>
+    <input type="text" name="oob_new_interface_name" class="form-control form-control-sm"
+           value="{{ oob_default_new_name }}" placeholder="New interface name">
+  </div>
+  {% if validation.oob_candidate.ip %}
+  <small class="text-muted d-block mt-1">OOB IP {{ validation.oob_candidate.ip }} is assigned to this interface and set as the device's OOB IP.</small>
+  {% endif %}
+</div>

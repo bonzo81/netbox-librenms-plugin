@@ -2,7 +2,6 @@
 
 import json
 import logging
-from ipaddress import ip_address as _ipaddr_parse
 from urllib.parse import parse_qs, urlparse
 
 from django.contrib import messages
@@ -26,7 +25,6 @@ from netbox_librenms_plugin.import_utils import (
     fetch_device_with_cache,
     get_import_device_cache_key,
     get_librenms_device_by_id,
-    get_or_create_global_ip,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
     validate_device_for_import,
@@ -971,6 +969,29 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         )
 
 
+def _suggest_oob_interface(device, oob_candidate):
+    """Return ``(suggested_interface_id, default_new_name)`` for an OOB IP.
+
+    NetBox requires ``oob_ip`` be assigned to one of the device's interfaces,
+    so the OOB-attach form lets the user pick (or create) one. This pre-selects
+    the existing interface whose name looks like an OOB/management port
+    (idrac/ilo/ipmi/bmc/drac/oob/mgmt), or ``None`` if there's no obvious match,
+    and derives a sensible default name for a new interface from the OOB type
+    (e.g. ``idrac0``). The OOB IP is frequently *not* physically on the matched
+    interface — operators attach it to an ``idrac0``-style port deliberately —
+    so this is only a suggestion the user can override.
+    """
+    import re as _re
+
+    oob_type = (oob_candidate.get("type") or "oob").strip().lower() or "oob"
+    default_new_name = f"{oob_type}0"
+    pattern = _re.compile(r"(idrac|ilo|ipmi|bmc|drac|oob|mgmt|management)", _re.IGNORECASE)
+    for iface in device.interfaces.all():
+        if pattern.search(iface.name or ""):
+            return iface.pk, default_new_name
+    return None, default_new_name
+
+
 class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to show detailed validation information."""
 
@@ -1000,6 +1021,15 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             context["sync_info"] = self._build_sync_info(libre_device, existing)
             context["existing_id_servers"] = self._build_id_server_info(existing)
             context["existing_device_model_name"] = existing._meta.model_name
+            # OOB-attach needs an interface to hang the OOB IP on (NetBox requires
+            # oob_ip be interface-assigned). Offer the device's interfaces with a
+            # sensible default pre-selected.
+            if validation.get("oob_candidate") and existing._meta.model_name == "device":
+                context["oob_interfaces"] = list(existing.interfaces.all())
+                (
+                    context["oob_suggested_interface_id"],
+                    context["oob_default_new_name"],
+                ) = _suggest_oob_interface(existing, validation["oob_candidate"])
 
         return render(
             request,
@@ -1963,7 +1993,6 @@ class AddAsOOBView(
         from netbox_librenms_plugin.utils import set_librenms_oob
 
         oob_type = oob_candidate.get("type") or ""
-        oob_version = oob_candidate.get("version") or None
         oob_ip_str = oob_candidate.get("ip") or None
         server_key = self.librenms_api.server_key
 
@@ -1985,28 +2014,35 @@ class AddAsOOBView(
                     librenms_id,
                     server_key,
                     oob_type=oob_type,
-                    version=oob_version,
-                    ip=oob_ip_str,
                 )
             except ValueError as exc:
                 return _htmx_error_response(f"Invalid OOB data: {escape(str(exc))}")
 
             update_fields = ["custom_field_data"]
-            # Assign device.oob_ip if not already set; auto-create the IPAM
-            # record if it doesn't exist yet so the user has something to
-            # later attach to an interface and re-home if needed.
+
+            # Set device.oob_ip from an interface-assigned IPAddress. NetBox
+            # requires oob_ip be assigned to one of the device's interfaces, so
+            # the user picks (or creates) the interface to hang the OOB IP on
+            # via the OOB-attach form. Linkage (set_librenms_oob) happened above.
             if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip, oob_ip_created = get_or_create_global_ip(
-                    oob_ip_str, auto_create=resolve_auto_create_ipam(request)
-                )
-                if oob_ip is not None:
-                    existing_device.oob_ip = oob_ip
-                    update_fields.append("oob_ip")
-                    if oob_ip_created:
-                        messages.info(
+                oob_iface = self._resolve_oob_interface(request, existing_device)
+                if oob_iface is None:
+                    messages.info(
+                        request,
+                        "OOB linked. Choose an interface in the OOB form to also set the device's OOB IP.",
+                    )
+                else:
+                    oob_ip = self._attach_oob_ip(oob_ip_str, oob_iface)
+                    if oob_ip is None:
+                        messages.warning(
                             request,
-                            f"Auto-created OOB IP {oob_ip_str} in IPAM (unassigned, global scope).",
+                            f"OOB linked, but couldn't set OOB IP {oob_ip_str} "
+                            "(invalid, or already assigned to another device).",
                         )
+                    else:
+                        existing_device.oob_ip = oob_ip
+                        update_fields.append("oob_ip")
+                        messages.info(request, f"Set OOB IP {oob_ip_str} on interface {oob_iface.name}.")
 
             if err := _save_device(existing_device, update_fields=update_fields, request=request):
                 return err
@@ -2031,6 +2067,64 @@ class AddAsOOBView(
         # the user can confirm the new OOB attachment without losing context.
         response["HX-Trigger"] = json.dumps({"validationRefresh": {"deviceId": device_id}})
         return response
+
+    @staticmethod
+    def _resolve_oob_interface(request, device):
+        """Resolve (or create) the interface the OOB IP should attach to.
+
+        Reads ``oob_interface_id`` from the OOB-attach form: an interface PK, or
+        the sentinel ``"__new__"`` to create one named ``oob_new_interface_name``.
+        Returns an :class:`Interface` owned by *device*, or ``None`` when the
+        user made no selection (linkage proceeds without setting ``oob_ip``).
+        """
+        from dcim.models import Interface
+
+        iface_id = (request.POST.get("oob_interface_id") or "").strip()
+        if iface_id == "__new__":
+            name = (request.POST.get("oob_new_interface_name") or "").strip()
+            if not name:
+                return None
+            iface, _ = Interface.objects.get_or_create(device=device, name=name, defaults={"type": "other"})
+            return iface
+        if iface_id:
+            try:
+                return Interface.objects.get(pk=int(iface_id), device=device)
+            except (Interface.DoesNotExist, ValueError):
+                return None
+        return None
+
+    @staticmethod
+    def _attach_oob_ip(ip_str, interface):
+        """Return an :class:`IPAddress` for *ip_str* assigned to *interface*.
+
+        Reuses an existing record for the host (matched via ``net_host`` so any
+        prefix length is accepted) and re-homes it to *interface*, unless it is
+        already assigned to a *different* device's object (in which case we do
+        not steal it and return ``None``). Otherwise creates a ``/32`` (IPv4) or
+        ``/128`` (IPv6). Returns ``None`` on an invalid address or a conflict.
+        """
+        from ipaddress import ip_address as _ip
+
+        from ipam.models import IPAddress
+
+        try:
+            parsed = _ip(ip_str)
+        except ValueError:
+            return None
+
+        existing = IPAddress.objects.filter(address__net_host=ip_str).first()
+        if existing is not None:
+            assigned = existing.assigned_object
+            owned = assigned is None or getattr(assigned, "device_id", None) == interface.device_id
+            if not owned:
+                return None
+            if assigned != interface:
+                existing.assigned_object = interface
+                existing.save()
+            return existing
+
+        mask = "/128" if parsed.version == 6 else "/32"
+        return IPAddress.objects.create(address=f"{ip_str}{mask}", assigned_object=interface, status="active")
 
 
 class PromoteToHostView(
@@ -2134,29 +2228,6 @@ class PromoteToHostView(
 
         server_key = self.librenms_api.server_key
 
-        # Pull stored OOB metadata (ip/version) from existing librenms link if possible,
-        # then ensure the incoming device's IP populates oob_ip on the existing device
-        # only if oob_ip isn't already set.
-        existing_oob_ip = None
-        oob_ip_str = None
-        cf_value = existing_device.custom_field_data.get("librenms_id")
-        if isinstance(cf_value, dict):
-            entry = cf_value.get(server_key)
-            if isinstance(entry, dict):
-                existing_oob_dict = entry.get("oob") if isinstance(entry.get("oob"), dict) else {}
-                existing_oob_ip = existing_oob_dict.get("ip") if isinstance(existing_oob_dict, dict) else None
-        # Prefer existing OOB ip if it was already known; otherwise use existing device's
-        # current oob_ip relationship; otherwise leave unset (do NOT inherit incoming
-        # device's IP — that IP belongs to the host, not the OOB controller).
-        if not existing_oob_ip and existing_device.oob_ip_id:
-            try:
-                from ipam.models import IPAddress  # noqa
-
-                existing_oob_ip = str(existing_device.oob_ip).split("/")[0] if existing_device.oob_ip else None
-            except Exception:  # pragma: no cover - defensive
-                existing_oob_ip = None
-        oob_ip_str = existing_oob_ip or None
-
         # Reject legacy bare-int librenms_id form (caller should migrate first).
         stored_id = existing_device.custom_field_data.get("librenms_id")
         _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
@@ -2170,19 +2241,6 @@ class PromoteToHostView(
             return _htmx_error_response(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
-
-        # Fetch OOB IP from LibreNMS outside the transaction so the row lock
-        # is not held during a potentially slow network round-trip.
-        _pre_fetched_oob_ip = None
-        if not oob_ip_str:
-            try:
-                ok, oob_info = self.librenms_api.get_device_info(existing_libre_id)
-            except Exception:  # pragma: no cover - defensive
-                ok, oob_info = False, None
-            if ok and isinstance(oob_info, dict):
-                _fetched = (oob_info.get("ip") or "").strip() or None
-                if _fetched:
-                    _pre_fetched_oob_ip = _fetched
 
         with transaction.atomic():
             try:
@@ -2215,89 +2273,16 @@ class PromoteToHostView(
                     existing_libre_id,
                     server_key,
                     oob_type=oob_type,
-                    ip=oob_ip_str,
                 )
             except ValueError as exc:
                 return _htmx_error_response(f"Invalid promotion data: {escape(str(exc))}")
 
-            # After promotion, populate IP relationships on the existing device:
-            #   - primary_ip4 / primary_ip6 from the incoming LibreNMS host's IP
-            #     (the device that's now linked as the host)
-            #   - oob_ip from the previously-linked LibreNMS device's IP
-            #     (the device that's now demoted into the OOB slot)
-            # If the IP does not yet exist in NetBox we create a global /32 (or
-            # /128) entry so the device row looks complete after promotion;
-            # the user can re-home / mask it later via the IP-sync flow.
-            # Both writes are best-effort and never overwrite an already-set
-            # primary_ip4 / primary_ip6 / oob_ip relationship.
+            # Promotion re-points the LibreNMS host/OOB linkage only. NetBox
+            # requires primary_ip4/6 and oob_ip to be assigned to one of the
+            # device's interfaces, so those relationships are set from the
+            # interface-assigned IP-sync flow — not from auto-created global
+            # records here.
             update_fields = ["custom_field_data"]
-
-            host_ip_str = (libre_device.get("ip") or "").strip() or None
-            if host_ip_str:
-                _auto_create = resolve_auto_create_ipam(request)
-                host_ip, host_ip_created = get_or_create_global_ip(host_ip_str, auto_create=_auto_create)
-                if host_ip is not None:
-                    try:
-                        is_v6 = _ipaddr_parse(host_ip_str).version == 6
-                    except ValueError:
-                        is_v6 = False
-                    # Only set as primary if the IP is unassigned OR already
-                    # assigned to an interface that belongs to this device.
-                    # Setting a primary IP whose assigned_object belongs to a
-                    # different device would create an inconsistent state.
-                    ao = host_ip.assigned_object
-                    ip_owned_by_device = ao is None or (hasattr(ao, "device_id") and ao.device_id == existing_device.pk)
-                    assigned = False
-                    if ip_owned_by_device:
-                        if is_v6 and existing_device.primary_ip6_id is None:
-                            existing_device.primary_ip6 = host_ip
-                            update_fields.append("primary_ip6")
-                            assigned = True
-                        elif not is_v6 and existing_device.primary_ip4_id is None:
-                            existing_device.primary_ip4 = host_ip
-                            update_fields.append("primary_ip4")
-                            assigned = True
-                    else:
-                        logger.warning(
-                            "Skipping primary IP assignment for %s: IP %s is already assigned "
-                            "to a different object (%r); user must assign it manually.",
-                            existing_device,
-                            host_ip_str,
-                            ao,
-                        )
-                    if host_ip_created and assigned:
-                        messages.info(
-                            request,
-                            f"Auto-created primary IP {host_ip_str} in IPAM (unassigned, global scope).",
-                        )
-
-            # Apply pre-fetched OOB IP if we got one and the row is still eligible.
-            if _pre_fetched_oob_ip and not oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip_str = _pre_fetched_oob_ip
-                # Cache the fetched IP in the OOB sub-object (CFD) while we hold the lock.
-                try:
-                    set_librenms_oob(
-                        existing_device,
-                        existing_libre_id,
-                        server_key,
-                        oob_type=oob_type,
-                        ip=oob_ip_str,
-                    )
-                except ValueError:  # pragma: no cover - defensive
-                    pass
-
-            if oob_ip_str and existing_device.oob_ip_id is None:
-                oob_ip, oob_ip_created = get_or_create_global_ip(
-                    oob_ip_str, auto_create=resolve_auto_create_ipam(request)
-                )
-                if oob_ip is not None:
-                    existing_device.oob_ip = oob_ip
-                    update_fields.append("oob_ip")
-                    if oob_ip_created:
-                        messages.info(
-                            request,
-                            f"Auto-created OOB IP {oob_ip_str} in IPAM (unassigned, global scope).",
-                        )
 
             # Apply any explicit per-field overrides chosen in the pre-promote modal.
             # Default behaviour (no overrides) keeps the existing device's name, type

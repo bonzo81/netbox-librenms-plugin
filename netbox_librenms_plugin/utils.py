@@ -1202,8 +1202,6 @@ def set_librenms_oob(
     server_key: str = "default",
     *,
     oob_type: str,
-    version: str | None = None,
-    ip: str | None = None,
 ) -> None:
     """
     Attach an OOB management controller to a device under *server_key*.
@@ -1211,6 +1209,11 @@ def set_librenms_oob(
     Promotes the server-key value to the ``{"id": N, "oob": {...}}`` dict form if it is
     currently a bare integer.  Validates *oob_type* against ``OOB_TYPE_PATTERN`` or accepts
     the generic sentinel ``"oob"`` (used when no specific type keyword can be detected).
+
+    Stores only the identity-mapping essentials — the OOB controller's LibreNMS device
+    ``id`` and a static ``type`` label.  Mutable LibreNMS state (the controller's IP and
+    firmware version) is deliberately NOT persisted here: the IP's source of truth is the
+    device's interface-assigned ``oob_ip`` IPAddress, and the version belongs in LibreNMS.
 
     Does **not** call ``obj.save()`` — the caller is responsible for persisting the change.
 
@@ -1220,8 +1223,6 @@ def set_librenms_oob(
         server_key: LibreNMS server key (from plugin ``servers`` config).
         oob_type: Raw type string (e.g. ``"iDRAC9"``, ``"ilo"``, or the generic ``"oob"``).
             Will be normalized to lowercase.
-        version: Optional firmware/software version string.
-        ip: Optional IP address string of the OOB controller.
 
     Raises:
         ValueError: if *oob_type* does not match any known OOB type and is not the
@@ -1263,10 +1264,6 @@ def set_librenms_oob(
         entry = {}
 
     oob: dict = {"id": _oob_id, "type": normalized_type}
-    if version:
-        oob["version"] = version
-    if ip:
-        oob["ip"] = ip
     entry["oob"] = oob
     cf_value[server_key] = entry
     obj.custom_field_data["librenms_id"] = cf_value

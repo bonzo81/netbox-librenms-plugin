@@ -4466,3 +4466,132 @@ class TestAddAsOOBViewPost:
 
         assert response.status_code == 200
         assert b"not found" in response.content.lower()
+
+
+class TestSuggestOOBInterface:
+    """_suggest_oob_interface: pre-select an OOB/mgmt-named interface + default new name."""
+
+    def _iface(self, name):
+        i = MagicMock()
+        i.name = name
+        return i
+
+    def test_picks_idrac_named_interface(self):
+        from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
+
+        dev = MagicMock()
+        eth, idrac = self._iface("eth0"), self._iface("iDRAC")
+        idrac.pk = 7
+        dev.interfaces.all.return_value = [eth, idrac]
+        sid, new_name = _suggest_oob_interface(dev, {"type": "idrac"})
+        assert sid == 7
+        assert new_name == "idrac0"
+
+    def test_no_match_returns_none_and_typed_default(self):
+        from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
+
+        dev = MagicMock()
+        eth = self._iface("eth0")
+        dev.interfaces.all.return_value = [eth]
+        sid, new_name = _suggest_oob_interface(dev, {"type": "ilo"})
+        assert sid is None
+        assert new_name == "ilo0"
+
+    def test_missing_type_defaults_to_oob(self):
+        from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
+
+        dev = MagicMock()
+        dev.interfaces.all.return_value = []
+        sid, new_name = _suggest_oob_interface(dev, {})
+        assert sid is None
+        assert new_name == "oob0"
+
+
+class TestResolveOOBInterface:
+    """AddAsOOBView._resolve_oob_interface: select existing / create new / none."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        return object.__new__(AddAsOOBView)
+
+    def test_none_when_no_selection(self):
+        view = self._view()
+        req = _make_request(post={})
+        assert view._resolve_oob_interface(req, MagicMock()) is None
+
+    def test_existing_interface_by_id(self):
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "5"})
+        dev = MagicMock()
+        with patch("dcim.models.Interface") as mock_iface_cls:
+            mock_iface_cls.objects.get.return_value = MagicMock(name="eth0")
+            result = view._resolve_oob_interface(req, dev)
+        mock_iface_cls.objects.get.assert_called_once_with(pk=5, device=dev)
+        assert result is mock_iface_cls.objects.get.return_value
+
+    def test_create_new_interface(self):
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
+        dev = MagicMock()
+        with patch("dcim.models.Interface") as mock_iface_cls:
+            mock_iface_cls.objects.get_or_create.return_value = (MagicMock(), True)
+            view._resolve_oob_interface(req, dev)
+        mock_iface_cls.objects.get_or_create.assert_called_once_with(
+            device=dev, name="idrac0", defaults={"type": "other"}
+        )
+
+    def test_new_without_name_returns_none(self):
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": ""})
+        assert view._resolve_oob_interface(req, MagicMock()) is None
+
+
+class TestAttachOOBIp:
+    """AddAsOOBView._attach_oob_ip: reuse/re-home or create an interface-assigned IP."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        return object.__new__(AddAsOOBView)
+
+    def test_invalid_ip_returns_none(self):
+        view = self._view()
+        assert view._attach_oob_ip("not-an-ip", MagicMock()) is None
+
+    def test_creates_v4_slash32_when_missing(self):
+        view = self._view()
+        iface = MagicMock()
+        with patch("ipam.models.IPAddress") as mock_ip_cls:
+            mock_ip_cls.objects.filter.return_value.first.return_value = None
+            view._attach_oob_ip("10.0.0.9", iface)
+        mock_ip_cls.objects.create.assert_called_once_with(
+            address="10.0.0.9/32", assigned_object=iface, status="active"
+        )
+
+    def test_rehomes_existing_unassigned_ip(self):
+        view = self._view()
+        iface = MagicMock()
+        iface.device_id = 1
+        existing = MagicMock()
+        existing.assigned_object = None
+        with patch("ipam.models.IPAddress") as mock_ip_cls:
+            mock_ip_cls.objects.filter.return_value.first.return_value = existing
+            result = view._attach_oob_ip("10.0.0.9", iface)
+        assert result is existing
+        assert existing.assigned_object is iface
+        existing.save.assert_called_once()
+
+    def test_does_not_steal_ip_from_other_device(self):
+        view = self._view()
+        iface = MagicMock()
+        iface.device_id = 1
+        other_iface = MagicMock()
+        other_iface.device_id = 2
+        existing = MagicMock()
+        existing.assigned_object = other_iface
+        with patch("ipam.models.IPAddress") as mock_ip_cls:
+            mock_ip_cls.objects.filter.return_value.first.return_value = existing
+            result = view._attach_oob_ip("10.0.0.9", iface)
+        assert result is None
+        existing.save.assert_not_called()

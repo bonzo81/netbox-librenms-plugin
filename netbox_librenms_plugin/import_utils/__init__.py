@@ -33,7 +33,6 @@ from .device_operations import (  # noqa: F401
     import_single_device,
     validate_device_for_import,
 )
-from .ip_helpers import auto_create_ipam_enabled, get_or_create_global_ip  # noqa: F401
 from .collisions import detect_bulk_collisions  # noqa: F401
 from .filters import (  # noqa: F401
     _apply_client_filters,

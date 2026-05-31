@@ -526,17 +526,22 @@ class TestOOBHelpers:
     # ── set_librenms_oob ──────────────────────────────────────────────────────
 
     def test_set_oob_round_trip(self):
-        """set_librenms_oob followed by get_librenms_oob returns equivalent values."""
+        """set_librenms_oob stores only id + type; ip/version are not persisted.
+
+        Mutable LibreNMS state (the controller's IP and firmware version) is
+        deliberately NOT denormalised into the librenms_id custom field — it is
+        read live from LibreNMS via the stored id when needed.
+        """
         from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
 
         obj = MagicMock()
         obj.custom_field_data = {"librenms_id": {"primary": 42}}
         obj.cf = obj.custom_field_data
 
-        set_librenms_oob(obj, 17, "primary", oob_type="drac", version="5.10", ip="10.0.0.5")
+        set_librenms_oob(obj, 17, "primary", oob_type="drac")
         result = get_librenms_oob(obj, "primary")
 
-        assert result == {"id": 17, "type": "drac", "version": "5.10", "ip": "10.0.0.5"}
+        assert result == {"id": 17, "type": "drac"}
 
     def test_set_oob_promotes_bare_int_entry(self):
         """set_librenms_oob promotes a bare-int entry to dict form, preserving the main id."""
