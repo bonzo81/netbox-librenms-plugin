@@ -1698,12 +1698,17 @@ class TestOOBDetection:
         if mock_vm_cls is None:
             mock_vm_cls = MagicMock()
             mock_vm_cls.objects.filter.return_value.first.return_value = None
+        # Stub IPAddress lookups to "no match" so these serial/OOB-detection tests
+        # actually reach those branches. A bare MagicMock makes .first() truthy, which
+        # would short-circuit validate_device_for_import on the primary-IP match path.
+        mock_ip_cls = MagicMock()
+        mock_ip_cls.objects.filter.return_value.first.return_value = None
         return [
             patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
             patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("ipam.models.IPAddress"),
+            patch("ipam.models.IPAddress", new=mock_ip_cls),
             patch("virtualization.models.VirtualMachine", new=mock_vm_cls),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
@@ -1966,7 +1971,9 @@ class TestOOBDetection:
             for p in reversed(patches):
                 p.stop()
 
-        assert result["serial_action"] in ("link", "hostname_differs")
+        # Same hostname on both sides → the serial match must resolve to "link",
+        # not the divergent-hostname branch.
+        assert result["serial_action"] == "link"
         assert result["oob_candidate"] is None
 
     # ------------------------------------------------------------------

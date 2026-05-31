@@ -481,3 +481,122 @@ class TestVlanEntryDictGuardInSync:
         result = api.parse_port_vlan_data(port_data)
         assert result["untagged_vlan"] == 10
         assert result["tagged_vlans"] == [20]
+
+
+class TestVLANPostServerKeyScoping:
+    """The refresh POST must scope migrated context (and cache) to the POSTed
+    server_key, not the session-active server, in multi-server setups."""
+
+    def test_post_uses_post_server_key_for_migrated_context(self):
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        view._get_error_context = MagicMock(return_value={})
+        # Seed the session client on _librenms_api and use the REAL librenms_api property so
+        # rebind_api_for_server() actually swaps the client post() uses — a property override
+        # would pin post() to the session client and mask whether the rebind took effect.
+        mock_api = MagicMock(server_key="default")
+        view._librenms_api = mock_api
+        rebound_api = MagicMock(server_key="prod")
+        rebound_api.get_librenms_id.return_value = None  # short-circuit before fetch/cache
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "prod"}.get(k, d)
+
+        with (
+            # The POST rebinds the API to the posted server before anything else.
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
+            patch(
+                "netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}
+            ) as mock_bmc,
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+        ):
+            view.post(req, pk=1)
+
+        mock_bmc.assert_called_once_with(obj, "prod")
+        # The id lookup ran on the REBOUND client, never the session one.
+        rebound_api.get_librenms_id.assert_called_once_with(obj)
+        mock_api.get_librenms_id.assert_not_called()
+
+    def test_post_scopes_cache_keys_to_post_server_key(self):
+        """Drive the request past the short-circuit into cache-key construction: a
+        regression that namespaced the cache under the session server (not the POSTed
+        one) must fail here. The previous test bails before any fetch/cache work."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        view.get_vlan_context = MagicMock(return_value={})
+        view.get_cache_key = MagicMock(return_value="ck")
+        view.get_last_fetched_key = MagicMock(return_value="lfk")
+        # Seed the session client and use the REAL librenms_api property so the rebind swaps
+        # the client; the fetch returns live on the REBOUND client (what post() should query).
+        mock_api = MagicMock(server_key="default", cache_timeout=30)
+        view._librenms_api = mock_api
+        rebound_api = MagicMock(server_key="prod", cache_timeout=30)
+        rebound_api.get_librenms_id.return_value = 10  # truthy → reach fetch + cache
+        rebound_api.get_device_vlans.return_value = (True, [{"vlan_vlan": 10}])
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "prod"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.cache"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+        ):
+            view.post(req, pk=1)
+
+        # The VLAN cache must be namespaced to the POSTed server, not the session one —
+        # and must NOT also be built under "default" (the regression this guards against).
+        from unittest.mock import call
+
+        view.get_cache_key.assert_any_call(obj, "vlans", "prod")
+        assert call(obj, "vlans", "default") not in view.get_cache_key.call_args_list
+        # The last-fetched metadata key must be scoped to the POSTed server too, or
+        # multi-server cache timestamps bleed across servers under "default".
+        view.get_last_fetched_key.assert_any_call(obj, "vlans", "prod")
+        assert call(obj, "vlans", "default") not in view.get_last_fetched_key.call_args_list
+        view.get_vlan_context.assert_called_once_with(req, obj, "prod")
+        # The VLAN fetch ran on the REBOUND client, never the session one.
+        rebound_api.get_device_vlans.assert_called_once()
+        mock_api.get_device_vlans.assert_not_called()
+
+
+class TestVLANErrorContextServerKey:
+    """_get_error_context must preserve an explicit server_key=None (stale-server branch)
+    rather than falling back to the session server — otherwise the fragment re-renders on
+    a different, still-configured server and a retry syncs against the wrong instance."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        view._librenms_api = MagicMock(server_key="default")
+        view.get_vlan_groups_for_device = MagicMock(return_value=[])
+        return view
+
+    def test_explicit_none_is_preserved(self):
+        view = self._view()
+        ctx = view._get_error_context(MagicMock(), "err", server_key=None)
+        assert ctx["server_key"] is None
+
+    def test_omitted_falls_back_to_session(self):
+        view = self._view()
+        ctx = view._get_error_context(MagicMock(), "err")
+        assert ctx["server_key"] == "default"
+
+    def test_explicit_key_is_used(self):
+        view = self._view()
+        ctx = view._get_error_context(MagicMock(), "err", server_key="prod")
+        assert ctx["server_key"] == "prod"

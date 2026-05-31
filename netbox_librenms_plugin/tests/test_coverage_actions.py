@@ -82,6 +82,42 @@ class TestSaveDevice:
         result = _save_device(device)
         assert result is None
 
+    def test_update_fields_dataerror_returns_400_not_500(self):
+        """save(update_fields=...) skips full_clean; an overlong value from LibreNMS
+        raises DataError at the DB layer and must become a 400 toast, not a 500."""
+        from django.db import DataError
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        device = MagicMock()
+        device.save.side_effect = DataError("value too long for type character varying(64)")
+
+        response = _save_device(device, update_fields=["name"])
+        # Pin the partial-save contract: the DataError must originate from save(), not from a
+        # full_clean() call — update_fields saves skip validation by design.
+        device.save.assert_called_once_with(update_fields=["name"])
+        device.full_clean.assert_not_called()
+        assert response.status_code == 400
+        assert b"Invalid field value" in response.content
+
+    def test_update_fields_databaseerror_returns_409_not_500(self):
+        """save(update_fields=...) forces an UPDATE; a concurrent delete makes it affect 0
+        rows and raises DatabaseError. That must become a 409 toast, not an unhandled 500."""
+        from django.db import DatabaseError
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        device = MagicMock()
+        device.save.side_effect = DatabaseError("Save with update_fields did not affect any rows.")
+
+        response = _save_device(device, update_fields=["name"])
+        # The DatabaseError must come from the partial-update save(), so confirm
+        # update_fields was actually forwarded (not a fallback to a plain save()).
+        device.save.assert_called_once_with(update_fields=["name"])
+        device.full_clean.assert_not_called()
+        assert response.status_code == 409
+        assert b"Database error" in response.content
+
 
 class TestResolveNamingPreferences:
     """Tests for resolve_naming_preferences (utils.resolve_naming_preferences)."""
@@ -1685,13 +1721,19 @@ class TestDeviceConflictActionMissingExisting:
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("dcim.models.Device") as MockDevice:
-                MockDevice.DoesNotExist = ValueError
-                MockDevice.objects.get.side_effect = ValueError("Not found")
+                # Use a DISTINCT DoesNotExist type (not aliased to ValueError) so this
+                # genuinely exercises the view's `except Device.DoesNotExist` path rather
+                # than a conflated ValueError handler.
+                class _DeviceDoesNotExist(Exception):
+                    pass
+
+                MockDevice.DoesNotExist = _DeviceDoesNotExist
+                MockDevice.objects.get.side_effect = _DeviceDoesNotExist("Not found")
                 response = view.post(request, device_id=1)
 
         assert response.status_code == 200
-        assert response.headers.get("HX-Reswap") == "none"
         assert b"Existing device not found" in response.content
+        assert response["HX-Reswap"] == "none"
 
 
 class TestDeviceConflictActionMorePaths:
@@ -4128,6 +4170,9 @@ class TestBulkImportEdgePaths:
                                     MockJob.enqueue.return_value = mock_job
                                     view.post(request)
 
+        # Pin the regression this test is named for: the background path must actually
+        # enqueue the job, not merely take some redirecting branch.
+        MockJob.enqueue.assert_called_once()
         mock_redirect.assert_called()
 
 
@@ -4344,6 +4389,7 @@ class TestAddAsOOBViewPost:
 
         assert response.status_code == 200
         assert b"Missing existing_device_id" in response.content
+        assert response["HX-Reswap"] == "none"
 
     def test_write_permission_denied_returns_error(self):
         """When write permission is denied, view returns that error immediately."""
@@ -4364,12 +4410,14 @@ class TestAddAsOOBViewPost:
         request = _make_request(post={"existing_device_id": "not-a-number"})
 
         with patch("dcim.models.Device") as mock_device:
-            mock_device.DoesNotExist = Exception
+            does_not_exist = type("DoesNotExist", (Exception,), {})
+            mock_device.DoesNotExist = does_not_exist
             mock_device.objects.get.side_effect = ValueError("invalid literal")
             response = view.post(request, device_id=1)
 
         assert response.status_code == 200
         assert b"Existing device not found" in response.content
+        assert response["HX-Reswap"] == "none"
 
     def test_device_does_not_exist_returns_htmx_error(self):
         """POST with an existing_device_id that refers to a deleted device returns HTMX error."""
@@ -4377,12 +4425,14 @@ class TestAddAsOOBViewPost:
         request = _make_request(post={"existing_device_id": "999"})
 
         with patch("dcim.models.Device") as mock_device:
-            mock_device.DoesNotExist = Exception
-            mock_device.objects.get.side_effect = Exception("not found")
+            does_not_exist = type("DoesNotExist", (Exception,), {})
+            mock_device.DoesNotExist = does_not_exist
+            mock_device.objects.get.side_effect = does_not_exist("not found")
             response = view.post(request, device_id=1)
 
         assert response.status_code == 200
         assert b"Existing device not found" in response.content
+        assert response["HX-Reswap"] == "none"
 
     def test_no_oob_candidate_in_validation_returns_htmx_error(self):
         """When validation has no oob_candidate, view returns an HTMX error."""
@@ -4402,6 +4452,7 @@ class TestAddAsOOBViewPost:
 
         assert response.status_code == 200
         assert b"No OOB candidate" in response.content
+        assert response["HX-Reswap"] == "none"
 
     def test_device_id_mismatch_returns_htmx_error(self):
         """When oob_candidate device pk does not match existing_device_id, returns HTMX error."""
@@ -4425,6 +4476,7 @@ class TestAddAsOOBViewPost:
 
         assert response.status_code == 200
         assert b"mismatch" in response.content.lower() or b"Device ID mismatch" in response.content
+        assert response["HX-Reswap"] == "none"
 
     def test_legacy_librenms_id_returns_htmx_error(self):
         """Device with legacy bare-int librenms_id is rejected with convert-first message."""
@@ -4449,6 +4501,7 @@ class TestAddAsOOBViewPost:
 
         assert response.status_code == 200
         assert b"legacy" in response.content.lower()
+        assert response["HX-Reswap"] == "none"
 
     def test_libre_device_not_found_returns_htmx_error(self):
         """When get_validated_device_with_selections returns no libre_device, returns HTMX error."""
@@ -4466,6 +4519,182 @@ class TestAddAsOOBViewPost:
 
         assert response.status_code == 200
         assert b"not found" in response.content.lower()
+        assert response["HX-Reswap"] == "none"
+
+    def test_happy_path_oob_sentinel_links_and_refreshes(self):
+        """End-to-end happy path with type=='oob': the view must reach set_librenms_oob
+        (run for real, so a view-side validation break is caught — not just the unit
+        test) and return the non-error validationRefresh response, not an HTMX error."""
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+        existing_device.name = "host-a"
+        existing_device.oob_ip_id = 1  # already set → skip the OOB-IP sub-flow
+        existing_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+
+        # A distinct locked row (re-read under select_for_update). The view must mutate and
+        # persist THIS instance, not the stale pre-lock lookup — using one object for both
+        # would hide a regression that saves the unlocked instance.
+        locked_device = MagicMock()
+        locked_device.pk = 5
+        locked_device.name = "host-a"
+        locked_device.oob_ip_id = 1
+        locked_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+
+        libre_device = {"device_id": 10}
+        # No "ip" → the OOB-IP set block is skipped; type "oob" is the regression target.
+        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        import copy
+
+        # Snapshot the saved instance + its custom_field_data AT save time, so the assertion
+        # proves the OOB mapping was present when _save_device() ran — not just afterward on a
+        # mutable object (which would still pass if the view saved first and mutated later).
+        saved = {}
+
+        def _capture_save(device, *args, **kwargs):
+            saved["instance"] = device
+            saved["cfd"] = copy.deepcopy(device.custom_field_data)
+            return None
+
+        with (
+            patch("dcim.models.Device") as mock_device,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+            patch("netbox_librenms_plugin.views.imports.actions._save_device", side_effect=_capture_save) as mock_save,
+            patch("netbox_librenms_plugin.views.imports.actions.cache"),
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+        ):
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            mock_device.objects.select_for_update.return_value.get.return_value = locked_device
+            response = view.post(request, device_id=10)
+
+        # Non-error response on the success path.
+        assert response.status_code == 200
+        assert "validationRefresh" in response.get("HX-Trigger", "")
+        view.render_device_row.assert_called_once()
+        # The LOCKED row must be the one persisted — guards against the view dropping the
+        # _save_device() call or saving the stale pre-lock instance.
+        mock_save.assert_called_once()
+        assert mock_save.call_args.args[0] is locked_device
+        # set_librenms_oob ran for real with the generic sentinel, and the mapping was already
+        # on the locked row at the moment it was persisted.
+        assert saved["instance"] is locked_device
+        assert saved["cfd"]["librenms_id"]["default"]["oob"] == {"id": 10, "type": "oob"}
+
+    def test_save_device_error_marks_transaction_rollback(self):
+        """_save_device returns an error response (it doesn't raise), so the view must mark
+        the transaction rollback-only before returning — otherwise any Interface/IPAddress
+        created earlier in the atomic block by the OOB-attach would commit."""
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+        existing_device.name = "host-a"
+        existing_device.oob_ip_id = 1  # skip the OOB-IP sub-flow; the save-failure path is the target
+        existing_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+        locked_device = MagicMock()
+        locked_device.pk = 5
+        locked_device.name = "host-a"
+        locked_device.oob_ip_id = 1
+        locked_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+
+        libre_device = {"device_id": 10}
+        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+
+        err_resp = HttpResponse("save failed", status=400)
+        with (
+            patch("dcim.models.Device") as mock_device,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err_resp),
+            patch("netbox_librenms_plugin.views.imports.actions.cache"),
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+        ):
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            mock_device.objects.select_for_update.return_value.get.return_value = locked_device
+            response = view.post(request, device_id=10)
+
+        assert response is err_resp
+        mock_tx.set_rollback.assert_called_once_with(True)
+
+
+class TestMergeNetBoxDevicesViewOOBTransfer:
+    """MergeNetBoxDevicesView.post: oob_ip may only move to the winner when its
+    underlying IP already sits on a winner interface (the merge does not move
+    interfaces, and the save skips full_clean())."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def _run(self, oob_ip_device_id):
+        """Drive a merge where donor has an oob_ip assigned to *oob_ip_device_id*.
+        Returns (locked_winner, locked_donor)."""
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        request = _make_request(post={"winner_pk": "20", "donor_pk": "10"})
+
+        oob_ip = MagicMock()
+        oob_ip.assigned_object.device_id = oob_ip_device_id
+
+        winner = MagicMock(pk=20, custom_field_data={"librenms_id": {"default": {"id": 20}}})
+        donor = MagicMock(pk=10, custom_field_data={"librenms_id": {"default": {"id": 10}}})
+        locked_winner = MagicMock(pk=20, name="w", oob_ip_id=None, oob_ip=None)
+        locked_donor = MagicMock(pk=10, name="d", oob_ip_id=1, oob_ip=oob_ip)
+
+        validation = {"merge_candidates": {"host_named": {"pk": 20}, "oob_named": {"pk": 10}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        with (
+            patch("dcim.models.Device") as mock_device,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+            patch("netbox_librenms_plugin.views.imports.actions.cache"),
+            patch("netbox_librenms_plugin.utils.merge_librenms_links", return_value={}),
+            patch("netbox_librenms_plugin.utils.mark_librenms_migrated"),
+        ):
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.side_effect = lambda pk: {20: winner, 10: donor}[pk]
+            mock_device.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
+                locked_winner,
+                locked_donor,
+            ]
+            resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+        return locked_winner, locked_donor, oob_ip
+
+    def test_transfers_when_oob_ip_on_winner_interface(self):
+        locked_winner, locked_donor, oob_ip = self._run(oob_ip_device_id=20)
+        assert locked_winner.oob_ip is oob_ip
+        assert locked_donor.oob_ip is None
+        # oob_ip must be in the winner's update_fields.
+        _, kwargs = locked_winner.save.call_args
+        assert "oob_ip" in kwargs["update_fields"]
+
+    def test_skips_when_oob_ip_on_donor_interface(self):
+        locked_winner, locked_donor, oob_ip = self._run(oob_ip_device_id=10)
+        # Left on the donor; winner not given a donor-owned interface's IP.
+        assert locked_donor.oob_ip is oob_ip
+        assert locked_winner.oob_ip is None
+        _, kwargs = locked_winner.save.call_args
+        assert "oob_ip" not in kwargs["update_fields"]
 
 
 class TestSuggestOOBInterface:
@@ -4518,33 +4747,83 @@ class TestResolveOOBInterface:
     def test_none_when_no_selection(self):
         view = self._view()
         req = _make_request(post={})
-        assert view._resolve_oob_interface(req, MagicMock()) is None
+        assert view._resolve_oob_interface(req, MagicMock()) == (None, None)
 
     def test_existing_interface_by_id(self):
         view = self._view()
         req = _make_request(post={"oob_interface_id": "5"})
         dev = MagicMock()
         with patch("dcim.models.Interface") as mock_iface_cls:
-            mock_iface_cls.objects.get.return_value = MagicMock(name="eth0")
-            result = view._resolve_oob_interface(req, dev)
-        mock_iface_cls.objects.get.assert_called_once_with(pk=5, device=dev)
-        assert result is mock_iface_cls.objects.get.return_value
+            # The reused row is locked (select_for_update) to block a concurrent delete.
+            locked_get = mock_iface_cls.objects.select_for_update.return_value.get
+            locked_get.return_value = MagicMock(name="eth0")
+            iface, reason = view._resolve_oob_interface(req, dev)
+        locked_get.assert_called_once_with(pk=5, device=dev)
+        assert iface is locked_get.return_value and reason is None
 
     def test_create_new_interface(self):
         view = self._view()
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
+        req.user.has_perm.return_value = True
         dev = MagicMock()
-        with patch("dcim.models.Interface") as mock_iface_cls:
-            mock_iface_cls.objects.get_or_create.return_value = (MagicMock(), True)
-            view._resolve_oob_interface(req, dev)
-        mock_iface_cls.objects.get_or_create.assert_called_once_with(
-            device=dev, name="idrac0", defaults={"type": "other"}
-        )
+        created = MagicMock()
+        with (
+            patch("dcim.models.Interface") as mock_iface_cls,
+            patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
+            # create() is wrapped in a nested savepoint; stub transaction so this
+            # non-DB unit test doesn't require a real connection.
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+        ):
+            # No locked row exists → this is a real create.
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
+            mock_iface_cls.objects.create.return_value = created
+            iface, reason = view._resolve_oob_interface(req, dev)
+        mock_iface_cls.objects.create.assert_called_once_with(device=dev, name="idrac0", type="other")
+        # The created interface must be returned — the OOB-IP attach path depends on it.
+        assert iface is created and reason is None
+
+    def test_new_reuses_existing_locked_interface(self):
+        """A (device, name) interface that already exists under the lock is reused — no
+        create, and no 'add' permission required."""
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
+        # Deny only add_interface: the reuse path must return the existing row without
+        # ever consulting the add permission, so this denial must not change the result.
+        req.user.has_perm.side_effect = lambda perm: "add_interface" not in perm
+        dev = MagicMock()
+        existing = MagicMock()
+        with (
+            patch("dcim.models.Interface") as mock_iface_cls,
+            patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
+        ):
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = existing
+            iface, reason = view._resolve_oob_interface(req, dev)
+        assert iface is existing and reason is None
+        mock_iface_cls.objects.create.assert_not_called()
+
+    def test_create_without_add_perm_returns_permission_add(self):
+        """If the pre-flight raced a delete (no locked row) and the user lacks Interface
+        'add', the write-time re-check refuses the create rather than silently creating."""
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
+        # Deny only add_interface so the test pins the specific permission checked — it
+        # would still pass on the wrong perm string if every permission were denied.
+        req.user.has_perm.side_effect = lambda perm: "add_interface" not in perm
+        dev = MagicMock()
+        with (
+            patch("dcim.models.Interface") as mock_iface_cls,
+            patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
+        ):
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
+            iface, reason = view._resolve_oob_interface(req, dev)
+        assert iface is None and reason == "permission_add"
+        mock_iface_cls.objects.create.assert_not_called()
+        assert any("add_interface" in c.args[0] for c in req.user.has_perm.call_args_list)
 
     def test_new_without_name_returns_none(self):
         view = self._view()
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": ""})
-        assert view._resolve_oob_interface(req, MagicMock()) is None
+        assert view._resolve_oob_interface(req, MagicMock()) == (None, None)
 
 
 class TestAttachOOBIp:
@@ -4555,19 +4834,38 @@ class TestAttachOOBIp:
 
         return object.__new__(AddAsOOBView)
 
-    def test_invalid_ip_returns_none(self):
+    def _req(self, denied_perm=None):
+        """Build a request mock. By default all perms granted; pass denied_perm to
+        deny exactly one (e.g. 'change_ipaddress') so a test pins the specific check."""
+        req = MagicMock()
+        if denied_perm is None:
+            req.user.has_perm.return_value = True
+        else:
+            req.user.has_perm.side_effect = lambda perm: denied_perm not in perm
+        return req
+
+    def test_invalid_ip_returns_invalid(self):
         view = self._view()
-        assert view._attach_oob_ip("not-an-ip", MagicMock()) is None
+        ip, reason = view._attach_oob_ip(self._req(), "not-an-ip", MagicMock())
+        assert ip is None and reason == "invalid"
 
     def test_creates_v4_slash32_when_missing(self):
         view = self._view()
         iface = MagicMock()
-        with patch("ipam.models.IPAddress") as mock_ip_cls:
-            mock_ip_cls.objects.filter.return_value.first.return_value = None
-            view._attach_oob_ip("10.0.0.9", iface)
+        with (
+            patch("ipam.models.IPAddress") as mock_ip_cls,
+            # create() is wrapped in a nested savepoint; stub transaction so this
+            # non-DB unit test doesn't require a real connection.
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+        ):
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = []
+            ip, reason = view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+        assert reason is None
         mock_ip_cls.objects.create.assert_called_once_with(
             address="10.0.0.9/32", assigned_object=iface, status="active"
         )
+        # The created IPAddress is what the view wires to oob_ip — it must be returned.
+        assert ip is mock_ip_cls.objects.create.return_value
 
     def test_rehomes_existing_unassigned_ip(self):
         view = self._view()
@@ -4576,9 +4874,9 @@ class TestAttachOOBIp:
         existing = MagicMock()
         existing.assigned_object = None
         with patch("ipam.models.IPAddress") as mock_ip_cls:
-            mock_ip_cls.objects.filter.return_value.first.return_value = existing
-            result = view._attach_oob_ip("10.0.0.9", iface)
-        assert result is existing
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
+            ip, reason = view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+        assert ip is existing and reason is None
         assert existing.assigned_object is iface
         existing.save.assert_called_once()
 
@@ -4591,7 +4889,168 @@ class TestAttachOOBIp:
         existing = MagicMock()
         existing.assigned_object = other_iface
         with patch("ipam.models.IPAddress") as mock_ip_cls:
-            mock_ip_cls.objects.filter.return_value.first.return_value = existing
-            result = view._attach_oob_ip("10.0.0.9", iface)
-        assert result is None
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
+            ip, reason = view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+        assert ip is None and reason == "conflict"
         existing.save.assert_not_called()
+
+    def test_ambiguous_match_returns_conflict(self):
+        """Multiple IPAddress rows share the host IP (net_host ignores prefix length):
+        refuse rather than re-home the wrong one by DB ordering."""
+        view = self._view()
+        iface = MagicMock(device_id=1)
+        with patch("ipam.models.IPAddress") as mock_ip_cls:
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [
+                MagicMock(),
+                MagicMock(),
+            ]
+            ip, reason = view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+        assert ip is None and reason == "conflict"
+        mock_ip_cls.objects.create.assert_not_called()
+
+    def test_rehome_denied_without_change_permission(self):
+        """TOCTOU backstop: an IP created after the pre-flight check must not be
+        re-homed by a user lacking change_ipaddress, even if pre-flight passed 'add'."""
+        view = self._view()
+        iface = MagicMock(device_id=1)
+        existing = MagicMock()
+        existing.assigned_object = None  # owned, but on a different (no) interface → re-home
+        req = self._req(denied_perm="change_ipaddress")  # allow add, deny only change
+        with (
+            patch("ipam.models.IPAddress") as mock_ip_cls,
+            # IPAddress is mocked, so resolve perm strings deterministically by action.
+            patch(
+                "utilities.permissions.get_permission_for_model",
+                side_effect=lambda model, action: f"ipam.{action}_ipaddress",
+            ),
+        ):
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
+            ip, reason = view._attach_oob_ip(req, "10.0.0.9", iface)
+        assert ip is None and reason == "permission_change"
+        existing.save.assert_not_called()
+        # Pin that the CHANGE permission specifically was the one checked.
+        assert any("change_ipaddress" in c.args[0] for c in req.user.has_perm.call_args_list)
+
+    def test_create_denied_without_add_permission(self):
+        """TOCTOU backstop on the create path: if a concurrent delete removed the row the
+        unlocked pre-flight saw (so it only checked 'change'), the locked create must still
+        re-verify 'add' and refuse an add-lacking user rather than create the IP."""
+        view = self._view()
+        iface = MagicMock(device_id=1)
+        req = self._req(denied_perm="add_ipaddress")  # deny only add
+        with (
+            patch("ipam.models.IPAddress") as mock_ip_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+            patch(
+                "utilities.permissions.get_permission_for_model",
+                side_effect=lambda model, action: f"ipam.{action}_ipaddress",
+            ),
+        ):
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = []
+            ip, reason = view._attach_oob_ip(req, "10.0.0.9", iface)
+        assert ip is None and reason == "permission_add"
+        mock_ip_cls.objects.create.assert_not_called()
+        assert any("add_ipaddress" in c.args[0] for c in req.user.has_perm.call_args_list)
+
+    def test_locks_candidate_row_with_select_for_update(self):
+        """The candidate IPAddress row must be locked (load-bearing TOCTOU mitigation)."""
+        view = self._view()
+        iface = MagicMock(device_id=1)
+        existing = MagicMock()
+        existing.assigned_object = None
+        with patch("ipam.models.IPAddress") as mock_ip_cls:
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
+            view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+        mock_ip_cls.objects.select_for_update.assert_called_once()
+
+
+class TestMissingOOBIpPermissions:
+    """AddAsOOBView._missing_oob_ip_permissions: the IP-set sub-flow must require
+    Interface/IPAddress perms, not just the top-level ('change', Device)."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        return object.__new__(AddAsOOBView)
+
+    def test_none_when_user_has_all_perms(self):
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
+        req.user.has_perm.return_value = True
+        # Patch only the manager so IPAddress._meta stays real for perm strings.
+        with patch("ipam.models.IPAddress.objects") as mock_objects:
+            mock_objects.filter.return_value.__getitem__.return_value = []
+            assert view._missing_oob_ip_permissions(req, "10.0.0.9") is None
+
+    def test_blocks_new_interface_without_add_interface(self):
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
+        req.user.has_perm.side_effect = lambda p: "add_interface" not in p
+        with patch("ipam.models.IPAddress.objects") as mock_objects:
+            mock_objects.filter.return_value.__getitem__.return_value = []
+            msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
+        assert msg is not None and "add_interface" in msg
+
+    def test_new_interface_name_that_already_exists_does_not_require_add(self):
+        """__new__ + an existing interface name is reused by _resolve_oob_interface,
+        so no Interface write happens — 'add_interface' must NOT be required even for a
+        user who only has change-Device + add_ipaddress."""
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
+        req.user.has_perm.side_effect = lambda p: "add_interface" not in p  # deny only add_interface
+        device = MagicMock()
+        with (
+            patch("ipam.models.IPAddress.objects") as mock_ip_objects,
+            patch("dcim.models.Interface.objects") as mock_iface_objects,
+        ):
+            mock_ip_objects.filter.return_value.__getitem__.return_value = []  # IP create (user has add_ipaddress)
+            mock_iface_objects.filter.return_value.exists.return_value = True  # interface already exists → reused
+            msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
+        # No add_interface demanded since the interface is reused, not created.
+        assert msg is None
+
+    def test_requires_add_ipaddress_when_creating(self):
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "5"})  # existing iface → no add_interface
+        req.user.has_perm.side_effect = lambda p: "add_ipaddress" not in p
+        with patch("ipam.models.IPAddress.objects") as mock_objects:
+            mock_objects.filter.return_value.__getitem__.return_value = []  # no record → create
+            msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
+        assert msg is not None and "add_ipaddress" in msg
+
+    def test_requires_change_ipaddress_when_rehoming(self):
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "5"})
+        req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
+        with patch("ipam.models.IPAddress.objects") as mock_objects:
+            existing = MagicMock()
+            existing.assigned_object.pk = 7  # assigned to a DIFFERENT interface → re-home
+            mock_objects.filter.return_value.__getitem__.return_value = [existing]
+            msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
+        assert msg is not None and "change_ipaddress" in msg
+
+    def test_no_change_ipaddress_when_already_on_selected_interface(self):
+        """IP already assigned to the chosen interface → _attach_oob_ip does not save,
+        so change_ipaddress must not be required (least privilege)."""
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "5"})
+        # User has every perm EXCEPT change_ipaddress.
+        req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
+        with patch("ipam.models.IPAddress.objects") as mock_objects:
+            existing = MagicMock()
+            existing.assigned_object.pk = 5  # already on the selected interface → no mutation
+            mock_objects.filter.return_value.__getitem__.return_value = [existing]
+            assert view._missing_oob_ip_permissions(req, "10.0.0.9") is None
+
+    def test_ambiguous_match_requires_change_despite_selected_interface(self):
+        """Multiple rows share the host IP: the write path refuses, so the preflight must
+        NOT take the already-on-selected-interface shortcut — it requires change_ipaddress."""
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "5"})
+        req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
+        with patch("ipam.models.IPAddress.objects") as mock_objects:
+            on_iface = MagicMock()
+            on_iface.assigned_object.pk = 5  # would otherwise short-circuit to "no perms"
+            mock_objects.filter.return_value.__getitem__.return_value = [on_iface, MagicMock()]
+            msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
+        assert msg is not None and "change_ipaddress" in msg

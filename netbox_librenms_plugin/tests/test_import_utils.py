@@ -1723,8 +1723,10 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "serial"
         assert "not linked to LibreNMS" in result["warnings"][0]
 
-    def test_serial_match_diff_hostname_offers_role_choice(self):
-        """Serial matches but hostname differs offers a host/OOB role choice toggle.
+    def test_serial_match_diff_hostname_defaults_to_oob_candidate(self):
+        """Serial matches but hostname differs → default action is `oob_candidate`,
+        with the host/OOB role-choice toggle NOT offered (serial_role_choice_available
+        is False) because there is no existing LibreNMS link to promote from.
 
         Previously this returned `hostname_differs`. With the role-toggle work
         (see device_validation_details.html + device_operations.py refactor),
@@ -1763,6 +1765,9 @@ class TestSerialNumberMatching:
         assert result["serial_action"] == "oob_candidate"
         assert result["existing_match_type"] == "serial"
         assert result.get("oob_candidate") is not None
+        # No existing LibreNMS/OOB link → oob_candidate-only baseline, so promote_to_host
+        # must stay absent (the documented "absent otherwise" convention).
+        assert "promote_to_host" not in result
         assert result.get("serial_role_choice_available") is False
 
     def test_hostname_match_diff_serial_offers_update(self):
@@ -2592,6 +2597,21 @@ class TestDeviceConflictActionView:
         }
         request.POST = post_data
         return request
+
+    def test_unknown_server_key_returns_error_without_500(self):
+        """A stale/tampered POST server_key must surface a graceful HTMX error,
+        not raise (build_librenms_api → None when the key is unknown)."""
+        view = self._create_view()
+        request = self._create_request("link", 42)
+        request.POST["server_key"] = "ghost"
+
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None) as mock_build:
+            view.request = request
+            resp = view.post(request, device_id=10)
+
+        mock_build.assert_called_once_with("ghost")
+        assert resp.status_code == 200
+        assert b"no longer configured" in resp.content
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")

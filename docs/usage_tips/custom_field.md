@@ -49,6 +49,13 @@ If the field was not created automatically (fallback): follow these steps to cre
         ```json
         {"production": 42, "staging": 17}
         ```
+      - Out-of-band (OOB) form — when a device is linked to its OOB controller, the per-server value is an object holding the host id and the controller's id/type:
+
+        ```json
+        {"production": {"id": 42, "oob": {"id": 99, "type": "drac"}}}
+        ```
+
+        This shape is written automatically by the OOB flows — see [Out-of-Band Management](oob_management.md). You don't normally edit it by hand.
       - Legacy single-server example (integer) — read-only/deprecated; do not use for new entries:
         ```
         42

@@ -61,6 +61,48 @@ class TestGetMigratedToMarker:
 
         assert get_migrated_to_marker(None, "default") is None
 
+    def test_returns_none_when_device_id_is_bool(self):
+        # bool is a subclass of int; a marker with device_id=True must not be
+        # treated as a valid pk (would otherwise map to device #1).
+        from netbox_librenms_plugin.utils import get_migrated_to_marker
+
+        donor = MagicMock()
+        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": True, "server_key": "default"}}}}
+        assert get_migrated_to_marker(donor, "default") is None
+
+    def test_returns_none_when_device_id_not_positive(self):
+        from netbox_librenms_plugin.utils import get_migrated_to_marker
+
+        for bad in (0, -5):
+            donor = MagicMock()
+            donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": bad, "server_key": "default"}}}}
+            assert get_migrated_to_marker(donor, "default") is None
+
+
+class TestBuildMigratedContext:
+    def test_no_marker_returns_none_pair_without_db_hit(self):
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        donor = MagicMock()
+        donor.cf = {}
+        # A MagicMock would let any attribute query through; assert no Device lookup.
+        with patch("dcim.models.Device") as mock_device:
+            ctx = build_migrated_context(donor, "default")
+        assert ctx == {"migrated_to_marker": None, "migrated_to_winner": None}
+        mock_device.objects.filter.assert_not_called()
+
+    def test_marker_present_resolves_winner(self):
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        donor = MagicMock()
+        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": 42, "server_key": "default"}}}}
+        winner = MagicMock(pk=42)
+        with patch("dcim.models.Device") as mock_device:
+            mock_device.objects.filter.return_value.first.return_value = winner
+            ctx = build_migrated_context(donor, "default")
+        assert ctx["migrated_to_marker"]["device_id"] == 42
+        assert ctx["migrated_to_winner"] is winner
+
 
 # ── helper: _resolve_winner_for_donor ─────────────────────────────────────
 
@@ -164,6 +206,8 @@ class TestMoveInterfaceToWinnerView:
             mock_iface_cls.objects.filter.return_value.exists.return_value = True
             resp = view.post(req, pk=5)
 
+        # Lock in the actual collision query (winner device + same interface name).
+        mock_iface_cls.objects.filter.assert_called_with(device=winner, name=interface.name)
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
 
@@ -174,6 +218,11 @@ class TestMoveInterfaceToWinnerView:
         donor = MagicMock(pk=10)
         winner = MagicMock(pk=20, name="winner")
         interface = MagicMock(pk=5, name="Eth0", device=donor)
+        # The donor interface re-read under the row lock — distinct from the
+        # pre-lock instance, with an explicit (non-MagicMock-name) name so the
+        # collision re-check is asserted against the *locked* name.
+        locked_iface = MagicMock(pk=5, device=donor)
+        locked_iface.name = "Eth0"
 
         with (
             patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
@@ -186,16 +235,80 @@ class TestMoveInterfaceToWinnerView:
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
-            mock_iface_cls.objects.filter.return_value.exists.return_value = False
-            mock_iface_cls.objects.filter.return_value.update.return_value = 1
-            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = []
+            # Distinct querysets so the move assertion is tied to the actual
+            # move query (filter(pk=...)) and not the collision probe
+            # (filter(device=winner, name=...)) — they must not share a mock.
+            collision_qs = MagicMock()
+            collision_qs.exists.return_value = False
+            move_qs = MagicMock()
+            move_qs.update.return_value = 1
+
+            def _filter(*args, **kwargs):
+                # The move is the only objects.filter() call keyed solely on pk.
+                if set(kwargs) == {"pk"}:
+                    return move_qs
+                return collision_qs
+
+            mock_iface_cls.objects.filter.side_effect = _filter
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+            # Locked device rows (donor + winner) are now captured and re-verified
+            # against the migration marker under the lock.
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
+                donor,
+                winner,
+            ]
             resp = view.post(req, pk=5)
 
-        # Conditional update (with device=donor guard) used instead of stale instance.save()
-        mock_iface_cls.objects.filter.assert_called_with(pk=interface.pk, device=donor)
-        mock_iface_cls.objects.filter.return_value.update.assert_called_once_with(device=winner)
+        # Donor interface is locked + re-read by (pk, device=donor) before the move.
+        mock_iface_cls.objects.select_for_update.return_value.filter.assert_called_with(pk=interface.pk, device=donor)
+        # Collision re-check uses the LOCKED interface name on the winner device.
+        mock_iface_cls.objects.filter.assert_any_call(device=winner, name=locked_iface.name)
+        # Row is moved by pk (already locked) via the dedicated move queryset.
+        mock_iface_cls.objects.filter.assert_any_call(pk=interface.pk)
+        move_qs.update.assert_called_once_with(device=winner)
         interface.save.assert_not_called()
+        locked_iface.save.assert_not_called()
         assert resp.headers.get("HX-Refresh") == "true"
+
+    def test_marker_repointed_under_lock_is_rejected(self):
+        """If the donor's _migrated_to is repointed between the unlocked resolve
+        and acquiring the row locks, the move must abort instead of targeting the
+        stale winner."""
+        view = self._setup_view()
+        req = _hx_request({"server_key": "default"})
+
+        donor = MagicMock(pk=10)
+        winner = MagicMock(pk=20)
+        winner.name = "winner"
+        other_winner = MagicMock(pk=99)  # marker now points here
+        interface = MagicMock(pk=5, device=donor)
+        interface.name = "Eth0"
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
+            patch(
+                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
+                # 1st call (pre-lock) → winner; 2nd call (under lock) → a different winner.
+                side_effect=[
+                    (winner, {"device_id": 20, "server_key": "default", "at": "x"}),
+                    (other_winner, {"device_id": 99, "server_key": "default", "at": "y"}),
+                ],
+            ),
+            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
+            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
+        ):
+            mock_iface_cls.objects.filter.return_value.exists.return_value = False
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
+                donor,
+                winner,
+            ]
+            resp = view.post(req, pk=5)
+
+        # Aborts with a conflict toast; the move query is never issued.
+        assert b"django-messages" in resp.content
+        mock_iface_cls.objects.select_for_update.assert_not_called()
 
     def test_perm_gate_short_circuits(self):
         from django.http import HttpResponse
@@ -252,8 +365,15 @@ class TestTransferDeviceIPView:
         req = _hx_request({"server_key": "default"})
 
         oob_ip = MagicMock(address="10.0.0.5/24")
+        # The address must already belong to the winner for the transfer to be valid
+        # (NetBox requires oob_ip on one of the device's own interfaces).
+        oob_ip.assigned_object.device_id = 20
+        # Pre-lock instances drive the pre-checks only; the view must mutate the
+        # *locked* rows fetched inside the transaction.
         donor = MagicMock(pk=10, oob_ip=oob_ip)
         winner = MagicMock(pk=20, name="winner", oob_ip=None)
+        locked_donor = MagicMock(pk=10, oob_ip=oob_ip)
+        locked_winner = MagicMock(pk=20, name="winner", oob_ip=None)
 
         with (
             patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=donor),
@@ -265,18 +385,58 @@ class TestTransferDeviceIPView:
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
-            # Return the already-constructed donor/winner mocks from the locked
-            # queryset so {d.pk: d for d in ...} builds a dict with both PKs.
+            # Locked queryset returns DISTINCT mocks so the test fails if the view
+            # mutates the stale pre-lock instances instead of the locked rows.
             mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
-                donor,
-                winner,
+                locked_donor,
+                locked_winner,
             ]
             resp = view.post(req, pk=10, ip_kind="oob")
-        assert donor.oob_ip is None
-        assert winner.oob_ip is oob_ip
-        winner.save.assert_called_once()
-        donor.save.assert_called_once()
+        # The locked rows are the ones mutated and saved.
+        assert locked_donor.oob_ip is None
+        assert locked_winner.oob_ip is oob_ip
+        locked_winner.save.assert_called_once()
+        locked_donor.save.assert_called_once()
+        # Stale pre-lock instances must be left untouched.
+        donor.save.assert_not_called()
+        winner.save.assert_not_called()
         assert resp.headers.get("HX-Refresh") == "true"
+
+    def test_rejects_when_address_still_attached_to_donor(self):
+        """The transfer only flips the FK (save skips full_clean), so it must refuse to
+        point the winner at an address still assigned to a donor interface — otherwise the
+        winner would own an oob_ip/primary_ip that isn't on one of its interfaces."""
+        view = self._setup_view()
+        req = _hx_request({"server_key": "default"})
+
+        oob_ip = MagicMock(address="10.0.0.5/24")
+        oob_ip.assigned_object.device_id = 10  # still on the DONOR, not the winner
+        donor = MagicMock(pk=10, oob_ip=oob_ip)
+        winner = MagicMock(pk=20, name="winner", oob_ip=None)
+        locked_donor = MagicMock(pk=10, oob_ip=oob_ip)
+        locked_winner = MagicMock(pk=20, name="winner", oob_ip=None)
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=donor),
+            patch(
+                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
+                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
+            ),
+            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
+            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
+        ):
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
+                locked_donor,
+                locked_winner,
+            ]
+            resp = view.post(req, pk=10, ip_kind="oob")
+
+        # Refused (409 surfaced via toast); neither side mutated/saved.
+        assert b"django-messages" in resp.content
+        assert locked_winner.oob_ip is None
+        locked_winner.save.assert_not_called()
+        locked_donor.save.assert_not_called()
 
 
 # ── MoveIPAddressToWinnerView ────────────────────────────────────────────
@@ -334,6 +494,8 @@ class TestMoveIPAddressToWinnerView:
             mock_objects.filter.return_value.exists.return_value = False
             resp = view.post(req, pk=7)
 
+        # Lock in the same-name lookup (winner device + donor interface name).
+        mock_objects.filter.assert_called_with(device=winner, name="Eth0")
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
 
@@ -375,7 +537,16 @@ class TestMoveIPAddressToWinnerView:
             patch("netbox_librenms_plugin.views.sync.migrate.transaction") as mock_tx,
         ):
             mock_iface_objects.filter.return_value.exists.return_value = True
-            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = winner_iface
+
+            # Distinguish the donor re-lock (filter(pk=..., device=donor)) from the
+            # winner lookup (filter(device=winner, name=...)) so the test fails if the
+            # donor-side re-lock is dropped — both previously returned winner_iface.
+            def iface_sfu_filter(*args, **kwargs):
+                qs = MagicMock()
+                qs.first.return_value = winner_iface if "name" in kwargs else donor_iface
+                return qs
+
+            mock_iface_objects.select_for_update.return_value.filter.side_effect = iface_sfu_filter
 
             locked_list = [locked_donor, locked_winner]
             mock_device_objects.select_for_update.return_value.filter.return_value.order_by.return_value = locked_list
@@ -392,3 +563,7 @@ class TestMoveIPAddressToWinnerView:
         assert locked_ip.assigned_object is winner_iface
         locked_ip.save.assert_called_once_with(update_fields=["assigned_object_type", "assigned_object_id"])
         assert resp.status_code == 200
+        # Both the donor re-lock and the winner lookup must have run under the lock.
+        sfu_filter_calls = mock_iface_objects.select_for_update.return_value.filter.call_args_list
+        assert any("pk" in c.kwargs for c in sfu_filter_calls)  # donor re-lock
+        assert any("name" in c.kwargs for c in sfu_filter_calls)  # winner lookup

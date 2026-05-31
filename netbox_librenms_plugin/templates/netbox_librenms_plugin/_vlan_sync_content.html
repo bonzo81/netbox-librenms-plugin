@@ -16,20 +16,27 @@
 </div>
 {% else %}
 
+{# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
+{% if migrated_to_marker %}
+<div>
+{% else %}
 {% with model_name=vlan_sync.object|meta:"model_name" %}
 <form method="post"
       action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}">
 {% endwith %}
+{% endif %}
     {% csrf_token %}
     {% if vlan_sync.server_key %}<input type="hidden" name="server_key" value="{{ vlan_sync.server_key }}">{% endif %}
     <input type="hidden" name="action" value="create_vlans">
 
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>
+            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected VLANs</span>
             </button>
+            {% endif %}
             <small class="text-muted ms-2">
                 <i class="mdi mdi-information-outline"></i> Select a VLAN Group for each row, or leave empty for global VLANs
             </small>
@@ -58,6 +65,10 @@
             </div>
         </div>
     </div>
+{% if migrated_to_marker %}
+</div>
+{% else %}
 </form>
+{% endif %}
 
 {% endif %}

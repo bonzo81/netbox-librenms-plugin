@@ -275,6 +275,34 @@ class LibreNMSAPIMixin:
             self._librenms_api = LibreNMSAPI()
         return self._librenms_api
 
+    def rebind_api_for_server(self, server_key):
+        """Rebind ``self.librenms_api`` to the POST-scoped *server_key*.
+
+        Base refresh views run live LibreNMS lookups through ``self.librenms_api``;
+        in a multi-server setup the active session server can differ from the tab
+        the user is acting on, so the client must be re-scoped to the POSTed key —
+        otherwise data fetched from the session/default server is cached under the
+        posted key (wrong cable/VLAN/inventory set). Mirrors
+        :meth:`SyncIPAddressesView.post`.
+
+        Returns the resolved server key on success, or ``None`` when the posted key
+        is unknown/misconfigured (a stale page or tampered request) — the caller
+        surfaces a user-facing fragment error instead of an unhandled 500.
+        """
+        server_key = (server_key or "").strip()
+        if not server_key:
+            return self.librenms_api.server_key
+        from netbox_librenms_plugin.librenms_api import build_librenms_api
+
+        api = build_librenms_api(server_key)
+        if api is None:
+            return None
+        self._librenms_api = api
+        # Return the *resolved* key (build_librenms_api may normalize e.g. "default"
+        # to a configured name); downstream cache/OOB scoping must use api.server_key
+        # so live fetches and cache writes target the same server.
+        return api.server_key
+
     def get_server_info(self):
         """
         Get information about the currently active LibreNMS server.

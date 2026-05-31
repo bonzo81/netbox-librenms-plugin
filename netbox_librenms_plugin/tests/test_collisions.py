@@ -200,3 +200,18 @@ def test_device_and_vm_with_same_pk_do_not_collide():
         _row(1001, "vm-row", {"existing_device": VirtualMachine(pk=42, name="srv")}),
     ]
     assert detect_bulk_collisions(devices) == []
+
+
+def test_collision_payload_carries_model_name_for_link_targeting():
+    """Each group must expose nb_model_name so the template links to the right object
+    type — a VM collision must not render a dcim:device URL."""
+    vm = VirtualMachine(pk=77, name="vm-host")
+    groups = detect_bulk_collisions(
+        [
+            _row(2000, "row-a", {"existing_device": vm}),
+            _row(2001, "row-b", {"existing_device": vm}),
+        ]
+    )
+    assert len(groups) == 1
+    assert groups[0]["nb_device_pk"] == 77
+    assert groups[0]["nb_model_name"] == "VirtualMachine"

@@ -184,6 +184,78 @@ class TestSyncInterfacesViewGetCachedPortsData:
         view.get_cache_key.assert_called_once_with(mock_obj, "ports", "mykey")
 
 
+class TestInterfaceContextOOBRows:
+    """get_context_data must not let OOB-controller rows hide / falsely-match
+    main-device interfaces in the netbox-only reconciliation set."""
+
+    def _make_view(self, cached_ports):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        view = object.__new__(BaseInterfaceTableView)
+        # get_context_data resolves select_related via self.model.__name__, so a
+        # well-formed view under test must set it (a Device here, matching obj below).
+        view.model = Device
+        # Main device has an "idrac0" interface that LibreNMS only reports on the
+        # OOB-controller side (same name) — it must still surface as netbox-only.
+        iface = MagicMock(id=10, enabled=True, description="")
+        iface.name = "idrac0"  # `name` is reserved in the MagicMock constructor
+        iface.get_absolute_url.return_value = "/iface/10/"
+        view._build_interface_lookup_maps = MagicMock(return_value={"by_name": {"idrac0": iface}, "by_librenms_id": {}})
+        view.get_vlan_groups_for_device = MagicMock(return_value=[])
+        view._build_vlan_lookup_maps = MagicMock(return_value={})
+        view._add_vlan_group_selection = MagicMock()
+        view._add_missing_vlans_info = MagicMock()
+        table = MagicMock()
+        view.get_table = MagicMock(return_value=table)
+        view.get_cache_key = MagicMock(return_value="ports-key")
+        view.get_last_fetched_key = MagicMock(return_value="lf-key")
+        view.get_vlan_overrides_key = MagicMock(return_value="ov-key")
+        return view, cached_ports
+
+    def test_oob_row_does_not_hide_netbox_only_interface(self):
+        view, cached = self._make_view({"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]})
+        obj = MagicMock(id=1, name="host1")
+        obj.virtual_chassis = None
+        req = _make_request()
+
+        def cache_get(key):
+            return cached if key == "ports-key" else ({} if key == "ov-key" else None)
+
+        with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
+            mock_cache.get.side_effect = cache_get
+            mock_cache.ttl.return_value = None
+            ctx = view.get_context_data(req, obj, "ifName", "default")
+
+        names = {i["name"] for i in ctx["netbox_only_interfaces"]}
+        assert "idrac0" in names  # OOB row must not suppress the main-device interface
+
+    def test_fresh_data_renders_without_reading_cache(self):
+        """On the OOB-ports-fetch-failure path the (partial) cache is deleted, so
+        get_context_data must render from the in-memory fresh_data snapshot instead of
+        reading the now-empty cache — otherwise the table renders empty under a
+        "showing host interfaces" banner."""
+        view, fresh = self._make_view({"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]})
+        obj = MagicMock(id=1, name="host1")
+        obj.virtual_chassis = None
+        req = _make_request()
+
+        with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
+            # Simulate the deleted cache: every cache.get returns None.
+            mock_cache.get.return_value = None
+            mock_cache.ttl.return_value = None
+            ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)
+
+        # The ports cache key must never be read — fresh_data short-circuits it.
+        assert all(not (c.args and c.args[0] == "ports-key") for c in mock_cache.get.call_args_list), (
+            "ports cache key was read despite fresh_data override"
+        )
+        # The fresh snapshot was still processed (the OOB row drove dedup) and a table built.
+        assert "table" in ctx
+        assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
+
+
 # ===========================================================================
 # SyncInterfacesView.post — full flows
 # ===========================================================================

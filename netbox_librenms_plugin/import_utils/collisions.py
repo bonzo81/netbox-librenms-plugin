@@ -127,7 +127,7 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
             bucket_key = (model_name, nb_pk)
             bucket = by_nb_pk.setdefault(
                 bucket_key,
-                {"nb_device_pk": nb_pk, "nb_device_name": nb_name, "_rows": {}},
+                {"nb_device_pk": nb_pk, "nb_device_name": nb_name, "nb_model_name": model_name, "_rows": {}},
             )
             # Keep the first non-default name we see — rows often disagree
             # on the cached display string, but the underlying pk is the
@@ -153,6 +153,9 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
             {
                 "nb_device_pk": bucket["nb_device_pk"],
                 "nb_device_name": bucket["nb_device_name"],
+                # Class name ("Device"/"VirtualMachine") so the template links to the right
+                # object type — a VM collision must not render a dcim:device URL.
+                "nb_model_name": bucket["nb_model_name"],
                 "librenms_rows": [
                     {
                         "device_id": r["device_id"],

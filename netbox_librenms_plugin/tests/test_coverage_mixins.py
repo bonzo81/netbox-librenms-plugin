@@ -19,6 +19,53 @@ from unittest.mock import MagicMock, patch
 # =============================================================================
 
 
+class TestLibreNMSAPIMixinRebindApiForServer:
+    """LibreNMSAPIMixin.rebind_api_for_server: POST-scoped API client for base views."""
+
+    def _mixin(self, session_key="default"):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m._librenms_api = MagicMock(server_key=session_key)
+        return m
+
+    def test_empty_key_keeps_session_api(self):
+        """No POSTed key → returns the session server key and does not rebind."""
+        m = self._mixin("default")
+        original = m._librenms_api
+        assert m.rebind_api_for_server("") == "default"
+        assert m.rebind_api_for_server(None) == "default"
+        assert m._librenms_api is original  # unchanged
+
+    def test_valid_key_rebinds_and_returns_key(self):
+        m = self._mixin("default")
+        new_api = MagicMock(server_key="prod")
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=new_api) as mock_build:
+            result = m.rebind_api_for_server("prod")
+        mock_build.assert_called_once_with("prod")
+        assert result == "prod"
+        assert m._librenms_api is new_api  # rebound
+
+    def test_returns_resolved_key_not_raw_post_value(self):
+        """build_librenms_api may normalize the posted key (e.g. "default" → a configured
+        name); the resolved api.server_key must be returned so cache/OOB scoping stays aligned
+        with the server actually fetched from."""
+        m = self._mixin("default")
+        resolved_api = MagicMock(server_key="primary")
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=resolved_api):
+            result = m.rebind_api_for_server("default")
+        assert result == "primary"  # resolved key, not the raw posted "default"
+        assert m._librenms_api is resolved_api
+
+    def test_unknown_key_returns_none_without_rebinding(self):
+        """A stale/tampered key (build returns None) → None, API left untouched."""
+        m = self._mixin("default")
+        original = m._librenms_api
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            assert m.rebind_api_for_server("ghost") is None
+        assert m._librenms_api is original
+
+
 class TestLibreNMSAPIMixinGetContextData:
     """Tests for LibreNMSAPIMixin.get_context_data (lines 275-282)."""
 

@@ -4,19 +4,26 @@
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
 
+{# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
+{% if migrated_to_marker %}
+<div>
+{% else %}
 <form method="post"
     action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
+{% endif %}
     {% endwith %}
     {% csrf_token %}
     {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
     {% block table_actions %}
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>
+            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected Interfaces</span>
             </button>
+            {% endif %}
             <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
                 <i class="mdi mdi-help-circle"></i> info
             </a>
@@ -198,7 +205,11 @@
             </div>
         </div>
     </div>
+{% if migrated_to_marker %}
+</div>
+{% else %}
 </form>
+{% endif %}
 {% else %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">
@@ -338,7 +349,7 @@
                                         {% if migrated_to_winner %}
                                         <button type="button"
                                             class="btn btn-sm btn-outline-warning"
-                                            hx-post="{% url 'plugins:netbox_librenms_plugin:interface_move_to_winner' pk=interface.pk %}"
+                                            hx-post="{% url 'plugins:netbox_librenms_plugin:interface_move_to_winner' pk=interface.id %}"
                                             hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
                                             hx-vals='{"server_key": "{{ migrated_to_marker.server_key }}"}'
                                             hx-confirm="Move interface '{{ interface.name }}' to {{ migrated_to_winner.name }}?"

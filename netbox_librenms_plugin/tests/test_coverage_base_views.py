@@ -80,6 +80,65 @@ class TestBaseCableTableViewGetLinksData:
 
         assert result is None
 
+    def test_get_links_data_records_fetch_error_for_caller(self):
+        """A real fetch failure must record _links_fetch_error so the caller can surface the
+        actual error instead of the generic 'No links found' message; a no-links result
+        (empty list) must leave it None."""
+        view = self._make_view()
+        obj = _mock_obj()
+
+        # Failure → error recorded.
+        view._librenms_api.get_device_links.return_value = (False, {"error": "auth failed"})
+        with patch.object(view, "get_ports_data", return_value={"ports": []}):
+            assert view.get_links_data(obj) is None
+        assert view._links_fetch_error == "auth failed"
+
+    def test_get_links_data_treats_non_dict_payload_as_failure(self):
+        """get_device_links() returns the raw JSON body, so a 200 can yield a list/null/
+        scalar. That must be treated as a fetch failure, not fall through to data.get('links')
+        and raise a 500."""
+        view = self._make_view()
+        obj = _mock_obj()
+
+        for bad_payload in ([{"local_port_id": 1}], None, "oops"):
+            view._librenms_api.get_device_links.return_value = (True, bad_payload)
+            with patch.object(view, "get_ports_data", return_value={"ports": []}):
+                assert view.get_links_data(obj) is None
+            assert view._links_fetch_error is not None
+
+    def test_get_links_data_treats_dict_with_malformed_links_as_failure(self):
+        """A dict body whose 'links' is null/object (not a list) must also be a fetch
+        failure — otherwise `for link in links` crashes or iterates dict keys."""
+        view = self._make_view()
+        obj = _mock_obj()
+
+        for bad_links in (None, {}, {"a": 1}, "nope"):
+            view._librenms_api.get_device_links.return_value = (True, {"links": bad_links})
+            with patch.object(view, "get_ports_data", return_value={"ports": []}):
+                assert view.get_links_data(obj) is None
+            assert view._links_fetch_error is not None
+
+        # Success with no links → no error recorded (reset per call).
+        view._librenms_api.get_device_links.return_value = (True, {"links": []})
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+        ):
+            view.get_links_data(obj)
+        assert view._links_fetch_error is None
+
+    def test_get_links_data_treats_status_error_payload_as_failure(self):
+        """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...}
+        must be treated as a fetch failure (with its message), not silently fall through
+        to 'No links found'."""
+        view = self._make_view()
+        obj = _mock_obj()
+        view._librenms_api.get_device_links.return_value = (True, {"status": "error", "message": "device unreachable"})
+        with patch.object(view, "get_ports_data", return_value={"ports": []}):
+            result = view.get_links_data(obj)
+        assert result is None
+        assert view._links_fetch_error == "device unreachable"
+
     def test_get_links_data_success_returns_link_list(self):
         """Successful API call returns formatted link list."""
         view = self._make_view()
@@ -198,6 +257,9 @@ class TestBaseCableTableViewGetLinksData:
         # Should use ifDescr "Management0", not raw LLDP value "eth0"
         assert oob_entry["local_port"] == "Management0"
         assert oob_entry["remote_device"] == "peer-b"
+        # OOB-side fetches must target the OOB device id, not the main device.
+        view._librenms_api.get_device_links.assert_any_call(oob_mock["id"])
+        view._librenms_api.get_ports.assert_called_once_with(oob_mock["id"])
 
     def test_get_links_data_oob_falls_back_to_raw_name_on_port_fetch_failure(self):
         """When OOB port fetch fails, falls back to raw local_port from LLDP data."""
@@ -238,6 +300,58 @@ class TestBaseCableTableViewGetLinksData:
         assert result is not None
         oob_entry = result[0]
         assert oob_entry["local_port"] == "eth0"  # Raw fallback
+        # OOB-side fetches must target the OOB device id even on the fallback path.
+        view._librenms_api.get_device_links.assert_any_call(oob_mock["id"])
+        view._librenms_api.get_ports.assert_called_once_with(oob_mock["id"])
+
+    def test_get_links_data_oob_status_error_payload_is_failure(self):
+        """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...}
+        from the OOB controller must flag _oob_links_fetch_failed and append no OOB rows
+        (the warning path in post()), not silently drop them."""
+        view = self._make_view()
+        view._librenms_api.get_device_links.side_effect = [
+            (True, {"links": []}),  # main: no links
+            (True, {"status": "error", "message": "oob unreachable"}),  # OOB: 200 error body
+        ]
+        obj = _mock_obj()
+        oob_mock = {"id": 7}
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=oob_mock),
+        ):
+            result = view.get_links_data(obj)
+
+        # No OOB rows appended; failure flagged for post() to warn; no OOB port fetch attempted.
+        assert not any(row.get("_source") == "oob" for row in (result or []))
+        assert view._oob_links_fetch_failed is True
+        view._librenms_api.get_ports.assert_not_called()
+
+    def test_get_links_data_oob_malformed_links_is_failure(self):
+        """A dict OOB body whose 'links' is null/object (not a list) must flag
+        _oob_links_fetch_failed and append no OOB rows, not crash on iteration."""
+        view = self._make_view()
+        view._librenms_api.get_device_links.side_effect = [
+            (True, {"links": [{"local_port_id": 1, "remote_hostname": "sw1"}]}),  # main: one link
+            (True, {"links": None}),  # OOB: dict body, malformed links
+        ]
+        obj = _mock_obj()
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value={"id": 7}),
+        ):
+            view._librenms_api.get_ports.return_value = (True, {"ports": []})
+            result = view.get_links_data(obj)
+
+        # Main link preserved; OOB failure flagged; no OOB rows.
+        assert any(row.get("_source") == "main" for row in (result or []))
+        assert not any(row.get("_source") == "oob" for row in (result or []))
+        assert view._oob_links_fetch_failed is True
 
 
 class TestBaseCableTableViewGetDeviceByIdOrName:
@@ -920,6 +1034,77 @@ class TestBaseInterfaceTableViewBasics:
         obj.primary_ip = None
         result = view.get_ip_address(obj)
         assert result is None
+
+    def test_post_rebinds_api_to_posted_server_before_fetch(self):
+        """The POST must rebind the API to the posted server BEFORE get_librenms_id/get_ports,
+        so live fetches and cache writes target the same server (no cross-server cache write)."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        view = object.__new__(BaseInterfaceTableView)
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        # Use the real librenms_api property (reads self._librenms_api) so rebind_api_for_server
+        # can actually swap the client post() uses — otherwise the test can't tell whether the
+        # rebind took effect or "prod" was merely threaded through bookkeeping.
+        session_api = MagicMock(server_key="default")
+        view._librenms_api = session_api
+        rebound_api = MagicMock(server_key="prod")
+        rebound_api.get_librenms_id.return_value = None  # short-circuit after rebind
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "prod"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api) as mock_build,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="name"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect", return_value="redir") as mock_redirect,
+        ):
+            view.get_redirect_url = MagicMock(return_value="/back/")
+            result = view.post(req, pk=1)
+
+        # Rebind happens with the posted key, and the id lookup runs on the REBOUND client,
+        # never the session one — proving the rebind swapped the client post() uses.
+        mock_build.assert_called_once_with("prod")
+        rebound_api.get_librenms_id.assert_called_once_with(obj)
+        session_api.get_librenms_id.assert_not_called()
+        assert result == "redir"
+        mock_redirect.assert_called_once()
+
+    def test_post_stale_server_key_redirects(self):
+        """A posted server_key that no longer resolves (build returns None) → error + redirect,
+        not an unhandled 500."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        view = object.__new__(BaseInterfaceTableView)
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        # Real property again, so a None rebind result leaves self._librenms_api untouched
+        # and we can assert the session client was never queried.
+        session_api = MagicMock(server_key="default")
+        view._librenms_api = session_api
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "ghost"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="name"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect", return_value="redir") as mock_redirect,
+        ):
+            view.get_redirect_url = MagicMock(return_value="/back/")
+            result = view.post(req, pk=1)
+
+        # Never reached the live id lookup; surfaced an error and redirected.
+        session_api.get_librenms_id.assert_not_called()
+        mock_messages.error.assert_called_once()
+        assert result == "redir"
+        mock_redirect.assert_called_once()
 
     def test_get_select_related_field_for_vm(self):
         """Returns 'virtual_machine' for VirtualMachine model."""
@@ -2379,38 +2564,49 @@ class TestBaseIPAddressTableViewFlagManagementIp:
         view._librenms_api.server_key = "default"
         return view
 
+    # ── _flag_management_ip: pure flagging from a resolved mgmt IP (no API call) ──
+
     def test_flags_matching_entry(self):
         view = self._make_view()
-        view._librenms_api.get_device_info.return_value = (True, {"ip": "10.0.0.1"})
         data = [{"ip_address": "10.0.0.5"}, {"ip_address": "10.0.0.1"}]
-        view._flag_management_ip(data)
+        view._flag_management_ip(data, "10.0.0.1")
         assert data[0].get("is_mgmt_ip") is None
         assert data[1].get("is_mgmt_ip") is True
+        # Flagging must never hit the API — the mgmt IP is resolved/cached upstream.
+        view._librenms_api.get_device_info.assert_not_called()
 
     def test_no_flag_when_no_match(self):
         view = self._make_view()
-        view._librenms_api.get_device_info.return_value = (True, {"ip": "192.0.2.9"})
         data = [{"ip_address": "10.0.0.1"}]
-        view._flag_management_ip(data)
-        assert data[0].get("is_mgmt_ip") is None
-
-    def test_no_flag_when_no_librenms_id(self):
-        view = self._make_view(librenms_id=None)
-        data = [{"ip_address": "10.0.0.1"}]
-        view._flag_management_ip(data)
-        view._librenms_api.get_device_info.assert_not_called()
-        assert data[0].get("is_mgmt_ip") is None
-
-    def test_no_flag_when_device_info_fails(self):
-        view = self._make_view()
-        view._librenms_api.get_device_info.return_value = (False, None)
-        data = [{"ip_address": "10.0.0.1"}]
-        view._flag_management_ip(data)
+        view._flag_management_ip(data, "192.0.2.9")
         assert data[0].get("is_mgmt_ip") is None
 
     def test_no_flag_when_mgmt_ip_blank(self):
         view = self._make_view()
-        view._librenms_api.get_device_info.return_value = (True, {"ip": ""})
         data = [{"ip_address": "10.0.0.1"}]
-        view._flag_management_ip(data)
+        view._flag_management_ip(data, "")
         assert data[0].get("is_mgmt_ip") is None
+
+    # ── _resolve_management_ip: the single live LibreNMS lookup (fetch path only) ──
+
+    def test_resolve_returns_mgmt_ip(self):
+        view = self._make_view()
+        view._librenms_api.get_device_info.return_value = (True, {"ip": "10.0.0.1"})
+        assert view._resolve_management_ip() == "10.0.0.1"
+        # Must look up the management IP for *this* device, not some other ID.
+        view._librenms_api.get_device_info.assert_called_once_with(view.librenms_id)
+
+    def test_resolve_blank_when_no_librenms_id(self):
+        view = self._make_view(librenms_id=None)
+        assert view._resolve_management_ip() == ""
+        view._librenms_api.get_device_info.assert_not_called()
+
+    def test_resolve_blank_when_device_info_fails(self):
+        view = self._make_view()
+        view._librenms_api.get_device_info.return_value = (False, None)
+        assert view._resolve_management_ip() == ""
+
+    def test_resolve_blank_when_mgmt_ip_empty(self):
+        view = self._make_view()
+        view._librenms_api.get_device_info.return_value = (True, {"ip": ""})
+        assert view._resolve_management_ip() == ""

@@ -167,8 +167,18 @@ def apply_oob_detection_result(
     """
     result["serial_action"] = serial_action
     result["oob_candidate"] = oob_candidate
-    result["promote_to_host"] = promote_to_host
+    # Honor the "absent otherwise" contract: only carry promote_to_host when a real
+    # promotion target exists, clearing any stale key rather than storing a None sentinel.
+    if promote_to_host is None:
+        result.pop("promote_to_host", None)
+    else:
+        result["promote_to_host"] = promote_to_host
     result["serial_role_choice_available"] = serial_role_choice_available
+    # Clear merge-only state: this is the non-merge path, so if the same result
+    # dict was previously marked a merge candidate, the stale merge UI data must
+    # not linger (apply_merge_candidates is the only writer of merge_candidates).
+    result["merge_candidates"] = None
+    result.setdefault("warnings", [])
     for warning in warnings or []:
         result["warnings"].append(warning)
 
@@ -203,8 +213,10 @@ def apply_merge_candidates(
     }
     result["can_import"] = False
     result["oob_candidate"] = None
-    result["promote_to_host"] = None
+    # "absent otherwise" contract — the merge path has no promotion target.
+    result.pop("promote_to_host", None)
     result["serial_role_choice_available"] = False
+    result.setdefault("warnings", [])
     result["warnings"].append(warning)
 
 

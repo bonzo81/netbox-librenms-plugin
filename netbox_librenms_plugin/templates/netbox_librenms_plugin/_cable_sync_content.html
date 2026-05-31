@@ -3,16 +3,23 @@
 
 <!-- Cable Sync Table -->
 {% if cable_sync.table %}
+{# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
+{% if migrated_to_marker %}
+<div>
+{% else %}
 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}">
+{% endif %}
     {% csrf_token %}
     {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
     <input type="hidden" id="selected_port" name="select" value="">
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>
+            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected Cables</span>
             </button>
+            {% endif %}
             <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#cableSyncHelpModal">
                 <i class="mdi mdi-help-circle"></i> info
             </a>
@@ -70,7 +77,11 @@
             </div>
         </div>
     </div>
+{% if migrated_to_marker %}
+</div>
+{% else %}
 </form>
+{% endif %}
 {% else %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">

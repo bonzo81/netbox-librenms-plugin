@@ -915,6 +915,35 @@ class TestSyncIPAddressesViewPermissionDenied:
         assert result.status_code == 403
 
 
+class TestSyncIPAddressesViewUnknownServerKey:
+    def test_unknown_server_key_errors_without_500(self):
+        """A stale/tampered POST server_key must surface a user-facing error +
+        redirect, not raise (LibreNMSAPI raises KeyError for unknown keys)."""
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        view = object.__new__(SyncIPAddressesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        mock_device = MagicMock(pk=1)
+        mock_api = MagicMock(server_key="default")
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None) as mock_build,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msgs,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
+            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+        ):
+            view.request = _make_request(post_data={"server_key": "ghost", "select": ["10.0.0.1/24"]})
+            result = view.post(view.request, object_type="device", pk=1)
+
+        mock_build.assert_called_once_with("ghost")
+        mock_msgs.error.assert_called_once()
+        # Must redirect back to the IP-sync tab (resolved server_key), not just "somewhere".
+        mock_redirect.assert_called_once_with("/sync/?tab=ipaddresses&server_key=default")
+        assert result is mock_redirect.return_value
+
+
 class TestSyncIPAddressesViewCacheMiss:
     def test_cache_miss_redirects(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView

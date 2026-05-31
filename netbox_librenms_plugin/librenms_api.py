@@ -12,6 +12,22 @@ EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device li
 logger = logging.getLogger(__name__)
 
 
+def build_librenms_api(server_key):
+    """Return a :class:`LibreNMSAPI` for *server_key*, or ``None`` when the key is
+    unknown or the server is misconfigured.
+
+    ``LibreNMSAPI(server_key=...)`` raises ``KeyError`` for an unknown non-default
+    key and ``ValueError`` when the URL/token is missing. Views take ``server_key``
+    from request POST, where a stale page or tampered request can carry a key that
+    no longer exists — returning ``None`` lets the caller surface a user-facing
+    error instead of an unhandled 500.
+    """
+    try:
+        return LibreNMSAPI(server_key=server_key)
+    except (KeyError, ValueError):
+        return None
+
+
 class LibreNMSAPI:
     """
     Client to interact with the LibreNMS API and retrieve interface data for devices.
@@ -65,8 +81,17 @@ class LibreNMSAPI:
         if servers_config and isinstance(servers_config, dict) and server_key in servers_config:
             # Multi-server configuration
             config = servers_config[server_key]
-            self.librenms_url = config["librenms_url"]
-            self.api_token = config["api_token"]
+            # A structurally invalid entry (None / non-mapping) would raise TypeError on
+            # the dict access below and bypass the ValueError contract that callers like
+            # build_librenms_api() rely on to fall back to None. Fail with ValueError, and
+            # read keys with .get() so a missing url/token is caught by the check below.
+            if not isinstance(config, dict):
+                raise ValueError(
+                    f"LibreNMS server '{server_key}' is misconfigured "
+                    f"(expected a mapping, got {type(config).__name__})."
+                )
+            self.librenms_url = config.get("librenms_url")
+            self.api_token = config.get("api_token")
             self.cache_timeout = config.get("cache_timeout", 300)
             self.verify_ssl = config.get("verify_ssl", True)
         else:
@@ -160,6 +185,12 @@ class LibreNMSAPI:
             # Multi-server configuration
             result = {}
             for key, config in servers_config.items():
+                # Skip structurally invalid entries (e.g. {"prod": None}); mirrors the
+                # mapping guard in __init__ so a malformed config can't crash the server
+                # selector here with AttributeError on config.get().
+                if not isinstance(config, dict):
+                    logger.warning("Skipping malformed LibreNMS server config %r (expected a mapping).", key)
+                    continue
                 display_name = config.get("display_name", key)
                 result[key] = display_name
             return result

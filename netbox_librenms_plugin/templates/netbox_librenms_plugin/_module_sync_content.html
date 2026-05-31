@@ -16,7 +16,8 @@
     {% endif %}
 </div>
 
-{% if has_write_permission %}
+{# Migrated donors must not install: drop the whole form (not just the button) so install_selected isn't a live POST target / wired JS handler in migrated mode — matching the other sync-content templates. #}
+{% if has_write_permission and not migrated_to_marker %}
 {# Separate form for Install Selected — uses JS to collect checked rows before submit #}
 <form id="install-selected-form" method="post"
     action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}">

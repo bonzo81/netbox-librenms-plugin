@@ -22,10 +22,16 @@
     <div class="border border-danger rounded-3 p-3 mb-3">
       <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
         <span class="badge bg-danger">Collision</span>
-        <span class="text-muted small">NetBox device:</span>
-        <a href="{% url 'dcim:device' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
-          {{ group.nb_device_name }}
-        </a>
+        <span class="text-muted small">NetBox {% if group.nb_model_name == 'VirtualMachine' %}VM{% else %}device{% endif %}:</span>
+        {% if group.nb_model_name == 'VirtualMachine' %}
+          <a href="{% url 'virtualization:virtualmachine' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
+            {{ group.nb_device_name }}
+          </a>
+        {% else %}
+          <a href="{% url 'dcim:device' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
+            {{ group.nb_device_name }}
+          </a>
+        {% endif %}
         <span class="text-muted small">(pk {{ group.nb_device_pk }})</span>
       </div>
       <div class="text-muted small mb-1">Selected LibreNMS rows targeting this device:</div>

@@ -90,6 +90,30 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "primary"
         assert api.librenms_url == "https://primary.example.com"
 
+    def test_init_non_mapping_server_config_raises_valueerror(self, mock_librenms_config):
+        """A structurally invalid (non-mapping) server entry must raise ValueError, not
+        leak a TypeError from the dict access — so build_librenms_api falls back to None."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"badserver": None}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, build_librenms_api
+
+        with pytest.raises(ValueError, match="misconfigured"):
+            LibreNMSAPI(server_key="badserver")
+        # build_librenms_api must convert that into a clean None, not a 500.
+        assert build_librenms_api("badserver") is None
+
+    def test_get_available_servers_skips_malformed_entry(self, mock_librenms_config):
+        """A non-mapping server entry (e.g. {"prod": None}) must be skipped, not crash the
+        server selector with AttributeError on config.get() — mirrors the __init__ guard."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"good": {"display_name": "Good"}, "bad": None}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        result = LibreNMSAPI.get_available_servers()
+        assert result == {"good": "Good"}
+
 
 # =============================================================================
 # Test Class 2: Connection Testing (4 tests)

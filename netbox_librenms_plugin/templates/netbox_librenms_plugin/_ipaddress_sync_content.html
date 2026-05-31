@@ -3,18 +3,25 @@
 
 <!-- IP Address Sync Table -->
 {% if ip_sync.table %}
+{# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=ip_sync.object|meta:"model_name" %}
+{% if migrated_to_marker %}
+<div>
+{% else %}
 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}">
+{% endif %}
 {% endwith %}
     {% csrf_token %}
     {% if ip_sync.server_key %}<input type="hidden" name="server_key" value="{{ ip_sync.server_key }}">{% endif %}
     <input type="hidden" id="selected_ip" name="select" value="">
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div class="d-flex align-items-center gap-3">
+            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected IP Addresses</span>
             </button>
+            {% endif %}
             <div class="form-check form-switch mb-0">
                 <input type="hidden" name="set-primary-ip-toggle" value="off">
                 <input class="form-check-input" type="checkbox" id="set-primary-ip-toggle-cb"
@@ -83,7 +90,11 @@
             </div>
         </div>
     </div>
+{% if migrated_to_marker %}
+</div>
+{% else %}
 </form>
+{% endif %}
 <script>
   // "Set Primary IP" toggle behaviour:
   //  - persist the choice as a user preference (remembered across visits)

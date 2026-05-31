@@ -91,6 +91,20 @@ class TestLibreNMSIdQ:
         base_only = Q(custom_field_data__librenms_id__default=10) | Q(custom_field_data__librenms_id=10)
         assert str(result) != str(base_only)
 
+    def test_dict_form_paths_included(self):
+        """Dict-form devices ({server_key: {"id": N, "oob": {...}}}) must resolve too:
+        the Q must query the __id and __oob__id JSON paths, not just the scalar path."""
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+
+        result_str = str(_librenms_id_q("default", 42))
+        assert "custom_field_data__librenms_id__default__id" in result_str
+        assert "custom_field_data__librenms_id__default__oob__id" in result_str
+        # The JSON string variant must be present on BOTH dict paths (JSON may store the
+        # id as "42"), not merely the integer form — assert the quoted value on each path
+        # so this fails if only the int-form predicates are emitted.
+        assert "custom_field_data__librenms_id__default__id', '42'" in result_str
+        assert "custom_field_data__librenms_id__default__oob__id', '42'" in result_str
+
     def test_non_int_string_value_except_caught(self):
         """Non-convertible string 'abc' → ValueError caught, base Q returned (lines 42-43)."""
         from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
@@ -1106,6 +1120,89 @@ class TestPrepareContextInterfaceNameFieldNone:
 
         mock_gif.assert_called_once_with(request)
         assert result is None  # returns None because cache miss
+
+    def test_cached_render_reuses_cached_ports_without_live_calls(self):
+        """A warm-cache render must enrich from the cached ports_by_id map and never call
+        get_port_by_id(), so the IP tab keeps working when LibreNMS is unavailable."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        cached_payload = {
+            "ip_addresses": [{"ip_address": "10.0.0.5", "prefix_length": 32, "port_id": 5}],
+            "mgmt_ip": "10.0.0.1",
+            "ports_by_id": {5: {"ifName": "Gi0/1"}},
+        }
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch.object(
+                view,
+                "_prefetch_netbox_data",
+                return_value={
+                    "interfaces_by_librenms_id": {},
+                    "interfaces_by_name": {},
+                    "all_interfaces": [],
+                    "device": obj,
+                    "ip_addresses_map": {},
+                    "vrfs": [],
+                },
+            ),
+            patch.object(view, "get_table", return_value=MagicMock()) as mock_get_table,
+        ):
+            mock_cache.get.return_value = cached_payload
+            mock_cache.ttl.return_value = 100
+            view._prepare_context(request, obj, "ifName", fetch_fresh=False)
+
+        view._librenms_api.get_port_by_id.assert_not_called()
+        mock_get_table.assert_called_once()
+        # The cached port name must actually reach the rendered rows — i.e. enrich_ip_data
+        # used ports_by_id to set interface_name. Asserting only "no live calls" would still
+        # pass if a regression rendered the row without the cached name.
+        enriched_rows = mock_get_table.call_args.args[0]
+        assert enriched_rows[0]["interface_name"] == "Gi0/1"
+
+    def test_cache_hit_backfills_missing_ports_by_id(self):
+        """A pre-upgrade cache entry without ports_by_id: enrich rebuilds the port map via
+        live get_port_by_id(), and we backfill it into cache under the *remaining* TTL so
+        subsequent warm renders stop re-hitting LibreNMS until the entry would have expired."""
+        view = self._make_view()
+        view._librenms_api.cache_timeout = 300
+        view._librenms_api.get_port_by_id.return_value = (True, {"port": [{"ifName": "Gi0/1"}]})
+        obj = _mock_obj()
+        request = _mock_request()
+
+        cached_payload = {  # NO ports_by_id key → pre-upgrade entry
+            "ip_addresses": [{"ip_address": "10.0.0.5", "prefix_length": 32, "port_id": 5}],
+            "mgmt_ip": "10.0.0.1",
+        }
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch.object(
+                view,
+                "_prefetch_netbox_data",
+                return_value={
+                    "interfaces_by_librenms_id": {},
+                    "interfaces_by_name": {},
+                    "all_interfaces": [],
+                    "device": obj,
+                    "ip_addresses_map": {},
+                    "vrfs": [],
+                },
+            ),
+            patch.object(view, "get_table", return_value=MagicMock()),
+        ):
+            mock_cache.get.return_value = cached_payload
+            mock_cache.ttl.return_value = 120
+            view._prepare_context(request, obj, "ifName", fetch_fresh=False)
+
+        # The rebuilt port map is written back under the remaining TTL (not the full timeout).
+        mock_cache.set.assert_called_once()
+        args, kwargs = mock_cache.set.call_args
+        assert args[0] == "ck"
+        assert args[1]["ports_by_id"] == {5: {"ifName": "Gi0/1"}}
+        assert kwargs["timeout"] == 120
 
 
 # =============================================================================

@@ -398,6 +398,22 @@ class TestApplyOobDetectionResult:
         )
         assert result["serial_action"] == "oob_candidate"
 
+    def test_clears_stale_merge_candidates(self):
+        """Non-merge path must drop merge-only state so a reused dict can't keep
+        stale merge UI data from a prior evaluation."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        result["merge_candidates"] = {"host_named": {"pk": 1}, "oob_named": {"pk": 2}}
+        apply_oob_detection_result(
+            result,
+            serial_action="oob_candidate",
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        assert result["merge_candidates"] is None
+
     def test_sets_oob_candidate_when_provided(self):
         from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
 
@@ -428,6 +444,25 @@ class TestApplyOobDetectionResult:
         # oob_candidate=None means "no candidate" -- field must be cleared to None
         # so stale values from a previous call do not persist.
         assert result["oob_candidate"] is None
+
+    def test_clears_promote_to_host_when_none(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        # Seed a stale promote_to_host so a regression that forgot to clear it (or stored
+        # a None sentinel instead of removing the key) would be caught here.
+        stale = {"existing_libre_id": 9, "existing_oob_type": "idrac", "existing_device": object()}
+        result = self._base_result()
+        result["promote_to_host"] = stale
+        apply_oob_detection_result(
+            result,
+            serial_action="link",
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        # promote_to_host=None must clear the field entirely (the "absent otherwise"
+        # contract), not preserve the stale value nor store a None sentinel.
+        assert "promote_to_host" not in result
 
     def test_sets_promote_to_host_when_provided(self):
         from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result

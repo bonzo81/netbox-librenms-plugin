@@ -8,9 +8,13 @@ from django.core.cache import cache
 
 from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
 from ..librenms_api import LibreNMSAPI
-from ..utils import find_by_librenms_id
+from ..utils import coerce_librenms_id, find_by_librenms_id, get_librenms_oob
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
-from .device_operations import import_single_device, validate_device_for_import
+from .device_operations import (
+    _describe_existing_librenms_link,
+    import_single_device,
+    validate_device_for_import,
+)
 from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
@@ -334,6 +338,52 @@ def bulk_import_devices(
     )
 
 
+def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, server_key: str) -> None:
+    """Re-derive the LibreNMS-id linkage fields for a refreshed *device*.
+
+    Cheap and DB-only (reads the device's ``librenms_id`` custom field) — no
+    LibreNMS API call — so a cached import row picks up OOB-link / host-link
+    changes made in NetBox since the row was cached. Without this, the cache-hit
+    path keeps the stale ``existing_match_type``/badge (e.g. an OOB controller
+    linked after caching still rendered as a conflict until the cache expired).
+
+    Mirrors ``validate_device_for_import``'s linkage logic: always refreshes
+    ``existing_librenms_link``, and when the device is matched to the scanned
+    LibreNMS id it classifies the match as ``librenms_oob`` (matched via the OOB
+    sub-key) or ``librenms_id`` (matched as the host).
+    """
+    link = _describe_existing_librenms_link(device, server_key)
+    validation["existing_librenms_link"] = link
+    # Only re-classify librenms-id-based matches; leave serial/hostname/primary_ip
+    # match types untouched.
+    if validation.get("existing_match_type") in ("librenms_id", "librenms_oob"):
+        scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
+        oob = get_librenms_oob(device, server_key=server_key)
+        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
+        if scanned_id is not None and oob_id is not None and oob_id == scanned_id:
+            validation["existing_match_type"] = "librenms_oob"
+        elif scanned_id is not None and link["host_id"] is not None and link["host_id"] == scanned_id:
+            # Host id still matches the scanned device — a genuine host-side link.
+            validation["existing_match_type"] = "librenms_id"
+        else:
+            # Linkage changed since caching: neither the host id nor the OOB id matches
+            # the scanned device anymore, so don't keep a stale librenms_id badge.
+            validation["existing_match_type"] = None
+
+
+def _clear_existing_match_derived_fields(validation: dict) -> None:
+    """Reset the fields produced from an existing match so stale serial/OOB/merge/promote
+    actions don't linger after that match is dropped (device deleted, or librenms/OOB link
+    removed since caching). The subsequent fresh lookup re-populates them if it re-matches.
+    """
+    validation["serial_action"] = None
+    validation["oob_candidate"] = None
+    validation["serial_role_choice_available"] = False
+    # promote_to_host follows the "absent otherwise" contract (see apply_oob_detection_result).
+    validation.pop("promote_to_host", None)
+    validation.pop("merge_candidates", None)
+
+
 def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:
     """
     Refresh existing_device from DB to pick up changes made in NetBox since caching.
@@ -354,26 +404,53 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
             if refreshed:
                 validation["existing_device"] = refreshed
-                if hasattr(refreshed, "role") and refreshed.role:
-                    apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
-                elif not validation.get("import_as_vm"):
-                    validation["device_role"] = {
-                        "found": False,
-                        "role": None,
-                        "available_roles": validation.get("device_role", {}).get("available_roles", []),
-                    }
-                    remove_validation_issue(validation, "role")
-                recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
-                # Re-assert non-importable state: recalculate bases can_import on
-                # issues alone, but an existing matched device must never be import-ready.
-                validation["can_import"] = False
-                validation["is_ready"] = False
-                return
+                # Re-derive linkage so an OOB-link/host-link change since caching
+                # is reflected in the badge (DB-only; no LibreNMS API call).
+                prior_match = validation.get("existing_match_type")
+                _refresh_librenms_linkage(validation, refreshed, libre_device, server_key)
+                if prior_match in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") is None:
+                    # The librenms-id/OOB link that made this the cached match is gone
+                    # (removed/repointed in NetBox since caching). Treat it like a vanished
+                    # match — clear it and recompute readiness, then fall through to the fresh
+                    # lookup below so the row is re-evaluated under current rules (it may now
+                    # match by hostname/serial/IP, or become importable as new) instead of
+                    # staying blocked until cache expiry. Mirrors the deleted-device branch.
+                    validation["existing_device"] = None
+                    validation["existing_librenms_link"] = None
+                    _clear_existing_match_derived_fields(validation)
+                    if not validation.get("import_as_vm"):
+                        validation["device_role"] = {
+                            "found": False,
+                            "role": None,
+                            "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                        }
+                    recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
+                else:
+                    if hasattr(refreshed, "role") and refreshed.role:
+                        apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
+                    elif not validation.get("import_as_vm"):
+                        validation["device_role"] = {
+                            "found": False,
+                            "role": None,
+                            "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                        }
+                        remove_validation_issue(validation, "role")
+                    recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
+                    # Re-assert non-importable state: recalculate bases can_import on
+                    # issues alone, but an existing matched device must never be import-ready.
+                    validation["can_import"] = False
+                    validation["is_ready"] = False
+                    return
             else:
                 # Device was deleted since caching — recompute readiness to match
                 # validate_device_for_import logic.
                 validation["existing_device"] = None
                 validation["existing_match_type"] = None
+                # Nothing is linked anymore — clear the linkage so the row can't
+                # keep rendering a stale host/OOB badge.
+                validation["existing_librenms_link"] = None
+                # Drop serial/OOB/merge/promote actions that pointed at the deleted device.
+                _clear_existing_match_derived_fields(validation)
                 # Clear stale device_role so is_ready is computed from scratch.
                 # Guard: VMs don't use device_role for readiness, so preserve any
                 # user-selected role rather than silently dropping it.
@@ -446,6 +523,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         if new_device:
             validation["existing_device"] = new_device
             validation["existing_match_type"] = match_type
+            # Re-derive linkage so a librenms_id match is correctly shown as the
+            # host vs. OOB half, and existing_librenms_link is populated for the
+            # paired badge (DB-only; no LibreNMS API call).
+            _refresh_librenms_linkage(validation, new_device, libre_device, server_key)
             validation["can_import"] = False
             validation["is_ready"] = False
             # Determine actual model from the found object, not from import_as_vm flag

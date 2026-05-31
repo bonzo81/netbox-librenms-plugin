@@ -19,10 +19,12 @@ oob_default_new_name.
     <option value="__new__" {% if not oob_suggested_interface_id %}selected{% endif %}>+ Create new interface…</option>
   </select>
   <div id="oob-new-iface-{{ libre_device.device_id }}" class="mt-1"{% if oob_suggested_interface_id %} style="display:none"{% endif %}>
-    <input type="text" name="oob_new_interface_name" class="form-control form-control-sm"
+    <label for="oob-new-iface-name-{{ libre_device.device_id }}" class="visually-hidden">New interface name</label>
+    <input type="text" name="oob_new_interface_name" id="oob-new-iface-name-{{ libre_device.device_id }}"
+           class="form-control form-control-sm"
            value="{{ oob_default_new_name }}" placeholder="New interface name">
   </div>
   {% if validation.oob_candidate.ip %}
-  <small class="text-muted d-block mt-1">OOB IP {{ validation.oob_candidate.ip }} is assigned to this interface and set as the device's OOB IP.</small>
+  <small class="text-muted d-block mt-1">On save, OOB IP {{ validation.oob_candidate.ip }} will be set as the device's OOB IP on the interface selected above.</small>
   {% endif %}
 </div>

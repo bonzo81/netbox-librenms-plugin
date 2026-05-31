@@ -83,10 +83,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if error := self.require_all_permissions("POST"):
             return error
 
-        # Read server_key from POST so we use the exact server the user was viewing
-        self._post_server_key = request.POST.get("server_key") or self.librenms_api.server_key
-
         obj = self.get_object(object_type, pk)
+
+        # Rebind the cached API client to the POSTed server so live lookups (e.g. the
+        # management-IP fetch for Set-Primary-IP) hit the same LibreNMS instance the cached
+        # rows came from. The key comes from request POST, so a stale/tampered request could
+        # carry an unknown key — surface a user-facing error instead of a 500. (Uses the
+        # shared mixin helper, which also resolves/normalizes the key.)
+        post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if post_server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return redirect(self.get_ip_tab_url(obj))
+        self._post_server_key = post_server_key
 
         selected_ips = self.get_selected_ips(request)
         cached_ips = self.get_cached_ip_data(request, obj)

@@ -433,7 +433,9 @@
         hx-swap="none">
         {% csrf_token %}
         <input type="hidden" name="server_key" value="{{ server_key }}">
-        <input type="hidden" name="donor_pk" id="merge-donor-{{ libre_device.device_id }}" value="">
+        {# Default to the host-named winner's donor (oob) so a JS failure still posts a valid donor. #}
+        <input type="hidden" name="donor_pk" id="merge-donor-{{ libre_device.device_id }}"
+               value="{{ validation.merge_candidates.oob_named.pk }}">
         <div class="mb-3">
           <div class="text-muted small mb-2">Choose the winner (kept). The other becomes the donor (absorbed):</div>
           {% with host=validation.merge_candidates.host_named oob=validation.merge_candidates.oob_named %}
@@ -868,6 +870,27 @@
             (function () {
               var modal = document.getElementById("promote-modal-{{ libre_device.device_id }}");
               if (!modal) return;
+              // The nested promote modal's DOM persists across close/reopen, so reset
+              // its radios + override_* hidden inputs on close — otherwise a stale "Use
+              // new" selection can submit even when the dialog shows "Keep current".
+              var promoteForm = modal.querySelector("form");
+              function resetPromoteForm() {
+                if (!promoteForm) return;
+                promoteForm.reset();
+                promoteForm.querySelectorAll('input[type="hidden"][name^="override_"]').forEach(function (input) {
+                  input.value = "";
+                });
+              }
+              if (!modal.dataset.promoteResetBound) {
+                modal.dataset.promoteResetBound = "1";
+                modal.addEventListener("hidden.bs.modal", resetPromoteForm);
+                // Fallback when Bootstrap's modal JS isn't active: the dismiss buttons
+                // only hide the modal and never fire hidden.bs.modal, so a stale "Use
+                // new" selection would persist across reopen. Reset on their click too.
+                modal.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function (btn) {
+                  btn.addEventListener("click", resetPromoteForm);
+                });
+              }
               modal.addEventListener("change", function (e) {
                 var t = e.target;
                 if (!t || t.type !== "radio") return;
@@ -924,7 +947,8 @@
       {% endif %}
 
     {% elif validation.existing_match_type == 'primary_ip' %}
-      {% if validation.serial_action == 'oob_candidate' %}
+      {# device_add_as_oob sets device.oob_ip (VMs lack it) — only offer OOB attach for real devices; a VM IP-match falls through to the info message below. #}
+      {% if validation.serial_action == 'oob_candidate' and existing_device_model_name != "virtualmachine" %}
         <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
           <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
           <span class="text-muted ms-1">
@@ -1085,9 +1109,14 @@
               modalEl.style.display = "none";
               modalEl.setAttribute("aria-hidden", "true");
               modalEl.removeAttribute("aria-modal");
-              document.body.classList.remove("modal-open");
-              var backdrop = document.querySelector(".modal-backdrop");
-              if (backdrop) backdrop.remove();
+              // The promote modal is nested inside the still-open HTMX validation modal;
+              // only tear down the shared body lock/backdrop if no other modal remains open,
+              // otherwise we'd strip the parent modal's backdrop and let the page be clicked.
+              if (document.querySelectorAll(".modal.show").length === 0) {
+                document.body.classList.remove("modal-open");
+                var backdrop = document.querySelector(".modal-backdrop");
+                if (backdrop) backdrop.remove();
+              }
             });
           });
         }

@@ -135,3 +135,27 @@ class TestServerKeyFromPost:
         )
 
         assert key == "librenms_ip_addresses_device_5_default"
+
+
+class TestNumericIDValidation:
+    """post() must reject a non-numeric device_id/vrf_id with a clean 400 rather than let
+    the value reach the ORM and surface as a generic 500."""
+
+    def test_non_numeric_object_id_returns_400(self):
+        view = _make_view()
+        request = _make_request({"device_id": "abc", "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        # Assert the specific message so the test can't pass on an unrelated 400 branch.
+        assert payload["message"] == "Invalid object ID"
+
+    def test_non_numeric_vrf_id_returns_400(self):
+        view = _make_view()
+        request = _make_request({"device_id": 5, "vrf_id": "xyz", "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        assert payload["message"] == "Invalid VRF ID"

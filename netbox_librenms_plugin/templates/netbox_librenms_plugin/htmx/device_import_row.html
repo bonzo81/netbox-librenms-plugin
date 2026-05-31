@@ -8,7 +8,7 @@
     </tr>
   {% endfor %}
 {% else %}
-  <tr id="device-row-{{ record.device_id }}">
+  <tr id="device-row-{{ record.device_id }}" hx-swap-oob="true">
     <td colspan="13">
       <div class="alert alert-danger">
         ERROR: No table rows found for device {{ record.device_id }}

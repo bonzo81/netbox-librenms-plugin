@@ -62,7 +62,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             return False
         return self._filter_form_data.get("use_background_job", True)
 
-    def _load_job_results(self, job_id, request=None):
+    def _load_job_results(self, job_id):
         """
         Load cached results from a completed background job.
 
@@ -186,7 +186,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             try:
                 job_id = int(job_id)
                 logger.info(f"Loading results from job {job_id}")
-                validated_devices = self._load_job_results(job_id, request=request)
+                validated_devices = self._load_job_results(job_id)
                 if validated_devices:
                     self._import_data = validated_devices
                     self._job_results_loaded = True

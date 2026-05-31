@@ -194,8 +194,29 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         with transaction.atomic():
             # Lock both devices in pk order to avoid cross-merge deadlocks.
             ordered = sorted({donor.pk, winner.pk})
-            list(Device.objects.select_for_update().filter(pk__in=ordered).order_by("pk"))
-            # Re-check under the lock to close the TOCTOU window.
+            locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=ordered).order_by("pk")}
+            donor = locked.get(donor.pk)
+            winner = locked.get(winner.pk)
+            if donor is None or winner is None:
+                return self._fail(request, "Device was deleted concurrently.", status=410)
+            # Re-verify the migration marker under the lock: a concurrent request
+            # could have cleared or repointed _migrated_to between the unlocked
+            # resolve above and acquiring these row locks, which would otherwise
+            # move the interface to the wrong (stale) winner.
+            relocked_winner, relocked_marker = _resolve_winner_for_donor(donor, server_key)
+            if relocked_marker is None or relocked_winner is None or relocked_winner.pk != winner.pk:
+                return self._fail(request, "Donor migration changed concurrently; refresh and retry.", status=409)
+            # Lock the donor interface row and re-read it under the lock. A
+            # concurrent rename would otherwise let a stale name slip past the
+            # collision check below while the row is still moved by pk.
+            interface = Interface.objects.select_for_update().filter(pk=interface.pk, device=donor).first()
+            if interface is None:
+                return self._fail(
+                    request,
+                    f"Interface is no longer attached to '{donor.name}'.",
+                    status=409,
+                )
+            # Re-check the collision under the lock, using the locked name.
             if Interface.objects.filter(device=winner, name=interface.name).exists():
                 return self._fail(
                     request,
@@ -203,16 +224,8 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                     "Rename or remove the existing interface first.",
                     status=409,
                 )
-            # Use a conditional update so only device_id is changed and the row
-            # is only moved if it still belongs to the donor (guards against a
-            # concurrent reassignment between the pre-lock check and now).
-            updated = Interface.objects.filter(pk=interface.pk, device=donor).update(device=winner)
-            if updated == 0:
-                return self._fail(
-                    request,
-                    f"Interface '{interface.name}' is no longer attached to '{donor.name}'.",
-                    status=409,
-                )
+            # Row is locked and confirmed donor-owned, so a pk update is safe.
+            Interface.objects.filter(pk=interface.pk).update(device=winner)
 
         return _hx_response(
             request,
@@ -277,11 +290,22 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             winner = locked.get(winner.pk)
             if donor is None or winner is None:
                 return self._fail(request, "Device was deleted concurrently.", status=410)
+            # Re-verify the migration marker under the lock (it could have been
+            # cleared or repointed since the unlocked resolve above).
+            relocked_winner, relocked_marker = _resolve_winner_for_donor(donor, server_key)
+            if relocked_marker is None or relocked_winner is None or relocked_winner.pk != winner.pk:
+                return self._fail(request, "Donor migration changed concurrently; refresh and retry.", status=409)
             ip = IPAddress.objects.select_for_update().filter(pk=ip.pk).first()
             if ip is None:
                 return self._fail(request, "IP address no longer exists.", status=410)
             assigned = ip.assigned_object
             if not isinstance(assigned, Interface) or assigned.device_id != donor.pk:
+                return self._fail(request, "IP is no longer assigned to the donor interface.", status=409)
+            # Lock the donor interface row too and re-read it: its name is used
+            # below to find the winner-side interface, so a concurrent rename
+            # would otherwise send the IP to the wrong interface (TOCTOU).
+            assigned = Interface.objects.select_for_update().filter(pk=assigned.pk, device=donor).first()
+            if assigned is None:
                 return self._fail(request, "IP is no longer assigned to the donor interface.", status=409)
             # Re-fetch the winner interface under the lock to close the TOCTOU window.
             winner_iface = Interface.objects.select_for_update().filter(device=winner, name=assigned.name).first()
@@ -359,6 +383,11 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             winner = locked.get(winner.pk)
             if donor is None or winner is None:
                 return self._fail(request, "Device was deleted concurrently.", status=410)
+            # Re-verify the migration marker under the lock (it could have been
+            # cleared or repointed since the unlocked resolve above).
+            relocked_winner, relocked_marker = _resolve_winner_for_donor(donor, server_key)
+            if relocked_marker is None or relocked_winner is None or relocked_winner.pk != winner.pk:
+                return self._fail(request, "Donor migration changed concurrently; refresh and retry.", status=409)
             # Re-check under the lock so concurrent transfers don't race.
             donor_ip = getattr(donor, field, None)
             if donor_ip is None:
@@ -367,6 +396,19 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                 return self._fail(
                     request,
                     f"Winner '{winner.name}' already has a {human}. Clear it on the winner first.",
+                    status=409,
+                )
+            # The save below uses update_fields (skips full_clean), so nothing else
+            # validates that the address belongs to the winner. NetBox requires
+            # primary_ip/oob_ip be assigned to one of the device's OWN interfaces, so
+            # refuse to point the winner at an address still attached to the donor —
+            # the interface/IP must be moved to the winner first (MoveIPAddressToWinnerView).
+            assigned = getattr(donor_ip, "assigned_object", None)
+            if getattr(assigned, "device_id", None) != winner.pk:
+                return self._fail(
+                    request,
+                    f"{human} ({donor_ip}) is still attached to '{donor.name}'. "
+                    f"Move its interface/IP to '{winner.name}' first.",
                     status=409,
                 )
             setattr(winner, field, donor_ip)

@@ -12,7 +12,6 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
-    get_migrated_to_marker,
     match_librenms_hardware_to_device_type,
     resolve_naming_preferences,
 )
@@ -64,7 +63,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             {
                 "object": obj,
                 "tab": self.tab,
-                "has_librenms_id": bool(self.librenms_id),
+                # is not None (not truthiness): a stored LibreNMS id of 0 is a present id,
+                # consistent with _build_all_server_mappings, which keeps {"id": 0} entries.
+                "has_librenms_id": self.librenms_id is not None,
             }
         )
 
@@ -155,7 +156,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
                 ),
                 "object_model_name": obj._meta.model_name,
-                **self._build_migrated_context(_lookup_device, self.librenms_api.server_key),
+                # The _migrated_to marker lives on the viewed device itself, not on
+                # the VC sync/lookup device — build migrated mode from obj so a
+                # VC-member donor renders consistently with the HTMX tab partials.
+                **self._build_migrated_context(obj, self.librenms_api.server_key),
             }
         )
 
@@ -176,19 +180,13 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         When ``migrated_to_marker`` is set, all sync action buttons should
         be hidden and per-row "Move to winner" actions should be shown
         instead.
+
+        Delegates to :func:`utils.build_migrated_context` so the full page and
+        the HTMX tab partials share one implementation.
         """
-        marker = get_migrated_to_marker(obj, server_key)
-        if not marker:
-            return {"migrated_to_marker": None, "migrated_to_winner": None}
+        from netbox_librenms_plugin.utils import build_migrated_context
 
-        from dcim.models import Device
-
-        try:
-            winner_pk = int(marker.get("device_id"))
-        except (TypeError, ValueError):
-            return {"migrated_to_marker": marker, "migrated_to_winner": None}
-        winner = Device.objects.filter(pk=winner_pk).first()
-        return {"migrated_to_marker": marker, "migrated_to_winner": winner}
+        return build_migrated_context(obj, server_key)
 
     @staticmethod
     def _build_all_server_mappings(obj, active_server_key):
@@ -220,6 +218,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         result = []
         for sk, did in cf_value.items():
+            # New dict form {server_key: {"id": N, "oob": {...}}} — use the host id.
+            # A migrated-only entry ({"_migrated_to": ...}) has no "id" and is skipped.
+            if isinstance(did, dict):
+                did = did.get("id")
             # Validate device ID — accept int or digit-string, skip bool/None/junk.
             if isinstance(did, bool) or did is None:
                 continue
@@ -279,7 +281,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             "vc_inventory_serials": [],
         }
 
-        if self.librenms_id:
+        if self.librenms_id is not None:
             success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if success and device_info:
                 # Get NetBox device details

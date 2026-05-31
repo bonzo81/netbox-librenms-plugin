@@ -1226,14 +1226,20 @@
             // then `window.bootstrap` as fallback, then plain DOM toggling.
             document.querySelectorAll('#htmx-modal-content .modal.show').forEach(function (nested) {
                 try {
+                    // Prefer Bootstrap: it tracks stacked modals and leaves the
+                    // outer HTMX modal's backdrop/body state intact. Only fall
+                    // back to a minimal DOM hide — never hideModal()/_hideManual,
+                    // which strips body.modal-open and the (shared, outer) backdrop
+                    // and would break the still-open outer modal.
                     if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
                         bootstrap.Modal.getOrCreateInstance(nested).hide();
-                    } else if (window.bootstrap && window.bootstrap.Modal) {
+                    } else if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal) {
                         window.bootstrap.Modal.getOrCreateInstance(nested).hide();
                     } else {
                         nested.classList.remove('show');
                         nested.style.display = 'none';
                         nested.setAttribute('aria-hidden', 'true');
+                        nested.removeAttribute('aria-modal');
                     }
                 } catch (err) {
                     // Swallow - we still want to refresh the validation panel.

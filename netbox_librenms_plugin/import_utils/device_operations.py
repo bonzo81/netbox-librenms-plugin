@@ -475,6 +475,9 @@ def validate_device_for_import(
                 logger.info(f"Found existing device by hostname: {existing_device.name}")
                 result["existing_device"] = existing_device
                 result["existing_match_type"] = "hostname"
+                # Surface the current host/OOB linkage so a hostname-matched device that
+                # is already linked to LibreNMS isn't mislabelled as "not linked".
+                result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
 
                 # Check for serial conflict on hostname-matched device
                 incoming_serial = libre_device.get("serial") or ""
@@ -497,8 +500,15 @@ def validate_device_for_import(
                             f"LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
                         )
                 else:
+                    existing_link = result["existing_librenms_link"] or {}
+                    if existing_link.get("host_id"):
+                        link_note = f"currently linked to LibreNMS device #{existing_link['host_id']}"
+                    elif existing_link.get("oob_id"):
+                        link_note = "OOB already linked"
+                    else:
+                        link_note = "not linked to LibreNMS"
                     result["warnings"].append(
-                        f"Device with same hostname exists in NetBox as '{existing_device.name}' (not linked to LibreNMS)"
+                        f"Device with same hostname exists in NetBox as '{existing_device.name}' ({link_note})"
                     )
 
                 result["can_import"] = False
@@ -722,6 +732,10 @@ def validate_device_for_import(
                             else None
                         )
                         if device:
+                            # Surface any existing host/OOB linkage so the import UI renders the
+                            # correct row state (the librenms_id / serial branches do the same;
+                            # without this an already-linked device shows as "not linked" here).
+                            result["existing_librenms_link"] = _describe_existing_librenms_link(device, server_key)
                             # Check if this is an OOB candidate via the IP path.
                             # The OOB controller's IP may already be the device's oob_ip, or the
                             # LibreNMS device may identify itself as an OOB type (iDRAC/iLO/etc.).
@@ -755,10 +769,27 @@ def validate_device_for_import(
                             else:
                                 result["existing_device"] = device
                                 result["existing_match_type"] = "primary_ip"
+                                # Line 728 may already have populated a host/OOB
+                                # linkage; describe it accurately instead of always
+                                # claiming "not linked to LibreNMS".
+                                existing_link = result.get("existing_librenms_link") or {}
+                                if existing_link.get("host_id"):
+                                    link_note = f"currently linked to LibreNMS device #{existing_link['host_id']}"
+                                elif existing_link.get("oob_id"):
+                                    link_note = "OOB already linked"
+                                else:
+                                    link_note = "not linked to LibreNMS"
                                 result["warnings"].append(
-                                    f"IP address {primary_ip} already assigned to device '{device.name}' (not linked to LibreNMS)"
+                                    f"IP address {primary_ip} already assigned to device '{device.name}' ({link_note})"
                                 )
                                 result["can_import"] = False
+
+        # Refresh local mode after ALL detection branches. The refresh at the top of the
+        # unmatched-device block only runs when nothing matched by librenms_id; an existing
+        # VM matched directly by librenms_id (above) sets result["import_as_vm"]=True but
+        # skips that block, so without this a linked VM would wrongly take the Device path
+        # (missing cluster["available_clusters"], running device-only validation/VC detection).
+        import_as_vm = result["import_as_vm"]
 
         # Validate based on import type (Device or VM)
         if import_as_vm:

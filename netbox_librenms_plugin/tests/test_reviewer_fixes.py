@@ -424,3 +424,46 @@ class TestCreatePlatformFullClean:
             error_msg = mock_messages.error.call_args[0][1]
             assert "could not be created" in error_msg
             assert "Slug already exists" in error_msg
+
+
+class TestNormalizeOOBTypeCimc:
+    """The docs advertise CIMC as a supported OOB controller family, so
+    normalize_oob_type() must recognise it (and it must be in OOB_TYPES)."""
+
+    def test_cimc_in_canonical_types(self):
+        from netbox_librenms_plugin.constants import OOB_TYPES
+
+        assert "cimc" in OOB_TYPES
+
+    def test_cimc_detected_from_os_and_hardware(self):
+        from netbox_librenms_plugin.constants import normalize_oob_type
+
+        assert normalize_oob_type("cimc", "") == "cimc"
+        assert normalize_oob_type("", "Cisco CIMC") == "cimc"
+
+    def test_non_oob_still_none(self):
+        from netbox_librenms_plugin.constants import normalize_oob_type
+
+        assert normalize_oob_type("ubuntu", "") is None
+
+
+class TestNormalizeOOBTypePrefersVendorSpecific:
+    """A vendor-specific match must win over the generic 'oob' token, even when the
+    generic token appears earlier (e.g. os='oob', hardware='iDRAC9')."""
+
+    def test_generic_oob_in_os_does_not_mask_specific_hardware(self):
+        from netbox_librenms_plugin.constants import normalize_oob_type
+
+        assert normalize_oob_type("oob", "iDRAC9") == "idrac"
+
+    def test_os_specific_still_wins_over_generic_hardware(self):
+        from netbox_librenms_plugin.constants import normalize_oob_type
+
+        # os-first ordering is preserved for the specific docstring example.
+        assert normalize_oob_type("drac9", "iDRAC9") == "drac"
+
+    def test_only_generic_present_returns_oob(self):
+        from netbox_librenms_plugin.constants import normalize_oob_type
+
+        assert normalize_oob_type("oob", "") == "oob"
+        assert normalize_oob_type("", "generic oob device") == "oob"
