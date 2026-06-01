@@ -847,6 +847,19 @@ class LocationMappingForm(NetBoxModelForm):
     rack = DynamicModelChoiceField(queryset=Rack.objects.all(), required=False, label="NetBox Rack")
     tenant = DynamicModelChoiceField(queryset=Tenant.objects.all(), required=False, label="NetBox Tenant")
 
+    # Render the object selectors immediately after the field_type dropdown so the
+    # (single) visible selector appears directly below it.
+    field_order = [
+        "field_type",
+        "region",
+        "site",
+        "location",
+        "rack",
+        "tenant",
+        "librenms_value",
+        "description",
+    ]
+
     class Meta:
         """Meta options for LocationMappingForm."""
 
