@@ -89,6 +89,17 @@ class TestParseLibrenmsLocation:
         result = parse_librenms_location("NYC", "(?P<site>[", is_regex=True)
         assert all(v is None for v in result.values())
 
+    def test_input_longer_than_cap_is_truncated_before_matching(self):
+        from netbox_librenms_plugin.utils import (
+            LOCATION_PARSE_MAX_INPUT_LEN,
+            parse_librenms_location,
+        )
+
+        # Build an input longer than the cap; only the first cap chars are matched.
+        site = "A" * (LOCATION_PARSE_MAX_INPUT_LEN + 50)
+        result = parse_librenms_location(site, "{site}", is_regex=False)
+        assert result["site"] == "A" * LOCATION_PARSE_MAX_INPUT_LEN
+
 
 # =============================================================================
 # TestPlaceholderToRegex
@@ -192,7 +203,7 @@ class TestGetLocationParseSettings:
         from netbox_librenms_plugin import utils
 
         fake_model = MagicMock()
-        fake_model.objects.filter.return_value.first.return_value = None
+        fake_model.objects.order_by.return_value.first.return_value = None
         with patch.dict(
             "sys.modules",
             {"netbox_librenms_plugin.models": MagicMock(LibreNMSSettings=fake_model)},
@@ -204,7 +215,7 @@ class TestGetLocationParseSettings:
 
         settings = MagicMock(location_parse_pattern="{site}", location_parse_is_regex=True)
         fake_model = MagicMock()
-        fake_model.objects.filter.return_value.first.return_value = settings
+        fake_model.objects.order_by.return_value.first.return_value = settings
         with patch.dict(
             "sys.modules",
             {"netbox_librenms_plugin.models": MagicMock(LibreNMSSettings=fake_model)},
