@@ -507,7 +507,7 @@ class PlatformMappingBulkExportYAMLView(BulkExportYAMLView):
 
 
 class LocationMappingBulkExportYAMLView(BulkExportYAMLView):
-    queryset = LocationMapping.objects.all()
+    queryset = LocationMapping.objects.select_related("content_type")
 
 
 # --- PlatformMapping views ---
@@ -576,7 +576,7 @@ class PlatformMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChange
 class LocationMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
     """Provides a view for listing all LocationMapping objects."""
 
-    queryset = LocationMapping.objects.all()
+    queryset = LocationMapping.objects.select_related("content_type")
     table = LocationMappingTable
     filterset = LocationMappingFilterSet
     filterset_form = LocationMappingFilterForm
