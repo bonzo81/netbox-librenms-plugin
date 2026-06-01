@@ -2583,3 +2583,92 @@ class TestSyncVLANsViewHandleCreateVlans:
                         with patch.object(view, "_redirect", return_value=MagicMock()):
                             view._handle_create_vlans(req, mock_obj, "device", 1)
         mock_msg.warning.assert_called_once()
+
+
+class TestSyncIPAddressesViewSetPrimaryIp:
+    """Phase 1: auto-match the LibreNMS management IP and set it as Primary IP."""
+
+    def _setup_view(self):
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        view = _make_view(SyncIPAddressesView)
+        view._post_server_key = "default"
+        return view
+
+    def test_same_host(self):
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView as V
+
+        assert V._same_host("10.0.0.1", "10.0.0.1") is True
+        assert V._same_host("10.0.0.1", "10.0.0.2") is False
+        assert V._same_host("not-an-ip", "10.0.0.1") is False
+        # IPv6 equality across differing textual forms
+        assert V._same_host("2001:db8::1", "2001:0db8:0000:0000:0000:0000:0000:0001") is True
+
+    def test_set_primary_ip_sets_ipv4_and_is_idempotent(self):
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView as V
+
+        ip_obj = MagicMock(family=4, pk=42)
+        obj = MagicMock()
+        obj.primary_ip4_id = None
+        assert V._set_primary_ip(obj, ip_obj) is True
+        assert obj.primary_ip4 is ip_obj
+        obj.save.assert_called_once()
+
+        # Already pointing at this IP -> no change, no extra save
+        obj.save.reset_mock()
+        obj.primary_ip4_id = 42
+        assert V._set_primary_ip(obj, ip_obj) is False
+        obj.save.assert_not_called()
+
+    def test_set_primary_ip_uses_v6_field(self):
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView as V
+
+        ip_obj = MagicMock(family=6, pk=7)
+        obj = MagicMock()
+        obj.primary_ip6_id = None
+        assert V._set_primary_ip(obj, ip_obj) is True
+        assert obj.primary_ip6 is ip_obj
+
+    def _run_process(self, view, cached, *, mgmt_ip, set_primary=True, interface=True):
+        selected = ["10.0.0.1"]
+        created_ip = MagicMock(family=4, pk=42)
+        obj = MagicMock()
+        obj.primary_ip4_id = None
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=set_primary):
+            with patch.object(view, "get_management_ip", return_value=mgmt_ip) as mock_mgmt:
+                with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
+                    with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
+                        mock_ip_cls.objects.filter.return_value.first.return_value = None
+                        mock_ip_cls.objects.create.return_value = created_ip
+                        with patch("netbox_librenms_plugin.views.sync.ip_addresses.Interface") as mock_iface_cls:
+                            mock_iface_cls.objects.get.return_value = MagicMock()
+                            with patch.object(view, "get_vrf_selection", return_value=None):
+                                results = view.process_ip_sync(view.request, selected, cached, obj, "device")
+        return results, obj, created_ip, mock_mgmt
+
+    def test_primary_set_when_matched_and_interface_assigned(self):
+        view = self._setup_view()
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": "/api/dcim/interfaces/5/"}]
+        results, obj, created_ip, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
+        assert results["primary_set"] == ["10.0.0.1"]
+        assert obj.primary_ip4 is created_ip
+
+    def test_primary_skipped_when_no_interface(self):
+        view = self._setup_view()
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
+        results, obj, _, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
+        assert results["primary_set"] == []
+        obj.save.assert_not_called()
+
+    def test_primary_skipped_when_ip_does_not_match_mgmt(self):
+        view = self._setup_view()
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": "/api/dcim/interfaces/5/"}]
+        results, obj, _, _ = self._run_process(view, cached, mgmt_ip="10.9.9.9")
+        assert results["primary_set"] == []
+
+    def test_toggle_off_skips_mgmt_lookup_and_primary(self):
+        view = self._setup_view()
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": "/api/dcim/interfaces/5/"}]
+        results, obj, _, mock_mgmt = self._run_process(view, cached, mgmt_ip="10.0.0.1", set_primary=False)
+        assert results["primary_set"] == []
+        mock_mgmt.assert_not_called()

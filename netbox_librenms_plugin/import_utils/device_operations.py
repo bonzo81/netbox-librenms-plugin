@@ -749,7 +749,7 @@ def import_single_device(
                     'interfaces': int,
                     'cables': int,
                     'ip_addresses': int
-                }
+                },
             }
     """
     try:

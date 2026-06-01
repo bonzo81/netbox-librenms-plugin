@@ -5895,3 +5895,70 @@ class TestVirtualChassisEdgeBranches:
             create_virtual_chassis_with_members(master_device, members_info, {"device_id": 1})
 
         assert mock_device_cls.objects.create.call_count == 1
+
+
+class TestResolveSetPrimaryIp:
+    """Phase 1: resolve_set_primary_ip cascade (POST/GET toggle -> user pref -> False)."""
+
+    def _make_request(self, post=None, get=None):
+        from unittest.mock import MagicMock
+
+        request = MagicMock()
+        request.POST = post or {}
+        request.GET = get or {}
+        request.user = MagicMock()
+        return request
+
+    def test_defaults_false_when_nothing_set(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.utils import resolve_set_primary_ip
+
+        request = self._make_request()
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
+            assert resolve_set_primary_ip(request) is False
+
+    def test_post_toggle_on(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.utils import resolve_set_primary_ip
+
+        request = self._make_request(post={"set-primary-ip-toggle": "on"})
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
+            assert resolve_set_primary_ip(request) is True
+
+    def test_post_toggle_off_overrides_pref(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.utils import resolve_set_primary_ip
+
+        request = self._make_request(post={"set-primary-ip-toggle": "off"})
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=True):
+            assert resolve_set_primary_ip(request) is False
+
+    def test_underscore_key_variant(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.utils import resolve_set_primary_ip
+
+        request = self._make_request(post={"set_primary_ip": "1"})
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
+            assert resolve_set_primary_ip(request) is True
+
+    def test_get_used_when_not_in_post(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.utils import resolve_set_primary_ip
+
+        request = self._make_request(get={"set-primary-ip-toggle": "true"})
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=None):
+            assert resolve_set_primary_ip(request) is True
+
+    def test_user_pref_bool_used_when_no_toggle(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.utils import resolve_set_primary_ip
+
+        request = self._make_request()
+        with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=True):
+            assert resolve_set_primary_ip(request) is True

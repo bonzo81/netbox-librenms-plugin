@@ -33,6 +33,7 @@ class IPAddressTable(tables.Table):
         row_attrs = {
             "data-interface": lambda record: record["ip_address"],
             "data-name": lambda record: record["ip_address"],
+            "data-mgmt-ip": lambda record: "true" if record.get("is_mgmt_ip") else "",
         }
 
     selection = ToggleColumn(

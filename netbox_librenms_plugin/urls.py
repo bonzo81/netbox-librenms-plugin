@@ -13,6 +13,7 @@ from .models import (
 from .views import (
     AddDeviceToLibreNMSView,
     AddDeviceTypeMappingView,
+    AddPlatformMappingView,
     AssignVCSerialView,
     BulkImportConfirmView,
     BulkImportDevicesView,
@@ -428,6 +429,11 @@ urlpatterns = [
         "device-import/add-device-type-mapping/<int:device_id>/",
         AddDeviceTypeMappingView.as_view(),
         name="add_device_type_mapping",
+    ),
+    path(
+        "device-import/add-platform-mapping/<int:device_id>/",
+        AddPlatformMappingView.as_view(),
+        name="add_platform_mapping",
     ),
     path(
         "device-import/create-platform/<int:device_id>/",

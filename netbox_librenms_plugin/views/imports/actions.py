@@ -35,7 +35,11 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import resolve_naming_preferences, save_user_pref, set_librenms_device_id
+from netbox_librenms_plugin.utils import (
+    resolve_naming_preferences,
+    save_user_pref,
+    set_librenms_device_id,
+)
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -655,8 +659,6 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 )
 
                 # Show notification and redirect - matching NetBox's native pattern
-                from django.utils.safestring import mark_safe
-
                 messages.info(
                     request,
                     mark_safe(
@@ -744,21 +746,24 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         failed_count = len(device_result.get("failed", [])) + len(vm_result.get("failed", []))
         skipped_count = len(device_result.get("skipped", [])) + len(vm_result.get("skipped", []))
 
+        # Build summary messages for both paths.  For HTMX responses, messages.*
+        # is consumed/cleared by device_import_row.html before reaching the browser;
+        # htmx_toasts carries the same text as an explicit OOB swap instead.
+        htmx_toasts = []  # [(bg_class, mdi_class, label, text), ...]
+
         if success_count:
-            messages.success(
-                request,
-                f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}",
-            )
+            _msg = f"Successfully imported {success_count} LibreNMS device{'s' if success_count != 1 else ''}"
+            messages.success(request, _msg)
+            htmx_toasts.append(("text-bg-success", "mdi-check-circle", "Success", _msg))
+
         if failed_count:
-            messages.error(
-                request,
-                f"Failed to import {failed_count} device{'s' if failed_count != 1 else ''}",
-            )
+            _msg = f"Failed to import {failed_count} device{'s' if failed_count != 1 else ''}"
+            messages.error(request, _msg)
+            htmx_toasts.append(("text-bg-danger", "mdi-alert-circle", "Error", _msg))
         if skipped_count:
-            messages.warning(
-                request,
-                f"Skipped {skipped_count} existing device{'s' if skipped_count != 1 else ''}",
-            )
+            _msg = f"Skipped {skipped_count} existing device{'s' if skipped_count != 1 else ''}"
+            messages.warning(request, _msg)
+            htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", _msg))
 
         if request.headers.get("HX-Request"):
             # Return updated rows for all imported devices using HTMX OOB swaps
@@ -819,7 +824,38 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     ).content.decode("utf-8")
                     updated_rows_html.append(row_html)
 
-            # Return concatenated row HTML with closeModal trigger
+            # Append all summary toasts as a single OOB swap.  The messages.*
+            # queue is consumed/cleared by device_import_row.html, so they never
+            # reach the browser in the HTMX path; this OOB fragment takes over.
+            if htmx_toasts:
+                toast_items = mark_safe(
+                    "".join(
+                        format_html(
+                            '<div class="toast toast-dark border-0 shadow-sm mb-1" role="alert"'
+                            ' aria-live="assertive" aria-atomic="true" data-bs-delay="12000">'
+                            '<div class="toast-header {}">'
+                            '<i class="mdi {} me-1"></i>{}'
+                            '<button type="button" class="btn-close me-0 m-auto"'
+                            ' data-bs-dismiss="toast" aria-label="Close"></button>'
+                            "</div>"
+                            '<div class="toast-body">{}</div>'
+                            "</div>",
+                            bg_cls,
+                            icon_cls,
+                            label,
+                            text,
+                        )
+                        for bg_cls, icon_cls, label, text in htmx_toasts
+                    )
+                )
+                updated_rows_html.append(
+                    format_html(
+                        '<div id="django-messages"'
+                        ' class="toast-container position-fixed bottom-0 end-0 p-3"'
+                        ' hx-swap-oob="true">{}</div>',
+                        toast_items,
+                    )
+                )
             return HttpResponse(
                 "\n".join(updated_rows_html),
                 headers={"HX-Trigger": '{"closeModal": null}'},
@@ -1578,10 +1614,12 @@ class CreatePlatformFromImportView(
         _, validation, _ = self.get_validated_device_with_selections(device_id, request)
         device_pk = None
         selected_manufacturer_pk = None
+        current_platform = None
         if validation:
             existing = validation.get("existing_device")
             if existing:
                 device_pk = existing.pk
+                current_platform = getattr(existing, "platform", None)
                 device_type = getattr(existing, "device_type", None)
                 if device_type:
                     selected_manufacturer_pk = device_type.manufacturer_id
@@ -1604,6 +1642,9 @@ class CreatePlatformFromImportView(
                 "server_key": self.librenms_api.server_key,
                 "use_htmx": True,
                 "htmx_include": htmx_include,
+                # Enable the "map to existing platform" section of the combined modal.
+                "libre_device": libre_device,
+                "current_platform": current_platform,
             },
         )
 
@@ -1771,6 +1812,7 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
     ALLOWED_PREFS = {
         "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
         "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
+        "set_primary_ip": "plugins.netbox_librenms_plugin.set_primary_ip",
         "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
     }
 
@@ -1789,3 +1831,121 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
 
         save_user_pref(request, self.ALLOWED_PREFS[key], value)
         return JsonResponse({"status": "ok"})
+
+
+class AddPlatformMappingView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
+    """HTMX view to create a PlatformMapping from the import validation modal."""
+
+    def post(self, request, device_id):
+        """Create a PlatformMapping linking the LibreNMS OS string to a NetBox Platform."""
+        if error := self.require_write_permission():
+            return error
+
+        from dcim.models import Platform
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        post_server_key = (request.POST.get("server_key") or "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
+
+        libre_device = fetch_device_with_cache(device_id, self.librenms_api)
+        if not libre_device:
+            return _htmx_error_response("Device not found in LibreNMS.")
+
+        librenms_os = (libre_device.get("os") or "").strip()
+        if not librenms_os or librenms_os == "-":
+            return _htmx_error_response("Device has no OS string — cannot create mapping.")
+
+        platform_id = request.POST.get("platform_id", "").strip()
+        if not platform_id:
+            return _htmx_error_response("Please select a platform before submitting.")
+
+        try:
+            platform_id = int(platform_id)
+        except (ValueError, TypeError):
+            return _htmx_error_response("Invalid platform selection.")
+
+        try:
+            platform = Platform.objects.get(pk=platform_id)
+        except Platform.DoesNotExist:
+            return _htmx_error_response("Selected platform not found.")
+
+        if PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).count() > 1:
+            return _htmx_error_response(
+                "Multiple mappings exist for this OS string. Remove duplicates before updating."
+            )
+        existing_mapping = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
+        self.required_object_permissions = {
+            "POST": [("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping)]
+        }
+        if error := self.require_object_permissions("POST"):
+            return error
+
+        try:
+            with transaction.atomic():
+                # Lock the row to close the TOCTOU window between the upfront
+                # permission check and the actual write. select_for_update cannot
+                # lock absent rows, so the create branch handles IntegrityError.
+                # Materialise the locked rows in one query — count() would drop
+                # the FOR UPDATE clause, leaving the rows unlocked.
+                locked_rows = list(
+                    PlatformMapping.objects.select_for_update().filter(librenms_os__iexact=librenms_os)[:2]
+                )
+                if len(locked_rows) > 1:
+                    return _htmx_error_response(
+                        "Multiple mappings exist for this OS string. Remove duplicates before updating."
+                    )
+                locked = locked_rows[0] if locked_rows else None
+                if locked and not existing_mapping:
+                    # Concurrent request created the mapping after our upfront read.
+                    # Only escalate to change permission if we would actually mutate.
+                    if locked.netbox_platform_id != platform_id:
+                        self.required_object_permissions = {"POST": [("change", PlatformMapping)]}
+                        if error := self.require_object_permissions("POST"):
+                            return error
+                if existing_mapping and not locked:
+                    # Mapping was deleted between our upfront read and the lock.
+                    # We are about to CREATE a new row, so require add permission.
+                    self.required_object_permissions = {"POST": [("add", PlatformMapping)]}
+                    if error := self.require_object_permissions("POST"):
+                        return error
+                if locked:
+                    if locked.netbox_platform_id != platform_id:
+                        locked.netbox_platform = platform
+                        locked.full_clean()
+                        locked.save()
+                else:
+                    try:
+                        PlatformMapping.objects.create(
+                            librenms_os=librenms_os.lower(),
+                            netbox_platform=platform,
+                        )
+                    except IntegrityError:
+                        return _htmx_error_response("Mapping was created concurrently. Please try again.")
+        except Exception as exc:
+            logger.exception("AddPlatformMappingView: failed to save mapping: %s", exc)
+            return _htmx_error_response("Error saving mapping. Please try again.")
+
+        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
+        cache.delete(cache_key)
+
+        detail_view = DeviceValidationDetailsView()
+        detail_view._librenms_api = self._librenms_api
+        modal_html = detail_view.get(request, device_id).content.decode("utf-8")
+        oob_modal = format_html(
+            '<div id="htmx-modal-content" hx-swap-oob="innerHTML">{}</div>',
+            mark_safe(modal_html),
+        )
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if libre_device is not None and validation is not None:
+            row_response = self.render_device_row(request, libre_device, validation, selections)
+            row_html = row_response.content.decode("utf-8")
+            row_html = format_html("<table><tbody>{}</tbody></table>", mark_safe(row_html))
+        else:
+            row_html = mark_safe("")
+
+        return HttpResponse(oob_modal + row_html, content_type="text/html")

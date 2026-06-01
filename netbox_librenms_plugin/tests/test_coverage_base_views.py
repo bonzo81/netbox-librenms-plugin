@@ -2259,3 +2259,57 @@ class TestBaseInterfaceTableViewMissingLines:
         gi01 = next((i for i in netbox_only if i["name"] == "Gi0/1"), None)
         assert gi01 is not None
         assert gi01["device_name"] == "router-1"
+
+
+# =============================================================================
+# BaseIPAddressTableView._flag_management_ip
+# =============================================================================
+
+
+class TestBaseIPAddressTableViewFlagManagementIp:
+    """Tests for marking the LibreNMS management-IP row (Set Primary IP support)."""
+
+    def _make_view(self, librenms_id=42):
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        view.librenms_id = librenms_id
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        return view
+
+    def test_flags_matching_entry(self):
+        view = self._make_view()
+        view._librenms_api.get_device_info.return_value = (True, {"ip": "10.0.0.1"})
+        data = [{"ip_address": "10.0.0.5"}, {"ip_address": "10.0.0.1"}]
+        view._flag_management_ip(data)
+        assert data[0].get("is_mgmt_ip") is None
+        assert data[1].get("is_mgmt_ip") is True
+
+    def test_no_flag_when_no_match(self):
+        view = self._make_view()
+        view._librenms_api.get_device_info.return_value = (True, {"ip": "192.0.2.9"})
+        data = [{"ip_address": "10.0.0.1"}]
+        view._flag_management_ip(data)
+        assert data[0].get("is_mgmt_ip") is None
+
+    def test_no_flag_when_no_librenms_id(self):
+        view = self._make_view(librenms_id=None)
+        data = [{"ip_address": "10.0.0.1"}]
+        view._flag_management_ip(data)
+        view._librenms_api.get_device_info.assert_not_called()
+        assert data[0].get("is_mgmt_ip") is None
+
+    def test_no_flag_when_device_info_fails(self):
+        view = self._make_view()
+        view._librenms_api.get_device_info.return_value = (False, None)
+        data = [{"ip_address": "10.0.0.1"}]
+        view._flag_management_ip(data)
+        assert data[0].get("is_mgmt_ip") is None
+
+    def test_no_flag_when_mgmt_ip_blank(self):
+        view = self._make_view()
+        view._librenms_api.get_device_info.return_value = (True, {"ip": ""})
+        data = [{"ip_address": "10.0.0.1"}]
+        view._flag_management_ip(data)
+        assert data[0].get("is_mgmt_ip") is None

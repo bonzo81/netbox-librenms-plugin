@@ -348,18 +348,24 @@
              data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
             <strong class="small">Settings:</strong>
             <div class="form-check form-switch mb-0">
-                <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if use_sysname %}checked{% endif %}
-                       data-bs-toggle="tooltip"
-                       title="Use SNMP sysName instead of LibreNMS hostname">
-                <label class="form-check-label small" for="use-sysname-toggle">
+                <span id="use-sysname-toggle">
+                    <input type="hidden" name="use-sysname-toggle" value="off">
+                    <input class="form-check-input" type="checkbox" id="use-sysname-toggle-cb" name="use-sysname-toggle" {% if use_sysname %}checked{% endif %}
+                           data-bs-toggle="tooltip"
+                           title="Use SNMP sysName instead of LibreNMS hostname">
+                </span>
+                <label class="form-check-label small" for="use-sysname-toggle-cb">
                     Use sysName
                 </label>
             </div>
             <div class="form-check form-switch mb-0">
-                <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if strip_domain %}checked{% endif %}
-                       data-bs-toggle="tooltip"
-                       title="Remove domain suffix (e.g., 'switch01.example.com' → 'switch01'). IP addresses preserved.">
-                <label class="form-check-label small" for="strip-domain-toggle">
+                <span id="strip-domain-toggle">
+                    <input type="hidden" name="strip-domain-toggle" value="off">
+                    <input class="form-check-input" type="checkbox" id="strip-domain-toggle-cb" name="strip-domain-toggle" {% if strip_domain %}checked{% endif %}
+                           data-bs-toggle="tooltip"
+                           title="Remove domain suffix (e.g., 'switch01.example.com' -> 'switch01'). IP addresses preserved.">
+                </span>
+                <label class="form-check-label small" for="strip-domain-toggle-cb">
                     Strip domain
                 </label>
             </div>
