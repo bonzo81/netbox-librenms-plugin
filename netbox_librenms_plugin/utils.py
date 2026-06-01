@@ -1214,6 +1214,10 @@ def _get_object_site_id(obj):
 LOCATION_PARSE_TOKENS = ("region", "site", "location", "rack", "tenant")
 _LOCATION_TOKEN_RE = re.compile(r"\{(region|site|location|rack|tenant)\}")
 
+# Hard cap on the location string length fed to regex matching, to bound
+# worst-case backtracking on user-provided patterns (regex DoS mitigation).
+LOCATION_PARSE_MAX_INPUT_LEN = 512
+
 
 def _normalise_location_value(location):
     """Return the location name as a string.
@@ -1263,6 +1267,9 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
     if not location_string or not pattern:
         return result
 
+    if len(location_string) > LOCATION_PARSE_MAX_INPUT_LEN:
+        location_string = location_string[:LOCATION_PARSE_MAX_INPUT_LEN]
+
     try:
         if is_regex:
             compiled = re.compile(pattern)
@@ -1293,7 +1300,7 @@ def get_location_parse_settings():
     try:
         from netbox_librenms_plugin.models import LibreNMSSettings
 
-        settings = LibreNMSSettings.objects.filter(pk=1).first()
+        settings = LibreNMSSettings.objects.order_by("pk").first()
     except Exception:  # noqa: BLE001 — optional config read; default on any failure
         logger.debug("Could not read LibreNMS location parse settings; using defaults", exc_info=True)
         return "", False

@@ -909,7 +909,8 @@ class LocationMappingImportForm(NetBoxModelImportForm):
         super().clean()
         cleaned_data = self.cleaned_data
         field_type = cleaned_data.get("field_type")
-        name = cleaned_data.get("netbox_object")
+        name = (cleaned_data.get("netbox_object") or "").strip()
+        cleaned_data["netbox_object"] = name
         if not field_type or not name:
             return cleaned_data
 
