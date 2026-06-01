@@ -180,7 +180,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
                     ip_with_mask = ip_data["ip_with_mask"]
 
-                    existing_ip = IPAddress.objects.filter(address=ip_with_mask).first()
+                    # Scope the lookup to the target VRF: the same address can
+                    # legitimately exist in multiple VRFs, and matching on address
+                    # alone would hijack an unrelated IP and rewrite its VRF.
+                    existing_ip = IPAddress.objects.filter(address=ip_with_mask, vrf=vrf).first()
 
                     if existing_ip:
                         if existing_ip.assigned_object != interface or existing_ip.vrf != vrf:
