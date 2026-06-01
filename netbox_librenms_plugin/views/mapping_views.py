@@ -588,6 +588,7 @@ class LocationMappingCreateView(LibreNMSWritePermissionMixin, generic.ObjectEdit
 
     queryset = LocationMapping.objects.all()
     form = LocationMappingForm
+    template_name = "netbox_librenms_plugin/locationmapping_edit.html"
 
 
 @register_model_view(LocationMapping, "bulk_import", path="import", detail=False)
@@ -609,6 +610,7 @@ class LocationMappingEditView(LibreNMSWritePermissionMixin, generic.ObjectEditVi
 
     queryset = LocationMapping.objects.all()
     form = LocationMappingForm
+    template_name = "netbox_librenms_plugin/locationmapping_edit.html"
 
 
 class LocationMappingDeleteView(LibreNMSWritePermissionMixin, generic.ObjectDeleteView):
