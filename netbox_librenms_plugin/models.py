@@ -9,6 +9,8 @@ from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
+from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
@@ -864,6 +866,19 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
         """Meta options for LocationMapping."""
 
         ordering = ["field_type", "librenms_value"]
+        constraints = [
+            # region/site/tenant values are globally unique, so a case-insensitive
+            # (field_type, librenms_value) pair must be unique to keep resolution
+            # deterministic. location/rack are scoped to a parent site, so they are
+            # intentionally excluded and may legitimately repeat. The partial index
+            # backing this constraint also serves the unscoped resolution lookups.
+            models.UniqueConstraint(
+                "field_type",
+                Lower("librenms_value"),
+                condition=Q(field_type__in=["region", "site", "tenant"]),
+                name="uniq_locationmapping_unscoped_ci",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.get_field_type_display()}: {self.librenms_value} -> {self.netbox_object}"
