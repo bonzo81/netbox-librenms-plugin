@@ -13,6 +13,7 @@ Optional:
       class="mt-1"
       id="plat-mapping-form-{{ libre_device.device_id }}">
   {% csrf_token %}
+  {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
   <div class="position-relative">
     <label for="plat-search-{{ libre_device.device_id }}" class="visually-hidden">
       Search platforms

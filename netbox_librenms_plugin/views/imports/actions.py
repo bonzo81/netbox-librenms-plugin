@@ -1889,7 +1889,7 @@ class AddPlatformMappingView(
                     except IntegrityError:
                         return _htmx_error_response("Mapping was created concurrently. Please try again.")
         except Exception as exc:
-            logger.warning("AddPlatformMappingView: failed to save mapping: %s", exc)
+            logger.exception("AddPlatformMappingView: failed to save mapping: %s", exc)
             return _htmx_error_response("Error saving mapping. Please try again.")
 
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
