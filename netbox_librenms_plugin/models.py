@@ -886,7 +886,7 @@ class LocationMapping(FullCleanOnSaveMixin, NetBoxModel):
             # intentionally excluded and may legitimately repeat. The partial index
             # backing this constraint also serves the unscoped resolution lookups.
             models.UniqueConstraint(
-                "field_type",
+                models.F("field_type"),
                 Lower("librenms_value"),
                 condition=Q(field_type__in=["region", "site", "tenant"]),
                 name="uniq_locationmapping_unscoped_ci",
