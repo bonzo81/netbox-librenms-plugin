@@ -245,6 +245,14 @@ class TestLibreNMSModuleTable:
         result = str(table.render_module_bay("", {}))
         assert "text-danger" in result
 
+    def test_render_module_bay_integrated_row_shows_plain_dash(self):
+        """Integrated rows have no bay of their own; show '-' not a red warning."""
+        table = self._make_table()
+        result = str(table.render_module_bay("-", {"status": "Integrated"}))
+        assert "text-danger" not in result
+        assert "No matching bay" not in result
+        assert result == "-"
+
     def test_render_module_bay_with_url_renders_link(self):
         """When module_bay_url is present, a hyperlink is rendered."""
         table = self._make_table()
