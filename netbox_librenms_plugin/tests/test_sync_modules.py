@@ -5223,3 +5223,49 @@ class TestPredictModuleInterfaceNamesSignal:
         finally:
             predict_module_interface_names.disconnect(first)
             predict_module_interface_names.disconnect(second)
+
+    def test_failing_receiver_is_isolated(self):
+        """send_robust must isolate a raising receiver so adoption isn't broken.
+
+        A buggy third-party receiver that raises is logged and skipped; a later
+        well-behaved receiver still applies, and the raw names survive if none do.
+        """
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def boom(sender, device, module, names, **kwargs):
+            raise RuntimeError("third-party receiver blew up")
+
+        @receiver(predict_module_interface_names)
+        def good(sender, device, module, names, **kwargs):
+            return ["override"]
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["raw"])
+            # The raising receiver must not propagate; the good receiver still wins.
+            assert get_module_template_interface_names(device, module) == ["override"]
+        finally:
+            predict_module_interface_names.disconnect(boom)
+            predict_module_interface_names.disconnect(good)
+
+    def test_only_failing_receiver_falls_back_to_raw_names(self):
+        """If the sole receiver raises, the raw template names are returned unchanged."""
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def boom(sender, device, module, names, **kwargs):
+            raise RuntimeError("third-party receiver blew up")
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["Gi1/0/1"])
+            assert get_module_template_interface_names(device, module) == ["Gi1/0/1"]
+        finally:
+            predict_module_interface_names.disconnect(boom)

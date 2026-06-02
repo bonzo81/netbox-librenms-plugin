@@ -169,6 +169,11 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
         try:
             instance = template.instantiate(device=device, module=module)
         except Exception:
+            logger.debug(
+                "instantiate() failed for template %r; skipping",
+                getattr(template, "name", None),
+                exc_info=True,
+            )
             continue
 
         name = (getattr(instance, "name", "") or "").strip()
@@ -189,9 +194,16 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
 
     from netbox_librenms_plugin.signals import predict_module_interface_names
 
-    for _receiver, returned in predict_module_interface_names.send(
+    # send_robust (not send): this is a public extension point, so a buggy third-party
+    # receiver must not break the module-adoption flow. send_robust isolates each receiver
+    # and returns the Exception in place of its result; we log and skip those, preserving
+    # the documented "last non-None return wins" ordering for the receivers that succeed.
+    for _receiver, returned in predict_module_interface_names.send_robust(
         sender=type(module), device=device, module=module, names=list(template_names)
     ):
+        if isinstance(returned, Exception):
+            logger.warning("predict_module_interface_names receiver failed: %s", returned)
+            continue
         if returned is not None:
             template_names = list(returned)
 
@@ -232,6 +244,11 @@ def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
         try:
             instance = template.instantiate(device=device, module=module)
         except Exception:
+            logger.debug(
+                "instantiate() failed for template %r; skipping",
+                raw_name,
+                exc_info=True,
+            )
             continue
         instantiated_name = (getattr(instance, "name", "") or "").strip()
         if not instantiated_name:
