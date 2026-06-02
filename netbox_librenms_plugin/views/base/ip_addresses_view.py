@@ -444,8 +444,8 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         try:
             try:
                 data = json.loads(request.body)
-            except json.JSONDecodeError as e:
-                return JsonResponse({"status": "error", "message": f"Invalid JSON: {e}"}, status=400)
+            except json.JSONDecodeError:
+                return JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
             ip_address = data.get("ip_address")
             vrf_id = data.get("vrf_id")
             object_id = data.get("device_id")
@@ -461,14 +461,17 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             # Get the object (Device or VirtualMachine)
             try:
                 obj = self._get_object(object_id, object_type)
-            except Http404 as e:
-                return JsonResponse({"status": "error", "message": str(e)}, status=404)
+            except Http404:
+                return JsonResponse({"status": "error", "message": f"Object with ID {object_id} not found"}, status=404)
 
             # Parse IP address
             try:
                 address_no_mask, prefix_len = self._parse_ip_address(ip_address)
-            except ValueError as e:
-                return JsonResponse({"status": "error", "message": str(e)}, status=400)
+            except ValueError:
+                return JsonResponse(
+                    {"status": "error", "message": "Invalid IP address: prefix length is missing or invalid"},
+                    status=400,
+                )
 
             cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
             cached_data = cache.get(cache_key)
