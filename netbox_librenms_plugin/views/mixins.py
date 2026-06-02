@@ -39,6 +39,37 @@ def _get_safe_redirect_url(request):
     return getattr(request, "path", "/")
 
 
+def _safe_redirect_response(request):
+    """
+    Build a permission-denied redirect response to a validated URL.
+
+    Resolves a candidate target via ``_get_safe_redirect_url`` and then
+    re-applies the ``url_has_allowed_host_and_scheme`` guard inline as a
+    positive guard, with the redirect sink inside the validated branch and a
+    hard-coded ``"/"`` fallback otherwise. Keeping the open-redirect guard
+    local to the sink (rather than in a helper) prevents open-redirect attacks
+    and lets static analysers trace the sanitizer barrier.
+
+    Returns an HTMX ``HX-Redirect`` response for HTMX requests, otherwise a
+    standard redirect.
+    """
+    target = _get_safe_redirect_url(request)
+    is_htmx = bool(request.headers.get("HX-Request"))
+
+    if url_has_allowed_host_and_scheme(
+        target,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        if is_htmx:
+            return HttpResponse("", headers={"HX-Redirect": target})
+        return redirect(target)
+
+    if is_htmx:
+        return HttpResponse("", headers={"HX-Redirect": "/"})
+    return redirect("/")
+
+
 class LibreNMSPermissionMixin(PermissionRequiredMixin):
     """
     Mixin for views requiring LibreNMS plugin permissions.
@@ -69,14 +100,7 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             msg = error_message or "You do not have permission to perform this action."
             messages.error(self.request, msg)
 
-            referrer = _get_safe_redirect_url(self.request)
-
-            # Check if this is an HTMX request
-            if self.request.headers.get("HX-Request"):
-                return HttpResponse("", headers={"HX-Redirect": referrer})
-
-            # referrer is safe: validated by _get_safe_redirect_url via url_has_allowed_host_and_scheme
-            return redirect(referrer)
+            return _safe_redirect_response(self.request)
         return None
 
     def require_write_permission_json(self, error_message=None):
@@ -164,14 +188,7 @@ class NetBoxObjectPermissionMixin:
             msg = f"Missing permissions: {missing_str}"
             messages.error(self.request, msg)
 
-            referrer = _get_safe_redirect_url(self.request)
-
-            # Check if this is an HTMX request
-            if self.request.headers.get("HX-Request"):
-                return HttpResponse("", headers={"HX-Redirect": referrer})
-
-            # referrer is safe: validated by _get_safe_redirect_url via url_has_allowed_host_and_scheme
-            return redirect(referrer)
+            return _safe_redirect_response(self.request)
         return None
 
     def require_object_permissions_json(self, method):
