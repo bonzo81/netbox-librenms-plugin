@@ -5224,12 +5224,14 @@ class TestPredictModuleInterfaceNamesSignal:
             predict_module_interface_names.disconnect(first)
             predict_module_interface_names.disconnect(second)
 
-    def test_failing_receiver_is_isolated(self):
+    def test_failing_receiver_is_isolated(self, caplog):
         """send_robust must isolate a raising receiver so adoption isn't broken.
 
         A buggy third-party receiver that raises is logged and skipped; a later
         well-behaved receiver still applies, and the raw names survive if none do.
         """
+        import logging
+
         from django.dispatch import receiver
 
         from netbox_librenms_plugin.signals import predict_module_interface_names
@@ -5247,7 +5249,10 @@ class TestPredictModuleInterfaceNamesSignal:
             device = MagicMock()
             module = self._make_module(["raw"])
             # The raising receiver must not propagate; the good receiver still wins.
-            assert get_module_template_interface_names(device, module) == ["override"]
+            with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.utils"):
+                assert get_module_template_interface_names(device, module) == ["override"]
+            # The isolated failure is logged (warning), not silently swallowed.
+            assert any("receiver failed" in msg for msg in caplog.messages)
         finally:
             predict_module_interface_names.disconnect(boom)
             predict_module_interface_names.disconnect(good)
