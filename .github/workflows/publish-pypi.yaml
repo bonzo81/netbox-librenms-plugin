@@ -8,6 +8,11 @@ on:
     tags:
       - '*'
 
+# Default to read-only token; the publish-to-pypi job overrides this with the
+# id-token: write permission required for PyPI trusted publishing.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build distribution 📦
