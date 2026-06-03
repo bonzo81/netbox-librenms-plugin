@@ -1254,8 +1254,14 @@ def set_librenms_oob(
 
     cf_value = obj.custom_field_data.get("librenms_id") or {}
     if not isinstance(cf_value, dict):
-        logger.warning("librenms_id on %r is not a dict; cannot set OOB.", obj)
-        return
+        # Legacy single-server format: a bare int/str librenms_id. The rest of the module
+        # still supports this shape and this PR avoids a mandatory migration, so promote it
+        # to the per-server dict here instead of no-opping the OOB attach. The legacy id is
+        # this server's host id; fail closed on a non-blank unparseable value.
+        legacy_id = coerce_librenms_id(cf_value)
+        if legacy_id is None and str(cf_value).strip():
+            raise ValueError(f"Cannot attach OOB: legacy librenms_id on {obj!r} is not a valid id: {cf_value!r}")
+        cf_value = {server_key: legacy_id} if legacy_id is not None else {}
 
     entry = cf_value.get(server_key)
     if isinstance(entry, int) and not isinstance(entry, bool):
@@ -1509,8 +1515,11 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
     if winner_id is None and donor_id is not None:
         winner_entry["id"] = donor_id
         summary["host_id_from_donor"] = donor_id
-    elif winner_id is not None and donor_id is not None and winner_oob is None:
-        # Demote donor's host id into winner's oob slot. Infer type from donor name.
+    elif winner_id is not None and donor_id is not None and winner_oob is None and not donor_oob:
+        # Demote donor's host id into winner's oob slot — but ONLY when the donor has no real
+        # OOB of its own. If the donor is shaped like {"id": ..., "oob": {...}}, its actual OOB
+        # controller (inherited by the donor_oob path below) takes precedence over demoting the
+        # donor's host id, otherwise the real OOB link would be lost. Infer type from donor name.
         match = OOB_TYPE_PATTERN.search(donor.name or "")
         inferred_type = match.group(1).lower() if match else "oob"
         demoted = {"id": donor_id, "type": inferred_type}

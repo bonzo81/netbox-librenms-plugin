@@ -257,7 +257,7 @@ class LibreNMSAPI:
         primary_ip_address = getattr(primary_ip, "address", None)
         ip_address = getattr(primary_ip_address, "ip", None) if primary_ip else None
         dns_name = getattr(primary_ip, "dns_name", None) if primary_ip else None
-        hostname = getattr(obj, "name", None) or None
+        hostname = getattr(obj, "name", None)
 
         # Try IP address
         if ip_address:

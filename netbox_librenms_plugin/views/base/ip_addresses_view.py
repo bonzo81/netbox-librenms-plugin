@@ -1,5 +1,6 @@
 import json
 import logging
+from urllib.parse import quote_plus
 
 from dcim.models import Device
 from django.contrib import messages
@@ -278,7 +279,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         # Build the follow-up HTMX URL on the POST-resolved server (fallback: session
         # server) so the next refresh/action targets the same server scope.
         server_key = server_key or self.librenms_api.server_key
-        table.htmx_url = f"{request.path}?tab=ipaddresses" + (f"&server_key={server_key}" if server_key else "")
+        # server_key is config data, not a guaranteed slug — URL-encode it so a key with
+        # &/=/space doesn't build a broken query string and silently change server scope.
+        table.htmx_url = f"{request.path}?tab=ipaddresses" + (
+            f"&server_key={quote_plus(server_key)}" if server_key else ""
+        )
         return table
 
     def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False, server_key=None):
@@ -529,12 +534,18 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
 
             # Validate the client-supplied numeric IDs up front so a bad value returns a
             # clean 400 instead of raising deep in the ORM and being caught as a generic 500.
+            # Reject JSON booleans explicitly: bool is an int subclass, so True/False would
+            # otherwise pass int() and validate as IDs 1/0.
+            if isinstance(object_id, bool):
+                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
             try:
                 object_id = int(object_id)
             except (TypeError, ValueError):
                 return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
             if vrf_id in (None, ""):
                 vrf_id = None
+            elif isinstance(vrf_id, bool):
+                return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
             else:
                 try:
                     vrf_id = int(vrf_id)

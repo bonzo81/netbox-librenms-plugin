@@ -213,6 +213,11 @@ def apply_merge_candidates(
     }
     result["can_import"] = False
     result["oob_candidate"] = None
+    # Clear earlier serial-conflict state so the merge path is the single source of truth:
+    # a hostname-first row may have already set serial_duplicate / serial_confirmed, which
+    # would otherwise leave a stale "serial conflict" signal alongside "merge these devices".
+    result["serial_duplicate"] = False
+    result["serial_confirmed"] = False
     # "absent otherwise" contract — the merge path has no promotion target.
     result.pop("promote_to_host", None)
     result["serial_role_choice_available"] = False

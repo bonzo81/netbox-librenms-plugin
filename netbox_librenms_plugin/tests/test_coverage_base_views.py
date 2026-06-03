@@ -1218,6 +1218,9 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_cache_key", return_value="cache-key") as mock_get_cache_key,
             patch.object(view, "get_last_fetched_key", return_value="last-key") as mock_get_last_fetched_key,
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            # Ports cache scopes to the VC sync device; pin it to obj so this caching test
+            # isn't entangled with VC-routing (cache_device == obj for non-VC anyway).
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,

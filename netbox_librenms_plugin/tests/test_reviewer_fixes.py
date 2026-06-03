@@ -446,6 +446,17 @@ class TestNormalizeOOBTypeCimc:
 
         assert normalize_oob_type("ubuntu", "") is None
 
+    def test_prefix_inside_unrelated_word_does_not_match(self):
+        """Whole-token matching: 'drac' inside 'dracut' (and 'ipmi' inside 'ipmitool')
+        must NOT classify a normal device as an OOB controller. Numeric suffixes like
+        iDRAC9 / drac9 must still match."""
+        from netbox_librenms_plugin.constants import normalize_oob_type
+
+        assert normalize_oob_type("dracut", "") is None
+        assert normalize_oob_type("ipmitool", "") is None
+        assert normalize_oob_type("iDRAC9", "") == "idrac"
+        assert normalize_oob_type("drac9", "") == "drac"
+
 
 class TestNormalizeOOBTypePrefersVendorSpecific:
     """A vendor-specific match must win over the generic 'oob' token, even when the

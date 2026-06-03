@@ -8,7 +8,10 @@ PERM_CHANGE_PLUGIN = "netbox_librenms_plugin.change_librenmssettings"
 LIBRENMS_VLAN_STATE_ACTIVE = 1
 
 # OOB management controller detection
-OOB_TYPE_PATTERN = re.compile(r"\b(idrac|ilo|ipmi|bmc|drac|cimc|oob)", re.IGNORECASE)
+# Trailing \d*\b restricts matches to whole tokens (optionally with a numeric suffix like
+# iDRAC9 / drac9) so a prefix collision inside an unrelated word — e.g. "dracut", "ipmitool"
+# — can't misclassify a normal device as an OOB controller.
+OOB_TYPE_PATTERN = re.compile(r"\b(idrac|ilo|ipmi|bmc|drac|cimc|oob)\d*\b", re.IGNORECASE)
 OOB_TYPES = ("idrac", "ilo", "ipmi", "bmc", "drac", "cimc", "oob")
 
 

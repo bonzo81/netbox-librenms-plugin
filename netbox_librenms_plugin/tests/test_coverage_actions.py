@@ -4316,6 +4316,23 @@ class TestAddAsOOBViewGenericSentinel:
         assert result is not None
         assert result["type"] == "oob"
 
+    def test_legacy_bare_int_librenms_id_promoted_on_oob_attach(self):
+        """A device whose librenms_id is still the legacy bare int must NOT silently no-op:
+        set_librenms_oob promotes it to the per-server dict and attaches the OOB block."""
+        from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": 42}  # legacy single-server format (bare int)
+        obj.cf = obj.custom_field_data
+
+        set_librenms_oob(obj, 55, "default", oob_type="idrac")
+
+        cf = obj.custom_field_data["librenms_id"]
+        assert isinstance(cf, dict)
+        assert cf["default"]["id"] == 42  # legacy host id promoted under the server key
+        assert cf["default"]["oob"] == {"id": 55, "type": "idrac"}
+        assert get_librenms_oob(obj, "default") == {"id": 55, "type": "idrac"}
+
     def test_sentinel_from_detection_layer_flows_to_storage(self):
         """The three-layer fallback in device_operations produces oob_type='oob'
         when neither the LibreNMS OS field nor either device name contains an OOB
@@ -4545,7 +4562,9 @@ class TestAddAsOOBViewPost:
         locked_device.oob_ip_id = 1
         locked_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
 
-        libre_device = {"device_id": 10}
+        # Distinct host id (10, already on the device) vs incoming OOB controller id (17):
+        # so the assertion pins that the *incoming* id lands in oob.id, not a reused host id.
+        libre_device = {"device_id": 17}
         # No "ip" → the OOB-IP set block is skipped; type "oob" is the regression target.
         validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
         view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
@@ -4573,7 +4592,7 @@ class TestAddAsOOBViewPost:
             mock_device.DoesNotExist = Exception
             mock_device.objects.get.return_value = existing_device
             mock_device.objects.select_for_update.return_value.get.return_value = locked_device
-            response = view.post(request, device_id=10)
+            response = view.post(request, device_id=17)
 
         # Non-error response on the success path.
         assert response.status_code == 200
@@ -4583,10 +4602,11 @@ class TestAddAsOOBViewPost:
         # _save_device() call or saving the stale pre-lock instance.
         mock_save.assert_called_once()
         assert mock_save.call_args.args[0] is locked_device
-        # set_librenms_oob ran for real with the generic sentinel, and the mapping was already
-        # on the locked row at the moment it was persisted.
+        # set_librenms_oob ran for real with the generic sentinel: the *incoming* controller
+        # id (17) lands in oob.id, while the host id (10) is preserved.
         assert saved["instance"] is locked_device
-        assert saved["cfd"]["librenms_id"]["default"]["oob"] == {"id": 10, "type": "oob"}
+        assert saved["cfd"]["librenms_id"]["default"]["id"] == 10
+        assert saved["cfd"]["librenms_id"]["default"]["oob"] == {"id": 17, "type": "oob"}
 
     def test_save_device_error_marks_transaction_rollback(self):
         """_save_device returns an error response (it doesn't raise), so the view must mark
@@ -4608,7 +4628,8 @@ class TestAddAsOOBViewPost:
         locked_device.oob_ip_id = 1
         locked_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
 
-        libre_device = {"device_id": 10}
+        # Distinct host id (10) vs incoming OOB controller id (17), per the host/OOB split.
+        libre_device = {"device_id": 17}
         validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
         view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
 
@@ -4623,7 +4644,7 @@ class TestAddAsOOBViewPost:
             mock_device.DoesNotExist = Exception
             mock_device.objects.get.return_value = existing_device
             mock_device.objects.select_for_update.return_value.get.return_value = locked_device
-            response = view.post(request, device_id=10)
+            response = view.post(request, device_id=17)
 
         assert response is err_resp
         mock_tx.set_rollback.assert_called_once_with(True)

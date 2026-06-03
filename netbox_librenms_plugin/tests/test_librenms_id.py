@@ -738,6 +738,23 @@ class TestMergeLibreNMSLinks:
         assert winner.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "idrac"
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
 
+    def test_donor_real_oob_preferred_over_demoting_donor_id(self):
+        """Donor shaped {"id": X, "oob": {...}} with the winner already holding a host id:
+        the donor's REAL oob must be inherited, not the donor's host id demoted into oob —
+        otherwise the actual OOB controller is silently lost during merge."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99, "oob": {"id": 77, "type": "ilo"}}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        # Winner keeps its own host id and inherits the donor's REAL oob (77/ilo) — the
+        # donor's host id (99) is NOT demoted into oob.
+        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 42
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 77, "type": "ilo"}
+        assert summary.get("oob_from_donor") == {"id": 77, "type": "ilo"}
+        assert summary.get("donor_id_demoted_to_oob") is None
+
     def test_donor_id_demoted_to_oob_generic_when_no_pattern_in_name(self):
         """Donor id is always demoted; type falls back to 'oob' when no keyword in name."""
         from netbox_librenms_plugin.utils import merge_librenms_links

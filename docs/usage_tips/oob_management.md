@@ -67,7 +67,7 @@ Each action runs under a row lock and verifies the `_migrated_to` marker before 
 
 Outside the OOB import flows, both `primary_ip` and `oob_ip` are driven from interface-assigned addresses:
 
-- **Primary IP** is set on the [IP Address sync tab](../librenms_import/overview.md): with **Set Primary IP** enabled, a synced IP that matches the LibreNMS management IP and is interface-assigned becomes the device's primary.
+- **Primary IP** is set on the device's **IP Addresses** sync tab: with **Set Primary IP** enabled, a synced IP that matches the LibreNMS management IP and is interface-assigned becomes the device's primary.
 - **OOB IP** is set through the **Add as OOB** flow above.
 
 This keeps every IP relationship valid against NetBox's requirement that primary/OOB IPs be assigned to one of the device's own interfaces.

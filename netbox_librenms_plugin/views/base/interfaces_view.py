@@ -201,17 +201,19 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # main-only, so caching it would let get_context_data serve that partial set
         # (OOB rows / shared-LOM markers silently missing) until TTL — drop any stale
         # entry instead so the next refresh re-fetches. Mirrors modules_view.
+        # Scope the ports cache to the VC sync device (lookup_device, resolved above), not the
+        # viewed member, so all VC members share one entry. Must match get_context_data()'s key.
         if oob_ports_failed:
-            cache.delete(self.get_cache_key(obj, "ports", _server_key))
-            cache.delete(self.get_last_fetched_key(obj, "ports", _server_key))
+            cache.delete(self.get_cache_key(lookup_device, "ports", _server_key))
+            cache.delete(self.get_last_fetched_key(lookup_device, "ports", _server_key))
         else:
             cache.set(
-                self.get_cache_key(obj, "ports", _server_key),
+                self.get_cache_key(lookup_device, "ports", _server_key),
                 librenms_data,
                 timeout=self.librenms_api.cache_timeout,
             )
             cache.set(
-                self.get_last_fetched_key(obj, "ports", _server_key),
+                self.get_last_fetched_key(lookup_device, "ports", _server_key),
                 timezone.now(),
                 timeout=self.librenms_api.cache_timeout,
             )
@@ -284,12 +286,17 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if server_key is None:
             server_key = getattr(self.librenms_api, "server_key", None)
 
+        # Scope the ports cache to the VC sync device (not the viewed member) so all VC
+        # members share one entry instead of fragmenting / re-fetching per member. Mirrors
+        # cables_view; resolves to obj itself for non-VC devices. Must match post()'s key.
+        cache_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+
         if fresh_data is not None:
             cached_data = fresh_data
             last_fetched = timezone.now()
         else:
-            cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
-            last_fetched = cache.get(self.get_last_fetched_key(obj, "ports", server_key))
+            cached_data = cache.get(self.get_cache_key(cache_device, "ports", server_key))
+            last_fetched = cache.get(self.get_last_fetched_key(cache_device, "ports", server_key))
 
         # Get VLAN groups for dropdown
         vlan_groups = self.get_vlan_groups_for_device(obj)
@@ -397,7 +404,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "ports", server_key))
+        cache_ttl = cache.ttl(self.get_cache_key(cache_device, "ports", server_key))
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )
