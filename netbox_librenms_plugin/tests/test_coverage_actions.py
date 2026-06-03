@@ -4830,6 +4830,49 @@ class TestAddAsOOBViewPost:
         # Aborted before the cross-device duplicate lookup even runs.
         mock_find.assert_not_called()
 
+    def test_aborts_when_locked_oob_type_changed_concurrently(self):
+        """Same OOB id already linked, but a concurrent re-detection stored a different
+        type. The stale modal must not silently overwrite the newer type — the guard
+        compares type as well as id (both are canonical OOB_TYPES tokens)."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+        existing_device.name = "host-a"
+        existing_device.oob_ip_id = 1
+        existing_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+        locked_device = MagicMock()
+        locked_device.pk = 5
+        locked_device.name = "host-a"
+        locked_device.oob_ip_id = 1
+        # Locked row already has OOB id 17 typed "ilo" (set by a concurrent request).
+        # get_librenms_oob reads obj.cf, so set it as a real dict (not an auto-mock).
+        locked_device.custom_field_data = {"librenms_id": {"default": {"id": 10, "oob": {"id": 17, "type": "ilo"}}}}
+        locked_device.cf = {"librenms_id": {"default": {"id": 10, "oob": {"id": 17, "type": "ilo"}}}}
+
+        libre_device = {"device_id": 17}
+        # This modal re-detected the same controller (17) as "idrac".
+        validation = {"oob_candidate": {"device": existing_device, "type": "idrac", "ip": None}}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+
+        with (
+            patch("dcim.models.Device") as mock_device,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+            patch("netbox_librenms_plugin.views.imports.actions._save_device") as mock_save,
+            patch("netbox_librenms_plugin.views.imports.actions.cache"),
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+        ):
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            mock_device.objects.select_for_update.return_value.get.return_value = locked_device
+            response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert b"modified concurrently" in response.content
+        mock_save.assert_not_called()
+
 
 class TestMergeNetBoxDevicesViewOOBTransfer:
     """MergeNetBoxDevicesView.post: oob_ip may only move to the winner when its

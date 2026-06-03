@@ -2087,8 +2087,16 @@ class AddAsOOBView(
                 get_librenms_oob,
             )
 
+            # Reject if the locked OOB link differs from what this (possibly stale) modal
+            # is about to write — by id OR by type. oob_type is already a canonical OOB_TYPES
+            # token (so is the stored current_oob["type"]), so this is a like-for-like compare
+            # that won't false-trip on an idempotent re-attach; it does catch a concurrent
+            # re-detection that changed the controller type.
             current_oob = get_librenms_oob(existing_device, server_key=server_key)
-            if current_oob and coerce_librenms_id(current_oob.get("id")) != coerce_librenms_id(librenms_id):
+            if current_oob and (
+                coerce_librenms_id(current_oob.get("id")) != coerce_librenms_id(librenms_id)
+                or (current_oob.get("type") or "") != oob_type
+            ):
                 return _htmx_error_response("OOB link was modified concurrently; refresh and retry.")
 
             # A concurrent change could have re-linked THIS device's host id to the incoming
