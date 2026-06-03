@@ -8,6 +8,7 @@ from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.utils import (
+    coerce_librenms_id,
     find_matching_platform,
     get_interface_name_field,
     get_librenms_device_id,
@@ -46,8 +47,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # Store for use in get_context_data (badge generation needs the same object)
         self._librenms_lookup_device = librenms_lookup_device
 
-        # Get librenms_id using the determined lookup device
-        self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
+        # Get librenms_id using the determined lookup device. Normalise to a positive int
+        # or None at the source so every downstream `is not None` check (has_librenms_id,
+        # get_device_info, etc.) can rely on the invariant without re-validating.
+        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(librenms_lookup_device))
 
         context = self.get_context_data(request, obj)
 
@@ -63,9 +66,8 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             {
                 "object": obj,
                 "tab": self.tab,
-                # self.librenms_id comes from get_librenms_device_id(), which already
-                # rejects non-positive ids, so `is not None` is correct here — 0/negatives
-                # never reach this point.
+                # self.librenms_id is normalised to a positive int or None at assignment
+                # (see post()), so `is not None` is correct here — 0/negatives never reach it.
                 "has_librenms_id": self.librenms_id is not None,
             }
         )

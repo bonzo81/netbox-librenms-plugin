@@ -1684,10 +1684,15 @@ class TestDeviceConflictActionMigrateLibreNMSId:
 
         mock_vm = MagicMock()
         mock_vm.pk = 1
+        mock_vm.name = "vm01"
+        # Legacy bare-int id matching the active device_id (42) → migration applies.
+        mock_vm.custom_field_data = {"librenms_id": 42}
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("virtualization.models.VirtualMachine") as MockVM:
                 MockVM.objects.get.return_value = mock_vm
+                # The locked re-read inside the transaction must also return the VM.
+                MockVM.objects.select_for_update.return_value.get.return_value = mock_vm
                 MockVM.DoesNotExist = Exception
                 with patch("dcim.models.Device"):
                     with patch.object(view, "require_object_permissions", return_value=None):
@@ -1696,7 +1701,11 @@ class TestDeviceConflictActionMigrateLibreNMSId:
                             "get_validated_device_with_selections",
                             return_value=(
                                 {"device_id": 42},
-                                {"existing_device": mock_vm, "device_type_mismatch": False},
+                                {
+                                    "existing_device": mock_vm,
+                                    "device_type_mismatch": False,
+                                    "serial_confirmed": True,
+                                },
                                 {},
                             ),
                         ):
@@ -1704,27 +1713,27 @@ class TestDeviceConflictActionMigrateLibreNMSId:
                                 mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
                                 mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
                                 with patch("netbox_librenms_plugin.views.imports.actions.cache"):
-                                    with patch("netbox_librenms_plugin.views.imports.actions.set_librenms_device_id"):
+                                    # migrate_librenms_id converts via migrate_legacy_librenms_id
+                                    # and guards against duplicate ownership via find_by_librenms_id.
+                                    with patch(
+                                        "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=True
+                                    ) as mock_migrate:
                                         with patch(
-                                            "netbox_librenms_plugin.views.imports.actions._save_device",
-                                            return_value=None,
+                                            "netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None
                                         ):
                                             with patch(
                                                 "netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key",
                                                 return_value="key",
                                             ):
-                                                with patch(
-                                                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                                                    return_value={"device_id": 42},
-                                                ):
-                                                    with patch.object(
-                                                        view, "render_device_row", return_value=MagicMock()
-                                                    ):
-                                                        try:
-                                                            view.post(request, device_id=42)
-                                                        except Exception:
-                                                            pass
-        # Should not raise - VM type selection is valid for migrate_librenms_id
+                                                with patch.object(
+                                                    view, "render_device_row", return_value=MagicMock()
+                                                ) as mock_render:
+                                                    view.post(request, device_id=42)
+        # The VM branch was actually exercised (no blanket try/except masking crashes):
+        # the migrate path converted the VM's legacy id and rendered the updated row.
+        MockVM.objects.get.assert_called_once_with(pk=1)
+        assert mock_migrate.called
+        assert mock_render.called
 
 
 class TestDeviceConflictActionMissingExisting:
@@ -2419,6 +2428,9 @@ class TestBulkImportConfirmViewVMRole:
             "status": "importable",
             "resolved_name": "vm01",
             "virtual_chassis": {},
+            # The view recomputes is_vm from this flag; without it the cluster branch
+            # (apply_cluster_to_validation) is skipped.
+            "import_as_vm": True,
         }
         mock_cluster = MagicMock()
         mock_role = MagicMock()
@@ -2455,8 +2467,10 @@ class TestBulkImportConfirmViewVMRole:
                                         ):
                                             response = view.post(request)
 
-        # Cluster and role should have been applied
-        assert mock_apply_c.called or mock_apply_r.called or response is not None
+        # Both the cluster and role selections must be applied for a VM with both set.
+        assert mock_apply_c.called
+        assert mock_apply_r.called
+        assert response is not None
 
     def test_device_with_role_and_rack_applies_both(self):
         """Lines 390, 393: Device with role + rack applies both."""
@@ -2498,14 +2512,19 @@ class TestBulkImportConfirmViewVMRole:
                                 with patch(
                                     "netbox_librenms_plugin.views.imports.actions.apply_role_to_validation"
                                 ) as mock_apply_r:
-                                    with patch("netbox_librenms_plugin.views.imports.actions.apply_rack_to_validation"):
+                                    with patch(
+                                        "netbox_librenms_plugin.views.imports.actions.apply_rack_to_validation"
+                                    ) as mock_apply_rack:
                                         with patch(
                                             "netbox_librenms_plugin.views.imports.actions.render",
                                             return_value=MagicMock(status_code=200),
                                         ):
                                             response = view.post(request)
 
-        assert mock_apply_r.called or response is not None
+        # Both the role and rack selections must be applied for a device with both set.
+        assert mock_apply_r.called
+        assert mock_apply_rack.called
+        assert response is not None
 
 
 class TestSaveDevicePath:
@@ -2713,6 +2732,10 @@ class TestMigrateLibreNMSIdMorePaths:
                             mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
                             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
                             with patch("dcim.models.Device") as MockDevice2:
+                                # This inner patch shadows the outer one for the in-function
+                                # `from dcim.models import Device`, so it must serve BOTH the
+                                # pre-lock existing_device lookup and the locked re-read.
+                                MockDevice2.objects.get.return_value = mock_existing
                                 MockDevice2.objects.select_for_update.return_value.get.return_value = locked_device
                                 MockDevice2.DoesNotExist = DoesNotExistExc
                                 with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
@@ -2735,12 +2758,10 @@ class TestMigrateLibreNMSIdMorePaths:
                                                         with patch.object(
                                                             view, "render_device_row", return_value=MagicMock()
                                                         ) as mock_render:
-                                                            try:
-                                                                view.post(request, device_id=42)
-                                                            except Exception:
-                                                                pass
-        # At minimum, migration logic was entered
-        assert mock_render.called or True  # test completes without error
+                                                            view.post(request, device_id=42)
+        # The migration path ran to completion and rendered the updated row
+        # (no blanket try/except masking a broken migrate/render path).
+        assert mock_render.called
 
 
 class TestDeviceConflictMoreActions:
@@ -3545,8 +3566,11 @@ class TestBulkImportConfirmPartialExpiry:
         view._librenms_api = _make_api()
         return view
 
-    def test_partial_expiry_returns_400(self):
-        """Line 422: some devices expired, some not → partial expiry 400."""
+    def test_one_expired_one_valid_device_still_renders(self):
+        """One selected device is fetched, the other has expired from cache. Because any
+        fetched device is unconditionally appended to ``devices``, the post() still renders
+        the valid device (200) rather than erroring — the ``if not devices`` 400 branches
+        are only reached when *every* selected device is missing."""
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
@@ -3586,12 +3610,14 @@ class TestBulkImportConfirmPartialExpiry:
                             with patch(
                                 "netbox_librenms_plugin.views.imports.actions.render",
                                 return_value=MagicMock(status_code=200),
-                            ):
+                            ) as mock_render:
                                 response = view.post(request)
 
-        # 1 device found, 1 expired → partial expiry → devices=[1], seen_ids={1, 2}
-        # cache_expired_count=1, len(seen_ids)=2 → cache_expired_count < len(seen_ids) → partial
-        assert response is not None
+        # The valid device (1) is rendered despite device 2 having expired; the loop
+        # fetched both ids (the expired one bumps cache_expired_count but isn't fatal).
+        assert response.status_code == 200
+        mock_render.assert_called_once()
+        assert call_count[0] == 2
 
 
 class TestBulkImportDevicesViewBasicPaths:
