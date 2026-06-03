@@ -260,14 +260,17 @@ class TestBulkImportConfirmView:
             result = view.post(request)
         assert result is error_resp
 
-    def test_no_devices_selected_returns_400(self):
+    def test_no_devices_selected_renders_alert(self):
+        # This is HTMX modal content (hx-target=#htmx-modal-content); htmx won't swap a
+        # 4xx, so the alert must come back 200 to render in-place.
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             request = _make_request(post={})
             result = view.post(request)
-        assert result.status_code == 400
+        assert result.status_code == 200
+        assert b"Select at least one device" in result.content
 
-    def test_invalid_device_id_skipped(self):
+    def test_invalid_device_id_renders_generic_alert(self):
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
@@ -276,10 +279,11 @@ class TestBulkImportConfirmView:
                 with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
                     request = _make_request(post={"select": ["not-an-int"]})
                     result = view.post(request)
-        # Should produce a 400 since no valid devices
-        assert result.status_code == 400
+        # No valid devices and nothing expired → generic alert, rendered 200 in the modal.
+        assert result.status_code == 200
+        assert b"No valid devices selected" in result.content
 
-    def test_all_cache_expired_returns_400_with_expiry_message(self):
+    def test_all_cache_expired_renders_expiry_alert(self):
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
@@ -288,7 +292,8 @@ class TestBulkImportConfirmView:
                 with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
                     request = _make_request(post={"select": ["1", "2"]})
                     result = view.post(request)
-        assert result.status_code == 400
+        # All selected devices expired → expiry alert, 200 so the modal renders it.
+        assert result.status_code == 200
         assert b"expired" in result.content.lower()
 
     @patch("netbox_librenms_plugin.views.imports.actions.render")
@@ -1498,8 +1503,9 @@ class TestBulkImportConfirmViewPost:
         view._librenms_api = _make_api()
         return view
 
-    def test_no_devices_selected_returns_400(self):
-        """Lines 312-317: empty device_ids returns 400."""
+    def test_no_devices_selected_renders_alert(self):
+        """Empty device_ids returns the alert as HTMX modal content (200, not 400, so
+        htmx swaps it into #htmx-modal-content)."""
         view = self._make_view()
         request = _make_request(post={})
         request.POST.getlist = MagicMock(return_value=[])
@@ -1507,7 +1513,8 @@ class TestBulkImportConfirmViewPost:
         with patch.object(view, "require_write_permission", return_value=None):
             response = view.post(request)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert b"Select at least one device" in response.content
 
     def test_duplicate_device_id_is_skipped(self):
         """Line 334: duplicate device_id is skipped."""
@@ -1687,12 +1694,18 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         mock_vm.name = "vm01"
         # Legacy bare-int id matching the active device_id (42) → migration applies.
         mock_vm.custom_field_data = {"librenms_id": 42}
+        # A DISTINCT locked instance so the test fails if the view mutates the stale
+        # pre-lock VM instead of the row re-read under select_for_update.
+        locked_vm = MagicMock()
+        locked_vm.pk = 1
+        locked_vm.name = "vm01"
+        locked_vm.custom_field_data = {"librenms_id": 42}
 
         with patch.object(view, "require_all_permissions", return_value=None):
             with patch("virtualization.models.VirtualMachine") as MockVM:
                 MockVM.objects.get.return_value = mock_vm
-                # The locked re-read inside the transaction must also return the VM.
-                MockVM.objects.select_for_update.return_value.get.return_value = mock_vm
+                # The locked re-read inside the transaction returns the distinct locked VM.
+                MockVM.objects.select_for_update.return_value.get.return_value = locked_vm
                 MockVM.DoesNotExist = Exception
                 with patch("dcim.models.Device"):
                     with patch.object(view, "require_object_permissions", return_value=None):
@@ -1732,7 +1745,8 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         # The VM branch was actually exercised (no blanket try/except masking crashes):
         # the migrate path converted the VM's legacy id and rendered the updated row.
         MockVM.objects.get.assert_called_once_with(pk=1)
-        assert mock_migrate.called
+        # The conversion operates on the LOCKED instance, not the stale pre-lock one.
+        assert mock_migrate.call_args.args[0] is locked_vm
         assert mock_render.called
 
 
@@ -2467,9 +2481,10 @@ class TestBulkImportConfirmViewVMRole:
                                         ):
                                             response = view.post(request)
 
-        # Both the cluster and role selections must be applied for a VM with both set.
-        assert mock_apply_c.called
-        assert mock_apply_r.called
+        # Both the cluster and role selections must be applied for a VM with both set,
+        # with the exact resolved objects (catches a role/cluster swap, not just "called").
+        assert mock_apply_c.call_args.args[1] is mock_cluster
+        assert mock_apply_r.call_args.args[1] is mock_role
         assert response is not None
 
     def test_device_with_role_and_rack_applies_both(self):
@@ -2521,9 +2536,10 @@ class TestBulkImportConfirmViewVMRole:
                                         ):
                                             response = view.post(request)
 
-        # Both the role and rack selections must be applied for a device with both set.
-        assert mock_apply_r.called
-        assert mock_apply_rack.called
+        # Both the role and rack selections must be applied for a device with both set,
+        # with the exact resolved objects in the expected positions.
+        assert mock_apply_r.call_args.args[1] is mock_role
+        assert mock_apply_rack.call_args.args[1] is mock_rack
         assert response is not None
 
 
@@ -2741,7 +2757,7 @@ class TestMigrateLibreNMSIdMorePaths:
                                 with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
                                     with patch(
                                         "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=True
-                                    ):
+                                    ) as mock_migrate:
                                         with patch(
                                             "netbox_librenms_plugin.views.imports.actions._save_device",
                                             return_value=None,
@@ -2762,6 +2778,8 @@ class TestMigrateLibreNMSIdMorePaths:
         # The migration path ran to completion and rendered the updated row
         # (no blanket try/except masking a broken migrate/render path).
         assert mock_render.called
+        # The conversion operates on the LOCKED instance, not the stale pre-lock one.
+        assert mock_migrate.call_args.args[0] is locked_device
 
 
 class TestDeviceConflictMoreActions:
@@ -4644,7 +4662,7 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
             # Host id 10 (≠ incoming OOB id 17) → the self host/OOB guard passes.
-            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10),
+            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10) as mock_get,
             # No other device owns id 17 → the in-transaction duplicate-mapping re-check passes.
             patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
         ):
@@ -4659,6 +4677,8 @@ class TestAddAsOOBViewPost:
         view.render_device_row.assert_called_once()
         # The duplicate-mapping lookup stays in the active server namespace.
         assert mock_find.call_args.args[1:] == (17, "default")
+        # The self host/OOB guard reads the LOCKED row, server-scoped and read-only.
+        mock_get.assert_called_once_with(locked_device, server_key="default", auto_save=False)
         # The LOCKED row must be the one persisted — guards against the view dropping the
         # _save_device() call or saving the stale pre-lock instance.
         mock_save.assert_called_once()
@@ -4701,7 +4721,7 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err_resp),
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
-            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10),
+            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10) as mock_get,
             patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
@@ -4712,6 +4732,7 @@ class TestAddAsOOBViewPost:
         assert response is err_resp
         mock_tx.set_rollback.assert_called_once_with(True)
         assert mock_find.call_args.args[1:] == (17, "default")
+        mock_get.assert_called_once_with(locked_device, server_key="default", auto_save=False)
 
     def test_aborts_when_librenms_id_owned_by_another_device(self):
         """The incoming OOB controller id must not already belong to another NetBox device.
@@ -4746,7 +4767,7 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions._save_device") as mock_save,
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
-            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10),
+            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10) as mock_get,
             patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=other_device) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
@@ -4761,6 +4782,7 @@ class TestAddAsOOBViewPost:
         mock_save.assert_not_called()
         # The lookup is scoped to the active server (id 17, "default").
         assert mock_find.call_args.args[1:] == (17, "default")
+        mock_get.assert_called_once_with(locked_device, server_key="default", auto_save=False)
 
     def test_aborts_when_incoming_id_is_own_host_id(self):
         """A concurrent re-link could make this device's host id equal the incoming OOB id;
@@ -4791,7 +4813,7 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
             # Host id resolves to the SAME id as the incoming OOB controller (17).
-            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=17),
+            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=17) as mock_get,
             patch("netbox_librenms_plugin.utils.find_by_librenms_id") as mock_find,
         ):
             mock_device.DoesNotExist = Exception
@@ -4803,6 +4825,8 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"this device&#x27;s host link" in response.content
         mock_save.assert_not_called()
+        # The guard reads the locked row, server-scoped and read-only.
+        mock_get.assert_called_once_with(locked_device, server_key="default", auto_save=False)
         # Aborted before the cross-device duplicate lookup even runs.
         mock_find.assert_not_called()
 

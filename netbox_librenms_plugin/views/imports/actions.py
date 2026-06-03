@@ -445,10 +445,11 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
         device_ids = request.POST.getlist("select")
         if not device_ids:
-            return HttpResponse(
-                '<div class="alert alert-warning mb-0">Select at least one device.</div>',
-                status=400,
-            )
+            # This is HTMX modal content (hx-target=#htmx-modal-content). htmx does not
+            # swap 4xx responses by default, so a 400 here would leave the alert unrendered
+            # (the JS fallback would surface the raw HTML as toast text). Return 200 so the
+            # styled alert renders in-place, matching the collision interstitial below.
+            return HttpResponse('<div class="alert alert-warning mb-0">Select at least one device.</div>')
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
         vc_detection_enabled = _resolve_vc_detection_enabled(request)
@@ -545,6 +546,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             )
 
         if not devices:
+            # All branches return 200 (not 400): this is HTMX modal content swapped into
+            # #htmx-modal-content, and htmx does not swap 4xx responses by default.
             # Check if this is due to cache expiration
             if cache_expired_count > 0 and cache_expired_count == len(seen_ids):
                 return HttpResponse(
@@ -554,8 +557,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     "The device data is no longer available in cache (5-minute timeout). "
                     'Please <a href="javascript:window.location.reload();" class="alert-link">refresh the page</a> '
                     "or re-run your filter to reload device data."
-                    "</div>",
-                    status=400,
+                    "</div>"
                 )
             elif cache_expired_count > 0:
                 # Partial expiration - some devices lost their selections
@@ -566,8 +568,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     f"{cache_expired_count} of {len(seen_ids)} selected devices had expired cache data and may be missing role/rack selections. "
                     'Please <a href="javascript:window.location.reload();" class="alert-link">refresh the page</a> '
                     "or re-run your filter to reload device data."
-                    "</div>",
-                    status=400,
+                    "</div>"
                 )
             else:
                 # Generic error - validation failed for all devices
@@ -575,8 +576,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     '<div class="alert alert-danger mb-0">'
                     "No valid devices selected. "
                     f"{len(errors)} error(s) occurred: {' '.join(escape(e) for e in errors) if errors else 'Please check device validation status.'}"
-                    "</div>",
-                    status=400,
+                    "</div>"
                 )
 
         context = {
@@ -1665,6 +1665,13 @@ class AddDeviceTypeMappingView(
         except DeviceType.DoesNotExist:
             return _htmx_error_response("Selected device type not found.")
 
+        # Reject ambiguous state up front: multiple case-variant rows for the same
+        # hardware string mean .first() would silently mutate an arbitrary one and leave
+        # the duplicate unresolved. Mirrors AddPlatformMappingView.
+        if DeviceTypeMapping.objects.filter(librenms_hardware__iexact=hardware).count() > 1:
+            return _htmx_error_response(
+                "Multiple mappings exist for this hardware string. Remove duplicates before updating."
+            )
         # Resolve the existing mapping first so we only require the permission
         # actually needed: "add" for a new mapping, "change" for an update.
         existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware__iexact=hardware).first()
@@ -1679,10 +1686,17 @@ class AddDeviceTypeMappingView(
             with transaction.atomic():
                 # Lock the row to close the window between the upfront permission
                 # check and the actual write (select_for_update prevents a concurrent
-                # INSERT from slipping through undetected).
-                locked = (
-                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware__iexact=hardware).first()
+                # INSERT from slipping through undetected). Materialise [:2] in one query
+                # (count() would drop the FOR UPDATE clause) and reject a concurrently-
+                # created duplicate rather than mutating an arbitrary row.
+                locked_rows = list(
+                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware__iexact=hardware)[:2]
                 )
+                if len(locked_rows) > 1:
+                    return _htmx_error_response(
+                        "Multiple mappings exist for this hardware string. Remove duplicates before updating."
+                    )
+                locked = locked_rows[0] if locked_rows else None
                 if locked and not existing_mapping:
                     # A concurrent request created the mapping after our upfront read.
                     # Only escalate to change permission if we would actually mutate the row;
