@@ -2069,12 +2069,24 @@ class AddAsOOBView(
             from netbox_librenms_plugin.utils import (
                 coerce_librenms_id,
                 find_by_librenms_id,
+                get_librenms_device_id,
                 get_librenms_oob,
             )
 
             current_oob = get_librenms_oob(existing_device, server_key=server_key)
             if current_oob and coerce_librenms_id(current_oob.get("id")) != coerce_librenms_id(librenms_id):
                 return _htmx_error_response("OOB link was modified concurrently; refresh and retry.")
+
+            # A concurrent change could have re-linked THIS device's host id to the incoming
+            # OOB id; attaching it as OOB would then store it in both the host slot and oob.id
+            # — a self host/OOB conflict. Reject that explicitly (find_by_librenms_id below
+            # would match self and wave it through).
+            current_host_id = get_librenms_device_id(existing_device, server_key=server_key, auto_save=False)
+            if coerce_librenms_id(current_host_id) == coerce_librenms_id(librenms_id):
+                return _htmx_error_response(
+                    f"LibreNMS device #{librenms_id} is this device's host link; it can't also be its "
+                    "OOB controller. Refresh and retry."
+                )
 
             # Another device may already own this LibreNMS id (as its host id or OOB id)
             # since validation ran. Re-check inside the transaction and abort on a non-self

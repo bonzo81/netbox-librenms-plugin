@@ -4617,8 +4617,10 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions._save_device", side_effect=_capture_save) as mock_save,
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
+            # Host id 10 (≠ incoming OOB id 17) → the self host/OOB guard passes.
+            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10),
             # No other device owns id 17 → the in-transaction duplicate-mapping re-check passes.
-            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None),
+            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
             mock_device.objects.get.return_value = existing_device
@@ -4629,6 +4631,8 @@ class TestAddAsOOBViewPost:
         assert response.status_code == 200
         assert "validationRefresh" in response.get("HX-Trigger", "")
         view.render_device_row.assert_called_once()
+        # The duplicate-mapping lookup stays in the active server namespace.
+        assert mock_find.call_args.args[1:] == (17, "default")
         # The LOCKED row must be the one persisted — guards against the view dropping the
         # _save_device() call or saving the stale pre-lock instance.
         mock_save.assert_called_once()
@@ -4671,7 +4675,8 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err_resp),
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
-            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None),
+            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10),
+            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
             mock_device.objects.get.return_value = existing_device
@@ -4680,6 +4685,7 @@ class TestAddAsOOBViewPost:
 
         assert response is err_resp
         mock_tx.set_rollback.assert_called_once_with(True)
+        assert mock_find.call_args.args[1:] == (17, "default")
 
     def test_aborts_when_librenms_id_owned_by_another_device(self):
         """The incoming OOB controller id must not already belong to another NetBox device.
@@ -4714,7 +4720,8 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions._save_device") as mock_save,
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
-            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=other_device),
+            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=10),
+            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=other_device) as mock_find,
         ):
             mock_device.DoesNotExist = Exception
             mock_device.objects.get.return_value = existing_device
@@ -4726,6 +4733,52 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"already linked to &#x27;the-idrac&#x27;" in response.content
         mock_save.assert_not_called()
+        # The lookup is scoped to the active server (id 17, "default").
+        assert mock_find.call_args.args[1:] == (17, "default")
+
+    def test_aborts_when_incoming_id_is_own_host_id(self):
+        """A concurrent re-link could make this device's host id equal the incoming OOB id;
+        attaching it as OOB would store the same id in both slots (self host/OOB conflict).
+        The lock-time guard must reject it before set_librenms_oob runs."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+        existing_device.name = "host-a"
+        existing_device.oob_ip_id = 1
+        existing_device.custom_field_data = {"librenms_id": {"default": {"id": 17}}}
+        locked_device = MagicMock()
+        locked_device.pk = 5
+        locked_device.name = "host-a"
+        locked_device.oob_ip_id = 1
+        locked_device.custom_field_data = {"librenms_id": {"default": {"id": 17}}}
+
+        libre_device = {"device_id": 17}
+        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+
+        with (
+            patch("dcim.models.Device") as mock_device,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+            patch("netbox_librenms_plugin.views.imports.actions._save_device") as mock_save,
+            patch("netbox_librenms_plugin.views.imports.actions.cache"),
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+            # Host id resolves to the SAME id as the incoming OOB controller (17).
+            patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=17),
+            patch("netbox_librenms_plugin.utils.find_by_librenms_id") as mock_find,
+        ):
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            mock_device.objects.select_for_update.return_value.get.return_value = locked_device
+            response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert b"this device&#x27;s host link" in response.content
+        mock_save.assert_not_called()
+        # Aborted before the cross-device duplicate lookup even runs.
+        mock_find.assert_not_called()
 
 
 class TestMergeNetBoxDevicesViewOOBTransfer:

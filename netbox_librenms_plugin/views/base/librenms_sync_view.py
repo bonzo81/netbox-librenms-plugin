@@ -63,8 +63,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             {
                 "object": obj,
                 "tab": self.tab,
-                # is not None (not truthiness): a stored LibreNMS id of 0 is a present id,
-                # consistent with _build_all_server_mappings, which keeps {"id": 0} entries.
+                # self.librenms_id comes from get_librenms_device_id(), which already
+                # rejects non-positive ids, so `is not None` is correct here — 0/negatives
+                # never reach this point.
                 "has_librenms_id": self.librenms_id is not None,
             }
         )
@@ -241,6 +242,11 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     continue
                 did = int(did)
             elif not isinstance(did, int):
+                continue
+            # LibreNMS device IDs are strictly positive (matches coerce_librenms_id); a
+            # 0/negative here is a malformed CF entry, not a real mapping — don't surface
+            # it as ID 0 with a dead /device/device=0/ link.
+            if did <= 0:
                 continue
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —
