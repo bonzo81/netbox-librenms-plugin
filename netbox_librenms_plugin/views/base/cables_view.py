@@ -436,7 +436,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if fetch_fresh:
             # Always fetch new data when requested
             links_data = self.get_links_data(obj, server_key=server_key)
-            if not links_data:
+            # Only a true fetch failure returns None. An empty list ([]) is a valid result
+            # (device has no host links) and must flow through: get_links_data() may have
+            # collected zero host links yet still set _oob_links_fetch_failed, and post()
+            # surfaces that OOB warning only on the success path — `if not links_data`
+            # would discard it and mislabel it "No links found".
+            if links_data is None:
                 return None
         else:
             # Try to use cached data

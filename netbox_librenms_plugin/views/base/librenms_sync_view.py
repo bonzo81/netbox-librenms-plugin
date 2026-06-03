@@ -218,10 +218,21 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         result = []
         for sk, did in cf_value.items():
+            is_oob_only = False
             # New dict form {server_key: {"id": N, "oob": {...}}} — use the host id.
-            # A migrated-only entry ({"_migrated_to": ...}) has no "id" and is skipped.
+            # An OOB-only entry ({"oob": {...}} with no host "id") is still a real link
+            # to this server: surface it (using the OOB controller's id) so the user can
+            # see and remove it, mirroring set_librenms_oob()'s lenient host-less shape.
+            # A migrated-only entry ({"_migrated_to": ...}) has neither id nor oob and is
+            # skipped.
             if isinstance(did, dict):
-                did = did.get("id")
+                host_id = did.get("id")
+                if host_id is None:
+                    oob = did.get("oob")
+                    if isinstance(oob, dict):
+                        host_id = oob.get("id")
+                        is_oob_only = host_id is not None
+                did = host_id
             # Validate device ID — accept int or digit-string, skip bool/None/junk.
             if isinstance(did, bool) or did is None:
                 continue
@@ -258,6 +269,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     "device_url": device_url,
                     "is_configured": is_configured,
                     "is_active": sk == active_server_key,
+                    "is_oob_only": is_oob_only,
                 }
             )
 

@@ -383,13 +383,20 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         interface_name_field = get_interface_name_field(request)
         # Rebind the API to the POSTed server so the live IP/management-IP fetches hit the
         # same LibreNMS instance the cached rows are namespaced under (multi-server tabs).
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        posted_server_key = request.POST.get("server_key")
+        server_key = self.rebind_api_for_server(posted_server_key)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
+            # Keep migrated-donor context (resolved from the POSTed key, since rebind failed)
+            # so the template still suppresses the live sync form/button — a stale server_key
+            # must not silently re-enable IP sync on a migrated donor. Mirrors cables_view.
             return render(
                 request,
                 self.partial_template_name,
-                {"ip_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None}},
+                {
+                    "ip_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
+                    **build_migrated_context(obj, posted_server_key),
+                },
             )
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=True, server_key=server_key)
 

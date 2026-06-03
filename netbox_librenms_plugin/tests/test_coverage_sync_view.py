@@ -507,6 +507,60 @@ class TestBuildAllServerMappings:
         assert result is not None
         assert result[0]["is_configured"] is False
 
+    def test_dict_entry_uses_host_id(self):
+        """New dict form {server_key: {"id": N, "oob": {...}}} renders the host id."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"id": 42, "oob": {"id": 17, "type": "idrac"}}}}
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {
+                "netbox_librenms_plugin": {
+                    "servers": {"default": {"librenms_url": "https://x.example.com", "display_name": "Default"}}
+                }
+            }
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "default")
+
+        assert result is not None
+        assert result[0]["device_id"] == 42
+        assert result[0]["is_oob_only"] is False
+
+    def test_oob_only_entry_surfaced_with_oob_id(self):
+        """An OOB-only entry ({"oob": {...}} with no host id) must still surface so the
+        user can see/remove it; it falls back to the OOB controller's id and is flagged."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"oob": {"id": 17, "type": "idrac"}}}}
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {
+                "netbox_librenms_plugin": {
+                    "servers": {"default": {"librenms_url": "https://x.example.com", "display_name": "Default"}}
+                }
+            }
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "default")
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["device_id"] == 17
+        assert result[0]["is_oob_only"] is True
+        assert result[0]["device_url"] == "https://x.example.com/device/device=17/"
+
+    def test_migrated_only_dict_entry_skipped(self):
+        """A migrated-only entry ({"_migrated_to": ...}) has neither id nor oob → skipped."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"_migrated_to": {"device_id": 5}}}}
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {"netbox_librenms_plugin": {"servers": {}}}
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "default")
+
+        assert result is None
+
 
 class TestGetLibreNMSDeviceInfo:
     """Tests for get_librenms_device_info (lines 228+)."""

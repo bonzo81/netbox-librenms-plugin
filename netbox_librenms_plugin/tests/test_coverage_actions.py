@@ -716,6 +716,35 @@ class TestBuildIdServerInfo:
         assert len(result) == 1
         assert result[0]["server_key"] == "other"
 
+    def test_dict_entry_uses_host_id(self):
+        """New dict form {server_key: {"id": N, "oob": {...}}} renders the host id, not None."""
+        method = self._get_method()
+        existing = MagicMock()
+        existing.custom_field_data = {"librenms_id": {"default": {"id": 42, "oob": {"id": 17, "type": "idrac"}}}}
+
+        with patch("django.conf.settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {
+                "netbox_librenms_plugin": {"servers": {"default": {"display_name": "Default Server"}}}
+            }
+            result = method(existing)
+
+        assert result is not None
+        assert result[0]["device_id"] == 42
+
+    def test_oob_only_dict_entry_skipped(self):
+        """An OOB-only entry has no host id to show in the import-action modal → skipped."""
+        method = self._get_method()
+        existing = MagicMock()
+        existing.custom_field_data = {"librenms_id": {"default": {"oob": {"id": 17, "type": "idrac"}}}}
+
+        with patch("django.conf.settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {
+                "netbox_librenms_plugin": {"servers": {"default": {"display_name": "Default Server"}}}
+            }
+            result = method(existing)
+
+        assert result is None
+
     def test_default_key_fallback_display_name(self):
         """'default' with no servers config uses root display_name."""
         method = self._get_method()
@@ -4588,6 +4617,8 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions._save_device", side_effect=_capture_save) as mock_save,
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
+            # No other device owns id 17 → the in-transaction duplicate-mapping re-check passes.
+            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None),
         ):
             mock_device.DoesNotExist = Exception
             mock_device.objects.get.return_value = existing_device
@@ -4640,6 +4671,7 @@ class TestAddAsOOBViewPost:
             patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err_resp),
             patch("netbox_librenms_plugin.views.imports.actions.cache"),
             patch("netbox_librenms_plugin.views.imports.actions.messages"),
+            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None),
         ):
             mock_device.DoesNotExist = Exception
             mock_device.objects.get.return_value = existing_device
@@ -4648,6 +4680,52 @@ class TestAddAsOOBViewPost:
 
         assert response is err_resp
         mock_tx.set_rollback.assert_called_once_with(True)
+
+    def test_aborts_when_librenms_id_owned_by_another_device(self):
+        """The incoming OOB controller id must not already belong to another NetBox device.
+        Re-checked inside the transaction (like PromoteToHostView) so one LibreNMS device
+        can't be pointed at two NetBox devices."""
+        view = self._make_view()
+        request = _make_request(post={"existing_device_id": "5"})
+
+        existing_device = MagicMock()
+        existing_device.pk = 5
+        existing_device.name = "host-a"
+        existing_device.oob_ip_id = 1
+        existing_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+        locked_device = MagicMock()
+        locked_device.pk = 5
+        locked_device.name = "host-a"
+        locked_device.oob_ip_id = 1
+        locked_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+
+        # A *different* device already owns LibreNMS id 17 (e.g. imported standalone).
+        other_device = MagicMock()
+        other_device.pk = 99
+        other_device.name = "the-idrac"
+
+        libre_device = {"device_id": 17}
+        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": None}}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+
+        with (
+            patch("dcim.models.Device") as mock_device,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+            patch("netbox_librenms_plugin.views.imports.actions._save_device") as mock_save,
+            patch("netbox_librenms_plugin.views.imports.actions.cache"),
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+            patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=other_device),
+        ):
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.return_value = existing_device
+            mock_device.objects.select_for_update.return_value.get.return_value = locked_device
+            response = view.post(request, device_id=17)
+
+        # HTMX error toast (200 + HX-Reswap:none), no save, and the conflicting device named.
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert b"already linked to &#x27;the-idrac&#x27;" in response.content
+        mock_save.assert_not_called()
 
 
 class TestMergeNetBoxDevicesViewOOBTransfer:
@@ -5029,6 +5107,9 @@ class TestMissingOOBIpPermissions:
             msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
         # No add_interface demanded since the interface is reused, not created.
         assert msg is None
+        # Pin the existence check to the passed device: a regression dropping the
+        # device= scope would let a same-named interface on any device skip add_interface.
+        mock_iface_objects.filter.assert_called_once_with(device=device, name="idrac0")
 
     def test_requires_add_ipaddress_when_creating(self):
         view = self._view()

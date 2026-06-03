@@ -133,6 +133,9 @@
                     {% else %}
                     <span class="text-muted">ID {{ mapping.device_id }}</span>
                     {% endif %}
+                    {% if mapping.is_oob_only %}
+                    <span class="badge bg-info-lt ms-1" title="This server has only an OOB controller link (no host mapping)">OOB only</span>
+                    {% endif %}
                 </td>
                 <td class="text-end pe-3">
                     {% if not mapping.is_configured %}

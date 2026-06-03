@@ -395,8 +395,10 @@ class TestTransferDeviceIPView:
         # The locked rows are the ones mutated and saved.
         assert locked_donor.oob_ip is None
         assert locked_winner.oob_ip is oob_ip
-        locked_winner.save.assert_called_once()
-        locked_donor.save.assert_called_once()
+        # Pin the targeted FK-only save: a regression to a full save() would run
+        # full_clean() and reject the merge over pre-existing device inconsistencies.
+        locked_winner.save.assert_called_once_with(update_fields=["oob_ip"])
+        locked_donor.save.assert_called_once_with(update_fields=["oob_ip"])
         # Stale pre-lock instances must be left untouched.
         donor.save.assert_not_called()
         winner.save.assert_not_called()

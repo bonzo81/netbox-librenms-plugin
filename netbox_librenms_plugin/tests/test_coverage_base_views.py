@@ -127,6 +127,32 @@ class TestBaseCableTableViewGetLinksData:
             view.get_links_data(obj)
         assert view._links_fetch_error is None
 
+    def test_prepare_context_keeps_empty_links_when_oob_fetch_failed(self):
+        """An empty host-link list with a failed OOB fetch must NOT collapse to None:
+        _prepare_context(fetch_fresh=True) must return a context so post() can show the
+        OOB warning, instead of mislabeling it 'No links found'."""
+        view = self._make_view()
+        view._librenms_api.cache_timeout = 300
+        obj = _mock_obj()
+
+        def _fake_links(o, server_key=None):
+            view._oob_links_fetch_failed = True  # host has no links AND the OOB fetch failed
+            return []
+
+        with (
+            patch.object(view, "get_links_data", side_effect=_fake_links),
+            patch.object(view, "get_cache_key", return_value="k"),
+            patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d),
+            patch.object(view, "get_table", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+        ):
+            mock_cache.ttl.return_value = 300
+            ctx = view._prepare_context(view.request, obj, fetch_fresh=True, server_key="default")
+
+        assert ctx is not None
+        assert view._oob_links_fetch_failed is True
+
     def test_get_links_data_treats_status_error_payload_as_failure(self):
         """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...}
         must be treated as a fetch failure (with its message), not silently fall through
@@ -1105,6 +1131,40 @@ class TestBaseInterfaceTableViewBasics:
         mock_messages.error.assert_called_once()
         assert result == "redir"
         mock_redirect.assert_called_once()
+
+    def test_ip_post_stale_server_key_keeps_migrated_context(self):
+        """IP sync's stale-server branch must include build_migrated_context so a migrated
+        donor keeps its suppressed sync form/button — a stale server_key must not silently
+        re-enable IP sync. Mirrors cables_view."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        view.rebind_api_for_server = MagicMock(return_value=None)  # stale key → rebind fails
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "ghost"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.get_interface_name_field", return_value="name"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
+            patch(
+                "netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context",
+                return_value={"migrated_to_marker": {"device_id": 7}},
+            ) as mock_migrated,
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render", return_value="rendered") as mock_render,
+        ):
+            result = view.post(req, pk=1)
+
+        mock_messages.error.assert_called_once()
+        # Migrated context resolved from the POSTed (stale) key and merged into the render.
+        mock_migrated.assert_called_once_with(obj, "ghost")
+        ctx = mock_render.call_args.args[2]
+        assert ctx["migrated_to_marker"] == {"device_id": 7}
+        assert result == "rendered"
 
     def test_get_select_related_field_for_vm(self):
         """Returns 'virtual_machine' for VirtualMachine model."""

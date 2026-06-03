@@ -1164,6 +1164,11 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             servers_config = {}
         result = []
         for sk, did in cf_value.items():
+            # New dict form {server_key: {"id": N, "oob": {...}}} — display the host id.
+            # OOB-only entries ({"oob": {...}} with no "id") have no host mapping to show
+            # in this import-action modal and are skipped.
+            if isinstance(did, dict):
+                did = did.get("id")
             if isinstance(did, bool) or not isinstance(did, (int, str)):
                 continue
             if isinstance(did, str):
@@ -2061,11 +2066,27 @@ class AddAsOOBView(
             except Device.DoesNotExist:
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
-            from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_oob
+            from netbox_librenms_plugin.utils import (
+                coerce_librenms_id,
+                find_by_librenms_id,
+                get_librenms_oob,
+            )
 
             current_oob = get_librenms_oob(existing_device, server_key=server_key)
             if current_oob and coerce_librenms_id(current_oob.get("id")) != coerce_librenms_id(librenms_id):
                 return _htmx_error_response("OOB link was modified concurrently; refresh and retry.")
+
+            # Another device may already own this LibreNMS id (as its host id or OOB id)
+            # since validation ran. Re-check inside the transaction and abort on a non-self
+            # conflict so we don't point one LibreNMS device at two NetBox devices. Mirrors
+            # PromoteToHostView's host_conflict guard; find_by_librenms_id is an unlocked
+            # read, so this narrows — not closes — the window (no unique constraint on the cf).
+            oob_conflict = find_by_librenms_id(Device, librenms_id, server_key)
+            if oob_conflict is not None and oob_conflict.pk != existing_device.pk:
+                return _htmx_error_response(
+                    f"LibreNMS device #{librenms_id} is already linked to '{escape(oob_conflict.name)}'; "
+                    "refresh and retry."
+                )
 
             try:
                 set_librenms_oob(

@@ -2514,10 +2514,15 @@ class TestRefreshLibreNMSLinkage:
                 bulk_import,
                 "_describe_existing_librenms_link",
                 return_value={"host_id": host_id, "oob_id": oob_id, "oob_type": None},
-            ),
-            patch.object(bulk_import, "get_librenms_oob", return_value=oob),
+            ) as mock_describe,
+            patch.object(bulk_import, "get_librenms_oob", return_value=oob) as mock_oob,
         ):
             bulk_import._refresh_librenms_linkage(validation, device, libre_device, "default")
+        # Both linkage reads must be scoped to the active server_key — a regression that
+        # dropped server_key would re-classify against the wrong server's mapping.
+        mock_describe.assert_called_once_with(device, "default")
+        if mock_oob.called:
+            mock_oob.assert_called_with(device, server_key="default")
         return validation
 
     def test_host_id_match_classifies_librenms_id(self):
