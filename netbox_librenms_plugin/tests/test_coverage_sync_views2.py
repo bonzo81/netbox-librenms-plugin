@@ -1009,13 +1009,18 @@ class TestSyncIPAddressesViewCreateIP:
         view._post_server_key = "default"
         view.get_cache_key = MagicMock(return_value="k")
 
+        mock_iface = MagicMock()
+        mock_iface.name = "eth0"
         mock_device = MagicMock(pk=1)
+        mock_device.interfaces.all.return_value = [mock_iface]
         mock_api = MagicMock(server_key="default")
 
+        # Interface is resolved from current NetBox state by LibreNMS port id.
         ip_data = {
             "ip_address": "10.0.0.1",
             "ip_with_mask": "10.0.0.1/24",
-            "interface_url": "http://localhost/api/dcim/interfaces/5/",
+            "port_id": 5,
+            "interface_name": "eth0",
         }
 
         with (
@@ -1026,17 +1031,17 @@ class TestSyncIPAddressesViewCreateIP:
             patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ip_addresses": [ip_data]}
             mock_ip_cls.objects.filter.return_value.first.return_value = None
-            mock_iface_cls.objects.get.return_value = MagicMock()
 
             view.request = _make_request(post_data={"select": ["10.0.0.1"]})
             view.post(view.request, object_type="device", pk=1)
 
         mock_ip_cls.objects.create.assert_called_once()
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_iface
         mock_msgs.success.assert_called()
 
 
@@ -1049,18 +1054,21 @@ class TestSyncIPAddressesViewUpdateIP:
         view._post_server_key = "default"
         view.get_cache_key = MagicMock(return_value="k")
 
+        mock_iface = MagicMock()
+        mock_iface.name = "eth0"
         mock_device = MagicMock(pk=1)
+        mock_device.interfaces.all.return_value = [mock_iface]
         mock_api = MagicMock(server_key="default")
 
         ip_data = {
             "ip_address": "10.0.0.1",
             "ip_with_mask": "10.0.0.1/24",
-            "interface_url": "http://localhost/api/dcim/interfaces/5/",
+            "port_id": 5,
+            "interface_name": "eth0",
         }
         mock_existing_ip = MagicMock()
         mock_existing_ip.assigned_object = MagicMock()  # Different from mock_iface
         mock_existing_ip.vrf = None
-        mock_iface = MagicMock()
 
         with (
             patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
@@ -1070,16 +1078,16 @@ class TestSyncIPAddressesViewUpdateIP:
             patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ip_addresses": [ip_data]}
             mock_ip_cls.objects.filter.return_value.first.return_value = mock_existing_ip
-            mock_iface_cls.objects.get.return_value = mock_iface
 
             view.request = _make_request(post_data={"select": ["10.0.0.1"]})
             view.post(view.request, object_type="device", pk=1)
 
+        assert mock_existing_ip.assigned_object is mock_iface
         mock_existing_ip.save.assert_called_once()
         mock_msgs.success.assert_called()
 
@@ -1094,12 +1102,13 @@ class TestSyncIPAddressesViewUnchangedIP:
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_device = MagicMock(pk=1)
+        mock_device.interfaces.all.return_value = []
         mock_api = MagicMock(server_key="default")
 
         ip_data = {
             "ip_address": "10.0.0.1",
             "ip_with_mask": "10.0.0.1/24",
-            "interface_url": None,
+            "interface_name": None,
         }
         mock_existing_ip = MagicMock()
         mock_existing_ip.assigned_object = None
@@ -1265,14 +1274,18 @@ class TestSyncIPAddressesViewVMInterface:
         view._post_server_key = "default"
         view.get_cache_key = MagicMock(return_value="k")
 
+        mock_vmiface = MagicMock()
+        mock_vmiface.name = "eth0"
         mock_vm = MagicMock()
         mock_vm.pk = 2
+        mock_vm.interfaces.all.return_value = [mock_vmiface]
         mock_api = MagicMock(server_key="default")
 
         ip_data = {
             "ip_address": "10.0.0.5",
             "ip_with_mask": "10.0.0.5/24",
-            "interface_url": "http://localhost/api/virtualization/interfaces/9/",
+            "port_id": 9,
+            "interface_name": "eth0",
         }
 
         with (
@@ -1283,17 +1296,111 @@ class TestSyncIPAddressesViewVMInterface:
             patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.VMInterface") as mock_vmiface_cls,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=9),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ip_addresses": [ip_data]}
             mock_ip_cls.objects.filter.return_value.first.return_value = None
-            mock_vmiface_cls.objects.get.return_value = MagicMock()
 
             view.request = _make_request(post_data={"select": ["10.0.0.5"]})
             view.post(view.request, object_type="virtualmachine", pk=2)
 
-        mock_vmiface_cls.objects.get.assert_called_once()
+        mock_ip_cls.objects.create.assert_called_once()
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_vmiface
+
+
+class TestSyncIPAddressesViewInterfaceResolution:
+    """The sync re-resolves the target interface against current NetBox state
+    rather than trusting the cached ``interface_url`` (which goes stale when an
+    interface is synced after the IP rows were cached)."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        return object.__new__(SyncIPAddressesView)
+
+    def test_match_interface_by_port_id(self):
+        iface = MagicMock()
+        iface.name = "eth0"
+        result = self._view()._match_interface(
+            {"port_id": 5, "interface_name": "ignored"},
+            {"5": iface},
+            {},
+        )
+        assert result is iface
+
+    def test_match_interface_by_name_fallback(self):
+        iface = MagicMock()
+        result = self._view()._match_interface(
+            {"port_id": 5, "interface_name": "eth0"},
+            {},
+            {"eth0": iface},
+        )
+        assert result is iface
+
+    def test_match_interface_no_match_returns_none(self):
+        result = self._view()._match_interface(
+            {"port_id": 99, "interface_name": "eth9"},
+            {"5": MagicMock()},
+            {"eth0": MagicMock()},
+        )
+        assert result is None
+
+    def test_match_interface_handles_missing_keys(self):
+        assert self._view()._match_interface({}, {}, {}) is None
+
+    def test_build_interface_maps_indexes_by_id_and_name(self):
+        view = self._view()
+        iface = MagicMock()
+        iface.name = "eth0"
+        obj = MagicMock()
+        obj.interfaces.all.return_value = [iface]
+        with patch(
+            "netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id",
+            return_value=7,
+        ):
+            by_id, by_name = view._build_interface_maps(obj, "default")
+        assert by_id == {"7": iface}
+        assert by_name == {"eth0": iface}
+
+    def test_stale_interface_url_still_assigns_after_interface_synced(self):
+        """Regression: cached row was enriched before the interface existed
+        (``interface_url`` is None), but the interface has since been synced.
+        The IP must be assigned to it without a manual cache refresh."""
+        view = self._view()
+        view._post_server_key = "default"
+
+        # Interface synced *after* these rows were cached.
+        iface = MagicMock()
+        iface.name = "lo0.0"
+        obj = MagicMock(pk=21)
+        obj.interfaces.all.return_value = [iface]
+
+        # Stale enriched row: interface_url is None because the interface did
+        # not exist in NetBox when the IP data was fetched/cached.
+        ip_data = {
+            "ip_address": "10.0.0.1",
+            "ip_with_mask": "10.0.0.1/24",
+            "interface_url": None,
+            "port_id": 5,
+            "interface_name": "lo0.0",
+        }
+
+        request = _make_request(post_data={"select": ["10.0.0.1"]})
+        with (
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5),
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=False),
+            patch.object(view, "get_vrf_selection", return_value=None),
+        ):
+            mock_ip_cls.objects.filter.return_value.first.return_value = None
+            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], obj, "device")
+
+        mock_ip_cls.objects.create.assert_called_once()
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is iface
+        assert results["created"] == ["10.0.0.1"]
+        assert results["primary_no_interface"] == []
 
 
 # ===========================================================================

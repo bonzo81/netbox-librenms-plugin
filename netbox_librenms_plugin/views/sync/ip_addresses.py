@@ -1,7 +1,7 @@
 import logging
 from urllib.parse import quote_plus
 
-from dcim.models import Device, Interface
+from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
@@ -10,9 +10,13 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VRF, IPAddress
-from virtualization.models import VirtualMachine, VMInterface
+from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.utils import resolve_set_primary_ip, same_host
+from netbox_librenms_plugin.utils import (
+    get_librenms_device_id,
+    resolve_set_primary_ip,
+    same_host,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -135,6 +139,40 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """True if two address strings refer to the same host IP."""
         return same_host(a, b)
 
+    def _build_interface_maps(self, obj, server_key):
+        """Index the object's *current* interfaces by LibreNMS port id and by name.
+
+        Used to re-resolve the target interface at sync time instead of trusting
+        the cached ``interface_url`` (see ``_match_interface``).
+        """
+        interfaces = list(obj.interfaces.all())
+        by_librenms_id = {}
+        for iface in interfaces:
+            lib_id = get_librenms_device_id(iface, server_key, auto_save=False)
+            if lib_id is not None:
+                by_librenms_id[str(lib_id)] = iface
+        by_name = {iface.name: iface for iface in interfaces}
+        return by_librenms_id, by_name
+
+    @staticmethod
+    def _match_interface(ip_data, by_librenms_id, by_name):
+        """Resolve the NetBox interface for a cached IP row against current state.
+
+        The cached ``interface_url`` is enrichment captured when the rows were
+        fetched, so an interface synced *afterwards* is missed and the sync would
+        wrongly report "no interface" until a manual cache refresh. The rendered
+        table re-enriches on every load (so it already shows the link); matching
+        here on the stable LibreNMS port id (preferred) then interface name keeps
+        the sync consistent with what the user sees. Returns the interface or None.
+        """
+        port_id = ip_data.get("port_id")
+        if port_id is not None and str(port_id) in by_librenms_id:
+            return by_librenms_id[str(port_id)]
+        name = ip_data.get("interface_name")
+        if name and name in by_name:
+            return by_name[name]
+        return None
+
     @staticmethod
     def _set_primary_ip(obj, ip_obj):
         """Point obj.primary_ip4/6 (by family) at *ip_obj*. Returns True if changed.
@@ -169,6 +207,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         set_primary = resolve_set_primary_ip(request)
         mgmt_ip = self.get_management_ip(obj) if set_primary else None
 
+        # Re-resolve interfaces from current NetBox state (not the cached
+        # interface_url) so an interface synced after these rows were cached is
+        # picked up without a manual cache refresh.
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        interfaces_by_librenms_id, interfaces_by_name = self._build_interface_maps(obj, server_key)
+
         for ip_address in selected_ips:
             try:
                 # Per-IP savepoint so one bad address rolls back only itself and
@@ -178,13 +222,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
                     vrf = self.get_vrf_selection(request, ip_address)
 
-                    interface = None
-                    if ip_data.get("interface_url"):
-                        interface_id = ip_data["interface_url"].split("/")[-2]
-                        if object_type == "device":
-                            interface = Interface.objects.get(id=interface_id)
-                        else:
-                            interface = VMInterface.objects.get(id=interface_id)
+                    interface = self._match_interface(ip_data, interfaces_by_librenms_id, interfaces_by_name)
 
                     ip_with_mask = ip_data["ip_with_mask"]
 

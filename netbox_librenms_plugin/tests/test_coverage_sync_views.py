@@ -1783,45 +1783,58 @@ class TestSyncIPAddressesViewProcessIpSync:
                     results = view.process_ip_sync(view.request, selected, cached, MagicMock(), "device")
         assert "10.0.0.1" in results["unchanged"]
 
-    def test_ip_with_interface_url_device(self):
+    def test_ip_assigned_to_interface_matched_by_port_id(self):
         view = self._setup_view()
         selected = ["10.0.0.1"]
         cached = [
             {
                 "ip_address": "10.0.0.1",
                 "ip_with_mask": "10.0.0.1/24",
-                "interface_url": "/api/dcim/interfaces/5/",
+                "port_id": 5,
+                "interface_name": "eth0",
             }
         ]
         mock_iface = MagicMock()
+        mock_iface.name = "eth0"
+        obj = MagicMock()
+        obj.interfaces.all.return_value = [mock_iface]
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
             with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
                 mock_ip_cls.objects.filter.return_value.first.return_value = None
-                with patch("netbox_librenms_plugin.views.sync.ip_addresses.Interface") as mock_iface_cls:
-                    mock_iface_cls.objects.get.return_value = mock_iface
+                with patch(
+                    "netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id",
+                    return_value=5,
+                ):
                     with patch.object(view, "get_vrf_selection", return_value=None):
-                        view.process_ip_sync(view.request, selected, cached, MagicMock(), "device")
-        mock_iface_cls.objects.get.assert_called_once_with(id="5")
+                        view.process_ip_sync(view.request, selected, cached, obj, "device")
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_iface
 
-    def test_ip_with_interface_url_vm(self):
+    def test_ip_assigned_to_interface_matched_by_name(self):
         view = self._setup_view()
         selected = ["10.0.0.1"]
         cached = [
             {
                 "ip_address": "10.0.0.1",
                 "ip_with_mask": "10.0.0.1/24",
-                "interface_url": "/api/virtualization/interfaces/7/",
+                "port_id": 7,
+                "interface_name": "eth0",
             }
         ]
         mock_vmiface = MagicMock()
+        mock_vmiface.name = "eth0"
+        obj = MagicMock()
+        obj.interfaces.all.return_value = [mock_vmiface]
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
             with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
                 mock_ip_cls.objects.filter.return_value.first.return_value = None
-                with patch("netbox_librenms_plugin.views.sync.ip_addresses.VMInterface") as mock_vmiface_cls:
-                    mock_vmiface_cls.objects.get.return_value = mock_vmiface
+                # No LibreNMS id on the interface -> falls back to name match.
+                with patch(
+                    "netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id",
+                    return_value=None,
+                ):
                     with patch.object(view, "get_vrf_selection", return_value=None):
-                        view.process_ip_sync(view.request, selected, cached, MagicMock(), "virtualmachine")
-        mock_vmiface_cls.objects.get.assert_called_once_with(id="7")
+                        view.process_ip_sync(view.request, selected, cached, obj, "virtualmachine")
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_vmiface
 
 
 class TestSyncIPAddressesViewDisplaySyncResults:
@@ -2629,46 +2642,55 @@ class TestSyncIPAddressesViewSetPrimaryIp:
         assert V._set_primary_ip(obj, ip_obj) is True
         assert obj.primary_ip6 is ip_obj
 
-    def _run_process(self, view, cached, *, mgmt_ip, set_primary=True, interface=True):
+    def _run_process(self, view, cached, *, mgmt_ip, set_primary=True):
         selected = ["10.0.0.1"]
         created_ip = MagicMock(family=4, pk=42)
         obj = MagicMock()
         obj.primary_ip4_id = None
+        # The interface is resolved from the object's current interfaces; the
+        # cached row matches it by LibreNMS port id (5) or name ("eth0").
+        mock_iface = MagicMock()
+        mock_iface.name = "eth0"
+        obj.interfaces.all.return_value = [mock_iface]
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=set_primary):
             with patch.object(view, "get_management_ip", return_value=mgmt_ip) as mock_mgmt:
                 with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
                     with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
                         mock_ip_cls.objects.filter.return_value.first.return_value = None
                         mock_ip_cls.objects.create.return_value = created_ip
-                        with patch("netbox_librenms_plugin.views.sync.ip_addresses.Interface") as mock_iface_cls:
-                            mock_iface_cls.objects.get.return_value = MagicMock()
+                        with patch(
+                            "netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id",
+                            return_value=5,
+                        ):
                             with patch.object(view, "get_vrf_selection", return_value=None):
                                 results = view.process_ip_sync(view.request, selected, cached, obj, "device")
         return results, obj, created_ip, mock_mgmt
 
     def test_primary_set_when_matched_and_interface_assigned(self):
         view = self._setup_view()
-        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": "/api/dcim/interfaces/5/"}]
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
         results, obj, created_ip, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
         assert results["primary_set"] == ["10.0.0.1"]
         assert obj.primary_ip4 is created_ip
 
     def test_primary_skipped_when_no_interface(self):
         view = self._setup_view()
-        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
+        # No port_id / interface_name match -> interface cannot be resolved.
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_name": None}]
         results, obj, _, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
         assert results["primary_set"] == []
+        assert results["primary_no_interface"] == ["10.0.0.1"]
         obj.save.assert_not_called()
 
     def test_primary_skipped_when_ip_does_not_match_mgmt(self):
         view = self._setup_view()
-        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": "/api/dcim/interfaces/5/"}]
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
         results, obj, _, _ = self._run_process(view, cached, mgmt_ip="10.9.9.9")
         assert results["primary_set"] == []
 
     def test_toggle_off_skips_mgmt_lookup_and_primary(self):
         view = self._setup_view()
-        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": "/api/dcim/interfaces/5/"}]
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
         results, obj, _, mock_mgmt = self._run_process(view, cached, mgmt_ip="10.0.0.1", set_primary=False)
         assert results["primary_set"] == []
         mock_mgmt.assert_not_called()
