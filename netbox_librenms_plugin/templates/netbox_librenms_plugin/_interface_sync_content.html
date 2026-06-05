@@ -4,6 +4,13 @@
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
 
+{% if interface_sync.oob_incomplete %}
+<div class="alert alert-warning d-flex align-items-center noprint" role="alert">
+    <i class="mdi mdi-alert me-2"></i>
+    <div>Showing host interfaces only — the linked OOB controller's ports could not be fetched on the last refresh, so OOB rows and shared-LOM markers are missing. Refresh again to retry.</div>
+</div>
+{% endif %}
+
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}

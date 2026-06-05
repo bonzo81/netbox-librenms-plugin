@@ -207,26 +207,26 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                     "showing host interfaces only. See server logs for details.",
                 )
                 oob_ports_failed = True
-        # Cache only a complete snapshot. On an OOB-ports fetch failure the data is
-        # main-only, so caching it would let get_context_data serve that partial set
-        # (OOB rows / shared-LOM markers silently missing) until TTL — drop any stale
-        # entry instead so the next refresh re-fetches. Mirrors modules_view.
+        # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it
+        # (which would leave downstream views — SingleInterfaceVerifyView,
+        # SaveVlanGroupOverridesView — with no backing snapshot), tag it `oob_incomplete`
+        # and still cache it. get_context_data surfaces an "OOB incomplete" banner whenever
+        # such a snapshot is rendered, so the missing OOB rows / shared-LOM markers are
+        # never silently absent on a later cached render.
         # Scope the ports cache to the VC sync device (lookup_device, resolved above), not the
         # viewed member, so all VC members share one entry. Must match get_context_data()'s key.
         if oob_ports_failed:
-            cache.delete(self.get_cache_key(lookup_device, "ports", _server_key))
-            cache.delete(self.get_last_fetched_key(lookup_device, "ports", _server_key))
-        else:
-            cache.set(
-                self.get_cache_key(lookup_device, "ports", _server_key),
-                librenms_data,
-                timeout=self.librenms_api.cache_timeout,
-            )
-            cache.set(
-                self.get_last_fetched_key(lookup_device, "ports", _server_key),
-                timezone.now(),
-                timeout=self.librenms_api.cache_timeout,
-            )
+            librenms_data["oob_incomplete"] = True
+        cache.set(
+            self.get_cache_key(lookup_device, "ports", _server_key),
+            librenms_data,
+            timeout=self.librenms_api.cache_timeout,
+        )
+        cache.set(
+            self.get_last_fetched_key(lookup_device, "ports", _server_key),
+            timezone.now(),
+            timeout=self.librenms_api.cache_timeout,
+        )
 
         # On an OOB-fetch failure the warning above already conveys the partial outcome;
         # use an accurate success banner ("host" only) rather than a blanket "successfully".
@@ -235,14 +235,11 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         else:
             messages.success(request, "Interface data refreshed successfully.")
 
-        # On an OOB-fetch failure we deleted the (partial) cache above, so render this
-        # response from the in-memory host ports rather than the now-empty cache.
         context = self.get_context_data(
             request,
             obj,
             interface_name_field,
             _server_key,
-            fresh_data=librenms_data if oob_ports_failed else None,
         )
         context = {"interface_sync": context}
         context["interface_name_field"] = interface_name_field
@@ -307,6 +304,11 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         else:
             cached_data = cache.get(self.get_cache_key(cache_device, "ports", server_key))
             last_fetched = cache.get(self.get_last_fetched_key(cache_device, "ports", server_key))
+
+        # A snapshot tagged oob_incomplete is host-only because the linked OOB controller's
+        # ports could not be fetched on the last refresh. Surface it on every render of that
+        # snapshot (via an inline banner) so the missing OOB rows are never silently absent.
+        oob_incomplete = bool(cached_data.get("oob_incomplete")) if isinstance(cached_data, dict) else False
 
         # Get VLAN groups for dropdown
         vlan_groups = self.get_vlan_groups_for_device(obj)
@@ -429,6 +431,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             "interface_name_field": interface_name_field,
             "netbox_only_interfaces": netbox_only_interfaces,
             "server_key": server_key,
+            "oob_incomplete": oob_incomplete,
         }
 
     def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):

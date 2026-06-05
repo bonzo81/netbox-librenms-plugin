@@ -1311,6 +1311,47 @@ class TestBaseInterfaceTableViewPost:
         # Success still re-populates the cache afterwards.
         mock_cache.set.assert_called()
 
+    def test_post_oob_fetch_failure_caches_incomplete_snapshot(self):
+        """When the linked OOB controller's ports fetch fails, the host-only snapshot is
+        cached tagged oob_incomplete (not deleted) so downstream verify/apply keep a
+        backing snapshot and the incomplete state can be surfaced."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host ports OK; OOB controller ports fetch fails.
+        view._librenms_api.get_ports.side_effect = [
+            (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]}),
+            (False, "boom"),
+        ]
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        # The host-only snapshot is cached (not deleted) and tagged incomplete.
+        ports_set_calls = [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "cache-key"]
+        assert len(ports_set_calls) == 1
+        cached_snapshot = ports_set_calls[0].args[1]
+        assert cached_snapshot["oob_incomplete"] is True
+        # The OOB-fetch failure is surfaced to the user.
+        mock_messages.warning.assert_called()
+
     def test_post_success_caches_and_renders(self):
         """Successful fetch caches data and renders template."""
         view = self._make_view()
@@ -1423,6 +1464,48 @@ class TestBaseInterfaceTableViewGetContextData:
             ctx = view.get_context_data(request, obj, "ifName")
 
         assert ctx["table"] is mock_table
+        # A complete snapshot is not flagged incomplete.
+        assert ctx["oob_incomplete"] is False
+
+    def test_oob_incomplete_flag_surfaced_from_cache(self):
+        """A cached snapshot tagged oob_incomplete surfaces the flag in context so the
+        template can warn that OOB rows are missing."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.virtual_chassis = None
+        request = _mock_request()
+
+        cached_data = {
+            "ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifAlias": None, "ifDescr": "Gi0/0"}],
+            "oob_incomplete": True,
+        }
+
+        mock_iface = MagicMock()
+        mock_iface.name = "Gi0/0"
+        mock_ifaces_qs = MagicMock()
+        mock_ifaces_qs.select_related.return_value = [mock_iface]
+
+        with (
+            patch.object(view, "get_cache_key", return_value="key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
+            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
+            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
+            patch.object(view, "_add_vlan_group_selection"),
+            patch.object(view, "_add_missing_vlans_info"),
+            patch.object(view, "get_table", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone") as mock_tz,
+        ):
+            mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
+            mock_cache.ttl.return_value = 300
+            mock_tz.now.return_value = MagicMock()
+            mock_tz.timedelta.return_value = MagicMock()
+            ctx = view.get_context_data(request, obj, "ifName")
+
+        assert ctx["oob_incomplete"] is True
 
     def test_cache_hit_with_vc_uses_vc_members(self):
         """Cached data with VC queries each chassis member's interfaces."""
