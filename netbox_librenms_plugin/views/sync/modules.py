@@ -1439,6 +1439,55 @@ class ModuleMismatchPreviewView(
         )
 
 
+class VCNormalizationReportView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Render a copyable markdown report describing a VC name-rewrite no-op for issue filing."""
+
+    def get(self, request, pk):
+        from dcim.models import Device, Module
+
+        from netbox_librenms_plugin.utils import (
+            build_vc_normalization_report,
+            detect_vc_normalization_noop,
+        )
+
+        self.required_object_permissions = {"GET": [("view", Device), ("view", Module)]}
+        if error := self.require_object_permissions("GET"):
+            return error
+
+        page_device = get_object_or_404(Device, pk=pk)
+        target_device, invalid_selected_device = _resolve_target_device_with_validation(
+            page_device, request.GET.get("selected_device_id")
+        )
+        if invalid_selected_device:
+            _warn_invalid_selected_device(request)
+
+        try:
+            module_id = int(request.GET.get("module_id"))
+        except (TypeError, ValueError):
+            return HttpResponse("Missing or invalid module_id.", status=400)
+
+        module = get_object_or_404(
+            Module.objects.select_related("module_type", "module_type__manufacturer", "module_bay", "device"),
+            pk=module_id,
+            device=target_device,
+        )
+
+        diagnostic = detect_vc_normalization_noop(target_device, module)
+        if diagnostic is None:
+            return HttpResponse(
+                "No VC name-rewrite no-op detected for this module — nothing to report.",
+                status=400,
+            )
+
+        return render(
+            request,
+            "netbox_librenms_plugin/htmx/vc_normalization_report.html",
+            {
+                "report_markdown": build_vc_normalization_report(diagnostic),
+            },
+        )
+
+
 class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
     Replace the installed module in a bay with fresh data from LibreNMS inventory.

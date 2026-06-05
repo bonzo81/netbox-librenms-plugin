@@ -58,6 +58,7 @@ from .views import (
     ReplaceModuleView,
     UpdateModuleInterfaceView,
     UpdateModuleSerialView,
+    VCNormalizationReportView,
     AddBayTemplateView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
@@ -194,6 +195,11 @@ urlpatterns = [
         "devices/<int:pk>/module-mismatch-preview/",
         ModuleMismatchPreviewView.as_view(),
         name="module_mismatch_preview",
+    ),
+    path(
+        "devices/<int:pk>/vc-normalization-report/",
+        VCNormalizationReportView.as_view(),
+        name="vc_normalization_report",
     ),
     path(
         "devices/<int:pk>/replace-module/",

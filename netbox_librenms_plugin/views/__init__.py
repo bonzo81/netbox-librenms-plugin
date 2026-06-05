@@ -20,6 +20,7 @@ from .sync.modules import (  # noqa: F401
     ReplaceModuleView,
     UpdateModuleInterfaceView,
     UpdateModuleSerialView,
+    VCNormalizationReportView,
 )
 from .base.vlan_table_view import BaseVLANTableView  # noqa: F401
 from .imports import (  # noqa: F401

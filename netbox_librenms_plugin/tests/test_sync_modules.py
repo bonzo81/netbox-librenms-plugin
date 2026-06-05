@@ -4920,3 +4920,397 @@ class TestAddBayTemplateViewRegexMapping:
             )
         )
         assert html == ""
+
+
+# ---------------------------------------------------------------------------
+# predict_module_interface_names signal hook
+# ---------------------------------------------------------------------------
+
+
+class TestVCNormalizationReportView:
+    """VCNormalizationReportView returns 400 when there's nothing to report, HTML when there is."""
+
+    def test_get_returns_400_when_module_id_missing(self):
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        request = _make_request("GET", data={})
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                return_value=device,
+            ),
+        ):
+            response = view.get(request, pk=24)
+
+        assert response.status_code == 400
+        assert b"module_id" in response.content
+
+    def test_get_returns_400_when_no_noop_detected(self):
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        module = MagicMock()
+        request = _make_request("GET", data={"module_id": "321"})
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch(
+                "netbox_librenms_plugin.utils.detect_vc_normalization_noop",
+                return_value=None,
+            ),
+        ):
+            response = view.get(request, pk=24)
+
+        assert response.status_code == 400
+        assert b"nothing to report" in response.content.lower()
+
+    def test_get_renders_template_when_noop_detected(self):
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        module = MagicMock()
+        request = _make_request("GET", data={"module_id": "321"})
+
+        diagnostic = {
+            "manufacturer_slug": "nokia",
+            "device_type_model": "7250-IXR",
+            "module_type_model": "QSFP-DD",
+            "module_bay_name": "Bay c9",
+            "vc_position": 3,
+            "vc_member_positions": [1, 2, 3, 4],
+            "template_pairs": [("{module}", "2/x1/1/c9")],
+            "regex": "x",
+        }
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch(
+                "netbox_librenms_plugin.utils.detect_vc_normalization_noop",
+                return_value=diagnostic,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.render",
+                return_value="rendered",
+            ) as mock_render,
+        ):
+            response = view.get(request, pk=24)
+
+        assert response == "rendered"
+        ctx = mock_render.call_args[0][2]
+        assert "**VC interface normalization — no match**" in ctx["report_markdown"]
+        assert "nokia" in ctx["report_markdown"]
+
+    def test_get_warns_on_invalid_selected_device_id(self):
+        """Invalid selected_device_id triggers the standard warn helper but still proceeds."""
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        module = MagicMock()
+        request = _make_request("GET", data={"module_id": "321", "selected_device_id": "bogus"})
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
+                return_value=(device, True),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._warn_invalid_selected_device",
+            ) as mock_warn,
+            patch(
+                "netbox_librenms_plugin.utils.detect_vc_normalization_noop",
+                return_value=None,
+            ),
+        ):
+            response = view.get(request, pk=24)
+
+        mock_warn.assert_called_once_with(request)
+        assert response.status_code == 400
+
+    def test_get_returns_400_when_module_id_non_numeric(self):
+        """Non-numeric module_id is treated the same as missing — returns 400."""
+        from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
+
+        view = object.__new__(VCNormalizationReportView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        request = _make_request("GET", data={"module_id": "not-a-number"})
+
+        with (
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                return_value=device,
+            ),
+        ):
+            response = view.get(request, pk=24)
+
+        assert response.status_code == 400
+
+
+class TestVCNormalizationE2E:
+    """End-to-end: production code path (get_module_template_interface_names → detect_vc_normalization_noop).
+
+    Exercises the real regex against vendor-realistic name shapes without DB
+    fixtures. Catches regressions if either piece changes how it processes names.
+    """
+
+    @staticmethod
+    def _device(vc_position=3, vc_id=11, member_positions=(1, 2, 3, 4)):
+        d = MagicMock()
+        d.vc_position = vc_position
+        d.virtual_chassis_id = vc_id
+        d.virtual_chassis = MagicMock()
+        d.virtual_chassis.members.values_list.return_value = list(member_positions)
+        d.device_type = MagicMock()
+        return d
+
+    @staticmethod
+    def _module(instantiated_names):
+        m = MagicMock()
+        templates = []
+        for name in instantiated_names:
+            tmpl = MagicMock()
+            tmpl.name = "{module}"
+            inst = MagicMock()
+            inst.name = name
+            tmpl.instantiate.return_value = inst
+            templates.append(tmpl)
+        m.module_type.interfacetemplates.all.return_value = templates
+        m.module_type.manufacturer.slug = "vendor"
+        m.module_type.model = "MOD"
+        m.module_bay.name = "Bay X"
+        return m
+
+    def test_cisco_shape_does_not_trigger_diagnostic(self):
+        """A Cisco-style name (TenGigabitEthernet1/1/1) matches the regex → no diagnostic."""
+        from netbox_librenms_plugin.utils import (
+            detect_vc_normalization_noop,
+            get_module_template_interface_names,
+        )
+
+        device = self._device(vc_position=3)
+        module = self._module(["TenGigabitEthernet1/1/1"])
+
+        # Production path: prediction returns the VC-rewritten name.
+        names = get_module_template_interface_names(device, module)
+        assert names == ["TenGigabitEthernet3/1/1"]
+
+        # Detector sees the (pre-rewrite) instantiated name, which DOES match the regex.
+        assert detect_vc_normalization_noop(device, module) is None
+
+    def test_nokia_shape_triggers_diagnostic(self):
+        """A Nokia-style name (2/x1/1/c9) doesn't match the regex → diagnostic returned."""
+        from netbox_librenms_plugin.utils import (
+            detect_vc_normalization_noop,
+            get_module_template_interface_names,
+        )
+
+        device = self._device(vc_position=2, member_positions=(1, 2))
+        module = self._module(["2/x1/1/c9"])
+
+        # Production path: prediction returns the name unchanged (no rewrite applied).
+        names = get_module_template_interface_names(device, module)
+        assert names == ["2/x1/1/c9"]
+
+        # Detector flags this as a vendor-support issue worth reporting.
+        diag = detect_vc_normalization_noop(device, module)
+        assert diag is not None
+        assert diag["vc_position"] == 2
+        assert diag["template_pairs"] == [("{module}", "2/x1/1/c9")]
+
+    def test_juniper_shape_triggers_diagnostic(self):
+        """Juniper xe-0/0/0 names don't match the regex (prefix breaks on '-') → diagnostic."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._device(vc_position=3, member_positions=(1, 2, 3, 4))
+        module = self._module(["xe-0/0/0", "xe-0/0/1"])
+
+        diag = detect_vc_normalization_noop(device, module)
+        assert diag is not None
+        assert {pair[1] for pair in diag["template_pairs"]} == {"xe-0/0/0", "xe-0/0/1"}
+
+    def test_mixed_shapes_with_one_matching_returns_none(self):
+        """If at least one template name matches the regex, the row is not flagged."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._device()
+        # One Cisco-shaped name (matches regex) alongside one Nokia-shaped (doesn't).
+        # Detector should NOT flag — at least one rewrite path is working.
+        module = self._module(["Te1/0/1", "2/x1/1/c9"])
+
+        assert detect_vc_normalization_noop(device, module) is None
+
+
+class TestPredictModuleInterfaceNamesSignal:
+    """get_module_template_interface_names invokes the predict signal and honors receiver overrides."""
+
+    def _make_module(self, template_names):
+        module = MagicMock()
+        template_manager = MagicMock()
+        templates = []
+        for name in template_names:
+            tmpl = MagicMock()
+            tmpl.instantiate.return_value = MagicMock(name=name)
+            tmpl.instantiate.return_value.name = name
+            templates.append(tmpl)
+        template_manager.all.return_value = templates
+        module.module_type.interfacetemplates = template_manager
+        return module
+
+    def test_no_receivers_returns_raw_template_names(self):
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        device = MagicMock()
+        module = self._make_module(["Gi1/0/1", "Gi1/0/2"])
+        assert get_module_template_interface_names(device, module) == ["Gi1/0/1", "Gi1/0/2"]
+
+    def test_receiver_can_rewrite_names(self):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def rewrite(sender, device, module, names, **kwargs):
+            return [f"{n}/1" for n in names]
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["2/x1/1/c9"])
+            assert get_module_template_interface_names(device, module) == ["2/x1/1/c9/1"]
+        finally:
+            predict_module_interface_names.disconnect(rewrite)
+
+    def test_receiver_returning_none_leaves_names_unchanged(self):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def noop(sender, device, module, names, **kwargs):
+            return None
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["Gi1/0/1"])
+            assert get_module_template_interface_names(device, module) == ["Gi1/0/1"]
+        finally:
+            predict_module_interface_names.disconnect(noop)
+
+    def test_receiver_can_override_to_empty_list(self):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def suppress(sender, device, module, names, **kwargs):
+            return []
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["Gi1/0/1"])
+            assert get_module_template_interface_names(device, module) == []
+        finally:
+            predict_module_interface_names.disconnect(suppress)
+
+    def test_last_receiver_returning_list_wins(self):
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def first(sender, device, module, names, **kwargs):
+            return ["first"]
+
+        @receiver(predict_module_interface_names)
+        def second(sender, device, module, names, **kwargs):
+            return ["second"]
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["raw"])
+            # Django Signal.send invokes receivers in connection order; the last
+            # non-None return wins per the documented contract.
+            result = get_module_template_interface_names(device, module)
+            assert result == ["second"]
+        finally:
+            predict_module_interface_names.disconnect(first)
+            predict_module_interface_names.disconnect(second)
+
+    def test_failing_receiver_is_isolated(self, caplog):
+        """send_robust must isolate a raising receiver so adoption isn't broken.
+
+        A buggy third-party receiver that raises is logged and skipped; a later
+        well-behaved receiver still applies, and the raw names survive if none do.
+        """
+        import logging
+
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def boom(sender, device, module, names, **kwargs):
+            raise RuntimeError("third-party receiver blew up")
+
+        @receiver(predict_module_interface_names)
+        def good(sender, device, module, names, **kwargs):
+            return ["override"]
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["raw"])
+            # The raising receiver must not propagate; the good receiver still wins.
+            with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.utils"):
+                assert get_module_template_interface_names(device, module) == ["override"]
+            # The isolated failure is logged (warning), not silently swallowed.
+            assert any("receiver failed" in msg for msg in caplog.messages)
+        finally:
+            predict_module_interface_names.disconnect(boom)
+            predict_module_interface_names.disconnect(good)
+
+    def test_only_failing_receiver_falls_back_to_raw_names(self):
+        """If the sole receiver raises, the raw template names are returned unchanged."""
+        from django.dispatch import receiver
+
+        from netbox_librenms_plugin.signals import predict_module_interface_names
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        @receiver(predict_module_interface_names)
+        def boom(sender, device, module, names, **kwargs):
+            raise RuntimeError("third-party receiver blew up")
+
+        try:
+            device = MagicMock()
+            module = self._make_module(["Gi1/0/1"])
+            assert get_module_template_interface_names(device, module) == ["Gi1/0/1"]
+        finally:
+            predict_module_interface_names.disconnect(boom)
