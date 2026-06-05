@@ -33,6 +33,12 @@ Each row in the table shows:
 - **Add Mapping** — opens the ModuleBayMapping or ModuleTypeMapping creation modal directly from the row, so you can resolve "No Bay" or "No Type" statuses without leaving the page
 - **Add Bay Template** — if the device type is missing a module bay template, this button creates it inline
 
+## Module Interfaces
+
+When a module type defines interface templates, installing the module also reconciles the device's interfaces with those templates. The plugin works out the names the module's interfaces should have (instantiating each interface template against the device, and rewriting names for Virtual Chassis members where needed), then adopts any existing standalone interfaces on the device that match those names into the newly installed module. This keeps interfaces that were created by a previous interface sync from being duplicated, and links them to the module that physically provides them.
+
+For vendors whose naming conventions cannot be derived from templates alone, the predicted names can be adjusted by another plugin through a signal hook — see [Extension Points](../development/extension_points.md) for details.
+
 ## Carrier Modules
 
 Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without the intermediate carrier/holder module that must first be installed in NetBox before the children become visible. When a CarrierAutoInstallRule matches, an **Install Carrier** button appears — clicking it installs the carrier module into the appropriate empty bay, after which the children can be synced normally.

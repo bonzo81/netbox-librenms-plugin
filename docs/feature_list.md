@@ -73,6 +73,7 @@
 ### IP Address Sync {#ip-address-sync}
 
 * Create IP address objects in Netbox from LibreNMS device IP data
+* Optionally set the device or VM Primary IP from the LibreNMS management IP (opt-in **Set Primary IP** toggle on the IP Address Sync tab)
 * Best results when the [custom field](usage_tips/custom_field.md) `librenms_id` is populated on interfaces
 
 ### VLAN Sync {#vlan-sync}

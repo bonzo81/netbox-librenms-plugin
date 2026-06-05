@@ -11,7 +11,7 @@ The plugin offers the following key features:
 ### Device Import
 Search and import devices from LibreNMS into NetBox with comprehensive validation and control:
 
-- Filter devices by location, type, OS, hostname, or system name
+- Filter devices by location, type, OS, hostname, system name, or hardware model
 - Validate import prerequisites (Site, Device Type, Device Role)
 - Smart matching for Sites, Device Types, and Platforms
 - Import as physical Devices or Virtual Machines
@@ -21,13 +21,23 @@ Search and import devices from LibreNMS into NetBox with comprehensive validatio
 
 See the [Device Import Guide](docs/librenms_import/overview.md) for detailed usage instructions.
 
+### Module / Inventory Sync
+Synchronize physical inventory data from LibreNMS (via ENTITY-MIB) to NetBox installed modules:
+
+- Compare LibreNMS inventory items (line-cards, transceivers, fans, PSUs) against NetBox module bays
+- Install, update, or skip individual modules directly from the sync table
+- Rich mapping system: ModuleTypeMapping, ModuleBayMapping (with regex support), NormalizationRules, InventoryIgnoreRules, CarrierAutoInstallRules
+- Virtual Chassis aware — inventory rows distributed across correct VC members
+
+See the [Module Sync Guide](docs/usage_tips/module_sync.md) and [Mapping Rules Guide](docs/usage_tips/mapping_rules.md) for details.
+
 ### Device Field Sync
 Synchronize device information from LibreNMS to NetBox. The following device fields can be synchronized:
 
 - Device Name (with naming preference support)
 - Serial Number (including virtual chassis members)
 - Device Type
-- Platform
+- Platform (via [Platform Mappings](docs/usage_tips/mapping_rules.md#platform-mappings))
 
 ### Interface Sync
 Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox. The following interface attributes are synchronized:
@@ -49,6 +59,8 @@ Create cable connection in NetBox from LibreNMS links data.
 ### IP Address Sync
 Create IP address in NetBox from LibreNMS device IP data.
 
+An opt-in **Set Primary IP** toggle on the IP Address Sync tab can also set the device or VM Primary IP.
+
 ### VLAN Sync
 - Create VLAN objects in NetBox from LibreNMS device VLAN data
 - Per-VLAN group assignment with scope-aware auto-selection
@@ -57,7 +69,7 @@ Create IP address in NetBox from LibreNMS device IP data.
 
 - Add device to LibreNMS from Netbox device page. SNMP v2c and v3 are supported.
 
-### Site & Location Synchronization
+### Site & Location Sync
 The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 - Compare NetBox sites to LibreNMS location data
 - Create LibreNMS locations to match NetBox sites
