@@ -65,6 +65,8 @@ Create cable connection in NetBox from LibreNMS links data.
 
 Create IP address in NetBox from LibreNMS device IP data.
 
+An opt-in **Set Primary IP** toggle on the IP Address Sync tab can also set the device or VM Primary IP.
+
 ### VLAN Sync
 - Create VLAN objects in NetBox from LibreNMS device VLAN data
 - Per-VLAN group assignment with scope-aware auto-selection
@@ -81,6 +83,12 @@ The plugin also supports synchronizing NetBox Sites with LibreNMS locations:
 * Create LibreNMS locations to match NetBox sites
 * Update existing LibreNMS locations latitude and longitude values based on NetBox data ⚠️ *(currently not working due to LibreNMS API issue)*
 * Sync device site to LibreNMS location
+
+### Multi LibreNMS Server Configuration
+
+* Configure multiple LibreNMS instances in your NetBox configuration
+* Switch between different LibreNMS servers through the web interface
+* Maintain backward compatibility with single-server configurations
 
 ### Screenshots/GIFs
 
