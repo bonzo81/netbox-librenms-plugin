@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.7 (2026-06-05)
+
+### New Features
+* **Module / Inventory Sync**: New Modules tab on Device and Virtual Chassis pages that reconciles LibreNMS ENTITY-MIB physical inventory (line-cards, transceivers, fans, PSUs) against NetBox module bays and installed modules, with install/update actions directly from the sync table (#261)
+* **Mapping Rules**: Configurable mapping system backing module sync — `DeviceTypeMapping`, `ModuleTypeMapping`, `ModuleBayMapping` (with regex and manufacturer scoping), `NormalizationRule`, `InventoryIgnoreRule`, and `CarrierAutoInstallRule`, all with bulk YAML import/export (#261)
+* **Module Interface Matching**: Follow-up sync logic that matches LibreNMS `port_id` to interface `librenms_id`, installs modules with interface templates (e.g. SFPs), and adopts existing standalone interfaces into installed modules (#296)
+* **Set Primary IP**: Opt-in toggle on the IP Address Sync tab that sets the device/VM `primary_ip4`/`primary_ip6` from the LibreNMS management IP when the synced IP is assigned to an interface (#303)
+* **Module Interface Name Prediction Hook**: New public `predict_module_interface_names` signal so other plugins can rewrite predicted module interface names, plus a copy-to-issue Virtual Chassis normalization report for unsupported naming conventions (#298)
+
+### Fixes
+* Generate a `slug` when creating a Platform via the device sync page "Create & Sync" button (#282, closes #279)
+* Guard `VirtualMachine.cluster` access so the import page no longer crashes for VMs without a cluster (#287, closes #284)
+* Fix the Create Platform modal rendering raw template syntax on Django 6 and scope the modal block to devices only (#294)
+* Stop rendering a "No matching bay" warning on informational Integrated module rows (#300)
+* Fix device Location showing as a raw dict instead of the location name on the sync page (#301, closes #280)
+
+### Improvements
+* Security: restrict `GITHUB_TOKEN` to least-privilege `contents: read` in GitHub Actions workflows (#304)
+* Security: localise the open-redirect guard to the redirect sink in `views/mixins.py` (#305)
+* Security: avoid exposing exception details in IP address sync responses (#306)
+
+### Documentation
+* Add Module Sync and Mapping Rules guides, a developer Extension Points page, and Set Primary IP coverage; wire the new pages into navigation and re-sync the root and docs READMEs (#288, #307)
+* Update Copilot instruction files for accuracy after v0.4.4–v0.4.6 changes and add a release workflow instruction file (#278)
+
 ## 0.4.6 (2026-04-20)
 
 ### Fixes
