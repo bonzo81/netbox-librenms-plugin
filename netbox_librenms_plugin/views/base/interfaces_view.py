@@ -130,6 +130,18 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             messages.error(request, "Device not found in LibreNMS.")
             return redirect(self.get_redirect_url(obj))
 
+        # Resolve the cache scope once (the VC sync device for a member, else obj) and use
+        # it for the up-front clear below and the writes further down. Mirrors cables_view.
+        _server_key = post_server_key
+        lookup_device = get_librenms_sync_device(obj, server_key=_server_key) or obj
+
+        # A refresh must actually refresh: drop the previous snapshot up front so that if
+        # the fetch below fails we fall back to an empty view + visible error, rather than
+        # silently serving stale data (and letting the follow-up sync run on it). The
+        # success path re-populates the cache below.
+        cache.delete(self.get_cache_key(lookup_device, "ports", _server_key))
+        cache.delete(self.get_last_fetched_key(lookup_device, "ports", _server_key))
+
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
         if not success:
@@ -143,15 +155,13 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             port["_source"] = "main"
         librenms_data["ports"] = enriched_ports
 
-        # If an OOB controller is linked, fetch its ports and merge them in.
-        # Reuse the POST-resolved server key (the API was rebound above) so the OOB
-        # fetch, cache writes, and migrated context all stay on one server — no
-        # mismatch between cached data and migrated mode.
-        _server_key = post_server_key
-        # Resolve OOB from the sync device (not the viewed object): for a VC member the
-        # OOB relationship is stored on the resolved sync device, so get_librenms_oob(obj)
-        # would miss it and drop the OOB rows / shared-LOM flagging. Mirrors cables_view.
-        lookup_device = get_librenms_sync_device(obj, server_key=_server_key) or obj
+        # If an OOB controller is linked, fetch its ports and merge them in. The
+        # POST-resolved server key (the API was rebound above) and the sync-device cache
+        # scope (lookup_device) were resolved above, so the OOB fetch, cache writes, and
+        # migrated context all stay on one server — no mismatch between cached data and
+        # migrated mode. Resolving OOB from the sync device (not the viewed member) matters
+        # for a VC member: the OOB relationship lives on the sync device, so
+        # get_librenms_oob(obj) would miss it and drop OOB rows / shared-LOM flagging.
         oob = get_librenms_oob(lookup_device, server_key=_server_key)
         oob_ports_failed = False
         if oob and oob.get("id"):

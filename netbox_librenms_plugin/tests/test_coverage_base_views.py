@@ -1251,15 +1251,65 @@ class TestBaseInterfaceTableViewPost:
         with (
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
         ):
             mock_redirect.return_value = MagicMock()
             view.post(request, pk=1)
 
         mock_messages.error.assert_called_once_with(request, "Connection refused")
         mock_redirect.assert_called_once_with("/device/1/")
+        # The stale snapshot is cleared up front; a failed fetch must not re-populate it,
+        # so the next render shows an empty view rather than old data.
+        mock_cache.delete.assert_any_call("cache-key")
+        mock_cache.delete.assert_any_call("last-key")
+        mock_cache.set.assert_not_called()
+
+    def test_post_clears_stale_cache_before_fetch(self):
+        """A refresh drops the previous ports snapshot before fetching, so a later
+        failure can't leave stale data behind."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]})
+
+        delete_calls_before_get_ports = []
+
+        def _record_get_ports(_id):
+            delete_calls_before_get_ports.extend(mock_cache.delete.call_args_list)
+            return (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]})
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", return_value=[]),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            view._librenms_api.get_ports.side_effect = _record_get_ports
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        # The cache was cleared (both keys) before the LibreNMS fetch ran.
+        recorded = [c.args[0] for c in delete_calls_before_get_ports]
+        assert "cache-key" in recorded
+        assert "last-key" in recorded
+        # Success still re-populates the cache afterwards.
+        mock_cache.set.assert_called()
 
     def test_post_success_caches_and_renders(self):
         """Successful fetch caches data and renders template."""
