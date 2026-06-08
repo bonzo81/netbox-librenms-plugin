@@ -444,11 +444,20 @@ document.addEventListener('change', function (e) {
     }
 
     // --- Sub-interface: remove cross-page hidden input when unchecking ---
+    // Only drop the injected parent input when NO other still-checked child on this
+    // page references the same cross-page parent — otherwise unchecking one sibling
+    // would strip the auto-included parent the remaining siblings still need.
     if (parentPortId && !checkbox.checked) {
         const form = checkbox.closest('form');
         if (form) {
-            const hidden = form.querySelector('#auto-parent-' + parentPortId);
-            if (hidden) hidden.remove();
+            const siblingStillChecked = Array.prototype.some.call(
+                document.querySelectorAll('tr[data-parent-port-id="' + parentPortId + '"] input[name="select"]'),
+                function (cb) { return cb !== checkbox && cb.checked; }
+            );
+            if (!siblingStillChecked) {
+                const hidden = form.querySelector('#auto-parent-' + parentPortId);
+                if (hidden) hidden.remove();
+            }
         }
     }
 
@@ -482,11 +491,25 @@ function _showParentCrossPageNotice(parentName) {
     const notice = document.createElement('div');
     notice.className = 'alert alert-info alert-dismissible py-1 px-2 small mb-1';
     notice.dataset.parent = parentName;
-    notice.innerHTML =
-        '<i class="mdi mdi-information-outline me-1"></i>' +
-        'Parent interface <strong>' + parentName + '</strong> is on another page ' +
-        'and will be included in the sync automatically.' +
-        '<button type="button" class="btn-close btn-sm" data-bs-dismiss="alert"></button>';
+
+    // Build the notice via DOM nodes rather than innerHTML: parentName is interface
+    // data and must never be interpreted as HTML (DOM-XSS). textContent escapes it.
+    const icon = document.createElement('i');
+    icon.className = 'mdi mdi-information-outline me-1';
+    notice.appendChild(icon);
+    notice.appendChild(document.createTextNode('Parent interface '));
+    const strong = document.createElement('strong');
+    strong.textContent = parentName;
+    notice.appendChild(strong);
+    notice.appendChild(
+        document.createTextNode(' is on another page and will be included in the sync automatically.')
+    );
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'btn-close btn-sm';
+    closeBtn.setAttribute('data-bs-dismiss', 'alert');
+    notice.appendChild(closeBtn);
+
     container.appendChild(notice);
 
     setTimeout(function () {

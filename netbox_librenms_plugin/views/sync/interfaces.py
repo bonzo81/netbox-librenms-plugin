@@ -760,9 +760,11 @@ class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
     def _get_object(self, object_type, object_id):
         if object_type == "device":
             return get_object_or_404(Device, pk=object_id)
-        if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=object_id)
-        raise Http404("Invalid object type.")
+        # VMInterface has no `lag` field, so LAG membership sync is device-only. Reject
+        # VMs up front rather than resolving one and failing later — that path also ran a
+        # mismatched ("change", Interface) permission check. Keeps the view honestly
+        # device-only and consistent with required_object_permissions.
+        raise Http404("LAG membership sync is only supported for device interfaces.")
 
     def post(self, request, object_type, object_id):
         if error := self.require_all_permissions("POST"):
@@ -788,13 +790,9 @@ class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return JsonResponse({"error": f"Aggregate interface: {err}"}, status=404)
 
         with transaction.atomic():
-            if not isinstance(member_iface, Interface):
-                return JsonResponse(
-                    {"error": "LAG membership sync is only supported for device interfaces, not VM interfaces"},
-                    status=400,
-                )
-
-            if isinstance(agg_iface, Interface) and agg_iface.type != "lag":
+            # obj is always a Device here (VMs are 404'd above), so both resolved
+            # interfaces are Interface instances.
+            if agg_iface.type != "lag":
                 agg_iface.type = "lag"
                 agg_iface.save()
                 logger.info("Set interface %s type=lag", agg_iface.name)
