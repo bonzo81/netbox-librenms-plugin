@@ -320,7 +320,10 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         # reusing an existing platform needs no "add Platform" permission, and the
         # mapping insert is only attempted when the toggle is on.
         create_mapping = bool(request.POST.get("create_mapping"))
-        platform_name = request.POST.get("platform_name")
+        # Normalize early: trailing/leading whitespace must not force the create
+        # path (a stray space would miss the case-insensitive existing-name match).
+        platform_name = (request.POST.get("platform_name") or "").strip()
+        librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
 
         # If a platform with this name already exists we reuse it as-is (never
         # mutating its manufacturer/vendor scoping) and only fill in the missing
@@ -333,7 +336,10 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         required = [("change", Device)]
         if existing_platform is None:
             required.append(("add", Platform))
-        if create_mapping:
+        # A mapping is only ever created when the toggle is on AND a LibreNMS OS was
+        # supplied (see the create block below). Don't demand "add PlatformMapping"
+        # when no mapping can be created, or it blocks a plain platform-assign.
+        if create_mapping and librenms_os:
             required.append(("add", PlatformMapping))
         self.required_object_permissions = {"POST": required}
 
@@ -344,7 +350,6 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         device = get_object_or_404(Device, pk=pk)
 
         manufacturer_id = request.POST.get("manufacturer")
-        librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
 
         if not platform_name:
             messages.error(request, "Platform name is required")

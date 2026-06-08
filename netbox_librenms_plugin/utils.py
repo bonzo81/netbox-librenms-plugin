@@ -204,8 +204,21 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
         if isinstance(returned, Exception):
             logger.warning("predict_module_interface_names receiver failed: %s", returned)
             continue
-        if returned is not None:
-            template_names = list(returned)
+        if returned is None:
+            continue
+        # Only accept a non-string sequence of strings. A bare str would be split into
+        # characters by list(); a dict would collapse to its keys — either silently
+        # corrupts the name list, so reject and keep the prior receiver's result.
+        if isinstance(returned, (str, bytes)) or not isinstance(returned, (list, tuple)):
+            logger.warning(
+                "predict_module_interface_names receiver returned %s, expected a list/tuple of names; ignoring",
+                type(returned).__name__,
+            )
+            continue
+        if not all(isinstance(name, str) for name in returned):
+            logger.warning("predict_module_interface_names receiver returned non-string element(s); ignoring")
+            continue
+        template_names = list(returned)
 
     return template_names
 

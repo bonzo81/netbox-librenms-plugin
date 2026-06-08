@@ -391,15 +391,17 @@ class TestBulkImportDevicesViewPost:
         assert result is error_resp
 
     def test_no_devices_returns_400(self):
+        # HTMX path: bare 400 (non-HTMX redirects instead — covered elsewhere).
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
-            result = view.post(_make_request(post={}))
+            result = view.post(_make_request(post={}, headers={"HX-Request": "true"}))
         assert result.status_code == 400
 
     def test_invalid_ids_returns_400(self):
+        # HTMX path: bare 400 (non-HTMX redirects instead — covered elsewhere).
         view = self._make_view()
         with patch.object(view, "require_write_permission", return_value=None):
-            result = view.post(_make_request(post={"select": ["abc"]}))
+            result = view.post(_make_request(post={"select": ["abc"]}, headers={"HX-Request": "true"}))
         assert result.status_code == 400
 
     def test_non_superuser_cannot_use_background_job(self):
@@ -1189,10 +1191,10 @@ class TestBulkImportDevicesViewErrorPaths:
         view._librenms_api = _make_api()
         return view
 
-    def test_post_no_devices_selected(self):
-        """Lines 487-490: empty device_ids returns 400."""
+    def test_post_no_devices_selected_htmx_returns_400(self):
+        """Empty device_ids on the HTMX path returns a raw 400 (surfaced as a toast client-side)."""
         view = self._make_view()
-        request = _make_request(post={})
+        request = _make_request(post={}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=[])  # No devices selected
 
         with patch.object(view, "require_write_permission", return_value=None):
@@ -1201,10 +1203,27 @@ class TestBulkImportDevicesViewErrorPaths:
 
         assert response.status_code == 400
 
-    def test_post_invalid_device_id(self):
-        """Lines 492-496: non-int device_id returns 400."""
+    def test_post_no_devices_selected_full_page_redirects_with_message(self):
+        """Empty device_ids on a non-HTMX POST queues an error message and redirects to the
+        import page, rather than serving a bare 400 body as a full page."""
         view = self._make_view()
-        request = _make_request(post={"select": "not-an-int"})
+        request = _make_request(post={})  # no HX-Request header
+        request.POST.getlist = MagicMock(return_value=[])
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch("netbox_librenms_plugin.views.imports.actions.messages") as mock_messages:
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
+                ) as mock_redirect:
+                    view.post(request)
+
+        mock_messages.error.assert_called_once()
+        mock_redirect.assert_called_once_with("plugins:netbox_librenms_plugin:librenms_import")
+
+    def test_post_invalid_device_id_htmx_returns_400(self):
+        """A non-int device_id on the HTMX path returns a raw 400."""
+        view = self._make_view()
+        request = _make_request(post={"select": "not-an-int"}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=["not-an-int"])
 
         with patch.object(view, "require_write_permission", return_value=None):
@@ -1212,6 +1231,22 @@ class TestBulkImportDevicesViewErrorPaths:
                 response = view.post(request)
 
         assert response.status_code == 400
+
+    def test_post_invalid_device_id_full_page_redirects_with_message(self):
+        """A non-int device_id on a non-HTMX POST queues an error and redirects to the import page."""
+        view = self._make_view()
+        request = _make_request(post={"select": "not-an-int"})  # no HX-Request header
+        request.POST.getlist = MagicMock(return_value=["not-an-int"])
+
+        with patch.object(view, "require_write_permission", return_value=None):
+            with patch("netbox_librenms_plugin.views.imports.actions.messages") as mock_messages:
+                with patch(
+                    "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
+                ) as mock_redirect:
+                    view.post(request)
+
+        mock_messages.error.assert_called_once()
+        mock_redirect.assert_called_once_with("plugins:netbox_librenms_plugin:librenms_import")
 
     def test_post_permission_denied(self):
         """Permission check returns error early."""
@@ -3649,9 +3684,9 @@ class TestBulkImportDevicesViewBasicPaths:
         return view
 
     def test_no_devices_selected_returns_400(self):
-        """Lines 488-490: no device IDs → 400."""
+        """No device IDs on the HTMX path → bare 400 (non-HTMX redirects instead)."""
         view = self._make_view()
-        request = _make_request(post={})
+        request = _make_request(post={}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=[])
 
         with patch.object(view, "require_write_permission", return_value=None):
@@ -3661,9 +3696,9 @@ class TestBulkImportDevicesViewBasicPaths:
         assert response.status_code == 400
 
     def test_invalid_device_id_returns_400(self):
-        """Lines 492-496: non-integer device_id → 400."""
+        """Non-integer device_id on the HTMX path → bare 400 (non-HTMX redirects instead)."""
         view = self._make_view()
-        request = _make_request(post={})
+        request = _make_request(post={}, headers={"HX-Request": "true"})
         request.POST.getlist = MagicMock(return_value=["not-an-int"])
 
         with patch.object(view, "require_write_permission", return_value=None):
@@ -4248,6 +4283,14 @@ class TestBulkImportEdgePaths:
         MockJob.enqueue.assert_called_once()
         mock_redirect.assert_called()
 
+        # ...and the enqueued job must carry the request's inputs forward, not be enqueued
+        # empty: the selected device id (parsed to int), the active server namespace, and
+        # the resolved sync options. Otherwise the background import silently does nothing.
+        enqueue_kwargs = MockJob.enqueue.call_args.kwargs
+        assert enqueue_kwargs["device_ids"] == [1]
+        assert enqueue_kwargs["server_key"] == "default"
+        assert enqueue_kwargs["sync_options"]["use_sysname"] is True
+
 
 class TestBulkImportConfirmCollisions:
     """Tests for Stage 3 collision-blocking behaviour."""
@@ -4618,13 +4661,16 @@ class TestAddAsOOBViewPost:
         from django.http import HttpResponse
 
         view = self._make_view()
+        # Run under a NON-default server namespace so the test fails if the view ever
+        # hardcodes "default" instead of honouring self._librenms_api.server_key.
+        view._librenms_api.server_key = "secondary"
         request = _make_request(post={"existing_device_id": "5"})
 
         existing_device = MagicMock()
         existing_device.pk = 5
         existing_device.name = "host-a"
         existing_device.oob_ip_id = 1  # already set → skip the OOB-IP sub-flow
-        existing_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+        existing_device.custom_field_data = {"librenms_id": {"secondary": {"id": 10}}}
 
         # A distinct locked row (re-read under select_for_update). The view must mutate and
         # persist THIS instance, not the stale pre-lock lookup — using one object for both
@@ -4633,7 +4679,7 @@ class TestAddAsOOBViewPost:
         locked_device.pk = 5
         locked_device.name = "host-a"
         locked_device.oob_ip_id = 1
-        locked_device.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+        locked_device.custom_field_data = {"librenms_id": {"secondary": {"id": 10}}}
 
         # Distinct host id (10, already on the device) vs incoming OOB controller id (17):
         # so the assertion pins that the *incoming* id lands in oob.id, not a reused host id.
@@ -4675,10 +4721,10 @@ class TestAddAsOOBViewPost:
         assert response.status_code == 200
         assert "validationRefresh" in response.get("HX-Trigger", "")
         view.render_device_row.assert_called_once()
-        # The duplicate-mapping lookup stays in the active server namespace.
-        assert mock_find.call_args.args[1:] == (17, "default")
+        # The duplicate-mapping lookup stays in the active (non-default) server namespace.
+        assert mock_find.call_args.args[1:] == (17, "secondary")
         # The self host/OOB guard reads the LOCKED row, server-scoped and read-only.
-        mock_get.assert_called_once_with(locked_device, server_key="default", auto_save=False)
+        mock_get.assert_called_once_with(locked_device, server_key="secondary", auto_save=False)
         # The LOCKED row must be the one persisted — guards against the view dropping the
         # _save_device() call or saving the stale pre-lock instance.
         mock_save.assert_called_once()
@@ -4686,8 +4732,8 @@ class TestAddAsOOBViewPost:
         # set_librenms_oob ran for real with the generic sentinel: the *incoming* controller
         # id (17) lands in oob.id, while the host id (10) is preserved.
         assert saved["instance"] is locked_device
-        assert saved["cfd"]["librenms_id"]["default"]["id"] == 10
-        assert saved["cfd"]["librenms_id"]["default"]["oob"] == {"id": 17, "type": "oob"}
+        assert saved["cfd"]["librenms_id"]["secondary"]["id"] == 10
+        assert saved["cfd"]["librenms_id"]["secondary"]["oob"] == {"id": 17, "type": "oob"}
 
     def test_save_device_error_marks_transaction_rollback(self):
         """_save_device returns an error response (it doesn't raise), so the view must mark

@@ -266,7 +266,11 @@ class TestMergeTransceiverDataPortIdentity:
         obj = MagicMock()
         request = MagicMock()
 
-        request.POST.get.return_value = None  # no POSTed server_key → rebind keeps session API
+        # No POSTed keys → get(key, default) must honour the caller's default (QueryDict
+        # semantics); a blanket return_value=None would break default-fallback paths.
+        request.POST.get.side_effect = lambda key, default=None: (
+            default
+        )  # no POSTed server_key → rebind keeps session API
         view.get_object = MagicMock(return_value=obj)
         view._get_sync_device = MagicMock(return_value=obj)
         view.has_write_permission = MagicMock(return_value=True)
@@ -306,7 +310,11 @@ class TestMergeTransceiverDataPortIdentity:
         obj = MagicMock()
         request = MagicMock()
 
-        request.POST.get.return_value = None  # no POSTed server_key → rebind keeps session API
+        # No POSTed keys → get(key, default) must honour the caller's default (QueryDict
+        # semantics); a blanket return_value=None would break default-fallback paths.
+        request.POST.get.side_effect = lambda key, default=None: (
+            default
+        )  # no POSTed server_key → rebind keeps session API
         view.get_object = MagicMock(return_value=obj)
         view._get_sync_device = MagicMock(return_value=obj)
         view.has_write_permission = MagicMock(return_value=True)
@@ -346,7 +354,7 @@ class TestMergeTransceiverDataPortIdentity:
         view.model = MagicMock()
         obj = MagicMock()
         request = MagicMock()
-        request.POST.get.return_value = None
+        request.POST.get.side_effect = lambda key, default=None: default
 
         view.get_object = MagicMock(return_value=obj)
         view._get_sync_device = MagicMock(return_value=obj)
@@ -383,7 +391,7 @@ class TestMergeTransceiverDataPortIdentity:
         view.model = MagicMock()
         obj = MagicMock()
         request = MagicMock()
-        request.POST.get.return_value = None
+        request.POST.get.side_effect = lambda key, default=None: default
 
         view.get_object = MagicMock(return_value=obj)
         view._get_sync_device = MagicMock(return_value=obj)

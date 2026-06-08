@@ -663,16 +663,21 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
         device_ids = request.POST.getlist("select")
         if not device_ids:
-            if not is_htmx:
-                messages.error(request, "No devices selected for import")
-            return HttpResponse("No devices selected", status=400)
+            # HTMX gets a raw 400 (surfaced client-side via htmx:responseError →
+            # showErrorToast); a non-HTMX POST gets the message + redirect flow so
+            # full-page users actually see the error, not a bare 400 body.
+            if is_htmx:
+                return HttpResponse("No devices selected", status=400)
+            messages.error(request, "No devices selected for import")
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         try:
             parsed_ids = [int(device_id) for device_id in device_ids]
         except (TypeError, ValueError):
-            if not is_htmx:
-                messages.error(request, "Invalid device identifier supplied")
-            return HttpResponse("Invalid device identifier", status=400)
+            if is_htmx:
+                return HttpResponse("Invalid device identifier", status=400)
+            messages.error(request, "Invalid device identifier supplied")
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
         vc_detection_enabled = _resolve_vc_detection_enabled(request)
