@@ -1,4 +1,5 @@
 import json
+import logging
 
 from dcim.models import Device
 from django.contrib import messages
@@ -11,8 +12,15 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.utils import get_interface_name_field, get_librenms_device_id
+from netbox_librenms_plugin.utils import (
+    get_interface_name_field,
+    get_librenms_device_id,
+    resolve_set_primary_ip,
+    same_host,
+)
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -96,7 +104,32 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
             enriched_data.append(enriched_ip)
 
+        self._flag_management_ip(enriched_data)
         return enriched_data
+
+    def _flag_management_ip(self, enriched_data):
+        """Mark the entry whose IP equals the device's LibreNMS management IP.
+
+        Used by the "Set Primary IP" toggle on the IP-sync tab to auto-select
+        the right row. Best-effort: a lookup failure simply leaves nothing
+        flagged so the sync table still renders.
+        """
+        librenms_id = getattr(self, "librenms_id", None)
+        if not librenms_id:
+            return
+        try:
+            success, info = self.librenms_api.get_device_info(librenms_id)
+        except Exception:  # pragma: no cover - defensive
+            return
+        if not success or not isinstance(info, dict):
+            return
+        mgmt_ip = (info.get("ip") or "").strip()
+        if not mgmt_ip:
+            return
+        for entry in enriched_data:
+            if same_host(entry.get("ip_address", ""), mgmt_ip):
+                entry["is_mgmt_ip"] = True
+                break
 
     def _prefetch_netbox_data(self, obj):
         """Prefetch all necessary NetBox data to minimize database queries"""
@@ -272,6 +305,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": server_key,
+            "set_primary_ip": resolve_set_primary_ip(request),
         }
 
     def get_context_data(self, request, obj):
@@ -410,8 +444,8 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         try:
             try:
                 data = json.loads(request.body)
-            except json.JSONDecodeError as e:
-                return JsonResponse({"status": "error", "message": f"Invalid JSON: {e}"}, status=400)
+            except json.JSONDecodeError:
+                return JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
             ip_address = data.get("ip_address")
             vrf_id = data.get("vrf_id")
             object_id = data.get("device_id")
@@ -427,14 +461,17 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             # Get the object (Device or VirtualMachine)
             try:
                 obj = self._get_object(object_id, object_type)
-            except Http404 as e:
-                return JsonResponse({"status": "error", "message": str(e)}, status=404)
+            except Http404:
+                return JsonResponse({"status": "error", "message": f"Object with ID {object_id} not found"}, status=404)
 
             # Parse IP address
             try:
                 address_no_mask, prefix_len = self._parse_ip_address(ip_address)
-            except ValueError as e:
-                return JsonResponse({"status": "error", "message": str(e)}, status=400)
+            except ValueError:
+                return JsonResponse(
+                    {"status": "error", "message": "Invalid IP address: prefix length is missing or invalid"},
+                    status=400,
+                )
 
             cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
             cached_data = cache.get(cache_key)
@@ -494,5 +531,8 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
                 }
             )
 
-        except Exception as e:
-            return JsonResponse({"status": "error", "message": str(e)}, status=500)
+        except Exception:
+            logger.exception("Unexpected error in IP address sync")
+            return JsonResponse(
+                {"status": "error", "message": "An internal error occurred. Please check server logs."}, status=500
+            )

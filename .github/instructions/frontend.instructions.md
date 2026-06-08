@@ -11,10 +11,11 @@ description: Frontend patterns for templates, HTMX, and static assets
 - All HTMX requests and `fetch()` calls must include a CSRF token. The standard pattern is `document.querySelector('[name=csrfmiddlewaretoken]').value` (from a hidden form input). The import JS also uses `getCookie('csrftoken')` as a fallback — prefer the hidden input approach for consistency.
 
 ## Modal Implementation
-- Modals use Tabler (Bootstrap-like) but **without** `bootstrap.Modal` helpers.
+- Modals try Bootstrap 5 native (`bootstrap.Modal`) first, falling back to manual DOM manipulation if unavailable. Both `librenms_sync.js` and `librenms_import.js` follow this pattern via `showModal()`/`hideModal()` helpers.
 - Buttons target the `htmx-modal-content` element and JavaScript in `librenms_import.html` toggles the wrapper.
 - Do not reintroduce `data-bs-toggle` or duplicate modal IDs.
 - The import page uses `ModalManager` class and `filterModalManager` instance—always use this reference in fetch callbacks, not undefined `modalInstance` variables.
+- Dismiss handlers (backdrop click, `data-bs-dismiss` buttons) are bound once per element to prevent stacking on repeated `showModal()` calls.
 
 ## JavaScript Fetch Patterns
 - Always check `response.ok` before processing fetch responses to catch HTTP errors.

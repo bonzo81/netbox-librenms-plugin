@@ -1,0 +1,36 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <table class="table table-hover attr-table">
+        <thead>
+          <tr>
+            <th>Manufacturer</th>
+            <th>Device Type Pattern</th>
+            <th>LibreNMS Child Class</th>
+            <th>LibreNMS Child Name Pattern</th>
+            <th>NetBox Bay Name Pattern</th>
+            <th>Carrier Module Type</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{% if object.manufacturer %}<a href="{{ object.manufacturer.get_absolute_url }}">{{ object.manufacturer }}</a>{% else %}—{% endif %}</td>
+            <td>{{ object.device_type_pattern|default:"—" }}</td>
+            <td>{{ object.librenms_child_class }}</td>
+            <td><code>{{ object.librenms_child_name_pattern }}</code></td>
+            <td><code>{{ object.netbox_bay_name_pattern }}</code></td>
+            <td><a href="{{ object.carrier_module_type.get_absolute_url }}">{{ object.carrier_module_type }}</a></td>
+            <td>{{ object.description|default:"—" }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

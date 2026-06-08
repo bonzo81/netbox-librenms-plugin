@@ -1,0 +1,25 @@
+{% load static %}
+<div class="modal-header">
+    <h5 id="htmx-modal-label" class="modal-title">
+        <i class="mdi mdi-bug-outline me-1"></i>Report VC normalization issue
+    </h5>
+    <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
+</div>
+<div class="modal-body" id="htmx-modal-body">
+    <p class="mb-2">
+        Paste the block below into a new
+        <a href="https://github.com/bonzo81/netbox-librenms-plugin/issues/new"
+           target="_blank" rel="noopener noreferrer">GitHub issue</a>.
+        Lines marked <em>(optional)</em> identify hardware catalog items — strip them if you'd rather not share.
+    </p>
+    <div class="d-flex justify-content-end mb-2">
+        <button type="button" id="vc-report-copy-btn" class="btn btn-sm btn-outline-primary"
+                data-target="vc-report-textarea">
+            <i class="mdi mdi-content-copy me-1"></i>Copy to clipboard
+        </button>
+    </div>
+    <textarea id="vc-report-textarea" class="form-control font-monospace" rows="14" readonly>{{ report_markdown }}</textarea>
+</div>
+<div class="modal-footer">
+    <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Close</button>
+</div>

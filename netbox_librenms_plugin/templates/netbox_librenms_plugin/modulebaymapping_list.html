@@ -1,0 +1,19 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Module Bay Mapping</h4>
+        <p>Map LibreNMS inventory container names to NetBox module bay names.
+           When synchronizing modules from LibreNMS, these mappings determine which
+           NetBox module bay a LibreNMS component should be installed into.</p>
+        <p>Example: Map "Linecard(slot 1)" to "Slot 1", or "Power Supply 1" to "PS1"</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:modulebaymapping_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

@@ -170,10 +170,37 @@ class LibreNMSAPI:
                 return {"default": f"Default Server ({legacy_url})"}
             return {"default": "Default Server"}
 
+    def get_stored_librenms_id(self, obj):
+        """
+        Return the stored or cached LibreNMS ID for an object without discovery.
+
+        This helper is safe for generic NetBox objects such as interfaces,
+        where IP/hostname-based discovery would be expensive or incorrect.
+
+        Args:
+            obj: NetBox object with a librenms_id custom field or cache identity
+
+        Returns:
+            int: LibreNMS ID if found in the custom field or cache, None otherwise
+        """
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
+        if librenms_id is not None:
+            return librenms_id
+
+        # Check cache
+        cache_key = self._get_cache_key(obj)
+        librenms_id = cache.get(cache_key)
+        if librenms_id is not None:
+            return librenms_id
+
+        return None
+
     def get_librenms_id(self, obj):
         """
         Args:
-            obj: NetBox device or VM object
+            obj: NetBox object with a librenms_id custom field or discovery identity
 
         Returns:
             int: LibreNMS device ID if found, None otherwise
@@ -190,22 +217,16 @@ class LibreNMSAPI:
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
         """
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
-        librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
+        librenms_id = self.get_stored_librenms_id(obj)
         if librenms_id is not None:
             return librenms_id
 
-        # Check cache
-        cache_key = self._get_cache_key(obj)
-        librenms_id = cache.get(cache_key)
-        if librenms_id is not None:
-            return librenms_id
-
-        # Determine dynamically from API
-        ip_address = obj.primary_ip.address.ip if obj.primary_ip else None
-        dns_name = obj.primary_ip.dns_name if obj.primary_ip else None
-        hostname = obj.name if obj.name else None
+        # Determine dynamically from API when the object exposes device identity fields.
+        primary_ip = getattr(obj, "primary_ip", None)
+        primary_ip_address = getattr(primary_ip, "address", None)
+        ip_address = getattr(primary_ip_address, "ip", None) if primary_ip else None
+        dns_name = getattr(primary_ip, "dns_name", None) if primary_ip else None
+        hostname = getattr(obj, "name", None) or None
 
         # Try IP address
         if ip_address:
@@ -343,12 +364,18 @@ class LibreNMSAPI:
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
-            if response.status_code == 200:
-                device_data = response.json()["devices"][0]
-                if not isinstance(device_data, dict):
-                    return False, None
-                return True, device_data
-            return False, None
+            response.raise_for_status()
+            device_data = response.json()["devices"][0]
+            if not isinstance(device_data, dict):
+                return False, None
+            # LibreNMS 26.5.0 returns the full location relationship object
+            # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
+            # instead of a flat location name string. Normalise to the name so
+            # downstream consumers receive a consistent value.
+            location = device_data.get("location")
+            if isinstance(location, dict):
+                device_data["location"] = location.get("location")
+            return True, device_data
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return False, None
 
@@ -429,16 +456,15 @@ class LibreNMSAPI:
         if data["snmp_version"] in ("v1", "v2c"):
             payload["community"] = data["community"]
         elif data["snmp_version"] == "v3":
-            payload.update(
-                {
-                    "authlevel": data["authlevel"],
-                    "authname": data["authname"],
-                    "authpass": data["authpass"],
-                    "authalgo": data["authalgo"],
-                    "cryptopass": data["cryptopass"],
-                    "cryptoalgo": data["cryptoalgo"],
-                }
-            )
+            payload["authlevel"] = data["authlevel"]
+            payload["authname"] = data["authname"]
+            # Credential keys only apply at the auth levels that use them. Omit
+            # empty values instead of sending empty strings — LibreNMS rejects
+            # those for noAuthNoPriv / authNoPriv add-device requests.
+            for key in ("authpass", "authalgo", "cryptopass", "cryptoalgo"):
+                value = data.get(key)
+                if value:
+                    payload[key] = value
 
         try:
             response = requests.post(
@@ -711,6 +737,69 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
+    def get_device_transceivers(self, device_id):
+        """
+        Fetch all transceiver data for a device from LibreNMS.
+
+        Route: /api/v0/devices/{device_id}/transceivers
+
+        This is a separate data source from entity inventory. Some vendors
+        (e.g., Nokia/SROS) don't expose SFPs via ENTITY-MIB but do report
+        them through vendor-specific MIBs which LibreNMS surfaces here.
+
+        Args:
+            device_id: LibreNMS device ID
+
+        Returns:
+            tuple: (success: bool, data: list)
+
+        Example transceiver item:
+            {
+                "port_id": 519,
+                "entity_physical_index": 1610899520,
+                "type": "CFP2/QSFP28",
+                "model": "3HE10550AARA01",
+                "serial": "X42AU0D",
+                "channels": 4,
+                "connector": "LC",
+                "wavelength": 1301,
+                ...
+            }
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{device_id}/transceivers",
+                headers=self.headers,
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            try:
+                data = response.json()
+            except ValueError:
+                return False, f"Invalid JSON in transceivers response for device {device_id}"
+
+            if not isinstance(data, dict) or "transceivers" not in data:
+                msg = data.get("message") if isinstance(data, dict) else None
+                return False, msg or f"Unexpected transceivers response format for device {device_id}"
+
+            if data.get("status") != "ok":
+                msg = data.get("message") or f"LibreNMS returned status={data.get('status')!r} for device {device_id}"
+                return False, msg
+
+            transceivers = data["transceivers"]
+            if not isinstance(transceivers, list):
+                msg = data.get("message")
+                return False, msg or f"Unexpected transceivers response format for device {device_id}"
+
+            if any(item is None or not isinstance(item, dict) for item in transceivers):
+                return False, f"Malformed transceiver entry in response for device {device_id}"
+
+            return True, transceivers
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
+
     def get_poller_groups(self):
         """
         Fetch all poller groups from LibreNMS.
@@ -955,14 +1044,15 @@ class LibreNMSAPI:
                 if not isinstance(all_vlans, list):
                     msg = result.get("message")
                     return False, msg or "Unexpected response format: missing 'vlans' list"
+                if not all(isinstance(v, dict) for v in all_vlans):
+                    return False, "Unexpected response format: invalid item shape in 'vlans'"
                 # Filter VLANs by device_id since resources endpoint returns all VLANs
-                device_vlans = [
-                    v for v in all_vlans if isinstance(v, dict) and str(v.get("device_id")) == str(device_id)
-                ]
+                device_vlans = [v for v in all_vlans if str(v.get("device_id")) == str(device_id)]
                 return True, device_vlans
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
             return False, "Unexpected response format"
+
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "VLANs resource not found"
@@ -1005,20 +1095,21 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
 
-            if response.status_code == 200:
-                result = response.json()
-                if not isinstance(result, dict):
-                    return False, "Unexpected response format"
-                port_data = result.get("port")
-                if not isinstance(port_data, list):
-                    return False, result.get("message", "Unexpected response format: missing 'port' list")
-                if not port_data:
-                    return False, "Port not found"
-                if not isinstance(port_data[0], dict):
-                    return False, "Unexpected response format: invalid 'port' entry"
-                return True, port_data[0]
+            result = response.json()
+            if not isinstance(result, dict):
+                return False, "Unexpected response format"
+            if result.get("status") != "ok":
+                msg = result.get("message") or f"LibreNMS returned status={result.get('status')!r} for port"
+                return False, msg
+            port_data = result.get("port")
+            if not isinstance(port_data, list):
+                return False, result.get("message") or "Unexpected response format: missing 'port' list"
+            if not port_data:
+                return False, "Port not found"
+            if not isinstance(port_data[0], dict):
+                return False, "Unexpected response format: invalid 'port' entry"
+            return True, port_data[0]
 
-            return False, f"HTTP {response.status_code}"
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "Port not found in LibreNMS"

@@ -1,12 +1,25 @@
+import json
+
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+
+def parse_request_json(request):
+    """Parse JSON from request.body, returning (data, error_response).
+
+    On success returns (dict, None). On malformed input returns (None, JsonResponse 400).
+    """
+    try:
+        return json.loads(request.body), None
+    except (TypeError, ValueError):
+        return None, JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
 
 
 def _get_safe_redirect_url(request):
@@ -24,6 +37,37 @@ def _get_safe_redirect_url(request):
     ):
         return referrer
     return getattr(request, "path", "/")
+
+
+def _safe_redirect_response(request):
+    """
+    Build a permission-denied redirect response to a validated URL.
+
+    Resolves a candidate target via ``_get_safe_redirect_url`` and then
+    re-applies the ``url_has_allowed_host_and_scheme`` guard inline as a
+    positive guard, with the redirect sink inside the validated branch and a
+    hard-coded ``"/"`` fallback otherwise. Keeping the open-redirect guard
+    local to the sink (rather than in a helper) prevents open-redirect attacks
+    and lets static analysers trace the sanitizer barrier.
+
+    Returns an HTMX ``HX-Redirect`` response for HTMX requests, otherwise a
+    standard redirect.
+    """
+    target = _get_safe_redirect_url(request)
+    is_htmx = bool(request.headers.get("HX-Request"))
+
+    if url_has_allowed_host_and_scheme(
+        target,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        if is_htmx:
+            return HttpResponse("", headers={"HX-Redirect": target})
+        return redirect(target)
+
+    if is_htmx:
+        return HttpResponse("", headers={"HX-Redirect": "/"})
+    return redirect("/")
 
 
 class LibreNMSPermissionMixin(PermissionRequiredMixin):
@@ -56,13 +100,7 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             msg = error_message or "You do not have permission to perform this action."
             messages.error(self.request, msg)
 
-            referrer = _get_safe_redirect_url(self.request)
-
-            # Check if this is an HTMX request
-            if self.request.headers.get("HX-Request"):
-                return HttpResponse("", headers={"HX-Redirect": referrer})
-
-            return redirect(referrer)
+            return _safe_redirect_response(self.request)
         return None
 
     def require_write_permission_json(self, error_message=None):
@@ -81,6 +119,18 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             msg = error_message or "You do not have permission to perform this action."
             return JsonResponse({"error": msg}, status=403)
         return None
+
+
+class LibreNMSWritePermissionMixin(LibreNMSPermissionMixin):
+    """
+    Mixin for mutation views requiring LibreNMS plugin write permission.
+
+    Sets permission_required to 'change_librenmssettings' so that only users
+    with write access can access Create, Edit, Delete, BulkImport, and
+    BulkDelete views.
+    """
+
+    permission_required = PERM_CHANGE_PLUGIN
 
 
 class NetBoxObjectPermissionMixin:
@@ -138,13 +188,7 @@ class NetBoxObjectPermissionMixin:
             msg = f"Missing permissions: {missing_str}"
             messages.error(self.request, msg)
 
-            referrer = _get_safe_redirect_url(self.request)
-
-            # Check if this is an HTMX request
-            if self.request.headers.get("HX-Request"):
-                return HttpResponse("", headers={"HX-Redirect": referrer})
-
-            return redirect(referrer)
+            return _safe_redirect_response(self.request)
         return None
 
     def require_object_permissions_json(self, method):

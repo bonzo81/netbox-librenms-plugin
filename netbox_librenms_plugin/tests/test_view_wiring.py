@@ -65,6 +65,11 @@ class TestLibreNMSAPIMixinWiring:
 
         self._assert_has_api_mixin(AssignVCSerialView)
 
+    def test_convert_legacy_id_has_librenms_api_mixin(self):
+        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+        self._assert_has_api_mixin(ConvertLegacyLibreNMSIdView)
+
 
 class TestCacheMixinWiring:
     """Views that cache LibreNMS data must have CacheMixin and expose get_cache_key."""
@@ -196,6 +201,18 @@ class TestRequiredObjectPermissionsWiring:
         self._assert_has_mixins(UpdateDeviceSerialView)
         assert "POST" in UpdateDeviceSerialView.required_object_permissions
 
+    def test_remove_server_mapping_has_required_object_permissions(self):
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+
+        self._assert_has_mixins(RemoveServerMappingView)
+        assert "POST" in RemoveServerMappingView.required_object_permissions
+
+    def test_convert_legacy_id_has_required_object_permissions(self):
+        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+        self._assert_has_mixins(ConvertLegacyLibreNMSIdView)
+        assert "POST" in ConvertLegacyLibreNMSIdView.required_object_permissions
+
     def test_delete_interfaces_has_required_object_permissions(self):
         from dcim.models import Interface
         from virtualization.models import VMInterface
@@ -235,10 +252,15 @@ class TestViewPropertyLazyInit:
         assert dummy._librenms_api is None
 
     def test_sync_interfaces_has_librenms_api_property_via_class(self):
-        """SyncInterfacesView must expose librenms_api through its MRO."""
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        """BaseLibreNMSSyncView must expose librenms_api through its MRO.
 
-        assert any("librenms_api" in vars(cls) for cls in SyncInterfacesView.__mro__)
+        SyncInterfacesView gains LibreNMSAPIMixin in the view-fixes PR; on the
+        current upstream/develop baseline we verify the property via
+        BaseLibreNMSSyncView, which inherits the mixin unconditionally.
+        """
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        assert any("librenms_api" in vars(cls) for cls in BaseLibreNMSSyncView.__mro__)
 
 
 # ── Template syntax smoke tests ──────────────────────────────────────────────

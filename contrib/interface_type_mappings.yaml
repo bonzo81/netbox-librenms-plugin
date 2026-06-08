@@ -1,0 +1,75 @@
+# Interface Type Mappings
+#
+# Maps LibreNMS interface types (and optional speeds) to NetBox interface types.
+# Import via: LibreNMS Plugin > Interface Mappings > Import
+#
+# Fields:
+#   librenms_type  — IANA ifType string from LibreNMS (e.g. ethernetCsmacd)
+#   librenms_speed — Speed in Kbps (optional, null matches any speed)
+#   netbox_type    — NetBox InterfaceTypeChoices slug
+#   description    — Optional note
+#
+# Common NetBox interface type slugs:
+#   1000base-t, 10gbase-t, 10gbase-x-sfpp, 25gbase-x-sfp28,
+#   40gbase-x-qsfpp, 100gbase-x-qsfp28, 400gbase-x-qsfpdd,
+#   ieee802.11ax, lag, virtual, other
+
+# WARNING: Speed-only matching cannot distinguish copper from fiber optics.
+# For example, 1G ethernetCsmacd could be 1000base-t (copper), 1000base-x-sfp (fiber),
+# or other media types. Review and adjust these mappings for your environment before
+# importing — incorrect mappings will mislabel ports.
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 1000000
+  netbox_type: 1000base-t
+  description: "1G Ethernet copper"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 10000000
+  netbox_type: 10gbase-x-sfpp
+  description: "10G Ethernet SFP+"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 25000000
+  netbox_type: 25gbase-x-sfp28
+  description: "25G Ethernet SFP28"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 40000000
+  netbox_type: 40gbase-x-qsfpp
+  description: "40G Ethernet QSFP+"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 100000000
+  netbox_type: 100gbase-x-qsfp28
+  description: "100G Ethernet QSFP28"
+
+- librenms_type: ethernetCsmacd
+  librenms_speed: 400000000
+  netbox_type: 400gbase-x-qsfpdd
+  description: "400G Ethernet QSFP-DD"
+
+- librenms_type: ieee8023adLag
+  librenms_speed:
+  netbox_type: lag
+  description: "LACP/LAG aggregation"
+
+- librenms_type: propVirtual
+  librenms_speed:
+  netbox_type: virtual
+  description: "Virtual/loopback interface"
+
+- librenms_type: softwareLoopback
+  librenms_speed:
+  netbox_type: virtual
+  description: "Software loopback"
+
+- librenms_type: tunnel
+  librenms_speed:
+  netbox_type: virtual
+  description: "Tunnel interface"
+
+- librenms_type: l2vlan
+  librenms_speed:
+  netbox_type: virtual
+  description: "VLAN interface"

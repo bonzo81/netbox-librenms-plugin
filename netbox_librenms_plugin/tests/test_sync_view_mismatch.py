@@ -2,9 +2,7 @@
 Tests for device mismatch detection in get_librenms_device_info.
 
 Covers the identity cross-matching logic that determines whether a
-mismatched_device warning banner is shown on the LibreNMS Sync page,
-as well as the resolved_name computation that drives the name-match
-icon and sync button.
+mismatched_device warning banner is shown on the LibreNMS Sync page.
 
 Match rule: mismatch is False when ANY NetBox identity (device name,
 primary IP, DNS name) matches ANY LibreNMS identity (sysName, hostname, ip).
@@ -27,7 +25,7 @@ def _make_view(librenms_id, device_info, librenms_url="https://librenms.example.
     return view
 
 
-def _make_obj(name, primary_ip=None, dns_name=None, virtual_chassis=None, cf=None, vc_position=None, serial=None):
+def _make_obj(name, primary_ip=None, dns_name=None, virtual_chassis=None, cf=None):
     """Create a mock NetBox device object."""
     obj = MagicMock()
     obj.name = name
@@ -39,23 +37,7 @@ def _make_obj(name, primary_ip=None, dns_name=None, virtual_chassis=None, cf=Non
     else:
         obj.primary_ip = None
     obj.virtual_chassis = virtual_chassis
-    obj.vc_position = vc_position
-    obj.serial = serial
     return obj
-
-
-def _make_request(use_sysname=None, strip_domain=None):
-    """Create a mock request with user preferences for naming settings."""
-    request = MagicMock()
-    request.POST = {}
-    request.GET = {}
-    config = {}
-    if use_sysname is not None:
-        config["plugins.netbox_librenms_plugin.use_sysname"] = use_sysname
-    if strip_domain is not None:
-        config["plugins.netbox_librenms_plugin.strip_domain"] = strip_domain
-    request.user.config.get = lambda path, default=None: config.get(path, default)
-    return request
 
 
 class TestMismatchDetection:
@@ -341,85 +323,6 @@ class TestMismatchDetection:
 
 
 # ---------------------------------------------------------------------------
-# Tests for VC lookup delegation in get()
-# ---------------------------------------------------------------------------
-
-
-class TestVCLookupDelegation:
-    """Verify that BaseLibreNMSSyncView.get() always delegates VC device
-    resolution to get_librenms_sync_device(), even when the viewed member
-    has its own librenms_id."""
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
-    def test_vc_member_with_own_id_delegates_to_sync_device(self, mock_sync_device, mock_get_object, mock_render):
-        """A VC member with its own librenms_id should still delegate to
-        get_librenms_sync_device, which may return a different member."""
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        # Viewed device: member A with its own librenms_id
-        member_a = MagicMock()
-        member_a.pk = 1
-        member_a.cf = {"librenms_id": {"default": 42}}
-        member_a.virtual_chassis = MagicMock()
-
-        # Sync device: member B (returned by get_librenms_sync_device)
-        member_b = MagicMock()
-        member_b.pk = 2
-
-        mock_get_object.return_value = member_a
-        mock_sync_device.return_value = member_b
-
-        view = object.__new__(BaseLibreNMSSyncView)
-        view.model = MagicMock()
-        api = MagicMock()
-        api.server_key = "default"
-        api.get_librenms_id.return_value = 42
-        view._librenms_api = api
-        view.tab = MagicMock()
-        view.get_context_data = MagicMock(return_value={})
-        mock_render.return_value = MagicMock()
-
-        request = MagicMock()
-        view.get(request, pk=1)
-
-        # get_librenms_sync_device must be called unconditionally for VC members
-        mock_sync_device.assert_called_once_with(member_a, server_key="default")
-        # get_librenms_id should be called on the sync device (member_b)
-        api.get_librenms_id.assert_called_once_with(member_b)
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
-    def test_non_vc_device_skips_sync_device_lookup(self, mock_sync_device, mock_get_object, mock_render):
-        """A device without a virtual chassis should not call
-        get_librenms_sync_device at all."""
-        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
-
-        device = MagicMock()
-        device.pk = 1
-        device.virtual_chassis = None
-
-        mock_get_object.return_value = device
-
-        view = object.__new__(BaseLibreNMSSyncView)
-        view.model = MagicMock()
-        api = MagicMock()
-        api.server_key = "default"
-        api.get_librenms_id.return_value = 42
-        view._librenms_api = api
-        view.tab = MagicMock()
-        view.get_context_data = MagicMock(return_value={})
-        mock_render.return_value = MagicMock()
-
-        request = MagicMock()
-        view.get(request, pk=1)
-
-        mock_sync_device.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
 # Tests for _build_all_server_mappings
 # ---------------------------------------------------------------------------
 
@@ -504,86 +407,84 @@ class TestBuildAllServerMappings:
         assert result[2]["is_configured"] is False
 
 
-class TestResolvedName:
-    """Tests for resolved_name computation using naming preferences."""
+# ---------------------------------------------------------------------------
+# Tests for VC lookup delegation in get()
+# ---------------------------------------------------------------------------
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.resolve_naming_preferences")
-    def test_resolved_name_uses_sysname_by_default(self, mock_prefs, mock_hw):
-        """resolved_name defaults to sysName when use_sysname=True."""
-        mock_prefs.return_value = (True, False)
-        view = _make_view(42, {"sysName": "sw01.example.com", "hostname": "10.0.0.2", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01.example.com", primary_ip="10.0.0.2")
-        request = _make_request(use_sysname=True, strip_domain=False)
 
-        result = view.get_librenms_device_info(obj, request)
+class TestVCLookupDelegation:
+    """
+    Verify that BaseLibreNMSSyncView.get() always delegates VC device
+    resolution to get_librenms_sync_device(), even when the viewed member
+    has its own librenms_id."""
 
-        assert result["librenms_device_details"]["resolved_name"] == "sw01.example.com"
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_vc_member_with_own_id_delegates_to_sync_device(self, mock_sync_device, mock_get_object, mock_render):
+        """
+        A VC member with its own librenms_id should still delegate to
+        get_librenms_sync_device, which may return a different member."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.resolve_naming_preferences")
-    def test_resolved_name_with_strip_domain(self, mock_prefs, mock_hw):
-        """resolved_name strips domain when strip_domain=True."""
-        mock_prefs.return_value = (True, True)
-        view = _make_view(42, {"sysName": "sw01.example.com", "hostname": "10.0.0.2", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.2")
-        request = _make_request(use_sysname=True, strip_domain=True)
+        # Viewed device: member A with its own librenms_id
+        member_a = MagicMock()
+        member_a.pk = 1
+        member_a.cf = {"librenms_id": {"default": 42}}
+        member_a.virtual_chassis = MagicMock()
 
-        result = view.get_librenms_device_info(obj, request)
+        # Sync device: member B (returned by get_librenms_sync_device)
+        member_b = MagicMock()
+        member_b.pk = 2
 
-        assert result["librenms_device_details"]["resolved_name"] == "sw01"
+        mock_get_object.return_value = member_a
+        mock_sync_device.return_value = member_b
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.resolve_naming_preferences")
-    def test_resolved_name_use_hostname(self, mock_prefs, mock_hw):
-        """resolved_name uses hostname when use_sysname=False."""
-        mock_prefs.return_value = (False, False)
-        view = _make_view(42, {"sysName": "sw01.example.com", "hostname": "sw01-mgmt", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01-mgmt", primary_ip="10.0.0.2")
-        request = _make_request(use_sysname=False, strip_domain=False)
+        view = object.__new__(BaseLibreNMSSyncView)
+        view.model = MagicMock()
+        api = MagicMock()
+        api.server_key = "default"
+        api.get_librenms_id.return_value = 42
+        view._librenms_api = api
+        view.tab = MagicMock()
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
 
-        result = view.get_librenms_device_info(obj, request)
+        request = MagicMock()
+        view.get(request, pk=1)
 
-        assert result["librenms_device_details"]["resolved_name"] == "sw01-mgmt"
+        # get_librenms_sync_device must be called unconditionally for VC members
+        mock_sync_device.assert_called_once_with(member_a, server_key="default")
+        # get_librenms_id should be called on the sync device (member_b)
+        api.get_librenms_id.assert_called_once_with(member_b)
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.resolve_naming_preferences")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view._generate_vc_member_name")
-    def test_resolved_name_vc_member(self, mock_vc_name, mock_prefs, mock_hw):
-        """resolved_name applies VC member naming pattern for VC members."""
-        mock_prefs.return_value = (True, True)
-        mock_vc_name.return_value = "sw01-M2"
-        vc = MagicMock()
-        view = _make_view(42, {"sysName": "sw01.example.com", "hostname": "10.0.0.2", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01-M2", primary_ip="10.0.0.2", virtual_chassis=vc, vc_position=2, serial="ABC123")
-        request = _make_request(use_sysname=True, strip_domain=True)
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_non_vc_device_skips_sync_device_lookup(self, mock_sync_device, mock_get_object, mock_render):
+        """
+        A device without a virtual chassis should not call
+        get_librenms_sync_device at all."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
-        result = view.get_librenms_device_info(obj, request)
+        device = MagicMock()
+        device.pk = 1
+        device.virtual_chassis = None
 
-        assert result["librenms_device_details"]["resolved_name"] == "sw01-M2"
-        mock_vc_name.assert_called_once_with("sw01", 2, serial="ABC123")
+        mock_get_object.return_value = device
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_resolved_name_falls_back_to_sysname_without_request(self, mock_hw):
-        """Without request, resolved_name falls back to raw sysName."""
-        view = _make_view(42, {"sysName": "sw01.example.com", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.2")
+        view = object.__new__(BaseLibreNMSSyncView)
+        view.model = MagicMock()
+        api = MagicMock()
+        api.server_key = "default"
+        api.get_librenms_id.return_value = 42
+        view._librenms_api = api
+        view.tab = MagicMock()
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
 
-        result = view.get_librenms_device_info(obj)
+        request = MagicMock()
+        view.get(request, pk=1)
 
-        assert result["librenms_device_details"]["resolved_name"] == "sw01.example.com"
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.resolve_naming_preferences")
-    def test_resolved_name_non_vc_device_no_vc_pattern(self, mock_prefs, mock_hw):
-        """Non-VC device does not apply VC member naming."""
-        mock_prefs.return_value = (True, True)
-        view = _make_view(42, {"sysName": "sw01.example.com", "hostname": "10.0.0.2", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.2")
-        obj.virtual_chassis = None
-        obj.vc_position = None
-        request = _make_request(use_sysname=True, strip_domain=True)
-
-        result = view.get_librenms_device_info(obj, request)
-
-        assert result["librenms_device_details"]["resolved_name"] == "sw01"
+        mock_sync_device.assert_not_called()
+        assert view._librenms_lookup_device == device

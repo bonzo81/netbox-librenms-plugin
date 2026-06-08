@@ -62,7 +62,8 @@ class TestBaseLibreNMSSyncViewGet:
 
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
-        view._librenms_api.get_librenms_id.return_value = 99
+        # Member has no own librenms_id; get_librenms_id returns None after delegation
+        view._librenms_api.get_librenms_id.return_value = None
 
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
@@ -151,6 +152,11 @@ class TestGetContextDataVC:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         view._librenms_api.librenms_url = "https://x.example.com"
+        # Explicitly set get_librenms_id return value so sync_device_has_librenms_id
+        # is determined by the patched get_librenms_device_id, not a bare MagicMock.
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Note: production code calls get_librenms_device_id() (module-level function),
+        # not self.librenms_api.get_librenms_id(). The patch below is the correct target.
 
         view.get_librenms_device_info = MagicMock(
             return_value={
@@ -204,6 +210,179 @@ class TestGetContextDataVC:
         assert ctx.get("is_vc_member") is True
         assert ctx.get("sync_device_has_librenms_id") is True
         assert ctx.get("sync_device_has_primary_ip") is True
+
+    def test_vc_context_sync_device_has_no_id(self):
+        """VC device where get_librenms_device_id returns None → sync_device_has_librenms_id is False."""
+        view = _make_view()
+        view.librenms_id = 42
+        view._librenms_lookup_device = MagicMock()
+
+        obj = MagicMock()
+        obj.virtual_chassis = MagicMock()
+        obj._meta = MagicMock()
+        obj._meta.model_name = "device"
+
+        sync_device = MagicMock()
+        sync_device.primary_ip = None  # also no IP
+        sync_device._meta.model_name = "device"
+        sync_device.pk = 10
+
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        view._librenms_api.librenms_url = "https://x.example.com"
+        # Explicitly set to None so sync_device_has_librenms_id computes as False
+        # (determined by the patched get_librenms_device_id returning None below).
+        view._librenms_api.get_librenms_id.return_value = None
+
+        view.get_librenms_device_info = MagicMock(
+            return_value={
+                "found_in_librenms": False,
+                "librenms_device_details": {
+                    "librenms_device_serial": "",
+                    "librenms_device_hardware": "-",
+                    "librenms_device_os": "-",
+                    "librenms_device_version": "-",
+                    "librenms_device_features": "-",
+                    "librenms_device_location": "-",
+                    "librenms_device_hardware_match": None,
+                    "vc_inventory_serials": [],
+                },
+                "mismatched_device": False,
+            }
+        )
+        view.get_interface_context = MagicMock(return_value=None)
+        view.get_cable_context = MagicMock(return_value=None)
+        view.get_ip_context = MagicMock(return_value=None)
+        view.get_vlan_context = MagicMock(return_value=None)
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device") as mock_sync:
+            mock_sync.return_value = sync_device
+            with patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_device_id") as mock_id:
+                mock_id.return_value = None  # No ID → flag should be False
+                with patch(
+                    "netbox_librenms_plugin.views.base.librenms_sync_view.get_interface_name_field",
+                    return_value="ifName",
+                ):
+                    with patch(
+                        "netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView._build_all_server_mappings",
+                        return_value=None,
+                    ):
+                        with patch(
+                            "netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView._get_platform_info",
+                            return_value={},
+                        ):
+                            with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV1V2"):
+                                with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV3"):
+                                    with patch("dcim.models.Manufacturer") as MockMfr:
+                                        MockMfr.objects.all.return_value.order_by.return_value = []
+                                        with patch.object(view, "get_context_data", wraps=view.get_context_data):
+                                            with patch(
+                                                "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
+                                                return_value={},
+                                            ):
+                                                ctx = view.get_context_data(MagicMock(), obj)
+
+        assert ctx.get("is_vc_member") is True
+        assert ctx.get("sync_device_has_librenms_id") is False
+        assert ctx.get("sync_device_has_primary_ip") is False
+
+
+class TestContextAllTabsPresent:
+    """Regression coverage for sync-tab context keys."""
+
+    def test_get_context_data_contains_all_sync_tabs(self):
+        """Context always exposes all tab keys, including module_sync."""
+        view = _make_view()
+        view.librenms_id = 42
+
+        obj = MagicMock()
+        obj.virtual_chassis = None
+        obj._meta = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 1
+        obj.cf = {"librenms_id": {"default": 42}}
+
+        interface_ctx = MagicMock()
+        cable_ctx = MagicMock()
+        ip_ctx = MagicMock()
+        vlan_ctx = MagicMock()
+        module_ctx = MagicMock()
+
+        view.get_librenms_device_info = MagicMock(
+            return_value={
+                "found_in_librenms": True,
+                "librenms_device_details": {
+                    "librenms_device_serial": "SN001",
+                    "librenms_device_hardware": "Cisco",
+                    "librenms_device_os": "ios",
+                    "librenms_device_version": "16.9",
+                    "librenms_device_features": "-",
+                    "librenms_device_location": "NYC",
+                    "librenms_device_hardware_match": None,
+                    "vc_inventory_serials": [],
+                },
+                "mismatched_device": False,
+            }
+        )
+        view.get_interface_context = MagicMock(return_value=interface_ctx)
+        view.get_cable_context = MagicMock(return_value=cable_ctx)
+        view.get_ip_context = MagicMock(return_value=ip_ctx)
+        view.get_vlan_context = MagicMock(return_value=vlan_ctx)
+        view.get_module_context = MagicMock(return_value=module_ctx)
+
+        with patch(
+            "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
+            return_value={},
+        ):
+            with patch(
+                "netbox_librenms_plugin.views.base.librenms_sync_view.get_interface_name_field", return_value="ifName"
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView._get_platform_info",
+                    return_value={},
+                ):
+                    with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV1V2"):
+                        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV3"):
+                            with patch("dcim.models.Manufacturer") as MockMfr:
+                                MockMfr.objects.all.return_value.order_by.return_value = []
+                                ctx = view.get_context_data(MagicMock(), obj)
+
+        assert "interface_sync" in ctx
+        assert "cable_sync" in ctx
+        assert "ip_sync" in ctx
+        assert "vlan_sync" in ctx
+        assert "module_sync" in ctx
+        assert ctx["interface_sync"] is interface_ctx
+        assert ctx["module_sync"] is module_ctx
+
+
+class TestModuleContextDefaults:
+    """Tests for module-context defaults and concrete overrides."""
+
+    def test_module_sync_is_none_when_not_overridden(self):
+        from netbox_librenms_plugin.views.object_sync.vms import VMLibreNMSSyncView
+
+        base_view = _make_view()
+        assert base_view.get_module_context(MagicMock(), MagicMock()) is None
+
+        vm_view = object.__new__(VMLibreNMSSyncView)
+        assert vm_view.get_module_context(MagicMock(), MagicMock()) is None
+
+    def test_device_view_module_context_is_non_none(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+
+        request = MagicMock()
+        obj = MagicMock()
+        view = object.__new__(DeviceLibreNMSSyncView)
+
+        with patch(
+            "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView.get_context_data",
+            return_value={"modules": []},
+        ) as mock_get_context:
+            result = view.get_module_context(request, obj)
+
+        assert result == {"modules": []}
+        mock_get_context.assert_called_once()
 
 
 class TestBuildAllServerMappings:
@@ -663,9 +842,10 @@ class TestGetPlatformInfo:
             }
         }
 
-        with patch("dcim.models.Platform") as MockPlatform:
-            MockPlatform.DoesNotExist = type("DoesNotExist", (Exception,), {})
-            MockPlatform.objects.get.return_value = mock_platform
+        with patch(
+            "netbox_librenms_plugin.views.base.librenms_sync_view.find_matching_platform",
+            return_value={"found": True, "platform": mock_platform, "match_type": "exact"},
+        ):
             result = view._get_platform_info(librenms_info, obj)
 
         assert result["platform_exists"] is True
@@ -683,9 +863,10 @@ class TestGetPlatformInfo:
             }
         }
 
-        with patch("dcim.models.Platform") as MockPlatform:
-            MockPlatform.DoesNotExist = type("DoesNotExist", (Exception,), {})
-            MockPlatform.objects.get.side_effect = MockPlatform.DoesNotExist()
+        with patch(
+            "netbox_librenms_plugin.views.base.librenms_sync_view.find_matching_platform",
+            return_value={"found": False, "platform": None, "match_type": None},
+        ):
             result = view._get_platform_info(librenms_info, obj)
 
         assert result["platform_exists"] is False

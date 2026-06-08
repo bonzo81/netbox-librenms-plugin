@@ -204,6 +204,28 @@ class TestGetLibreNMSIdDictServerKey:
                 assert result is None
                 mock_get_id.assert_called_once_with(obj, "default", auto_save=False)
 
+    def test_get_librenms_id_zero_is_valid(self):
+        """Regression: librenms_id == 0 must be returned directly without falling through to API lookup.
+        The code uses 'is not None' guards, so 0 is a valid cached/stored ID."""
+        api = _make_api()
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"default": 0}}
+        obj.custom_field_data = {"librenms_id": {"default": 0}}
+        obj._meta.model_name = "device"
+        obj.pk = 1
+        obj.primary_ip = None
+        obj.name = "zero-device"
+
+        # get_librenms_device_id returns 0 (valid ID, must not be treated as falsy)
+        with patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=0) as mock_get_id:
+            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
+                mock_cache.get.return_value = None
+                result = api.get_librenms_id(obj)
+        # 0 is a valid ID — method should return 0, not fall through to hostname lookup
+        assert result == 0
+        mock_get_id.assert_called_once_with(obj, "default", auto_save=False)
+
     def test_store_librenms_id_via_hostname_lookup(self):
         """get_librenms_id reaches _store_librenms_id when CF/cache miss but hostname API hit."""
         api = _make_api()
@@ -877,6 +899,7 @@ class TestAddDeviceWithOptionalFields:
         with patch("requests.post", return_value=mock_resp) as mock_post:
             ok, msg = api.add_device(data)
         assert ok is True
+        assert msg == "Device added successfully."
         assert "port" in mock_post.call_args[1]["json"]
 
     def test_add_device_with_transport(self):
@@ -888,6 +911,7 @@ class TestAddDeviceWithOptionalFields:
         with patch("requests.post", return_value=mock_resp) as mock_post:
             ok, msg = api.add_device(data)
         assert ok is True
+        assert msg == "Device added successfully."
         assert "transport" in mock_post.call_args[1]["json"]
 
     def test_add_device_with_port_association_mode(self):
@@ -899,6 +923,7 @@ class TestAddDeviceWithOptionalFields:
         with patch("requests.post", return_value=mock_resp) as mock_post:
             ok, msg = api.add_device(data)
         assert ok is True
+        assert msg == "Device added successfully."
         assert "port_association_mode" in mock_post.call_args[1]["json"]
 
     def test_add_device_with_poller_group(self):
@@ -910,6 +935,7 @@ class TestAddDeviceWithOptionalFields:
         with patch("requests.post", return_value=mock_resp) as mock_post:
             ok, msg = api.add_device(data)
         assert ok is True
+        assert msg == "Device added successfully."
         assert "poller_group" in mock_post.call_args[1]["json"]
 
 
@@ -1199,15 +1225,14 @@ class TestMalformedPayloads:
         assert ok is False
         assert msg is not None
 
-    def test_get_device_vlans_skips_non_dict_items(self):
-        """get_device_vlans: non-dict items in vlans list are skipped safely."""
+    def test_get_device_vlans_fails_closed_on_non_dict_items(self):
+        """get_device_vlans: non-dict items in vlans list cause fail-closed (False, error message)."""
         api = _make_api()
         vlans = [None, "bad", {"device_id": 1, "vlan_id": 10}]
         with patch("requests.get", return_value=self._ok_resp({"status": "ok", "vlans": vlans})):
-            ok, data = api.get_device_vlans(1)
-        assert ok is True
-        assert len(data) == 1
-        assert data[0]["vlan_id"] == 10
+            ok, msg = api.get_device_vlans(1)
+        assert ok is False
+        assert "invalid item shape" in msg
 
     def test_get_device_ips_none_addresses(self):
         """get_device_ips: addresses=None returns (False, ...)."""

@@ -1,0 +1,31 @@
+# Carrier Auto-Install Rules
+#
+# Suggest a holder/carrier ModuleType to install when LibreNMS reports orphan
+# child modules (e.g. CPM cards, mezzanines, MDAs) that have no matching NetBox
+# bay because their parent carrier was never installed in NetBox.
+#
+# Import via: LibreNMS Plugin → Carrier Auto-Install Rules → Import
+#
+# Fields:
+#   manufacturer:                Optional manufacturer name (exact). Empty = any vendor.
+#   device_type_pattern:         Optional regex on device_type.model. Empty = any model.
+#   librenms_child_class:        Exact entPhysicalClass of the orphan child (e.g. cpmModule).
+#   librenms_child_name_pattern: Regex on entPhysicalName of the orphan child.
+#   netbox_bay_name_pattern:     Regex on candidate empty device-level bay name.
+#   carrier_module_type:         NetBox ModuleType model (slug-style model field) to install.
+#   description:                 Optional description.
+#
+# Patterns use Python re.fullmatch() — they must match the entire string.
+# When the chassis has at least one empty bay matching netbox_bay_name_pattern,
+# an "Install Carrier" button appears on the module sync page (suggest-only,
+# never auto-installed). Multiple matching empty bays produce one button each.
+
+# Nokia 7750 SR-s chassis (e.g. SR-7s, SR-14s) report CPM cards in slots A/B
+# but the physical CMA carrier that holds them is invisible to LibreNMS.
+- manufacturer: Nokia
+  device_type_pattern: '^7750 SR-.*$'
+  librenms_child_class: cpmModule
+  librenms_child_name_pattern: '^Slot [AB]$'
+  netbox_bay_name_pattern: '^CMA$'
+  carrier_module_type: CMA2-7s
+  description: Install CMA2-7s carrier when CPM cards are reported orphaned

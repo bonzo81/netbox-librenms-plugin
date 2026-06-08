@@ -22,15 +22,15 @@ Click the validation details button to review what's missing and select values f
 ### Import as Device
 
 - **Site** (required) - Auto-matched from LibreNMS location
-- **Device Type** (required) - Auto-matched from LibreNMS hardware string
+- **Device Type** (required) - Auto-matched from LibreNMS hardware string, or via [Device Type Mapping](../usage_tips/mapping_rules.md#device-type-mappings)
 - **Device Role** (required) - Must be selected manually
-- **Platform** (optional) - Auto-matched from LibreNMS OS
+- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mapping_rules.md#platform-mappings). If no mapping exists and the platform is not found, a **Create Platform** button opens a modal to create a new NetBox Platform and mapping in one step.
 - **Rack** (optional) - Available if Site has racks
 
 ### Import as Virtual Machine
 
 - **Cluster** (required) - Must be selected manually
-- **Platform** (optional) - Auto-matched from LibreNMS OS
+- **Platform** (optional) - Auto-matched from LibreNMS OS via [Platform Mapping](../usage_tips/mapping_rules.md#platform-mappings). The same **Create Platform** modal is available if needed.
 
 ## Virtual Chassis Detection
 

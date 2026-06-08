@@ -151,6 +151,10 @@ def bulk_import_vms(
     # Use job logger if available, otherwise standard logger
     log = job.logger if job else logger
 
+    # Resolve options once before the loop — they do not change per-VM
+    use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
+    strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+
     for idx, vm_id in enumerate(vm_ids, start=1):
         # Check for job cancellation before first VM and every 5 thereafter
         if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
@@ -173,8 +177,6 @@ def bulk_import_vms(
                 continue
 
             # Validate as VM
-            use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
-            strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
             validation = validate_device_for_import(
                 libre_device,
                 import_as_vm=True,

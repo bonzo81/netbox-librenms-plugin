@@ -1,0 +1,44 @@
+{% load helpers %}
+{% include 'inc/messages.html' %}
+
+<!-- Module Sync Table -->
+{% if module_sync.table %}
+<div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+    <div>
+        <span class="text-muted">
+            Showing inventory items from LibreNMS matched against NetBox module bays and module types.
+        </span>
+    </div>
+    {% if module_sync.cache_expiry %}
+        <div id="module-cache-countdown" class="me-3">
+            Cache expires in: <span id="module-countdown-timer" data-expiry="{{ module_sync.cache_expiry|date:'c' }}"></span>
+        </div>
+    {% endif %}
+</div>
+
+{% if has_write_permission %}
+{# Separate form for Install Selected — uses JS to collect checked rows before submit #}
+<form id="install-selected-form" method="post"
+    action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="server_key" value="{{ module_sync.server_key|default:'' }}">
+    <div class="noprint mb-3">
+        <button type="submit" class="btn btn-primary" id="install-selected-btn">
+            <i class="mdi mdi-package-down"></i> Install Selected
+        </button>
+    </div>
+</form>
+{% endif %}
+<div class="card">
+    {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
+    {% include 'inc/table.html' with table=module_sync.table %}
+    {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
+</div>
+{% else %}
+<div class="card">
+    <div class="card-body text-center text-muted py-4">
+        <i class="mdi mdi-expansion-card-variant mdi-48px"></i>
+        <p class="mt-2 mb-0">No inventory data loaded. Click <strong>Refresh Modules</strong> to fetch data from LibreNMS.</p>
+    </div>
+</div>
+{% endif %}

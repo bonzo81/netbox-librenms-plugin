@@ -1,0 +1,23 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Normalization Rules</h4>
+        <p>Regex-based string normalization applied <strong>before</strong> matching lookups.
+           When a LibreNMS string doesn't match any NetBox object or mapping entry,
+           normalization rules transform it (e.g.&nbsp;strip revision suffixes) and retry.</p>
+        <p>Rules are chained in priority order per scope. One rule engine serves
+           module types, device types, and module bays.</p>
+        <p>Example — strip Nokia revision suffixes:<br>
+           <code>^(3HE\w{5}[A-Z]{2})[A-Z]{2}\d{2}$</code> → <code>\1</code><br>
+           Turns <code>3HE16474AARA01</code> into <code>3HE16474AA</code> which matches the part number.</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:normalizationrule_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

@@ -442,6 +442,60 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         call_kwargs = mock_intf_cls.objects.get_or_create.call_args[1]
         assert call_kwargs["device"] is mock_device
 
+    def test_device_port_id_prefers_existing_librenms_id_match(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        mock_device = MagicMock()
+        mock_device.__class__ = Device
+        mock_device.id = 1
+        mock_device.virtual_chassis = None
+
+        matched_interface = MagicMock()
+        matched_interface.device_id = 1
+        librenms_port = {"ifName": "Gi0/1", "port_id": 42}
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=matched_interface),
+        ):
+            view.get_netbox_interface_type = MagicMock(return_value="other")
+            view.sync_interface(mock_device, librenms_port, [], "ifName")
+
+        mock_intf_cls.objects.get_or_create.assert_not_called()
+        view.update_interface_attributes.assert_called_once_with(
+            matched_interface,
+            librenms_port,
+            "other",
+            [],
+            "ifName",
+        )
+
+    def test_device_port_id_conflict_without_local_name_match_skips(self):
+        from dcim.models import Device
+
+        view = self._make_view()
+        mock_device = MagicMock()
+        mock_device.__class__ = Device
+        mock_device.id = 1
+        mock_device.virtual_chassis = None
+
+        conflicting_interface = MagicMock()
+        conflicting_interface.device_id = 2
+        librenms_port = {"ifName": "Gi0/1", "port_id": 77}
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch(
+                "netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=conflicting_interface
+            ),
+        ):
+            mock_intf_cls.objects.filter.return_value.first.return_value = None
+            view.get_netbox_interface_type = MagicMock(return_value="other")
+            view.sync_interface(mock_device, librenms_port, [], "ifName")
+
+        view.update_interface_attributes.assert_not_called()
+
 
 class TestSyncInterfacesViewSyncInterfaceVM:
     def test_vm_interface_created(self):
@@ -467,6 +521,40 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
         mock_vmintf_cls.objects.get_or_create.assert_called_once()
         view.update_interface_attributes.assert_called_once()
+
+    def test_vm_port_id_prefers_existing_librenms_id_match(self):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from virtualization.models import VirtualMachine
+
+        view = object.__new__(SyncInterfacesView)
+        view.request = _make_request()
+        view._post_server_key = "default"
+        view._lookup_maps = {}
+        view.interface_name_field = "ifName"
+        view.update_interface_attributes = MagicMock()
+        view._sync_interface_vlans = MagicMock()
+
+        mock_vm = MagicMock()
+        mock_vm.__class__ = VirtualMachine
+        mock_vm.id = 5
+        matched_interface = MagicMock()
+        matched_interface.virtual_machine_id = 5
+        librenms_port = {"ifName": "eth0", "port_id": 55}
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.VMInterface") as mock_vmintf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=matched_interface),
+        ):
+            view.sync_interface(mock_vm, librenms_port, [], "ifName")
+
+        mock_vmintf_cls.objects.get_or_create.assert_not_called()
+        view.update_interface_attributes.assert_called_once_with(
+            matched_interface,
+            librenms_port,
+            None,
+            [],
+            "ifName",
+        )
 
     def test_invalid_obj_raises_value_error(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -754,11 +842,40 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
         with (
             patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=None),
             patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set,
         ):
             view.update_interface_attributes(interface, librenms_port, None, [], "ifName")
 
         mock_set.assert_called_once_with(interface, 42, "default")
+
+    def test_port_id_conflict_does_not_overwrite(self):
+        from dcim.models import Interface
+
+        view = self._make_view()
+        interface = MagicMock()
+        interface.__class__ = Interface
+        interface.pk = 1
+        conflicting_owner = MagicMock()
+        conflicting_owner.pk = 2
+        librenms_port = {
+            "ifName": "Gi0/1",
+            "ifType": None,
+            "ifSpeed": None,
+            "ifAlias": None,
+            "ifMtu": None,
+            "port_id": 42,
+            "ifAdminStatus": "up",
+        }
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.interfaces.find_by_librenms_id", return_value=conflicting_owner),
+            patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id") as mock_set,
+        ):
+            view.update_interface_attributes(interface, librenms_port, None, [], "ifName")
+
+        mock_set.assert_not_called()
 
     def test_ifalias_not_set_when_same_as_name(self):
         """ifAlias should not overwrite when equal to interface name."""

@@ -8,3 +8,4 @@ This guide is intended for developers and contributors working on the NetBox Lib
 - [Views & Inheritance](./views.md): How views are organized, inheritance patterns, and extension tips.
 - [Mixins](./mixins.md): Reusable logic for views, including API access and caching.
 - [Templates](./templates.md): Template structure, conventions, and customization tips.
+- [Extension Points](./extension_points.md): Public signals and hooks other plugins can use to extend behaviour.

@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface, MACAddress
@@ -13,9 +14,11 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
+    find_by_librenms_id,
     get_interface_name_field,
     get_librenms_device_id,
     get_librenms_sync_device,
+    normalize_librenms_port_id,
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -25,6 +28,8 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SyncInterfacesView(
@@ -147,8 +152,10 @@ class SyncInterfacesView(
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         """Create or update a single NetBox interface from LibreNMS data."""
         interface_name = librenms_interface.get(interface_name_field)
+        port_id = normalize_librenms_port_id(librenms_interface.get("port_id"))
 
         if isinstance(obj, Device):
+            server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             device_selection_key = f"device_selection_{interface_name}"
             selected_device_id = self.request.POST.get(device_selection_key)
 
@@ -167,11 +174,20 @@ class SyncInterfacesView(
             else:
                 target_device = obj
 
-            interface, _ = Interface.objects.get_or_create(device=target_device, name=interface_name)
+            interface = self._resolve_device_interface(target_device, interface_name, port_id, server_key)
         elif isinstance(obj, VirtualMachine):
-            interface, _ = VMInterface.objects.get_or_create(virtual_machine=obj, name=interface_name)
+            server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+            interface = self._resolve_vm_interface(obj, interface_name, port_id, server_key)
         else:
             raise ValueError("Invalid object type.")
+
+        if interface is None:
+            logger.warning(
+                "Skipping interface sync for '%s': unable to resolve target interface safely (port_id=%r).",
+                interface_name,
+                port_id,
+            )
+            return
 
         netbox_type = None
         if isinstance(obj, Device):
@@ -188,6 +204,34 @@ class SyncInterfacesView(
         # Sync VLANs if not excluded
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
+
+    def _resolve_device_interface(self, target_device, interface_name, port_id, server_key):
+        """Resolve a device interface using port_id first, then safe name fallback."""
+        if port_id:
+            by_id = find_by_librenms_id(Interface, port_id, server_key)
+            if by_id is not None:
+                if by_id.device_id == target_device.id:
+                    return by_id
+                existing_by_name = Interface.objects.filter(device=target_device, name=interface_name).first()
+                if existing_by_name:
+                    return existing_by_name
+                return None
+        interface, _ = Interface.objects.get_or_create(device=target_device, name=interface_name)
+        return interface
+
+    def _resolve_vm_interface(self, vm, interface_name, port_id, server_key):
+        """Resolve a VM interface using port_id first, then safe name fallback."""
+        if port_id:
+            by_id = find_by_librenms_id(VMInterface, port_id, server_key)
+            if by_id is not None:
+                if by_id.virtual_machine_id == vm.id:
+                    return by_id
+                existing_by_name = VMInterface.objects.filter(virtual_machine=vm, name=interface_name).first()
+                if existing_by_name:
+                    return existing_by_name
+                return None
+        interface, _ = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
+        return interface
 
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""
@@ -254,7 +298,18 @@ class SyncInterfacesView(
         port_id = librenms_interface.get("port_id")
         if port_id is not None:
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            set_librenms_device_id(interface, port_id, server_key)
+            normalized_port_id = normalize_librenms_port_id(port_id)
+            if normalized_port_id is not None:
+                existing_owner = find_by_librenms_id(interface.__class__, normalized_port_id, server_key)
+                if existing_owner is None or existing_owner.pk == interface.pk:
+                    set_librenms_device_id(interface, normalized_port_id, server_key)
+                else:
+                    logger.warning(
+                        "Not reassigning port_id %s from %s to %s.",
+                        normalized_port_id,
+                        existing_owner,
+                        interface,
+                    )
 
         if "enabled" not in exclude_columns:
             admin_status = librenms_interface.get("ifAdminStatus")
@@ -382,8 +437,9 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                         errors.append(f"Error deleting interface {interface_name or interface_id}: {str(exc)}")
                         continue
 
-        except Exception as exc:  # pragma: no cover
-            return JsonResponse({"error": f"Transaction failed: {str(exc)}"}, status=500)
+        except Exception:  # pragma: no cover
+            logger.exception("DeleteNetBoxInterfacesView transaction failed")
+            return JsonResponse({"error": "Transaction failed. Please check server logs."}, status=500)
 
         response_data = {
             "status": "success",

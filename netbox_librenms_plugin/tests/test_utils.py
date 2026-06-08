@@ -72,6 +72,23 @@ class TestDeviceTypeMatching:
         assert result["device_type"] is None
         assert result["match_type"] is None
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping", create=True)
+    def test_match_device_type_mapping_match(self, mock_dtm):
+        """DeviceTypeMapping entry should be used before part_number/model fallback."""
+        mock_dt = MagicMock(id=1, model="MX480")
+        mock_mapping_obj = MagicMock(netbox_device_type=mock_dt)
+        mock_dtm.DoesNotExist = Exception
+        mock_dtm.objects.get.return_value = mock_mapping_obj
+
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        result = match_librenms_hardware_to_device_type("Juniper MX480 Internet Backbone Router")
+
+        assert result["matched"] is True
+        assert result["device_type"] == mock_dt
+        assert result["match_type"] == "mapping"
+        mock_dtm.objects.get.assert_called_once_with(librenms_hardware__iexact="Juniper MX480 Internet Backbone Router")
+
     def test_match_device_type_empty_hardware(self):
         """Empty string returns None."""
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
@@ -197,11 +214,14 @@ class TestSiteMatching:
 class TestPlatformMatching:
     """Test platform matching logic."""
 
+    @patch("netbox_librenms_plugin.models.PlatformMapping")
     @patch("dcim.models.Platform")
-    def test_find_platform_for_os_exact_match(self, mock_platform_model):
+    def test_find_platform_for_os_exact_match(self, mock_platform_model, mock_platform_mapping):
         """OS string matched to platform."""
         mock_platform = MagicMock(id=1, name="ios")
         mock_platform_model.objects.get.return_value = mock_platform
+        mock_platform_mapping.DoesNotExist = Exception
+        mock_platform_mapping.objects.get.side_effect = mock_platform_mapping.DoesNotExist
 
         from netbox_librenms_plugin.utils import find_matching_platform
 
@@ -210,10 +230,16 @@ class TestPlatformMatching:
         assert result["found"] is True
         assert result["platform"] == mock_platform
         assert result["match_type"] == "exact"
+        # Exact name matched — PlatformMapping is never consulted
+        mock_platform_mapping.objects.get.assert_not_called()
+        mock_platform_model.objects.get.assert_called_once_with(name__iexact="ios")
 
+    @patch("netbox_librenms_plugin.models.PlatformMapping")
     @patch("dcim.models.Platform")
-    def test_find_platform_for_os_not_found(self, mock_platform_model):
+    def test_find_platform_for_os_not_found(self, mock_platform_model, mock_platform_mapping):
         """Returns None when no match."""
+        mock_platform_mapping.DoesNotExist = Exception
+        mock_platform_mapping.objects.get.side_effect = mock_platform_mapping.DoesNotExist
         mock_platform_model.DoesNotExist = Exception
         mock_platform_model.objects.get.side_effect = mock_platform_model.DoesNotExist
 
@@ -223,6 +249,8 @@ class TestPlatformMatching:
 
         assert result["found"] is False
         assert result["platform"] is None
+        mock_platform_mapping.objects.get.assert_called_once_with(librenms_os__iexact="unknown_os")
+        mock_platform_model.objects.get.assert_called_once_with(name__iexact="unknown_os")
 
     def test_find_platform_for_os_empty(self):
         """Empty OS returns None."""
@@ -322,6 +350,23 @@ class TestConversionHelpers:
 
         result = format_mac_address(None)
         assert result == ""
+
+    def test_normalize_librenms_port_id_accepts_positive_int_and_str(self):
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        assert normalize_librenms_port_id(42) == 42
+        assert normalize_librenms_port_id("42") == 42
+
+    def test_normalize_librenms_port_id_rejects_invalid_values(self):
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+        assert normalize_librenms_port_id(None) is None
+        assert normalize_librenms_port_id(True) is None
+        assert normalize_librenms_port_id(False) is None
+        assert normalize_librenms_port_id(0) is None
+        assert normalize_librenms_port_id(-1) is None
+        assert normalize_librenms_port_id("abc") is None
+        assert normalize_librenms_port_id(1.5) is None
 
 
 # =============================================================================
@@ -457,6 +502,78 @@ class TestVirtualChassisHelpers:
         result = get_librenms_sync_device(mock_device, server_key="default")
 
         assert result == member_a
+
+    def test_get_librenms_sync_device_fallback_to_member_with_ip(self):
+        """Priority 3: no dict member, master has no IP, another member has primary IP → that member."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        vc = MagicMock()
+        master = MagicMock()
+        master.vc_position = 1
+        master.virtual_chassis = vc
+        master.cf = {}
+        master.primary_ip = None  # master has no IP
+
+        member_with_ip = MagicMock()
+        member_with_ip.vc_position = 2
+        member_with_ip.cf = {}
+        member_with_ip.primary_ip = MagicMock()  # this member has IP
+
+        vc.master = master  # designated master exists but has no primary_ip
+        vc.members.all.return_value = [master, member_with_ip]
+
+        result = get_librenms_sync_device(master, server_key="prod")
+
+        assert result == member_with_ip
+
+    def test_get_librenms_sync_device_fallback_lowest_vc_position(self):
+        """Priority 4: no IPs anywhere → return member with lowest vc_position."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        vc = MagicMock()
+        member_pos3 = MagicMock()
+        member_pos3.vc_position = 3
+        member_pos3.cf = {}
+        member_pos3.primary_ip = None
+
+        member_pos1 = MagicMock()
+        member_pos1.vc_position = 1
+        member_pos1.cf = {}
+        member_pos1.primary_ip = None
+
+        member_pos2 = MagicMock()
+        member_pos2.vc_position = 2
+        member_pos2.cf = {}
+        member_pos2.primary_ip = None
+
+        vc.master = None
+        vc.members.all.return_value = [member_pos3, member_pos1, member_pos2]  # unordered
+
+        member_pos2.virtual_chassis = vc
+
+        result = get_librenms_sync_device(member_pos2, server_key="prod")
+
+        assert result == member_pos1  # lowest vc_position wins
+
+    def test_get_module_template_interface_names_rewrites_for_vc_member(self):
+        from netbox_librenms_plugin.utils import get_module_template_interface_names
+
+        device = MagicMock()
+        device.vc_position = 3
+        device.virtual_chassis_id = 11
+        device.virtual_chassis = MagicMock()
+        device.virtual_chassis.members.values_list.return_value = [1, 2, 3]
+
+        module = MagicMock()
+        template = MagicMock()
+        instantiated = MagicMock()
+        instantiated.name = "TenGigabitEthernet1/1/1"
+        template.instantiate.return_value = instantiated
+        module.module_type.interfacetemplates.all.return_value = [template]
+
+        result = get_module_template_interface_names(device, module)
+
+        assert result == ["TenGigabitEthernet3/1/1"]
 
     def test_zero_id_is_not_a_valid_librenms_id(self):
         """LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
@@ -816,3 +933,166 @@ class TestSaveUserPrefView:
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
         assert issubclass(SaveUserPrefView, LibreNMSPermissionMixin)
+
+
+class TestDetectVCNormalizationNoop:
+    """detect_vc_normalization_noop flags only the no-vendor-support case."""
+
+    def _make_device(self, vc_position=3, vc_id=11, member_positions=(1, 2, 3, 4)):
+        device = MagicMock()
+        device.vc_position = vc_position
+        device.virtual_chassis_id = vc_id
+        if vc_id is None:
+            device.virtual_chassis = None
+        else:
+            device.virtual_chassis = MagicMock()
+            device.virtual_chassis.members.values_list.return_value = list(member_positions)
+        return device
+
+    def _make_module(self, instantiated_names, raw_names=None):
+        module = MagicMock()
+        templates = []
+        for idx, name in enumerate(instantiated_names):
+            tmpl = MagicMock()
+            raw = (raw_names or [None] * len(instantiated_names))[idx]
+            tmpl.name = raw or name
+            instance = MagicMock()
+            instance.name = name
+            tmpl.instantiate.return_value = instance
+            templates.append(tmpl)
+        module.module_type.interfacetemplates.all.return_value = templates
+        module.module_type.manufacturer.slug = "vendor"
+        module.module_type.model = "MODEL-X"
+        module.module_bay.name = "Bay 0"
+        return module
+
+    def test_returns_none_when_device_not_in_vc(self):
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device(vc_position=None, vc_id=None)
+        module = self._make_module(["2/x1/1/c9"])
+        assert detect_vc_normalization_noop(device, module) is None
+
+    def test_returns_none_when_a_name_matches_regex(self):
+        """Cisco-style name matches the rewrite regex → not a vendor-support issue."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device()
+        device.device_type.model = "C9300-48T"
+        module = self._make_module(["TenGigabitEthernet1/1/1"])
+        assert detect_vc_normalization_noop(device, module) is None
+
+    def test_returns_diagnostic_when_no_names_match_regex(self):
+        """Nokia-style name doesn't match the rewrite regex → flag for reporting."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device(vc_position=3, member_positions=(1, 2, 3, 4))
+        device.device_type.model = "7250-IXR"
+        module = self._make_module(["2/x1/1/c9"], raw_names=["{module}"])
+
+        diag = detect_vc_normalization_noop(device, module)
+        assert diag is not None
+        assert diag["vc_position"] == 3
+        assert diag["vc_member_positions"] == [1, 2, 3, 4]
+        assert diag["template_pairs"] == [("{module}", "2/x1/1/c9")]
+        assert diag["device_type_model"] == "7250-IXR"
+        assert diag["module_type_model"] == "MODEL-X"
+        assert diag["manufacturer_slug"] == "vendor"
+        assert diag["module_bay_name"] == "Bay 0"
+        assert "regex" in diag
+
+    def test_returns_none_when_no_templates(self):
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device()
+        module = self._make_module([])
+        assert detect_vc_normalization_noop(device, module) is None
+
+    def test_template_instantiate_exception_is_skipped(self):
+        """Templates that raise on instantiate are skipped; no false positive if all skip."""
+        from netbox_librenms_plugin.utils import detect_vc_normalization_noop
+
+        device = self._make_device()
+        module = MagicMock()
+        bad_template = MagicMock()
+        bad_template.instantiate.side_effect = ValueError("boom")
+        module.module_type.interfacetemplates.all.return_value = [bad_template]
+        assert detect_vc_normalization_noop(device, module) is None
+
+
+class TestBuildVCNormalizationReport:
+    """Markdown formatter produces a stable, copyable block with optional-strip suffixes."""
+
+    def test_contains_all_diagnostic_fields(self):
+        from netbox_librenms_plugin.utils import build_vc_normalization_report
+
+        diagnostic = {
+            "manufacturer_slug": "nokia",
+            "device_type_model": "7250-IXR",
+            "module_type_model": "QSFP-DD",
+            "module_bay_name": "Bay c9",
+            "vc_position": 3,
+            "vc_member_positions": [1, 2, 3, 4],
+            "template_pairs": [("{module}", "2/x1/1/c9")],
+            "regex": "^[A-Za-z][A-Za-z0-9]*\\d+[/:].+$",
+        }
+        out = build_vc_normalization_report(diagnostic)
+        assert "**VC interface normalization — no match**" in out
+        assert "`nokia`" in out
+        assert "`7250-IXR`" in out
+        assert "`QSFP-DD`" in out
+        assert "`Bay c9`" in out
+        assert "VC position (target): 3" in out
+        assert "[1, 2, 3, 4]" in out
+        assert "`{module}` → `2/x1/1/c9`" in out
+        assert "Plugin:" in out
+
+    def test_catalog_lines_get_optional_strip_suffix(self):
+        from netbox_librenms_plugin.utils import build_vc_normalization_report
+
+        out = build_vc_normalization_report(
+            {
+                "manufacturer_slug": "v",
+                "device_type_model": "d",
+                "module_type_model": "m",
+                "module_bay_name": "b",
+                "vc_position": 1,
+                "vc_member_positions": [1],
+                "template_pairs": [("a", "b")],
+                "regex": "x",
+            }
+        )
+        catalog_lines = [
+            line
+            for line in out.splitlines()
+            if line.startswith("- Manufacturer:")
+            or line.startswith("- Device type:")
+            or line.startswith("- Module type:")
+            or line.startswith("- Module bay:")
+        ]
+        assert len(catalog_lines) == 4
+        assert all("(optional, you can remove this line)" in line for line in catalog_lines)
+        # VC + template lines must NOT carry the suffix.
+        for line in out.splitlines():
+            if line.startswith("- VC ") or line.startswith("  - `"):
+                assert "(optional" not in line
+
+    def test_missing_catalog_value_renders_unknown(self):
+        from netbox_librenms_plugin.utils import build_vc_normalization_report
+
+        out = build_vc_normalization_report(
+            {
+                "manufacturer_slug": None,
+                "device_type_model": "",
+                "module_type_model": "m",
+                "module_bay_name": "b",
+                "vc_position": 2,
+                "vc_member_positions": [1, 2],
+                "template_pairs": [],
+                "regex": "x",
+            }
+        )
+        assert "Manufacturer: _(unknown)_" in out
+        assert "Device type: _(unknown)_" in out
+        # Template pairs section falls back to a no-templates note.
+        assert "_(no templates)_" in out
