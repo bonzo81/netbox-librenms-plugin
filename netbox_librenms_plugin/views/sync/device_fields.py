@@ -315,17 +315,27 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     }
 
     def post(self, request, pk):
-        """Create a new platform and assign it to the device."""
-        # Read create_mapping before permission check so it can be included in the check.
+        """Create a new platform (or reuse an existing one) and assign it to the device."""
+        # Read inputs before the permission check so required perms can adapt:
+        # reusing an existing platform needs no "add Platform" permission, and the
+        # mapping insert is only attempted when the toggle is on.
         create_mapping = bool(request.POST.get("create_mapping"))
+        platform_name = request.POST.get("platform_name")
+
+        # If a platform with this name already exists we reuse it as-is (never
+        # mutating its manufacturer/vendor scoping) and only fill in the missing
+        # mapping. This handles the common case where the platform exists but no
+        # LibreNMS-OS mapping points at it, so the regular sync can't match it.
+        existing_platform = None
+        if platform_name:
+            existing_platform = Platform.objects.filter(name__iexact=platform_name).first()
+
+        required = [("change", Device)]
+        if existing_platform is None:
+            required.append(("add", Platform))
         if create_mapping:
-            self.required_object_permissions = {
-                "POST": [
-                    ("change", Device),
-                    ("add", Platform),
-                    ("add", PlatformMapping),
-                ],
-            }
+            required.append(("add", PlatformMapping))
+        self.required_object_permissions = {"POST": required}
 
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
@@ -333,19 +343,11 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         device = get_object_or_404(Device, pk=pk)
 
-        platform_name = request.POST.get("platform_name")
         manufacturer_id = request.POST.get("manufacturer")
         librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
 
         if not platform_name:
             messages.error(request, "Platform name is required")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-
-        if Platform.objects.filter(name__iexact=platform_name).exists():
-            messages.warning(
-                request,
-                f"Platform '{platform_name}' already exists. Use the regular sync button.",
-            )
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         manufacturer = None
@@ -356,40 +358,47 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 pass
 
         with transaction.atomic():
-            try:
-                platform = Platform(
-                    name=platform_name,
-                    slug=slugify(platform_name),
-                    manufacturer=manufacturer,
-                )
-                platform.full_clean()
-                platform.save()
-            except ValidationError as e:
-                transaction.set_rollback(True)
-                error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-                logger.exception(
-                    "ValidationError creating platform '%s' for device pk=%s: %s",
-                    platform_name,
-                    pk,
-                    error_msg,
-                )
-                messages.error(
-                    request,
-                    f"Platform '{platform_name}' could not be created: {error_msg}",
-                )
-                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-            except IntegrityError as e:
-                transaction.set_rollback(True)
-                logger.exception(
-                    "IntegrityError creating platform '%s' for device pk=%s",
-                    platform_name,
-                    pk,
-                )
-                messages.error(
-                    request,
-                    f"Platform '{platform_name}' could not be created: {e}",
-                )
-                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            platform_created = False
+            if existing_platform is None:
+                try:
+                    platform = Platform(
+                        name=platform_name,
+                        slug=slugify(platform_name),
+                        manufacturer=manufacturer,
+                    )
+                    platform.full_clean()
+                    platform.save()
+                    platform_created = True
+                except ValidationError as e:
+                    transaction.set_rollback(True)
+                    error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+                    logger.exception(
+                        "ValidationError creating platform '%s' for device pk=%s: %s",
+                        platform_name,
+                        pk,
+                        error_msg,
+                    )
+                    messages.error(
+                        request,
+                        f"Platform '{platform_name}' could not be created: {error_msg}",
+                    )
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                except IntegrityError as e:
+                    transaction.set_rollback(True)
+                    logger.exception(
+                        "IntegrityError creating platform '%s' for device pk=%s",
+                        platform_name,
+                        pk,
+                    )
+                    messages.error(
+                        request,
+                        f"Platform '{platform_name}' could not be created: {e}",
+                    )
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            else:
+                # Reuse the existing platform unchanged — do not touch its
+                # manufacturer/vendor scoping; we only assign it and add the mapping.
+                platform = existing_platform
 
             try:
                 device = Device.objects.select_for_update().get(pk=pk)
@@ -451,7 +460,10 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                             platform_name,
                         )
 
-        msg = f"Created platform '{platform}' and assigned to device"
+        if platform_created:
+            msg = f"Created platform '{platform}' and assigned to device"
+        else:
+            msg = f"Platform '{platform}' already existed and was assigned to device"
         if mapping_created:
             msg += f" — platform mapping '{librenms_os}' → '{platform}' added"
         messages.success(request, msg)

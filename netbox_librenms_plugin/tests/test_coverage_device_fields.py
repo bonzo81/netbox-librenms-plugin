@@ -734,21 +734,73 @@ class TestCreateAndAssignPlatformView:
         mock_msg.error.assert_called_once()
         assert "required" in mock_msg.error.call_args[0][1].lower()
 
-    def test_platform_already_exists(self):
+    def test_platform_already_exists_is_reused_and_assigned(self):
+        """Existing platform is reused (not re-created) and assigned to the device;
+        its manufacturer/vendor scoping is left untouched."""
         view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
+        req = _make_request({"platform_name": "ios", "manufacturer": "", "create_mapping": ""})
 
+        existing_platform = MagicMock()
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = True
+        mock_platform_cls.objects.filter.return_value.first.return_value = existing_platform
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
             view.post(req, pk=1)
-        mock_msg.warning.assert_called_once()
+        # Reused, not constructed anew
+        mock_platform_cls.assert_not_called()
+        # Existing platform assigned to the locked device and saved
+        assert mock_locked.platform is existing_platform
+        mock_locked.save.assert_called_once()
+        # Existing platform itself is never saved/modified (vendor scoping preserved)
+        existing_platform.save.assert_not_called()
+        mock_msg.success.assert_called_once()
+        assert "already existed" in mock_msg.success.call_args[0][1].lower()
+
+    def test_platform_already_exists_creates_missing_mapping(self):
+        """When the platform exists and create_mapping is on, the missing mapping is added."""
+        view = self._view()
+        req = _make_request({"platform_name": "ios", "manufacturer": "", "librenms_os": "ios", "create_mapping": "1"})
+
+        existing_platform = MagicMock()
+        mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.filter.return_value.first.return_value = existing_platform
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.first.return_value = None
+        mock_mapping_instance = MagicMock()
+        mock_mapping_cls.return_value = mock_mapping_instance
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=1)
+        mock_platform_cls.assert_not_called()
+        mock_mapping_cls.assert_called_once()
+        mock_mapping_instance.save.assert_called_once()
+        mock_msg.success.assert_called_once()
 
     def test_manufacturer_not_found(self):
         """manufacturer_id provided but Manufacturer.DoesNotExist: manufacturer stays None."""
@@ -756,7 +808,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": "99"})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -789,7 +841,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -820,7 +872,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": platform_name, "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -852,7 +904,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_instance.full_clean.side_effect = ValidationError({"name": ["err"]})
         mock_platform_cls.return_value = mock_platform_instance
@@ -876,7 +928,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -907,7 +959,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -941,7 +993,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         # Make save raise IntegrityError
         mock_platform_instance.save.side_effect = IntegrityError("duplicate")
@@ -978,7 +1030,7 @@ class TestCreateAndAssignPlatformView:
             }
         )
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
         mock_device_cls = MagicMock()

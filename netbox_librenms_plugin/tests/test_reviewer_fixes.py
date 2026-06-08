@@ -407,7 +407,7 @@ class TestCreatePlatformFullClean:
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
             # objects.filter().exists() returns False (no existing platform)
-            MockPlatform.objects.filter.return_value.exists.return_value = False
+            MockPlatform.objects.filter.return_value.first.return_value = None
             # Simulate full_clean raising ValidationError (slug collision)
             platform_instance = MagicMock()
             platform_instance.full_clean.side_effect = ValidationError("Slug already exists")
