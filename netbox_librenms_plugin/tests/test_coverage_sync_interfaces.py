@@ -387,6 +387,46 @@ class TestSyncInterfacesViewPost:
         mock_msgs.success.assert_called_once()
         mock_redirect.assert_called_once()
 
+    def test_post_surfaces_skipped_conflicts_warning(self):
+        """When an interface is skipped (port_id owned by another device), post() surfaces
+        a warning naming it — not just a log line."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
+        mock_api = MagicMock(server_key="default")
+
+        mock_device = MagicMock(pk=1)
+        ports = [{"ifName": "Gi0/1", "port_id": 10}]
+        req = _make_request(post_data={"select": ["Gi0/1"], "server_key": "default"})
+
+        def _record_skip(*args, **kwargs):
+            view._skipped_conflicts.append("Gi0/1")
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=mock_device),
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
+            patch("netbox_librenms_plugin.views.sync.interfaces.redirect"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
+            patch.object(view, "sync_interface", side_effect=_record_skip),
+            patch.object(type(view), "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view.__class__, "get_cache_key", return_value="k"),
+            patch.object(view.__class__, "_build_vlan_lookup_maps", return_value={}),
+            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+        ):
+            mock_cache.get.return_value = {"ports": ports}
+            view.post(req, "device", 1)
+
+        mock_msgs.warning.assert_called_once()
+        warning_msg = mock_msgs.warning.call_args[0][1]
+        assert "Gi0/1" in warning_msg
+        assert "different device" in warning_msg
+        mock_msgs.success.assert_called_once()
+
 
 # ===========================================================================
 # SyncInterfacesView.sync_interface — Device paths
@@ -425,6 +465,25 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
         mock_intf_cls.objects.get_or_create.assert_called_once()
         view.update_interface_attributes.assert_called_once()
+
+    def test_foreign_port_id_skip_is_recorded(self):
+        """When the resolver returns None (port_id belongs to another device), the row is
+        skipped and its name recorded in _skipped_conflicts for the post() summary."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        view._skipped_conflicts = []
+        mock_device = MagicMock()
+        mock_device.__class__ = Device
+        mock_device.virtual_chassis = None
+
+        librenms_port = {"ifName": "Gi0/1", "port_id": 99}
+        view._resolve_device_interface = MagicMock(return_value=None)
+
+        view.sync_interface(mock_device, librenms_port, [], "ifName")
+
+        assert view._skipped_conflicts == ["Gi0/1"]
+        view.update_interface_attributes.assert_not_called()
 
     def test_device_selection_with_vc_valid(self):
         from dcim.models import Device

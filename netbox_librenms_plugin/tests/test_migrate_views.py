@@ -235,21 +235,11 @@ class TestMoveInterfaceToWinnerView:
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
-            # Distinct querysets so the move assertion is tied to the actual
-            # move query (filter(pk=...)) and not the collision probe
-            # (filter(device=winner, name=...)) — they must not share a mock.
+            # All objects.filter() calls are collision probes now: the move mutates and
+            # saves the locked interface rather than running a filter(pk=...).update().
             collision_qs = MagicMock()
             collision_qs.exists.return_value = False
-            move_qs = MagicMock()
-            move_qs.update.return_value = 1
-
-            def _filter(*args, **kwargs):
-                # The move is the only objects.filter() call keyed solely on pk.
-                if set(kwargs) == {"pk"}:
-                    return move_qs
-                return collision_qs
-
-            mock_iface_cls.objects.filter.side_effect = _filter
+            mock_iface_cls.objects.filter.return_value = collision_qs
             mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
             # Locked device rows (donor + winner) are now captured and re-verified
             # against the migration marker under the lock.
@@ -263,12 +253,100 @@ class TestMoveInterfaceToWinnerView:
         mock_iface_cls.objects.select_for_update.return_value.filter.assert_called_with(pk=interface.pk, device=donor)
         # Collision re-check uses the LOCKED interface name on the winner device.
         mock_iface_cls.objects.filter.assert_any_call(device=winner, name=locked_iface.name)
-        # Row is moved by pk (already locked) via the dedicated move queryset.
-        mock_iface_cls.objects.filter.assert_any_call(pk=interface.pk)
-        move_qs.update.assert_called_once_with(device=winner)
+        # The move runs Interface.clean() via full_clean()+save() on the LOCKED row — a
+        # bare .update() would bypass the cross-device parent/lag/bridge validation.
+        assert locked_iface.device is winner
+        locked_iface.full_clean.assert_called_once()
+        locked_iface.save.assert_called_once()
+        # The pre-lock instance is never the one persisted.
         interface.save.assert_not_called()
-        locked_iface.save.assert_not_called()
         assert resp.headers.get("HX-Refresh") == "true"
+
+    def test_cross_device_relationship_rejected_with_409(self):
+        """If the move would leave the interface with a parent/lag/bridge on the donor
+        (a cross-device link), full_clean() raises and the move is rejected, not saved."""
+        from django.core.exceptions import ValidationError
+
+        view = self._setup_view()
+        req = _hx_request({"server_key": "default"})
+
+        donor = MagicMock(pk=10)
+        winner = MagicMock(pk=20)
+        winner.name = "winner"
+        interface = MagicMock(pk=5, device=donor)
+        interface.name = "Eth0"
+        locked_iface = MagicMock(pk=5, device=donor)
+        locked_iface.name = "Eth0"
+        locked_iface.full_clean.side_effect = ValidationError({"lag": ["Must belong to the same device."]})
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
+            patch(
+                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
+                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
+            ),
+            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
+            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
+        ):
+            collision_qs = MagicMock()
+            collision_qs.exists.return_value = False
+            mock_iface_cls.objects.filter.return_value = collision_qs
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
+                donor,
+                winner,
+            ]
+            resp = view.post(req, pk=5)
+
+        # clean() failed → row not saved, error surfaced via the OOB toast (HTMX path).
+        locked_iface.full_clean.assert_called_once()
+        locked_iface.save.assert_not_called()
+        assert b"django-messages" in resp.content
+
+    def test_save_integrity_error_rejected_with_409(self):
+        """A concurrent winner-side rename/create can trip a unique constraint at save()
+        time (after our name re-check); surface it as a 409, not a 500."""
+        from django.db import IntegrityError
+
+        view = self._setup_view()
+        req = _hx_request({"server_key": "default"})
+
+        donor = MagicMock(pk=10)
+        winner = MagicMock(pk=20)
+        winner.name = "winner"
+        interface = MagicMock(pk=5, device=donor)
+        interface.name = "Eth0"
+        locked_iface = MagicMock(pk=5, device=donor)
+        locked_iface.name = "Eth0"
+        locked_iface.full_clean.return_value = None
+        locked_iface.save.side_effect = IntegrityError("duplicate key value")
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
+            patch(
+                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
+                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
+            ),
+            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
+            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
+        ):
+            collision_qs = MagicMock()
+            collision_qs.exists.return_value = False
+            mock_iface_cls.objects.filter.return_value = collision_qs
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
+                donor,
+                winner,
+            ]
+            resp = view.post(req, pk=5)
+
+        # save() raised → surfaced as the collision OOB toast (HTMX path), not a 500.
+        locked_iface.save.assert_called_once()
+        assert b"django-messages" in resp.content
 
     def test_marker_repointed_under_lock_is_rejected(self):
         """If the donor's _migrated_to is repointed between the unlocked resolve

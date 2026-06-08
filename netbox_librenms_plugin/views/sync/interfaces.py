@@ -92,8 +92,19 @@ class SyncInterfacesView(
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
         self._lookup_maps = lookup_maps
 
+        # Collects interfaces skipped because their LibreNMS port_id resolves to an
+        # interface on a *different* device (see _resolve_device/vm_interface). Surfaced
+        # below so the skip isn't silent — otherwise the user only sees it in the logs.
+        self._skipped_conflicts = []
         self.sync_selected_interfaces(obj, selected_interfaces, ports_data, exclude_columns, interface_name_field)
 
+        if self._skipped_conflicts:
+            skipped = ", ".join(self._skipped_conflicts)
+            messages.warning(
+                request,
+                f"{len(self._skipped_conflicts)} interface(s) skipped — their LibreNMS port is already "
+                f"mapped to a different device's interface: {skipped}.",
+            )
         messages.success(request, "Selected interfaces synced successfully.")
         return redirect(redirect_url)
 
@@ -187,6 +198,11 @@ class SyncInterfacesView(
                 interface_name,
                 port_id,
             )
+            # Record for the user-facing summary in post(). Defensive getattr: sync_interface
+            # may be exercised directly (without post() initialising the list).
+            skipped = getattr(self, "_skipped_conflicts", None)
+            if skipped is not None:
+                skipped.append(interface_name or "(unnamed)")
             return
 
         netbox_type = None
@@ -212,9 +228,9 @@ class SyncInterfacesView(
             if by_id is not None:
                 if by_id.device_id == target_device.id:
                     return by_id
-                existing_by_name = Interface.objects.filter(device=target_device, name=interface_name).first()
-                if existing_by_name:
-                    return existing_by_name
+                # The port_id resolves to an interface on a DIFFERENT device. Don't fall
+                # back to a same-named local interface — that would overwrite it with
+                # another device's port data. Return None so the caller skips this row.
                 return None
         interface, _ = Interface.objects.get_or_create(device=target_device, name=interface_name)
         return interface
@@ -226,9 +242,9 @@ class SyncInterfacesView(
             if by_id is not None:
                 if by_id.virtual_machine_id == vm.id:
                     return by_id
-                existing_by_name = VMInterface.objects.filter(virtual_machine=vm, name=interface_name).first()
-                if existing_by_name:
-                    return existing_by_name
+                # The port_id resolves to an interface on a DIFFERENT VM. Don't fall back
+                # to a same-named local interface — that would overwrite it with another
+                # VM's port data. Return None so the caller skips this row.
                 return None
         interface, _ = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
         return interface

@@ -1895,8 +1895,20 @@ class CreatePlatformFromImportView(
             target_model = None
             target_pk = None
 
+        librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
+
+        # Require ("add", PlatformMapping) only when a mapping row will actually be
+        # written below — i.e. the toggle is on, an OS was supplied, and no mapping for
+        # that OS exists yet (mirrors the write guard further down). Demanding the perm
+        # for a write that won't happen would needlessly block creating the Platform.
+        # (The write block re-checks not-exists, so a concurrent insert can't slip through.)
+        will_create_mapping = (
+            create_mapping
+            and bool(librenms_os)
+            and not PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists()
+        )
         perms = [("add", Platform)]
-        if create_mapping:
+        if will_create_mapping:
             perms.append(("add", PlatformMapping))
         if target_model is not None:
             perms.append(("change", target_model))
@@ -1907,7 +1919,6 @@ class CreatePlatformFromImportView(
 
         platform_name = (request.POST.get("platform_name") or "").strip()
         manufacturer_id = (request.POST.get("manufacturer") or "").strip()
-        librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
 
         if not platform_name:
             return _htmx_error_response("Platform name is required.")
@@ -1974,9 +1985,13 @@ class CreatePlatformFromImportView(
                         except IntegrityError:
                             # Concurrent request created the mapping; safe to ignore.
                             pass
-        except (ValidationError, IntegrityError) as exc:
-            logger.exception("CreatePlatformFromImportView: failed to create platform: %s", exc)
-            return _htmx_error_response("Error creating platform. Please try again.")
+        except ValidationError as exc:
+            logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
+            detail = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+            return _htmx_error_response(f"Error creating platform: {detail}")
+        except IntegrityError as exc:
+            logger.exception("CreatePlatformFromImportView: integrity error while creating platform")
+            return _htmx_error_response(f"Error creating platform: {exc}")
 
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)

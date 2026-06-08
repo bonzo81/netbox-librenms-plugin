@@ -1018,6 +1018,55 @@ class TestCreateAndAssignPlatformView:
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
 
+    def test_integrity_error_reuses_concurrently_created_platform(self):
+        """IntegrityError on create, but the same-named platform now exists (a concurrent
+        insert won the race): reuse it and assign — no error, no rollback."""
+        from django.db import IntegrityError
+
+        view = self._view()
+        req = _make_request({"platform_name": "ios", "manufacturer": ""})
+
+        reused_platform = MagicMock()
+        mock_platform_cls = MagicMock()
+        # First .first() is the up-front existence check (None → take the create path);
+        # the second is the post-IntegrityError re-query (the concurrently-created row).
+        mock_platform_cls.objects.filter.return_value.first.side_effect = [None, reused_platform]
+        mock_platform_instance = MagicMock()
+        mock_platform_instance.save.side_effect = IntegrityError("duplicate")
+        mock_platform_cls.return_value = mock_platform_instance
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        # __exit__ must return False so the IntegrityError propagates out of the nested atomic.
+        mock_atomic_cm = MagicMock()
+        mock_atomic_cm.__enter__ = MagicMock(return_value=None)
+        mock_atomic_cm.__exit__ = MagicMock(return_value=False)
+        mock_txn = MagicMock()
+        mock_txn.atomic.return_value = mock_atomic_cm
+        mock_txn.set_rollback = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=1)
+
+        # Reuse path: the concurrently-created platform is assigned and persisted, with
+        # no error/rollback. The save() assertion guards against a regression that wires
+        # up the FK but skips persistence.
+        mock_msg.error.assert_not_called()
+        mock_txn.set_rollback.assert_not_called()
+        assert mock_locked.platform is reused_platform
+        mock_locked.save.assert_called_once()
+        mock_msg.success.assert_called_once()
+
     def _success_patches(self, platform_name="ios", librenms_os="ios", create_mapping="1"):
         """Return (view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked)."""
         view = self._view()
@@ -1107,14 +1156,15 @@ class TestCreateAndAssignPlatformView:
 
         mock_mapping_cls.assert_not_called()
 
-    def test_required_object_permissions_include_platformmapping_when_create_mapping(self):
-        """When create_mapping is checked, ('add', PlatformMapping) is added to required_object_permissions
-        BEFORE require_all_permissions runs (so the authorization check sees it)."""
-        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
-
+    def test_required_object_permissions_include_platformmapping_when_mapping_will_be_created(self):
+        """create_mapping on + OS supplied + no existing mapping → ('add', PlatformMapping)
+        is added to required_object_permissions BEFORE require_all_permissions runs."""
         view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
+        # No mapping exists yet for this OS → a write will happen → the perm IS required.
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.exists.return_value = False
 
         captured = {}
 
@@ -1129,12 +1179,42 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
         ):
             view.post(req, pk=1)
 
-        assert ("add", RealPlatformMapping) in captured["perms"], (
-            "Expected ('add', PlatformMapping) in required_object_permissions when create_mapping=True"
+        assert ("add", mock_mapping_cls) in captured["perms"], (
+            "Expected ('add', PlatformMapping) when create_mapping=True and no mapping exists yet"
+        )
+
+    def test_required_object_permissions_exclude_platformmapping_when_mapping_exists(self):
+        """create_mapping on but a mapping for the OS already exists → no mapping write
+        occurs, so ('add', PlatformMapping) must NOT be required (don't block the assign)."""
+        view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
+        )
+        # A mapping for this OS already exists → no write → perm not required.
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.exists.return_value = True
+
+        captured = {}
+
+        def fake_require(method):
+            captured["perms"] = view.required_object_permissions.get(method, [])
+            return MagicMock()
+
+        view.require_all_permissions = fake_require
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+        ):
+            view.post(req, pk=1)
+
+        assert ("add", mock_mapping_cls) not in captured["perms"], (
+            "Did not expect ('add', PlatformMapping) when a mapping for the OS already exists"
         )
 
     def test_required_object_permissions_exclude_platformmapping_when_no_create_mapping(self):

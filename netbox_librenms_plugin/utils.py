@@ -218,7 +218,9 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
         if not all(isinstance(name, str) for name in returned):
             logger.warning("predict_module_interface_names receiver returned non-string element(s); ignoring")
             continue
-        template_names = list(returned)
+        # De-dup while preserving order: the caller built template_names as a
+        # unique list, so a receiver returning repeats must not reintroduce dupes.
+        template_names = list(dict.fromkeys(returned))
 
     return template_names
 

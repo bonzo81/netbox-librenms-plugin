@@ -36,6 +36,11 @@ def _get_safe_redirect_url(request):
         require_https=request.is_secure(),
     ):
         return referrer
+    # No usable Referer. On a non-GET request, request.path is often a POST-only
+    # action endpoint, so redirecting the browser there would 405 — fall back to a
+    # GET-safe "/" instead. GET requests can still reload their own path.
+    if getattr(request, "method", "GET") != "GET":
+        return "/"
     return getattr(request, "path", "/")
 
 

@@ -787,10 +787,11 @@ class TestSafeRedirectUrl:
         assert result == "http://testserver/some/page/"
 
     def test_external_referrer_is_rejected(self):
-        """External referrer URL is rejected, falls back to request.path."""
+        """External referrer URL is rejected; a GET request falls back to request.path."""
         from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
 
         request = MagicMock()
+        request.method = "GET"
         request.META = {"HTTP_REFERER": "http://evil.com/attack"}
         request.get_host.return_value = "testserver"
         request.is_secure.return_value = False
@@ -800,15 +801,29 @@ class TestSafeRedirectUrl:
         assert result == "/safe/fallback/"
 
     def test_no_referrer_falls_back_to_path(self):
-        """Missing referrer falls back to request.path."""
+        """Missing referrer on a GET request falls back to request.path."""
         from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
 
         request = MagicMock()
+        request.method = "GET"
         request.META = {}
         request.path = "/current/page/"
 
         result = _get_safe_redirect_url(request)
         assert result == "/current/page/"
+
+    def test_non_get_with_no_referrer_falls_back_to_slash(self):
+        """On a non-GET request (request.path is likely POST-only), a missing/rejected
+        referrer falls back to a GET-safe "/" rather than the POST-only path."""
+        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
+
+        request = MagicMock()
+        request.method = "POST"
+        request.META = {}
+        request.path = "/post/only/action/"
+
+        result = _get_safe_redirect_url(request)
+        assert result == "/"
 
     def test_no_referrer_no_path_falls_back_to_slash(self):
         """Missing referrer and no path attribute falls back to '/'."""
@@ -834,7 +849,8 @@ class TestSafeRedirectUrl:
         assert result == "/original/page/"
 
     def test_write_permission_denied_rejects_external_referrer(self):
-        """Write permission denial with external referrer falls back to request.path."""
+        """Write permission denial with external referrer falls back to a GET-safe "/"
+        (request is a non-GET MagicMock, so request.path — often POST-only — is avoided)."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
         mixin = LibreNMSPermissionMixin()
@@ -850,10 +866,11 @@ class TestSafeRedirectUrl:
             with patch("netbox_librenms_plugin.views.mixins.messages"):
                 mixin.require_write_permission()
 
-        mock_redirect.assert_called_once_with("/safe/page/")
+        mock_redirect.assert_called_once_with("/")
 
     def test_htmx_rejects_external_referrer(self):
-        """HTMX request with external referrer uses fallback in HX-Redirect."""
+        """HTMX request with external referrer uses a GET-safe "/" fallback in HX-Redirect
+        (non-GET MagicMock request, so the POST-only request.path is avoided)."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
         mixin = LibreNMSPermissionMixin()
@@ -868,7 +885,7 @@ class TestSafeRedirectUrl:
         with patch("netbox_librenms_plugin.views.mixins.messages"):
             result = mixin.require_write_permission()
 
-        assert result["HX-Redirect"] == "/safe/page/"
+        assert result["HX-Redirect"] == "/"
 
 
 class TestBulkImportVCPermission:

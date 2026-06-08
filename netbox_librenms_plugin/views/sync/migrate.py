@@ -11,9 +11,12 @@ Permissions: each view requires plugin write permission AND the
 appropriate NetBox model permission on the object being moved.
 """
 
+import logging
+
 from dcim.models import Device, Interface
 from django.contrib import messages
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.shortcuts import get_object_or_404, redirect
@@ -26,6 +29,8 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_winner_for_donor(donor, server_key="default"):
@@ -224,8 +229,42 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                     "Rename or remove the existing interface first.",
                     status=409,
                 )
-            # Row is locked and confirmed donor-owned, so a pk update is safe.
-            Interface.objects.filter(pk=interface.pk).update(device=winner)
+            # Move via full_clean()+save(), not a bare .update(): a plain column update
+            # bypasses Interface.clean(), which is exactly what guards against the moved
+            # interface keeping a parent/lag/bridge that still lives on the donor (a
+            # cross-device link NetBox forbids). Surface that as a 409 so the user unlinks
+            # the relationship first rather than silently creating an invalid interface.
+            interface.device = winner
+            try:
+                interface.full_clean()
+            except ValidationError as exc:
+                detail = (
+                    "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
+                    if hasattr(exc, "message_dict")
+                    else str(exc)
+                )
+                return self._fail(
+                    request,
+                    f"Cannot move interface '{interface.name}' to '{winner.name}': {detail}",
+                    status=409,
+                )
+            try:
+                interface.save()
+            except IntegrityError:
+                # A concurrent rename/create on the winner side can still trip a DB unique
+                # constraint between our name re-check and this save. Surface it as the same
+                # 409 the collision check uses rather than letting it bubble up as a 500.
+                logger.warning(
+                    "IntegrityError moving interface pk=%s to winner pk=%s (concurrent winner-side change)",
+                    interface.pk,
+                    winner.pk,
+                )
+                return self._fail(
+                    request,
+                    f"Winner device '{winner.name}' already has an interface named '{interface.name}'. "
+                    "Rename or remove the existing interface first.",
+                    status=409,
+                )
 
         return _hx_response(
             request,

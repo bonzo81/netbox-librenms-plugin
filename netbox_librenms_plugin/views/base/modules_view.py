@@ -1752,6 +1752,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """
         if row.get("status") != "No Bay":
             return
+        # OOB controller rows are stamped read-only in _build_row; never offer carrier
+        # install options on them either (this runs after _build_row, so the central
+        # stamp doesn't cover it).
+        if row.get("_source") == "oob":
+            return
         device_bays = getattr(self, "_current_device_bays", None) or {}
         if not device_bays:
             return
@@ -2387,6 +2392,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # overwritten it with "Installed" / "Serial Mismatch" / "Type Mismatch".
         if name_conflict_reason:
             row["status"] = "Name Conflict"
+
+        # OOB controller rows share this table but must never expose host-side write
+        # actions: the bay/type resolution above keys off model/name and could match an
+        # OOB row to a host bay, enabling install/replace/serial/binding on it. Stamp OOB
+        # rows read-only centrally (the _attach_interface_match guard only covers binding).
+        if row.get("_source") == "oob":
+            for _flag in ("can_install", "can_replace", "can_update_serial", "can_update_interface_binding"):
+                row[_flag] = False
 
         return row
 

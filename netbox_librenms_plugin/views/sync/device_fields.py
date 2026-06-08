@@ -336,10 +336,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         required = [("change", Device)]
         if existing_platform is None:
             required.append(("add", Platform))
-        # A mapping is only ever created when the toggle is on AND a LibreNMS OS was
-        # supplied (see the create block below). Don't demand "add PlatformMapping"
-        # when no mapping can be created, or it blocks a plain platform-assign.
-        if create_mapping and librenms_os:
+        # Require "add PlatformMapping" only when a mapping row will actually be written
+        # below: the toggle is on, a LibreNMS OS was supplied, and no mapping for that OS
+        # exists yet. Demanding it otherwise would block a plain platform-assign for a
+        # write that never happens. (The write block re-checks not-exists, so a concurrent
+        # insert can't slip through.) Mirrors CreatePlatformFromImportView.
+        will_create_mapping = (
+            create_mapping
+            and bool(librenms_os)
+            and not PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists()
+        )
+        if will_create_mapping:
             required.append(("add", PlatformMapping))
         self.required_object_permissions = {"POST": required}
 
@@ -366,13 +373,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             platform_created = False
             if existing_platform is None:
                 try:
-                    platform = Platform(
-                        name=platform_name,
-                        slug=slugify(platform_name),
-                        manufacturer=manufacturer,
-                    )
-                    platform.full_clean()
-                    platform.save()
+                    # Nested savepoint so a unique-name collision (concurrent insert)
+                    # only rolls back this INSERT, leaving the outer transaction usable
+                    # for the re-query below — same pattern as the mapping block.
+                    with transaction.atomic():
+                        platform = Platform(
+                            name=platform_name,
+                            slug=slugify(platform_name),
+                            manufacturer=manufacturer,
+                        )
+                        platform.full_clean()
+                        platform.save()
                     platform_created = True
                 except ValidationError as e:
                     transaction.set_rollback(True)
@@ -389,17 +400,23 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     )
                     return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
                 except IntegrityError as e:
-                    transaction.set_rollback(True)
-                    logger.exception(
-                        "IntegrityError creating platform '%s' for device pk=%s",
-                        platform_name,
-                        pk,
-                    )
-                    messages.error(
-                        request,
-                        f"Platform '{platform_name}' could not be created: {e}",
-                    )
-                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                    # A concurrent request created this platform between our existence
+                    # check and our save. Reuse the winner (the goal is reuse-or-create)
+                    # instead of failing the whole assign; only abort if the re-query
+                    # finds nothing (the IntegrityError was for some other reason).
+                    platform = Platform.objects.filter(name__iexact=platform_name).first()
+                    if platform is None:
+                        transaction.set_rollback(True)
+                        logger.exception(
+                            "IntegrityError creating platform '%s' for device pk=%s",
+                            platform_name,
+                            pk,
+                        )
+                        messages.error(
+                            request,
+                            f"Platform '{platform_name}' could not be created: {e}",
+                        )
+                        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
             else:
                 # Reuse the existing platform unchanged — do not touch its
                 # manufacturer/vendor scoping; we only assign it and add the mapping.
