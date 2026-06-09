@@ -406,7 +406,7 @@ class TestCreatePlatformFullClean:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            # objects.filter().exists() returns False (no existing platform)
+            # objects.filter().first() returns None (no existing platform)
             MockPlatform.objects.filter.return_value.first.return_value = None
             # Simulate full_clean raising ValidationError (slug collision)
             platform_instance = MagicMock()

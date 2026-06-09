@@ -299,7 +299,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return render(
                 request,
                 self.partial_template_name,
-                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None}},
+                {
+                    "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
+                    "has_write_permission": self.has_write_permission(),
+                    # Keep donor-mode flags on this render too — resolve from the posted key
+                    # (server_key is None here) so a migrated donor doesn't lose context.
+                    **build_migrated_context(obj, request.POST.get("server_key")),
+                },
             )
         sync_device = self._get_sync_device(obj, server_key=server_key)
 

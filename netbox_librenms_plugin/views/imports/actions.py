@@ -65,6 +65,12 @@ def _attach_messages_oob(response, request):
         return response
     if not isinstance(response.content, (bytes, bytearray)):
         return response
+    # Skip the OOB swap when nothing is queued: an empty #django-messages container
+    # would replace (and wipe) toasts already visible on the page from an earlier action.
+    storage = messages.get_messages(request)
+    if not list(storage):
+        return response
+    storage.used = False
     try:
         rendered = render_to_string("inc/messages.html", request=request)
     except Exception:  # pragma: no cover - defensive: don't break HTMX response on render error

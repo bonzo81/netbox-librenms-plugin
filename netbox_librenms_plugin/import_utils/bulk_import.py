@@ -378,6 +378,8 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
     """
     validation["serial_action"] = None
     validation["oob_candidate"] = None
+    validation["serial_confirmed"] = False
+    validation["serial_duplicate"] = False
     validation["serial_role_choice_available"] = False
     # promote_to_host follows the "absent otherwise" contract (see apply_oob_detection_result).
     validation.pop("promote_to_host", None)

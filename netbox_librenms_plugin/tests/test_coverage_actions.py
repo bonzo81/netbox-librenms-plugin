@@ -508,21 +508,55 @@ class TestAttachMessagesOob:
         result = _attach_messages_oob(response, MagicMock())
         assert result is response  # returned unchanged
 
+    @staticmethod
+    def _storage(items):
+        """A messages-storage stand-in that is iterable and accepts .used = False."""
+        storage = MagicMock()
+        storage.__iter__ = lambda self: iter(items)
+        return storage
+
     def test_appends_rendered_messages_to_bytes_content(self):
         from django.http import HttpResponse
 
         from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
 
         response = HttpResponse(b"<tr>row html</tr>")
-        with patch(
-            "netbox_librenms_plugin.views.imports.actions.render_to_string",
-            return_value='<div id="django-messages" hx-swap-oob="true"></div>',
-        ) as mock_render:
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
+                return_value=self._storage(["a message"]),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.render_to_string",
+                return_value='<div id="django-messages" hx-swap-oob="true"></div>',
+            ) as mock_render,
+        ):
             result = _attach_messages_oob(response, MagicMock())
 
         mock_render.assert_called_once()
         assert b'<div id="django-messages"' in result.content
         assert result.content.startswith(b"<tr>row html</tr>")
+
+    def test_skips_oob_swap_when_no_messages_queued(self):
+        """No pending messages → don't append an empty OOB container that would
+        wipe toasts already visible from an earlier action."""
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
+
+        response = HttpResponse(b"<tr>row html</tr>")
+        original = response.content
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
+                return_value=self._storage([]),
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.render_to_string") as mock_render,
+        ):
+            result = _attach_messages_oob(response, MagicMock())
+
+        mock_render.assert_not_called()
+        assert result.content == original
 
     def test_swallows_render_errors(self):
         from django.http import HttpResponse
@@ -531,9 +565,15 @@ class TestAttachMessagesOob:
 
         response = HttpResponse(b"<tr>row html</tr>")
         original = response.content
-        with patch(
-            "netbox_librenms_plugin.views.imports.actions.render_to_string",
-            side_effect=RuntimeError("db not available"),
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
+                return_value=self._storage(["a message"]),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.render_to_string",
+                side_effect=RuntimeError("db not available"),
+            ),
         ):
             result = _attach_messages_oob(response, MagicMock())
 
