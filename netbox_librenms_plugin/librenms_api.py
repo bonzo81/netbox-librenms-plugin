@@ -582,6 +582,7 @@ class LibreNMSAPI:
         ports: list,
         port_stack: list,
         lag_patterns: dict | None = None,
+        device_os: str | None = None,
     ) -> dict:
         """
         Resolve LAG membership and sub-interface parent relationships from LibreNMS data.
@@ -602,7 +603,12 @@ class LibreNMSAPI:
                         high_port_id and low_port_id keys.
             lag_patterns: Optional dict of {librenms_os: pattern_str} overriding DB lookup.
                           Pass an empty dict to disable name-pattern matching entirely.
-                          When None (default), patterns are fetched from PortStackLagPattern.
+                          When None (default), patterns are fetched from PortStackLagPattern,
+                          scoped to device_os when that is provided.
+            device_os: LibreNMS OS of the device being resolved. When set (and lag_patterns
+                       is None), only that OS's pattern is loaded so a vendor-specific regex
+                       can't misclassify an interface on another platform. When None, all
+                       stored patterns are loaded (legacy, unscoped behaviour).
 
         Returns:
             dict with keys:
@@ -614,7 +620,10 @@ class LibreNMSAPI:
         if lag_patterns is None:
             from netbox_librenms_plugin.models import PortStackLagPattern
 
-            lag_patterns = {p.librenms_os: p.lag_name_pattern for p in PortStackLagPattern.objects.all()}
+            queryset = PortStackLagPattern.objects.all()
+            if device_os:
+                queryset = queryset.filter(librenms_os__iexact=device_os.strip())
+            lag_patterns = {p.librenms_os: p.lag_name_pattern for p in queryset}
 
         by_id = {p["port_id"]: p for p in ports if p.get("port_id")}
         by_name = {p["ifName"]: p for p in ports if p.get("ifName")}

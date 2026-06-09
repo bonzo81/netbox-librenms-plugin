@@ -338,7 +338,16 @@ class BaseInterfaceTableView(
         if self._has_lag_signals(all_ports_final):
             ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
             if ps_success:
-                relationships = self.librenms_api.resolve_port_relationships(all_ports_final, ps_data)
+                # Scope LAG name-pattern matching to this device's OS so a vendor-specific
+                # regex can't misclassify an interface on another platform. Best-effort:
+                # on a failed/odd device-info fetch we fall back to all patterns.
+                device_os = None
+                info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+                if info_success and isinstance(device_info, dict):
+                    device_os = device_info.get("os")
+                relationships = self.librenms_api.resolve_port_relationships(
+                    all_ports_final, ps_data, device_os=device_os
+                )
                 librenms_data["port_stack_relationships"] = relationships
 
         # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it

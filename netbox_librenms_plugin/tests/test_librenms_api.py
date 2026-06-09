@@ -2278,3 +2278,37 @@ class TestResolvePortRelationships:
         stack = [{"high_port_id": 9999, "low_port_id": 101}]
         result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, stack, lag_patterns={})
         assert result["lag_members"] == {}
+
+    @pytest.mark.django_db
+    def test_db_patterns_scoped_to_device_os(self, mock_librenms_api):
+        """With device_os set, only that OS's stored pattern is loaded — a pattern from a
+        different platform must not classify this device's interfaces (the round-12 finding).
+
+        Uses test-unique OS names so the device_os filter excludes the migration-seeded
+        defaults (e.g. the real ``ios`` pattern, which is also ``^Po\\d+$``)."""
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        PortStackLagPattern.objects.create(librenms_os="ztest_pochannel", lag_name_pattern=r"^Po\d+$")
+        PortStackLagPattern.objects.create(librenms_os="ztest_bond", lag_name_pattern=r"^bond\d+$")
+
+        # device_os matches the Po-channel pattern → Po10 (propVirtual) classified as a LAG.
+        scoped = mock_librenms_api.resolve_port_relationships(
+            CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], device_os="ztest_pochannel"
+        )
+        assert scoped["lag_members"] == {301: 302}
+
+        # device_os scopes to the bond pattern only; Po10 is not matched → no LAG.
+        other = mock_librenms_api.resolve_port_relationships(
+            CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], device_os="ztest_bond"
+        )
+        assert other["lag_members"] == {}
+
+    @pytest.mark.django_db
+    def test_db_patterns_unscoped_when_no_device_os(self, mock_librenms_api):
+        """Without device_os, every stored pattern is loaded (legacy behaviour)."""
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        PortStackLagPattern.objects.create(librenms_os="ztest_pochannel", lag_name_pattern=r"^Po\d+$")
+
+        result = mock_librenms_api.resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1])
+        assert result["lag_members"] == {301: 302}
