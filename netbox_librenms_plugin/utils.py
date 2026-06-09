@@ -663,6 +663,9 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     if param_value:
         try:
             per_page = int(param_value)
+            # Guard against 0/negative input, which would break the paginator.
+            if per_page < 1:
+                return netbox_get_paginate_count(request)
             max_page_size = config.MAX_PAGE_SIZE
             # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
             # would zero the page size, and with None it TypeErrors).

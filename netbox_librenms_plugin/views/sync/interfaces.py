@@ -807,7 +807,8 @@ class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Set Interface.parent (sub-interface -> parent) based on LibreNMS port_stack data."""
 
-    required_object_permissions = {"POST": [("change", Interface)]}
+    # Permissions are set dynamically in post() based on object_type — both Devices
+    # (Interface) and VMs (VMInterface, which also has a parent field) are supported.
 
     def _get_object(self, object_type, object_id):
         if object_type == "device":
@@ -817,6 +818,13 @@ class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         raise Http404("Invalid object type.")
 
     def post(self, request, object_type, object_id):
+        if object_type == "device":
+            self.required_object_permissions = {"POST": [("change", Interface)]}
+        elif object_type == "virtualmachine":
+            self.required_object_permissions = {"POST": [("change", VMInterface)]}
+        else:
+            raise Http404("Invalid object type.")
+
         if error := self.require_all_permissions("POST"):
             return error
 

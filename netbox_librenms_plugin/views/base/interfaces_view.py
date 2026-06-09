@@ -518,7 +518,10 @@ class BaseInterfaceTableView(
             port_stack_relationships = cached_data.get("port_stack_relationships", {})
             lag_members = port_stack_relationships.get("lag_members", {})
             sub_interfaces = port_stack_relationships.get("sub_interfaces", {})
-            by_port_id = {p["port_id"]: p for p in ports_data if p.get("port_id")}
+            # Scope to host rows: ports_data is merged host + OOB, and an OOB controller
+            # can reuse a host port_id. Letting an OOB row win here would attach the wrong
+            # aggregate/parent to the host interface during lag/parent enrichment.
+            by_port_id = {p["port_id"]: p for p in ports_data if p.get("port_id") and p.get("_source") != "oob"}
 
             # Pre-fetch all interfaces for all potential chassis members
             # (_build_interface_lookup_maps select_relateds lag/parent for devices).

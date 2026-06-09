@@ -279,6 +279,19 @@ class TestGetTablePaginateCountValueError:
                 result = get_table_paginate_count(request, "table_")
         assert result == 50
 
+    def test_non_positive_per_page_falls_back_to_default(self):
+        """0 or negative input must not propagate to the paginator."""
+        from netbox_librenms_plugin.utils import get_table_paginate_count
+
+        for raw in ("0", "-5"):
+            request = MagicMock()
+            request.GET = {"table_per_page": raw}
+            with patch("netbox_librenms_plugin.utils.get_config"):
+                with patch("netbox_librenms_plugin.utils.netbox_get_paginate_count") as mock_paginate:
+                    mock_paginate.return_value = 50
+                    result = get_table_paginate_count(request, "table_")
+            assert result == 50, f"per_page={raw!r} should fall back to default"
+
 
 class TestGetUserPrefNoConfig:
     """Tests for get_user_pref when user has no config (line 179)."""

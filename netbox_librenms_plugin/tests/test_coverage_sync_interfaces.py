@@ -76,6 +76,49 @@ class TestSyncInterfacesViewPermissions:
             view.get_required_permissions_for_object_type("invalid")
 
 
+class TestSyncInterfaceParentViewPermissions:
+    """SyncInterfaceParentView supports VMs (VMInterface has a parent field), so its
+    POST permission must be scoped to the object type, not hardcoded to Interface."""
+
+    def _stop_after_perms(self):
+        """Patch require_all_permissions to short-circuit post() right after the
+        dynamic permission dict is set, returning a sentinel response."""
+        return patch.object(
+            __import__(
+                "netbox_librenms_plugin.views.sync.interfaces", fromlist=["SyncInterfaceParentView"]
+            ).SyncInterfaceParentView,
+            "require_all_permissions",
+            return_value=_denied_response(),
+        )
+
+    def test_device_post_requires_interface_change(self):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
+        from dcim.models import Interface
+
+        view = object.__new__(SyncInterfaceParentView)
+        with self._stop_after_perms():
+            view.post(_make_request(), "device", 1)
+        assert view.required_object_permissions["POST"] == [("change", Interface)]
+
+    def test_vm_post_requires_vminterface_change(self):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
+        from virtualization.models import VMInterface
+
+        view = object.__new__(SyncInterfaceParentView)
+        with self._stop_after_perms():
+            view.post(_make_request(), "virtualmachine", 1)
+        assert view.required_object_permissions["POST"] == [("change", VMInterface)]
+
+    def test_invalid_type_raises_http404(self):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
+        from django.http import Http404
+        import pytest
+
+        view = object.__new__(SyncInterfaceParentView)
+        with pytest.raises(Http404):
+            view.post(_make_request(), "invalid", 1)
+
+
 # ===========================================================================
 # SyncInterfacesView.get_object
 # ===========================================================================
