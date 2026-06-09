@@ -1989,9 +1989,11 @@ class CreatePlatformFromImportView(
             logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
             detail = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
             return _htmx_error_response(f"Error creating platform: {detail}")
-        except IntegrityError as exc:
+        except IntegrityError:
             logger.exception("CreatePlatformFromImportView: integrity error while creating platform")
-            return _htmx_error_response(f"Error creating platform: {exc}")
+            return _htmx_error_response(
+                "Error creating platform due to a database constraint. Please try again or contact an administrator."
+            )
 
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)

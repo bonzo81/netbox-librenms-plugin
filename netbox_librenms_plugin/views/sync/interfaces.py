@@ -103,7 +103,7 @@ class SyncInterfacesView(
             messages.warning(
                 request,
                 f"{len(self._skipped_conflicts)} interface(s) skipped — their LibreNMS port is already "
-                f"mapped to a different device's interface: {skipped}.",
+                f"mapped to a different interface: {skipped}.",
             )
         messages.success(request, "Selected interfaces synced successfully.")
         return redirect(redirect_url)
