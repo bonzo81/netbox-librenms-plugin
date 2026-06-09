@@ -301,9 +301,13 @@ class TestMoveInterfaceToWinnerView:
             resp = view.post(req, pk=5)
 
         # clean() failed → row not saved, error surfaced via the OOB toast (HTMX path).
+        # HTMX errors are signalled by the OOB toast at HTTP 200 (see _fail docstring),
+        # not by the status code; assert the *absence* of the success HX-Refresh header
+        # so this stays distinct from the success response, which sets HX-Refresh=true.
         locked_iface.full_clean.assert_called_once()
         locked_iface.save.assert_not_called()
         assert b"django-messages" in resp.content
+        assert resp.headers.get("HX-Refresh") is None
 
     def test_save_integrity_error_rejected_with_409(self):
         """A concurrent winner-side rename/create can trip a unique constraint at save()
@@ -345,8 +349,11 @@ class TestMoveInterfaceToWinnerView:
             resp = view.post(req, pk=5)
 
         # save() raised → surfaced as the collision OOB toast (HTMX path), not a 500.
+        # As above: HTMX errors are an OOB toast at HTTP 200, distinguished from the
+        # success response by the absence of the HX-Refresh header.
         locked_iface.save.assert_called_once()
         assert b"django-messages" in resp.content
+        assert resp.headers.get("HX-Refresh") is None
 
     def test_marker_repointed_under_lock_is_rejected(self):
         """If the donor's _migrated_to is repointed between the unlocked resolve
