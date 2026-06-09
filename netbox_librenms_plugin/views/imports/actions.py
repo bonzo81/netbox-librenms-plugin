@@ -2801,9 +2801,14 @@ class MergeNetBoxDevicesView(
             try:
                 winner.save(update_fields=update_fields)
                 donor.save(update_fields=update_fields)
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "MergeNetBoxDevicesView: failed to persist merge winner=%s donor=%s",
+                    winner.pk,
+                    donor.pk,
+                )
                 transaction.set_rollback(True)
-                return _htmx_error_response(f"Save failed: {escape(str(exc))}")
+                return _htmx_error_response("Unable to save the merge changes. Please try again.")
 
         logger.info(
             "Merged NetBox device '%s' (pk=%d) into '%s' (pk=%d) on server %s. Summary: %s; oob_ip_transferred=%s",
