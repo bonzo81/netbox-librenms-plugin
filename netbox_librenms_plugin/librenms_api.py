@@ -569,7 +569,10 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
             data = response.json()
-            return True, data.get("mappings", [])
+            # data.get("mappings", []) still yields None when the key is present but null;
+            # normalise so callers (resolve_port_relationships) never iterate a non-list.
+            mappings = data.get("mappings") if isinstance(data, dict) else None
+            return True, mappings if isinstance(mappings, list) else []
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "Device not found in LibreNMS"

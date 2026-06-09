@@ -2285,6 +2285,13 @@ document.addEventListener('click', function (e) {
         body: body.toString(),
     })
         .then(function (r) {
+            if (!r.ok) {
+                // Surface the backend error text (403/500/HTML page) instead of a
+                // generic JSON parse failure.
+                return fetchErrorMessage(r).then(function (msg) {
+                    throw new Error(msg);
+                });
+            }
             return r.json();
         })
         .then(function (data) {

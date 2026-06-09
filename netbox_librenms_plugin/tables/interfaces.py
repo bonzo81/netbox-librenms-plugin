@@ -451,11 +451,16 @@ class LibreNMSInterfaceTable(tables.Table):
         if sync_status == "missing_nb" and lnms_port_id:
             port_id = record.get("port_id", "")
             nb_iface = record.get("netbox_interface")
-            object_id = (
-                nb_iface.device_id
-                if nb_iface and hasattr(nb_iface, "device_id")
-                else (self.device.pk if self.device else "")
-            )
+            # Resolve the row's member device first. On a VC page self.device is the viewed
+            # member, which may not own this row's interface — without this, a missing_nb
+            # sync would target the wrong device.
+            if nb_iface and hasattr(nb_iface, "device_id"):
+                object_id = nb_iface.device_id
+            elif self.device is not None and getattr(self.device, "virtual_chassis", None):
+                member = get_virtual_chassis_member(self.device, record.get(self.interface_name_field))
+                object_id = (member or self.device).pk
+            else:
+                object_id = self.device.pk if self.device else ""
             object_type = "virtualmachine" if hasattr(self.device, "cluster") and self.device.cluster else "device"
             btn = format_html(
                 ' <button type="button" class="btn btn-sm btn-link p-0 {}" '

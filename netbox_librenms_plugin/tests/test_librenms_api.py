@@ -2140,6 +2140,20 @@ class TestGetPortStack:
         assert success is True
         assert data == []
 
+    def test_returns_empty_list_when_mappings_is_null(self, mock_librenms_api):
+        """A `{"mappings": null}` body must normalise to (True, []) so downstream
+        resolve_port_relationships() never iterates a None port_stack."""
+        from unittest.mock import MagicMock, patch
+
+        fake_response = MagicMock()
+        fake_response.json.return_value = {"status": "ok", "mappings": None}
+        fake_response.raise_for_status = MagicMock()
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+            success, data = mock_librenms_api.get_port_stack(5)
+
+        assert success is True
+        assert data == []
+
 
 # =============================================================================
 # Fixture port data for resolve_port_relationships tests

@@ -90,14 +90,17 @@ def _attach_messages_oob(response, request):
         return response
     # Skip the OOB swap when nothing is queued: an empty #django-messages container
     # would replace (and wipe) toasts already visible on the page from an earlier action.
+    # Iterating the storage marks it consumed; restore used=False after peeking so the
+    # toast render below (or the page's own renderer) still emits the messages.
     storage = messages.get_messages(request)
-    if not list(storage):
-        return response
+    pending = list(storage)
     # ``get_messages`` returns a bare ``list`` (no ``.used``) when no message-storage
     # middleware ran (e.g. RequestFactory requests); a real request always has a storage
     # backend. Guard so re-marking the storage unconsumed can't AttributeError.
     if hasattr(storage, "used"):
         storage.used = False
+    if not pending:
+        return response
     try:
         rendered = render_to_string("inc/messages.html", request=request)
     except Exception:  # pragma: no cover - defensive: don't break HTMX response on render error

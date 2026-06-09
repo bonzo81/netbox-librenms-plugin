@@ -848,10 +848,11 @@ class TestAttachMessagesOob:
         from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
 
         response = HttpResponse(b"<tr>row html</tr>")
+        storage = self._storage(["a message"])
         with (
             patch(
                 "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
-                return_value=self._storage(["a message"]),
+                return_value=storage,
             ),
             patch(
                 "netbox_librenms_plugin.views.imports.actions.render_to_string",
@@ -866,6 +867,8 @@ class TestAttachMessagesOob:
         # The CodeQL-safe format_html() composition produces exactly the concatenation of the
         # original response bytes and the rendered (trusted) fragment — no escaping of either.
         assert result.content == b"<tr>row html</tr>" + b'<div id="django-messages" hx-swap-oob="true"></div>'
+        # The peek must not leave the storage consumed for the page renderer.
+        assert storage.used is False
 
     def test_skips_oob_swap_when_no_messages_queued(self):
         """No pending messages → don't append an empty OOB container that would wipe toasts already visible from an earlier action."""
@@ -875,10 +878,11 @@ class TestAttachMessagesOob:
 
         response = HttpResponse(b"<tr>row html</tr>")
         original = response.content
+        storage = self._storage([])
         with (
             patch(
                 "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
-                return_value=self._storage([]),
+                return_value=storage,
             ),
             patch("netbox_librenms_plugin.views.imports.actions.render_to_string") as mock_render,
         ):
@@ -886,6 +890,8 @@ class TestAttachMessagesOob:
 
         mock_render.assert_not_called()
         assert result.content == original
+        # Even on the empty path, the peek must restore used so nothing is consumed.
+        assert storage.used is False
 
     def test_swallows_render_errors(self):
         from django.http import HttpResponse
