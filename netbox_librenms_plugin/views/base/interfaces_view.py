@@ -116,17 +116,25 @@ class BaseInterfaceTableView(
         return normalize_librenms_port_id(librenms_id)
 
     def _build_interface_lookup_maps(self, obj):
-        """Build name and LibreNMS ID indexes, dropping conflicting IDs entirely."""
+        """Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
+
+        For device interfaces (not VMs), also select_related the lag/parent FKs so
+        _enrich_port_with_lag_parent() doesn't issue N+1 queries when reading
+        nb_iface.lag / nb_iface.parent for each port. VMInterface has no such FKs.
+        """
         by_name = {}
         by_librenms_id = {}
         duplicate_librenms_ids = set()
 
         # Prefetch the M2M relations the table renderers dereference per matched row
         # (render_vlans -> tagged_vlans, render_mac_address -> mac_addresses); without this each
-        # rendered interface row issues its own query for these.
+        # rendered interface row issues its own query for these. Also select_related the lag/parent
+        # FKs (render_parent dereferences them) — skipped for VMs, which have no such fields.
+        related_field = self.get_select_related_field(obj)
+        extra_related = [] if related_field == "virtual_machine" else ["lag", "parent"]
         interfaces = (
             self.get_interfaces(obj)
-            .select_related(self.get_select_related_field(obj))
+            .select_related(related_field, *extra_related)
             .prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
         )
         for interface in interfaces:
@@ -512,10 +520,8 @@ class BaseInterfaceTableView(
             sub_interfaces = port_stack_relationships.get("sub_interfaces", {})
             by_port_id = {p["port_id"]: p for p in ports_data if p.get("port_id")}
 
-            # For device interfaces (not VMs), also select lag and parent FKs
-            _extra_related = [] if self.get_select_related_field(obj) == "virtual_machine" else ["lag", "parent"]
-
             # Pre-fetch all interfaces for all potential chassis members
+            # (_build_interface_lookup_maps select_relateds lag/parent for devices).
             interfaces_by_device = {}
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 for member in obj.virtual_chassis.members.all():
@@ -795,8 +801,8 @@ class BaseInterfaceTableView(
                 return True
         return False
 
+    @staticmethod
     def _enrich_port_with_lag_parent(
-        self,
         port: dict,
         port_id_to_lag: dict,
         port_id_to_parent: dict,

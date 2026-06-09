@@ -183,6 +183,21 @@ class SingleInterfaceVerifyView(
                     interface_name_field=interface_name_field,
                     server_key=server_key,
                 )
+                # Recompute the LAG/parent relationship for the *selected* member so the
+                # Parent/LAG cell isn't left showing the previously-rendered device's status.
+                # netbox_interface must be set first — the enrichment reads it to compare
+                # NetBox lag/parent against LibreNMS. format_interface_data re-sets it (no-op).
+                port_data["netbox_interface"] = selected_device.interfaces.filter(name=interface_name).first()
+                relationships = cached_data.get("port_stack_relationships", {})
+                by_port_id = {p["port_id"]: p for p in cached_data.get("ports", []) if p.get("port_id")}
+                BaseInterfaceTableView._enrich_port_with_lag_parent(
+                    port_data,
+                    relationships.get("lag_members", {}),
+                    relationships.get("sub_interfaces", {}),
+                    by_port_id,
+                    interface_name_field,
+                    server_key or "",
+                )
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})
 

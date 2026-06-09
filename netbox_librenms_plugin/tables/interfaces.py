@@ -607,6 +607,9 @@ class LibreNMSInterfaceTable(tables.Table):
             "mtu": self.render_mtu(port_data["ifMtu"], port_data),
             "enabled": self.render_enabled(port_data["ifAdminStatus"], port_data),
             "description": self.render_description(port_data["ifAlias"], port_data),
+            # Renders from the lag/parent enrichment keys the caller stamps onto
+            # port_data; absent enrichment it returns "" (safe empty cell).
+            "parent": self.render_parent(None, port_data),
         }
 
         return formatted_data

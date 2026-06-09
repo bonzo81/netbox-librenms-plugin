@@ -1193,6 +1193,12 @@ function handleInterfaceChange(select, value) {
                 row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
                 row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
                 row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
+                // Parent/LAG relationship is device-specific, so refresh it too — otherwise
+                // it keeps the previously-selected member's status and sync button.
+                const parentCell = row.querySelector('td[data-col="parent"]');
+                if (parentCell && typeof formattedRow.parent !== 'undefined') {
+                    parentCell.innerHTML = formattedRow.parent;
+                }
                 initializeFilters();
             }
         })
