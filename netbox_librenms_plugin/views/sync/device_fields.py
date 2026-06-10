@@ -18,6 +18,7 @@ from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.utils import (
+    AmbiguousLibreNMSIdError,
     find_by_librenms_id,
     find_matching_platform,
     get_librenms_sync_device,
@@ -816,7 +817,16 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 messages.error(request, "Device data changed before lock was acquired; aborting conversion.")
                 return self._sync_url(object_type, pk)
             # Check that no other object already owns this ID (server-scoped or legacy)
-            match = find_by_librenms_id(model, librenms_id, server_key)
+            try:
+                match = find_by_librenms_id(model, librenms_id, server_key)
+            except AmbiguousLibreNMSIdError:
+                transaction.set_rollback(True)
+                messages.error(
+                    request,
+                    f"librenms_id {librenms_id} is ambiguous — it matches more than one "
+                    f"{model.__name__}; cannot convert. Resolve the duplicate assignment first.",
+                )
+                return self._sync_url(object_type, pk)
             conflict = match is not None and match.pk != locked.pk
             if conflict:
                 transaction.set_rollback(True)

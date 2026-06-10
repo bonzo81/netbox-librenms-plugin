@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
+    AmbiguousLibreNMSIdError,
     find_by_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
@@ -374,7 +375,16 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key):
     if not port_id:
         return None
 
-    existing_owner = find_by_librenms_id(Interface, port_id, server_key)
+    try:
+        existing_owner = find_by_librenms_id(Interface, port_id, server_key)
+    except AmbiguousLibreNMSIdError:
+        return {
+            "status": "conflict",
+            "reason": (
+                f"port_id {port_id} is ambiguous — it matches more than one interface; "
+                "not reassigning. Resolve the duplicate librenms_id first."
+            ),
+        }
     if existing_owner is not None and existing_owner.device_id != device.pk:
         return {
             "status": "conflict",

@@ -1113,10 +1113,25 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
     obj.custom_field_data["librenms_id"] = cf_value
 
 
+class AmbiguousLibreNMSIdError(LookupError):
+    """Raised when a librenms_id resolves to more than one NetBox object.
+
+    Distinguishes a genuine ambiguity (a data-integrity violation — e.g. two devices
+    sharing the same host id, or a host id and a *different* OOB id) from a clean miss.
+    Returning ``None`` for both would let callers treat an ambiguous link as "not found"
+    and proceed (importing/binding), so :func:`find_by_librenms_id` raises this instead
+    and callers fail closed.
+    """
+
+
 def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     """
     Return the first object of *model* whose ``librenms_id`` JSON field contains
     *librenms_id* under *server_key*.
+
+    Raises :class:`AmbiguousLibreNMSIdError` when the id resolves to more than one
+    distinct object (duplicate host-only, duplicate OOB-only, or host vs. a different
+    OOB match); callers must fail closed rather than treating it as a miss.
 
     Also matches legacy records stored as a bare ``librenms_id`` integer or string
     in ``custom_field_data``—these predate multi-server support and act as a
@@ -1194,7 +1209,10 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
             host_matches[0].pk,
             host_matches[1].pk,
         )
-        return None
+        raise AmbiguousLibreNMSIdError(
+            f"librenms_id {librenms_id!r} matches multiple {model.__name__} host records "
+            f"(pk={host_matches[0].pk}, pk={host_matches[1].pk}) on server {server_key!r}"
+        )
     if len(oob_matches) > 1:
         logger.warning(
             "Ambiguous librenms_id %r for %s on server %r: multiple OOB matches (pk=%s, pk=%s) "
@@ -1205,7 +1223,10 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
             oob_matches[0].pk,
             oob_matches[1].pk,
         )
-        return None
+        raise AmbiguousLibreNMSIdError(
+            f"librenms_id {librenms_id!r} matches multiple {model.__name__} OOB records "
+            f"(pk={oob_matches[0].pk}, pk={oob_matches[1].pk}) on server {server_key!r}"
+        )
 
     host_match = host_matches[0] if host_matches else None
     oob_match = oob_matches[0] if oob_matches else None
@@ -1219,7 +1240,10 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
             host_match.pk,
             oob_match.pk,
         )
-        return None
+        raise AmbiguousLibreNMSIdError(
+            f"librenms_id {librenms_id!r} matches {model.__name__} host pk={host_match.pk} but a "
+            f"different OOB pk={oob_match.pk} on server {server_key!r}"
+        )
     # Host identity wins when both resolve to the same row (or only one matched).
     return host_match or oob_match
 

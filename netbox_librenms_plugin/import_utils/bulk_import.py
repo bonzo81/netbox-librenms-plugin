@@ -8,7 +8,7 @@ from django.core.cache import cache
 
 from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
 from ..librenms_api import LibreNMSAPI
-from ..utils import coerce_librenms_id, find_by_librenms_id, get_librenms_oob
+from ..utils import AmbiguousLibreNMSIdError, coerce_librenms_id, find_by_librenms_id, get_librenms_oob
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
 from .device_operations import (
     _describe_existing_librenms_link,
@@ -547,6 +547,18 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # but a late-found existing match must never be import-ready.
             validation["can_import"] = False
             validation["is_ready"] = False
+    except AmbiguousLibreNMSIdError as exc:
+        # An ambiguous librenms_id (matching multiple records) must block import rather
+        # than fall through as "not found" and stay importable.
+        logger.warning("Bulk re-check blocked — ambiguous librenms_id %r: %s", librenms_id, exc)
+        validation["can_import"] = False
+        validation["is_ready"] = False
+        validation["existing_match_type"] = "ambiguous_librenms_id"
+        validation.setdefault("warnings", []).append(
+            f"LibreNMS ID {librenms_id} matches more than one existing NetBox record; import "
+            "blocked to avoid binding to the wrong object. Resolve the duplicate librenms_id "
+            "assignment, then retry."
+        )
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
 

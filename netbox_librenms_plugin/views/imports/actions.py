@@ -1330,7 +1330,7 @@ class DeviceConflictActionView(
         # serializes concurrent operations on the SAME device and greatly reduces the
         # window for assigning the same ID to two DIFFERENT devices.
         if action in {"link", "update", "update_serial"}:
-            from netbox_librenms_plugin.utils import find_by_librenms_id
+            from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
 
             with transaction.atomic():
                 server_key = self.librenms_api.server_key
@@ -1342,7 +1342,13 @@ class DeviceConflictActionView(
                     existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
                 except Device.DoesNotExist:
                     return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
-                id_conflict = find_by_librenms_id(Device, int(librenms_id), server_key)
+                try:
+                    id_conflict = find_by_librenms_id(Device, int(librenms_id), server_key)
+                except AmbiguousLibreNMSIdError:
+                    return _htmx_error_response(
+                        f"LibreNMS ID {librenms_id} is ambiguous — it matches more than one device. "
+                        "Resolve the duplicate assignment before linking."
+                    )
                 if id_conflict and id_conflict.pk != existing_device.pk:
                     return _htmx_error_response(
                         f"LibreNMS ID conflict: ID {librenms_id} is already assigned to device "
@@ -1583,9 +1589,15 @@ class DeviceConflictActionView(
                     )
                 # Check that no other object already owns this ID (server-scoped or legacy)
                 server_key = self.librenms_api.server_key
-                from netbox_librenms_plugin.utils import find_by_librenms_id
+                from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
 
-                match = find_by_librenms_id(existing_model, cf_locked_int, server_key)
+                try:
+                    match = find_by_librenms_id(existing_model, cf_locked_int, server_key)
+                except AmbiguousLibreNMSIdError:
+                    return _htmx_error_response(
+                        f"librenms_id {cf_locked_int} is ambiguous — it matches more than one device. "
+                        "Resolve the duplicate assignment before migrating."
+                    )
                 conflict = match is not None and match.pk != locked_device.pk
                 if conflict:
                     return _htmx_error_response(
@@ -2135,6 +2147,7 @@ class AddAsOOBView(
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
             from netbox_librenms_plugin.utils import (
+                AmbiguousLibreNMSIdError,
                 coerce_librenms_id,
                 find_by_librenms_id,
                 get_librenms_device_id,
@@ -2169,7 +2182,13 @@ class AddAsOOBView(
             # conflict so we don't point one LibreNMS device at two NetBox devices. Mirrors
             # PromoteToHostView's host_conflict guard; find_by_librenms_id is an unlocked
             # read, so this narrows — not closes — the window (no unique constraint on the cf).
-            oob_conflict = find_by_librenms_id(Device, librenms_id, server_key)
+            try:
+                oob_conflict = find_by_librenms_id(Device, librenms_id, server_key)
+            except AmbiguousLibreNMSIdError:
+                return _htmx_error_response(
+                    f"LibreNMS device #{librenms_id} is ambiguous — it matches more than one NetBox "
+                    "device. Resolve the duplicate assignment before attaching as OOB."
+                )
             if oob_conflict is not None and oob_conflict.pk != existing_device.pk:
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is already linked to '{escape(oob_conflict.name)}'; "
@@ -2617,6 +2636,7 @@ class PromoteToHostView(
                 return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
             from netbox_librenms_plugin.utils import (
+                AmbiguousLibreNMSIdError,
                 coerce_librenms_id,
                 find_by_librenms_id,
                 get_librenms_device_id,
@@ -2635,7 +2655,13 @@ class PromoteToHostView(
             # inside the transaction and abort on a non-self conflict so we don't create a
             # duplicate host mapping. find_by_librenms_id is an unlocked read, so this
             # narrows — not closes — the window (no unique constraint exists on the cf).
-            host_conflict = find_by_librenms_id(Device, new_host_id, server_key)
+            try:
+                host_conflict = find_by_librenms_id(Device, new_host_id, server_key)
+            except AmbiguousLibreNMSIdError:
+                return _htmx_error_response(
+                    f"LibreNMS device #{new_host_id} is ambiguous — it matches more than one NetBox "
+                    "device. Resolve the duplicate assignment before promoting."
+                )
             if host_conflict is not None and host_conflict.pk != existing_device.pk:
                 return _htmx_error_response(
                     f"LibreNMS device #{new_host_id} is already linked to '{escape(host_conflict.name)}'; "

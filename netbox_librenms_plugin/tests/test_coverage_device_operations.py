@@ -275,6 +275,26 @@ class TestValidateDeviceStateMachine:
         assert result["is_ready"] is False
         assert result["can_import"] is False
 
+    def test_ambiguous_librenms_id_blocks_import(self):
+        """An ambiguous librenms_id (find_by raises) must block import, not fall through to
+        the not-found path and import as new."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError
+
+        result = self._run_validate(
+            self._base_device(),
+            patches_overrides=[
+                patch(
+                    "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                    side_effect=AmbiguousLibreNMSIdError("dup host pk=1, pk=2"),
+                ),
+            ],
+        )
+        assert result["can_import"] is False
+        assert result["existing_match_type"] == "ambiguous_librenms_id"
+        assert any("matches more than one" in w for w in result["warnings"])
+
     def test_new_vm_without_cluster_is_not_ready(self):
         """New VM import with no cluster available must not be ready."""
         result = self._run_validate(self._base_device(hostname="vm01"), import_as_vm=True)

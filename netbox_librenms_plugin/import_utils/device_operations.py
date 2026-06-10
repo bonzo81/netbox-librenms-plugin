@@ -12,6 +12,7 @@ from virtualization.models import Cluster  # noqa: F401 — used by test mock.pa
 
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
+    AmbiguousLibreNMSIdError,
     coerce_librenms_id,
     find_by_librenms_id,
     find_matching_platform,
@@ -173,6 +174,23 @@ def _determine_device_name(
             name = name.split(".")[0]
 
     return name
+
+
+def _flag_ambiguous_librenms_id(result, librenms_id, exc):
+    """Block import when a librenms_id resolves to more than one NetBox object.
+
+    An ambiguous id is a data-integrity violation; treating it as "not found" would let
+    the device import as new (or bind to an arbitrary row), so fail closed instead.
+    """
+    logger.warning("Import validation blocked — ambiguous librenms_id %r: %s", librenms_id, exc)
+    result["can_import"] = False
+    if result.get("existing_match_type") != "ambiguous_librenms_id":
+        result["existing_match_type"] = "ambiguous_librenms_id"
+        result["warnings"].append(
+            f"LibreNMS ID {librenms_id} matches more than one existing NetBox record; import "
+            "blocked to avoid binding to the wrong object. Resolve the duplicate librenms_id "
+            "assignment, then retry."
+        )
 
 
 def validate_device_for_import(
@@ -341,8 +359,13 @@ def validate_device_for_import(
 
         # Check for existing VM first (by librenms_id custom field).
         # find_by_librenms_id() covers both the new per-server JSON format
-        # and legacy bare-integer values so neither is missed.
-        existing_vm = find_by_librenms_id(VirtualMachine, librenms_id, server_key)
+        # and legacy bare-integer values so neither is missed. An ambiguous id
+        # (matching multiple records) blocks the import — see _flag_ambiguous_librenms_id.
+        try:
+            existing_vm = find_by_librenms_id(VirtualMachine, librenms_id, server_key)
+        except AmbiguousLibreNMSIdError as exc:
+            existing_vm = None
+            _flag_ambiguous_librenms_id(result, librenms_id, exc)
 
         if existing_vm:
             logger.info(f"Found existing VM: {existing_vm.name} (matched by librenms_id={librenms_id})")
@@ -372,7 +395,11 @@ def validate_device_for_import(
         # find_by_librenms_id() covers both the new per-server JSON format
         # and legacy bare-integer values so neither is missed.
         if not result["existing_device"]:
-            existing_device = find_by_librenms_id(Device, librenms_id, server_key)
+            try:
+                existing_device = find_by_librenms_id(Device, librenms_id, server_key)
+            except AmbiguousLibreNMSIdError as exc:
+                existing_device = None
+                _flag_ambiguous_librenms_id(result, librenms_id, exc)
 
             if existing_device:
                 logger.info(f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})")

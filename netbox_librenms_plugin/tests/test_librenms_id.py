@@ -239,9 +239,11 @@ class TestFindByLibreNMSId:
 
     def test_fail_closed_when_host_and_oob_match_different_rows(self):
         """If the host query matches one object and the OOB query a *different* one, the
-        result is ambiguous — return None rather than binding to whichever sorts first."""
+        result is ambiguous — raise rather than binding to whichever sorts first (and rather
+        than returning None, which callers would treat as a clean miss and proceed)."""
+        import pytest
         from unittest.mock import MagicMock
-        from netbox_librenms_plugin.utils import find_by_librenms_id
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
 
         mock_model = MagicMock(__name__="Device")  # __name__ used in the fail-closed log
         host_obj = MagicMock(pk=1)
@@ -252,7 +254,8 @@ class TestFindByLibreNMSId:
             _qs_returning([oob_obj]),
         ]
 
-        assert find_by_librenms_id(mock_model, 42, "default") is None
+        with pytest.raises(AmbiguousLibreNMSIdError):
+            find_by_librenms_id(mock_model, 42, "default")
 
     def test_same_row_for_host_and_oob_is_returned(self):
         """When both queries resolve to the same row, it is returned (not ambiguous)."""
@@ -278,9 +281,10 @@ class TestFindByLibreNMSId:
 
     def test_fail_closed_on_duplicate_host_matches(self):
         """Two distinct rows sharing the same host librenms_id is a data-integrity
-        violation — refuse to bind to either rather than picking whichever sorts first."""
+        violation — raise rather than picking whichever sorts first."""
+        import pytest
         from unittest.mock import MagicMock
-        from netbox_librenms_plugin.utils import find_by_librenms_id
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
 
         mock_model = MagicMock(__name__="Device")
         # Host query returns two rows; OOB query is irrelevant (host ambiguity fails first).
@@ -289,12 +293,14 @@ class TestFindByLibreNMSId:
             _qs_returning([]),
         ]
 
-        assert find_by_librenms_id(mock_model, 42, "default") is None
+        with pytest.raises(AmbiguousLibreNMSIdError):
+            find_by_librenms_id(mock_model, 42, "default")
 
     def test_fail_closed_on_duplicate_oob_matches(self):
         """Two distinct rows sharing the same OOB librenms_id is likewise rejected."""
+        import pytest
         from unittest.mock import MagicMock
-        from netbox_librenms_plugin.utils import find_by_librenms_id
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
 
         mock_model = MagicMock(__name__="Device")
         mock_model.objects.filter.side_effect = [
@@ -302,7 +308,8 @@ class TestFindByLibreNMSId:
             _qs_returning([MagicMock(pk=3), MagicMock(pk=4)]),
         ]
 
-        assert find_by_librenms_id(mock_model, 42, "default") is None
+        with pytest.raises(AmbiguousLibreNMSIdError):
+            find_by_librenms_id(mock_model, 42, "default")
 
 
 class TestMigrateLegacyLibreNMSId:
