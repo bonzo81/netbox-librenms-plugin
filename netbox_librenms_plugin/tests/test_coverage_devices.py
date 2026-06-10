@@ -480,6 +480,55 @@ class TestSingleInterfaceVerifyView:
         assert response.status_code == 200  # cache hit under the device's OWN key proves it was used directly
 
 
+    def test_resolves_netbox_interface_by_stable_port_id_not_name(self):
+        """The NetBox interface is matched by its stored LibreNMS port_id, not the display
+        name — so a naming-mode mismatch (synced under ifName, viewed under ifDescr) can't
+        mis-resolve the row."""
+        import json
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps(
+            {"device_id": 1, "interface_name": "GigabitEthernet0/1", "interface_name_field": "ifDescr"}
+        ).encode()
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = None
+
+        # The NetBox interface was synced under ifName as "Gi0/1" but is now displayed under
+        # ifDescr as "GigabitEthernet0/1"; only the stored port_id (42) identifies it.
+        nb_iface = MagicMock(name="nb_iface")
+        nb_iface.name = "Gi0/1"
+        other_iface = MagicMock(name="other_iface")
+        other_iface.name = "Gi0/2"
+        mock_device.interfaces.all.return_value = [other_iface, nb_iface]
+
+        port_data = {"ifDescr": "GigabitEthernet0/1", "ifName": "Gi0/1", "port_id": 42, "speed": 1000}
+        cached_data = {"ports": [port_data]}
+        mock_table = MagicMock()
+        mock_table.format_interface_data.return_value = "<tr>row</tr>"
+
+        def fake_get_id(iface, server_key, auto_save=False):
+            return 42 if iface is nb_iface else 7
+
+        with (
+            patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device),
+            patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_device_id", side_effect=fake_get_id),
+            patch.object(view, "get_cache_key", return_value="k"),
+            patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable", return_value=mock_table),
+        ):
+            mock_cache.get.return_value = cached_data
+            response = view.post(request)
+
+        assert response.status_code == 200
+        # Resolved by port_id → the correctly-identified interface, despite the name mismatch,
+        assert port_data["netbox_interface"] is nb_iface
+        # and the fragile name filter was never used as the primary lookup.
+        mock_device.interfaces.filter.assert_not_called()
+
+
+
 class TestSingleModuleVerifyView:
     """Tests for SingleModuleVerifyView."""
 

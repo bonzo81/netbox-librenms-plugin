@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleT
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     get_interface_name_field,
+    get_librenms_device_id,
     get_librenms_sync_device,
     get_missing_vlan_warning,
     get_tagged_vlan_css_class,
@@ -187,7 +188,23 @@ class SingleInterfaceVerifyView(
                 # Parent/LAG cell isn't left showing the previously-rendered device's status.
                 # netbox_interface must be set first — the enrichment reads it to compare
                 # NetBox lag/parent against LibreNMS. format_interface_data re-sets it (no-op).
-                port_data["netbox_interface"] = selected_device.interfaces.filter(name=interface_name).first()
+                #
+                # Resolve by the interface's stored LibreNMS port_id (stable), not the display
+                # name: ifName/ifDescr is a render-time preference with no canonical value, so
+                # a name lookup breaks whenever the current naming mode differs from the one the
+                # interface was synced under. Fall back to the name only for interfaces created
+                # without a librenms_id.
+                target_port_id = port_data.get("port_id")
+                target_int = int(target_port_id) if str(target_port_id).isdigit() else None
+                nb_iface = None
+                if target_int is not None:
+                    for iface in selected_device.interfaces.all():
+                        if get_librenms_device_id(iface, server_key, auto_save=False) == target_int:
+                            nb_iface = iface
+                            break
+                if nb_iface is None:
+                    nb_iface = selected_device.interfaces.filter(name=interface_name).first()
+                port_data["netbox_interface"] = nb_iface
                 relationships = cached_data.get("port_stack_relationships", {})
                 # Host-scope the map (mirror get_context_data): an OOB controller reusing a
                 # host port_id must not override the host row during lag/parent enrichment.
