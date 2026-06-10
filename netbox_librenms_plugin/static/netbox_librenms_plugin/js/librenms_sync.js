@@ -354,6 +354,9 @@ function initializeTableCheckboxes(tableId) {
                 if (start !== -1 && end !== -1) {
                     current.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
                         cb.checked = anchor.checked;
+                        // Fire change so shift-range selection runs the same auto-select logic
+                        // (cross-page parent / LAG member inclusion) as single clicks / select-all.
+                        cb.dispatchEvent(new Event('change', { bubbles: true }));
                     });
                 }
             }
