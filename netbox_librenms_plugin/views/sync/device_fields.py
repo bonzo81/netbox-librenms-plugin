@@ -507,9 +507,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     @staticmethod
     def _sync_redirect(request, pk):
         """Redirect to the device sync tab, preserving the POST-scoped server_key so a
-        multi-server user returns to the same server tab instead of the default one."""
+        multi-server user returns to the same server tab instead of the default one.
+
+        The server_key is only reflected when it matches a configured server, and the value
+        emitted into the URL comes from the trusted config (not the raw request), so no
+        untrusted input reaches the redirect target (open-redirect / CodeQL py/url-redirection safe).
+        """
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-        server_key = (request.POST.get("server_key") or "").strip()
+        requested = (request.POST.get("server_key") or "").strip()
+        server_key = next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None)
         if server_key:
             url = f"{url}?server_key={quote_plus(server_key)}"
         return redirect(url)

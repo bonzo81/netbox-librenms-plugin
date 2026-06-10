@@ -2444,3 +2444,39 @@ class TestDeviceFieldsViewWiring:
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
 
         assert "POST" in RemoveServerMappingView.required_object_permissions
+
+
+class TestSyncRedirectServerKeyValidation:
+    """_sync_redirect must only reflect a server_key that matches a configured server,
+    so untrusted request input can't be steered into the redirect URL (open-redirect)."""
+
+    def test_valid_server_key_is_reflected(self):
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        req = _make_request(post_data={"server_key": "prod"})
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        ):
+            CreateAndAssignPlatformView._sync_redirect(req, 1)
+        url = mock_redirect.call_args[0][0]
+        assert "server_key=prod" in url
+
+    def test_unknown_server_key_is_dropped(self):
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        req = _make_request(post_data={"server_key": "//evil.com/steal"})
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        ):
+            CreateAndAssignPlatformView._sync_redirect(req, 1)
+        url = mock_redirect.call_args[0][0]
+        assert "evil.com" not in url
+        assert "server_key" not in url
