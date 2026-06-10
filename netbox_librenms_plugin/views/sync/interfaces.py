@@ -790,8 +790,6 @@ def _interfaces_same_owner(a, b) -> bool:
 class _PortIdResolveMixin:
     """Mixin to resolve a LibreNMS port_id to a NetBox interface by librenms_id custom field, then name fallback."""
 
-    _server_key: str
-
     def _resolve_interface_by_port_id(self, obj, port_id: str, server_key: str, name_hint: str = ""):
         return _resolve_interface_by_port_id(obj, port_id, server_key, name_hint)
 
