@@ -84,6 +84,10 @@ class SyncInterfacesView(
             )
         self._post_server_key = server_key
         selected_interfaces = self.get_selected_interfaces(request, interface_name_field)
+        # Stable LibreNMS port_ids selected directly (e.g. cross-page parents auto-included
+        # by the LAG/parent JS). Display names ("select") can collide in ifDescr mode, so
+        # the relationship sync keys on these ids to avoid binding the wrong port.
+        self._selected_port_ids = {pid for pid in request.POST.getlist("select_port_id") if pid}
         exclude_columns = request.POST.getlist("exclude_columns")
 
         redirect_url = (
@@ -203,23 +207,23 @@ class SyncInterfacesView(
 
         interface_name_field = self.interface_name_field
 
-        # Build lookups: str(port_id) -> port_dict, and interface_name -> str(port_id)
+        # Resolve the selection to stable LibreNMS port_ids. The POST carries display names
+        # ("select") plus any cross-page parents injected by stable id ("select_port_id").
+        # Keying by port_id avoids collapsing distinct ports that share a display name —
+        # possible in ifDescr mode, where the visible name is not a unique identifier.
         port_by_id = {}
-        port_id_by_name = {}
+        selected_port_ids = set(getattr(self, "_selected_port_ids", set()))
         for port in ports_data:
             pid = port.get("port_id")
-            name = port.get(interface_name_field)
-            if pid is not None:
-                port_by_id[str(pid)] = port
-            if name and pid is not None:
-                port_id_by_name[name] = str(pid)
-
-        selected_set = set(selected_interfaces)
+            if pid is None:
+                continue
+            port_by_id[str(pid)] = port
+            if port.get(interface_name_field) in selected_interfaces:
+                selected_port_ids.add(str(pid))
 
         with transaction.atomic():
-            for iface_name in selected_set:
-                port_id = port_id_by_name.get(iface_name)
-                if not port_id:
+            for port_id in selected_port_ids:
+                if port_id not in port_by_id:
                     continue
 
                 # LAG membership: this interface is a member of a LAG aggregate
@@ -299,11 +303,13 @@ class SyncInterfacesView(
         interface_name_field,
     ):
         """Create or update NetBox interfaces from LibreNMS port data."""
+        selected_port_ids = getattr(self, "_selected_port_ids", set())
         with transaction.atomic():
             if isinstance(obj, Device):
                 locked_targets = self._lock_selected_device_targets(
                     obj,
                     selected_interfaces,
+                    selected_port_ids,
                     ports_data,
                     interface_name_field,
                 )
@@ -313,7 +319,6 @@ class SyncInterfacesView(
                         self._record_skipped_conflict(interface_name, "selected target unavailable")
                     return
                 self._locked_target_devices = locked_targets
-
             try:
                 for port in ports_data:
                     # OOB-controller rows are merged into the host's interface list only for context
@@ -324,20 +329,31 @@ class SyncInterfacesView(
                     if port.get("_source") == "oob":
                         continue
                     port_name = port.get(interface_name_field)
+                    port_id = port.get("port_id")
 
-                    if port_name in selected_interfaces:
+                    if port_name in selected_interfaces or (port_id is not None and str(port_id) in selected_port_ids):
                         self.sync_interface(obj, port, exclude_columns, interface_name_field)
             finally:
                 self.__dict__.pop("_locked_target_devices", None)
 
-    def _lock_selected_device_targets(self, obj, selected_interfaces, ports_data, interface_name_field):
+    def _lock_selected_device_targets(
+        self,
+        obj,
+        selected_interfaces,
+        selected_port_ids,
+        ports_data,
+        interface_name_field,
+    ):
         """Lock the page device and selected VC targets for the sync transaction."""
         target_ids = {obj.pk}
         for port in ports_data:
             if port.get("_source") == "oob":
                 continue
             interface_name = port.get(interface_name_field)
-            if interface_name not in selected_interfaces:
+            port_id = port.get("port_id")
+            if interface_name not in selected_interfaces and (
+                port_id is None or str(port_id) not in selected_port_ids
+            ):
                 continue
             selected_id = self.request.POST.get(f"device_selection_{interface_name}")
             if selected_id:

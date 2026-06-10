@@ -426,21 +426,22 @@ document.addEventListener('change', function (e) {
                 changed = true;
             }
         } else {
-            // Parent is on a different page - inject a hidden input into the form
-            const parentName = row.dataset.parentName;
-            if (parentName) {
-                const form = checkbox.closest('form');
-                if (form) {
-                    const hiddenId = 'auto-parent-' + parentPortId;
-                    if (!form.querySelector('#' + hiddenId)) {
-                        const hidden = document.createElement('input');
-                        hidden.type = 'hidden';
-                        hidden.name = 'select';
-                        hidden.value = parentName;
-                        hidden.id = hiddenId;
-                        form.appendChild(hidden);
-                        _showParentCrossPageNotice(parentName);
-                    }
+            // Parent is on a different page - inject a hidden input carrying the parent's
+            // stable LibreNMS port_id (data-parent-port-id), not its display name. The
+            // display name can differ from the checkbox 'select' value in ifDescr mode, so
+            // the sync view matches this on 'select_port_id' (by port_id) instead.
+            const form = checkbox.closest('form');
+            if (form) {
+                const hiddenId = 'auto-parent-' + parentPortId;
+                if (!form.querySelector('#' + hiddenId)) {
+                    const hidden = document.createElement('input');
+                    hidden.type = 'hidden';
+                    hidden.name = 'select_port_id';
+                    hidden.value = parentPortId;
+                    hidden.id = hiddenId;
+                    form.appendChild(hidden);
+                    // data-parent-name is human-readable text for the notice only.
+                    _showParentCrossPageNotice(row.dataset.parentName || parentPortId);
                 }
             }
         }

@@ -1201,6 +1201,111 @@ class TestSyncInterfacesViewSyncSelected:
         call_args = view.sync_interface.call_args
         assert call_args[0][1]["ifName"] == "Gi0/1"
 
+    def test_syncs_port_selected_by_stable_id(self):
+        """A port whose display name is not in 'select' is still synced when its port_id
+        is in select_port_id (e.g. a cross-page parent auto-included by the LAG/parent JS)."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.interface_name_field = "ifName"
+        view.sync_interface = MagicMock()
+        view._selected_port_ids = {"42"}
+
+        ports_data = [{"ifName": "Gi0/1", "port_id": 7}, {"ifName": "Gi0/2", "port_id": 42}]
+        selected = ["Gi0/1"]  # Gi0/2 is selected only by stable port_id, not by name
+
+        with patch("netbox_librenms_plugin.views.sync.interfaces.transaction"):
+            view.sync_selected_interfaces(MagicMock(), selected, ports_data, [], "ifName")
+
+        synced = sorted(c[0][1]["ifName"] for c in view.sync_interface.call_args_list)
+        assert synced == ["Gi0/1", "Gi0/2"]
+
+
+# ===========================================================================
+# SyncInterfacesView._sync_lag_and_parent_relationships
+# ===========================================================================
+
+
+class TestSyncLagAndParentRelationships:
+    def _make_view(self, name_field="ifName", selected_port_ids=None):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.interface_name_field = name_field
+        if selected_port_ids is not None:
+            view._selected_port_ids = set(selected_port_ids)
+        return view
+
+    def test_duplicate_display_name_members_not_collapsed(self):
+        """In ifDescr mode two member ports can share a display name; both must still be
+        linked to their LAG. Keying selection by port_id (not the colliding name) is the fix."""
+        from dcim.models import Interface
+        from netbox_librenms_plugin.views.sync import interfaces as mod
+
+        view = self._make_view(name_field="ifDescr")
+        obj = MagicMock()
+
+        # Two members share ifDescr "Ethernet" but have distinct port_ids; both in LAG 100.
+        ports_data = [
+            {"ifDescr": "Ethernet", "ifName": "Gi0/1", "port_id": 10},
+            {"ifDescr": "Ethernet", "ifName": "Gi0/2", "port_id": 11},
+            {"ifDescr": "Po1", "ifName": "Po1", "port_id": 100},
+        ]
+        relationships = {"lag_members": {"10": 100, "11": 100}, "sub_interfaces": {}}
+        selected = ["Ethernet"]  # both member rows carry the same checkbox value
+
+        members = {
+            "10": MagicMock(spec=Interface, lag_id=None),
+            "11": MagicMock(spec=Interface, lag_id=None),
+        }
+        agg = MagicMock(spec=Interface, type="lag", pk=100)
+
+        def resolve(o, port_id, server_key, name_hint=""):
+            return (agg, None) if port_id == "100" else (members[port_id], None)
+
+        with (
+            patch.object(mod, "_resolve_interface_by_port_id", side_effect=resolve),
+            patch.object(mod, "_interfaces_same_owner", return_value=True),
+            patch.object(mod, "transaction"),
+        ):
+            view._sync_lag_and_parent_relationships(obj, selected, ports_data, relationships, "default")
+
+        # Both members linked to the aggregate — the duplicate display name didn't collapse.
+        assert members["10"].lag is agg
+        assert members["11"].lag is agg
+        members["10"].save.assert_called()
+        members["11"].save.assert_called()
+
+    def test_member_selected_only_by_stable_id_is_linked(self):
+        """A port present only via select_port_id (not selected by display name) is still
+        processed by the relationship sync."""
+        from dcim.models import Interface
+        from netbox_librenms_plugin.views.sync import interfaces as mod
+
+        view = self._make_view(name_field="ifName", selected_port_ids={"11"})
+        obj = MagicMock()
+        ports_data = [
+            {"ifName": "Gi0/2", "port_id": 11},
+            {"ifName": "Po1", "port_id": 100},
+        ]
+        relationships = {"lag_members": {"11": 100}, "sub_interfaces": {}}
+        selected = []  # nothing selected by name; only port_id 11 via select_port_id
+
+        member = MagicMock(spec=Interface, lag_id=None)
+        agg = MagicMock(spec=Interface, type="lag", pk=100)
+
+        def resolve(o, port_id, server_key, name_hint=""):
+            return (agg, None) if port_id == "100" else (member, None)
+
+        with (
+            patch.object(mod, "_resolve_interface_by_port_id", side_effect=resolve),
+            patch.object(mod, "_interfaces_same_owner", return_value=True),
+            patch.object(mod, "transaction"),
+        ):
+            view._sync_lag_and_parent_relationships(obj, selected, ports_data, relationships, "default")
+
+        assert member.lag is agg
+
 
 # A POSTed valid non-default server_key must scope the sync to that server without 500ing on a
 # misconfigured default client. Under the stack that behavior comes from rebind_api_for_server, so
