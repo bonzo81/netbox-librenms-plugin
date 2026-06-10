@@ -529,17 +529,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         """Redirect to the device sync tab, preserving the POST-scoped server_key so a
         multi-server user returns to the same server tab instead of the default one.
 
-        The server_key is only reflected when it matches a configured server, and the value
-        emitted into the URL comes from the trusted config (not the raw request), so no
-        untrusted input reaches the redirect target (open-redirect / CodeQL py/url-redirection safe).
+        The server_key is reflected only inside an explicit allowlist guard
+        (``requested in get_available_servers()``). That membership check is the barrier
+        CodeQL recognises for py/url-redirection (CWE-601) — the redirect target is always a
+        reverse()-built internal path with an optional, allowlisted query value.
         """
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         requested = (request.POST.get("server_key") or "").strip()
-        server_key = next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None)
-        if server_key:
-            url = f"{url}?server_key={quote_plus(server_key)}"
+        if requested and requested in LibreNMSAPI.get_available_servers():
+            url = f"{url}?server_key={quote_plus(requested)}"
         return redirect(url)
 
 
@@ -747,16 +747,20 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         return model, get_object_or_404(model, pk=pk)
 
     def _sync_url(self, object_type, pk):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
         name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
         url = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": pk})
         # Propagate the active multi-server server_key so redirects land on the server the
-        # user was working in, not the default tab.
+        # user was working in. Reflect it only inside an explicit allowlist guard so the
+        # request value can't steer the redirect target — the barrier CodeQL recognises for
+        # py/url-redirection (CWE-601).
         request = getattr(self, "request", None)
-        server_key = ""
+        requested = ""
         if request is not None:
-            server_key = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
-        if server_key:
-            url = f"{url}?server_key={quote_plus(server_key)}"
+            requested = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
+        if requested and requested in LibreNMSAPI.get_available_servers():
+            url = f"{url}?server_key={quote_plus(requested)}"
         return redirect(url)
 
     def post(self, request, pk):

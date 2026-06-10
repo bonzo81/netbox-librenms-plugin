@@ -1952,17 +1952,42 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         (url,), _ = mock_redir.call_args
         assert isinstance(url, str) and "server_key" not in url
 
-    def test_sync_url_propagates_server_key(self):
-        """The POST-scoped server_key is preserved on the redirect so multi-server users
-        return to the server they were working in."""
+    def test_sync_url_propagates_known_server_key(self):
+        """A POST-scoped server_key that matches a configured server is preserved so
+        multi-server users return to the server they were working in."""
         view = self._view()
         view.request = MagicMock()
         view.request.POST = {"server_key": "prod"}
         view.request.GET = {}
-        with patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir:
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
             view._sync_url("device", 1)
         (url,), _ = mock_redir.call_args
         assert "server_key=prod" in url
+
+    def test_sync_url_drops_unknown_server_key(self):
+        """An unconfigured/spoofed server_key is not reflected into the redirect URL
+        (allowlist guard — open-redirect safe)."""
+        view = self._view()
+        view.request = MagicMock()
+        view.request.POST = {"server_key": "//evil.com/steal"}
+        view.request.GET = {}
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)
+        (url,), _ = mock_redir.call_args
+        assert "evil.com" not in url
+        assert "server_key" not in url
 
 
 # ---------------------------------------------------------------------------
