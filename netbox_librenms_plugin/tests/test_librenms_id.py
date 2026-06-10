@@ -578,10 +578,14 @@ class TestOOBHelpers:
 
         find_by_librenms_id(mock_model, 17, "primary")
 
-        call_args = mock_model.objects.filter.call_args
-        q_arg = call_args[0][0]
-        assert ("custom_field_data__librenms_id__primary__oob__id", 17) in q_arg.children
-        assert ("custom_field_data__librenms_id__primary__oob__id", "17") in q_arg.children
+        # Aggregate the Q children across all filter() calls rather than only the last one,
+        # so the assertion tests behaviour (the OOB sub-key is queried) and not the order of
+        # the host/OOB queries.
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            all_children |= set(call[0][0].children)
+        assert ("custom_field_data__librenms_id__primary__oob__id", 17) in all_children
+        assert ("custom_field_data__librenms_id__primary__oob__id", "17") in all_children
 
     def test_find_by_does_not_return_unrelated_id(self):
         """find_by_librenms_id returns None when no model matches."""

@@ -2020,13 +2020,32 @@ class CreatePlatformFromImportView(
                         if request.user.has_perm(get_permission_for_model(PlatformMapping, "add")):
                             try:
                                 with transaction.atomic():
-                                    PlatformMapping.objects.create(
+                                    # full_clean() before save so a tampered/overlong POST-derived
+                                    # librenms_os fails as a caught ValidationError rather than a raw
+                                    # DataError that would 500 the modal. The mapping is a secondary
+                                    # side-effect, so skip+warn instead of failing the Platform create.
+                                    mapping = PlatformMapping(
                                         librenms_os=librenms_os.lower(),
                                         netbox_platform=platform,
                                     )
+                                    mapping.full_clean()
+                                    mapping.save()
                             except IntegrityError:
                                 # Concurrent request created the mapping; safe to ignore.
                                 pass
+                            except ValidationError:
+                                logger.warning(
+                                    "CreatePlatformFromImportView: skipped invalid PlatformMapping for OS %r",
+                                    librenms_os,
+                                    exc_info=True,
+                                )
+                                transaction.on_commit(
+                                    lambda os=librenms_os: messages.warning(
+                                        request,
+                                        f"Platform created, but the LibreNMS-OS mapping for '{os}' was not "
+                                        "added — the OS value was invalid.",
+                                    )
+                                )
                         else:
                             logger.warning(
                                 "CreatePlatformFromImportView: skipped PlatformMapping create for OS %r — "
