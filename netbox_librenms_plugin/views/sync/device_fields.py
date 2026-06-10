@@ -539,8 +539,11 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         requested = (request.POST.get("server_key") or "").strip()
-        if requested and requested in LibreNMSAPI.get_available_servers():
-            candidate = f"{url}?server_key={quote_plus(requested)}"
+        # Re-source the matched key from the trusted config rather than echoing the raw
+        # request value, then gate the redirect on url_has_allowed_host_and_scheme.
+        server_key = next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None)
+        if server_key:
+            candidate = f"{url}?server_key={quote_plus(server_key)}"
             if url_has_allowed_host_and_scheme(
                 candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
             ):
@@ -765,8 +768,13 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         requested = ""
         if request is not None:
             requested = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
-        if request is not None and requested and requested in LibreNMSAPI.get_available_servers():
-            candidate = f"{url}?server_key={quote_plus(requested)}"
+        # Re-source the matched key from the trusted config rather than echoing the raw
+        # request value, then gate the redirect on url_has_allowed_host_and_scheme.
+        server_key = (
+            next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None) if requested else None
+        )
+        if request is not None and server_key:
+            candidate = f"{url}?server_key={quote_plus(server_key)}"
             if url_has_allowed_host_and_scheme(
                 candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
             ):

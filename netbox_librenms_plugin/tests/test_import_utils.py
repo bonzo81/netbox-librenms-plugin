@@ -1114,6 +1114,40 @@ class TestDeviceValidation:
         assert result["existing_device"] == existing_vm
         assert result["can_import"] is False
         assert result["import_as_vm"] is True
+        # The VM match must populate existing_librenms_link (mirrors the device path) so the
+        # UI doesn't render the VM as unlinked.
+        assert result["existing_librenms_link"] is not None
+
+    @patch("virtualization.models.VirtualMachine")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
+    def test_librenms_id_matched_vm_populates_link(self, *mocks):
+        """A VM matched by librenms_id surfaces its LibreNMS linkage so it isn't shown
+        as unlinked."""
+        mock_vm = mocks[-1]
+        mock_device = mocks[-2]
+        existing_vm = MagicMock()
+        existing_vm.name = "vm-01"
+        existing_vm.custom_field_data = {"librenms_id": {"default": 42}}
+        existing_vm.cf = existing_vm.custom_field_data
+        # find_by_librenms_id consumes the queryset via list(qs[:2]); make the VM lookup match.
+        mock_vm.objects.filter.return_value.__getitem__.return_value = [existing_vm]
+        mock_device.objects.filter.return_value.__getitem__.return_value = []
+        mock_device.objects.filter.return_value.first.return_value = None
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        result = validate_device_for_import({"device_id": 42, "hostname": "vm-01"}, include_vc_detection=False)
+
+        assert result["existing_device"] == existing_vm
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["existing_librenms_link"] == {"host_id": 42, "oob_id": None, "oob_type": None}
 
 
 class TestDeviceNamingPreferencesLegacy:

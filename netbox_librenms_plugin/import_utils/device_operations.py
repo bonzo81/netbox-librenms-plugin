@@ -394,6 +394,9 @@ def validate_device_for_import(
             result["existing_match_type"] = "librenms_id"
             result["import_as_vm"] = True  # Force VM mode since VM exists
             result["can_import"] = False
+            # Surface the host/OOB linkage so a librenms_id-matched VM renders as linked
+            # (mirrors the device path); otherwise the UI shows the VM as unlinked.
+            result["existing_librenms_link"] = _describe_existing_librenms_link(existing_vm, server_key)
 
             # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
             # Direct access needed to detect legacy format for migration prompt:
@@ -520,6 +523,9 @@ def validate_device_for_import(
                     f"VM with same hostname exists in NetBox as '{existing_vm.name}' (not linked to LibreNMS)"
                 )
                 result["can_import"] = False
+                # Mirror the device path so badge state renders consistently (all-None here
+                # since this VM was matched by hostname, not librenms_id).
+                result["existing_librenms_link"] = _describe_existing_librenms_link(existing_vm, server_key)
             elif existing_device:
                 logger.info(f"Found existing device by hostname: {existing_device.name}")
                 result["existing_device"] = existing_device
