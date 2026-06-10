@@ -731,6 +731,7 @@ class PortStackLagPatternFilterForm(NetBoxModelFilterSetForm):
 
     librenms_os = forms.CharField(required=False, label="LibreNMS OS")
     lag_name_pattern = forms.CharField(required=False, label="LAG Name Pattern")
+    description = forms.CharField(required=False, label="Description")
 
     model = PortStackLagPattern
 

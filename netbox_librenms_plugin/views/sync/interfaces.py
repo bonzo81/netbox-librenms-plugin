@@ -881,9 +881,10 @@ class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         if not _interfaces_same_owner(child_iface, parent_iface):
             return JsonResponse({"error": "Child and parent interfaces are on different devices."}, status=409)
 
-        child_iface.parent = parent_iface
-        child_iface.save()
-        logger.info("Set %s.parent = %s", child_iface.name, parent_iface.name)
+        with transaction.atomic():
+            child_iface.parent = parent_iface
+            child_iface.save()
+            logger.info("Set %s.parent = %s", child_iface.name, parent_iface.name)
 
         return JsonResponse(
             {"status": "success", "message": f"Linked {child_iface.name} to parent {parent_iface.name}"}
