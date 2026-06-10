@@ -592,10 +592,14 @@ class BaseInterfaceTableView(
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, lookup_maps)
 
-                # Enrich port with LAG/parent relationship context
-                self._enrich_port_with_lag_parent(
-                    port, lag_members, sub_interfaces, by_port_id, interface_name_field, server_key or ""
-                )
+                # Enrich port with LAG/parent relationship context. Skip OOB rows: the
+                # relationships come from the host device's port_stack, so applying them to
+                # an OOB controller row (which can reuse a host port_id) would make the OOB
+                # interface inherit the host's LAG/parent names and sync status.
+                if port.get("_source") != "oob":
+                    self._enrich_port_with_lag_parent(
+                        port, lag_members, sub_interfaces, by_port_id, interface_name_field, server_key or ""
+                    )
 
             table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
             table.configure(request)

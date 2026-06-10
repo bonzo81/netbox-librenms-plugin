@@ -2293,6 +2293,12 @@ class TestResolvePortRelationships:
         result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, stack, lag_patterns={})
         assert result["lag_members"] == {}
 
+    def test_non_dict_port_entries_are_skipped(self, mock_librenms_api):
+        """A malformed (non-dict) entry in `ports` must not crash resolution; valid pairs still resolve."""
+        ports = [None, "oops", 42, *NOKIA_PORTS]
+        result = mock_librenms_api.resolve_port_relationships(ports, NOKIA_PORT_STACK[:1], lag_patterns={})
+        assert result["lag_members"] == {101: 102}
+
     @pytest.mark.django_db
     def test_db_patterns_scoped_to_device_os(self, mock_librenms_api):
         """With device_os set, only that OS's stored pattern is loaded — a pattern from a

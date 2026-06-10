@@ -628,8 +628,11 @@ class LibreNMSAPI:
                 queryset = queryset.filter(librenms_os__iexact=device_os.strip())
             lag_patterns = {p.librenms_os: p.lag_name_pattern for p in queryset}
 
-        by_id = {p["port_id"]: p for p in ports if p.get("port_id")}
-        by_name = {p["ifName"]: p for p in ports if p.get("ifName")}
+        # Guard against malformed payload items (non-dict) so a single bad entry from
+        # LibreNMS doesn't crash the whole relationship resolution with AttributeError.
+        safe_ports = [p for p in ports if isinstance(p, dict)]
+        by_id = {p["port_id"]: p for p in safe_ports if p.get("port_id") is not None}
+        by_name = {p["ifName"]: p for p in safe_ports if p.get("ifName")}
 
         compiled_patterns = []
         for pattern_str in lag_patterns.values():

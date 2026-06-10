@@ -243,12 +243,19 @@ class SyncInterfacesView(
                         continue
 
                     if member_iface.lag_id != agg_iface.pk:
-                        if isinstance(agg_iface, Interface) and agg_iface.type != "lag":
-                            agg_iface.type = "lag"
-                            agg_iface.save()
-                        member_iface.lag = agg_iface
-                        member_iface.save()
-                        logger.info("Bulk sync: set %s.lag = %s", member_iface.name, agg_iface.name)
+                        if not _interfaces_same_owner(member_iface, agg_iface):
+                            logger.warning(
+                                "Bulk sync: skipping cross-member LAG link %s -> %s (different devices)",
+                                member_iface.name,
+                                agg_iface.name,
+                            )
+                        else:
+                            if isinstance(agg_iface, Interface) and agg_iface.type != "lag":
+                                agg_iface.type = "lag"
+                                agg_iface.save()
+                            member_iface.lag = agg_iface
+                            member_iface.save()
+                            logger.info("Bulk sync: set %s.lag = %s", member_iface.name, agg_iface.name)
 
                 # Sub-interface parent: this interface is a child of a parent interface
                 raw_parent = sub_interfaces.get(
@@ -272,9 +279,16 @@ class SyncInterfacesView(
                         continue
 
                     if child_iface.parent_id != parent_iface.pk:
-                        child_iface.parent = parent_iface
-                        child_iface.save()
-                        logger.info("Bulk sync: set %s.parent = %s", child_iface.name, parent_iface.name)
+                        if not _interfaces_same_owner(child_iface, parent_iface):
+                            logger.warning(
+                                "Bulk sync: skipping cross-member parent link %s -> %s (different devices)",
+                                child_iface.name,
+                                parent_iface.name,
+                            )
+                        else:
+                            child_iface.parent = parent_iface
+                            child_iface.save()
+                            logger.info("Bulk sync: set %s.parent = %s", child_iface.name, parent_iface.name)
 
     def sync_selected_interfaces(
         self,
@@ -743,6 +757,20 @@ def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint:
     return None, f"Interface with LibreNMS port_id {port_id} not found on {obj}"
 
 
+def _interfaces_same_owner(a, b) -> bool:
+    """True when both interfaces belong to the same Device (or same VM).
+
+    `_resolve_interface_by_port_id` searches all members of a Virtual Chassis, so a stale
+    or ambiguous port_stack relationship can resolve a LAG/parent pair onto two different
+    member devices. NetBox forbids a cross-device lag/parent, so callers must reject such a
+    pair instead of persisting an invalid link.
+    """
+    return (getattr(a, "device_id", None), getattr(a, "virtual_machine_id", None)) == (
+        getattr(b, "device_id", None),
+        getattr(b, "virtual_machine_id", None),
+    )
+
+
 class _PortIdResolveMixin:
     """Mixin to resolve a LibreNMS port_id to a NetBox interface by librenms_id custom field, then name fallback."""
 
@@ -788,6 +816,9 @@ class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         )
         if err:
             return JsonResponse({"error": f"Aggregate interface: {err}"}, status=404)
+
+        if not _interfaces_same_owner(member_iface, agg_iface):
+            return JsonResponse({"error": "Member and aggregate interfaces are on different devices."}, status=409)
 
         with transaction.atomic():
             # obj is always a Device here (VMs are 404'd above), so both resolved
@@ -846,6 +877,9 @@ class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         )
         if err:
             return JsonResponse({"error": f"Parent interface: {err}"}, status=404)
+
+        if not _interfaces_same_owner(child_iface, parent_iface):
+            return JsonResponse({"error": "Child and parent interfaces are on different devices."}, status=409)
 
         child_iface.parent = parent_iface
         child_iface.save()

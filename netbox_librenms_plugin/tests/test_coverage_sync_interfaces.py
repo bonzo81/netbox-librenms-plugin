@@ -119,6 +119,32 @@ class TestSyncInterfaceParentViewPermissions:
             view.post(_make_request(), "invalid", 1)
 
 
+class TestInterfacesSameOwnerGuard:
+    """_interfaces_same_owner gates lag/parent links so a port_stack relationship that
+    resolves across two VC members can't persist a NetBox-forbidden cross-device link."""
+
+    def test_same_device_is_true(self):
+        from netbox_librenms_plugin.views.sync.interfaces import _interfaces_same_owner
+
+        a = MagicMock(device_id=1, virtual_machine_id=None)
+        b = MagicMock(device_id=1, virtual_machine_id=None)
+        assert _interfaces_same_owner(a, b) is True
+
+    def test_different_device_is_false(self):
+        from netbox_librenms_plugin.views.sync.interfaces import _interfaces_same_owner
+
+        a = MagicMock(device_id=1, virtual_machine_id=None)
+        b = MagicMock(device_id=2, virtual_machine_id=None)
+        assert _interfaces_same_owner(a, b) is False
+
+    def test_same_vm_is_true(self):
+        from netbox_librenms_plugin.views.sync.interfaces import _interfaces_same_owner
+
+        a = MagicMock(device_id=None, virtual_machine_id=7)
+        b = MagicMock(device_id=None, virtual_machine_id=7)
+        assert _interfaces_same_owner(a, b) is True
+
+
 # ===========================================================================
 # SyncInterfacesView.get_object
 # ===========================================================================

@@ -390,8 +390,11 @@ document.addEventListener('change', function (e) {
     const checkbox = e.target;
     if (!checkbox.matches('input[name="select"]')) return;
 
+    // Only the auto-SELECT behaviour is gated on the toggle; the deselect cleanup below
+    // must always run so a hidden cross-page parent injected earlier (while the toggle was
+    // on) is still removed when its child is unchecked after the toggle is turned off.
     const toggle = document.getElementById('autoSelectLagMembers');
-    if (!toggle || !toggle.checked) return;
+    const autoSelectEnabled = Boolean(toggle && toggle.checked);
 
     const row = checkbox.closest('tr');
     if (!row) return;
@@ -400,7 +403,7 @@ document.addEventListener('change', function (e) {
 
     // --- LAG: check/uncheck all members ---
     const portId = row.dataset.portId;
-    if (portId) {
+    if (autoSelectEnabled && portId) {
         const memberRows = document.querySelectorAll('tr[data-member-of-lag="' + portId + '"]');
         memberRows.forEach(function (memberRow) {
             const memberCheckbox = memberRow.querySelector('input[name="select"]');
@@ -413,7 +416,7 @@ document.addEventListener('change', function (e) {
 
     // --- Sub-interface: select parent when checking ---
     const parentPortId = row.dataset.parentPortId;
-    if (parentPortId && checkbox.checked) {
+    if (autoSelectEnabled && parentPortId && checkbox.checked) {
         const parentRow = document.querySelector('tr[data-port-id="' + parentPortId + '"]');
         if (parentRow) {
             // Parent is on the same page - check it directly
