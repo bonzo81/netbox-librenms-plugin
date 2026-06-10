@@ -1940,13 +1940,29 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         view = self._view()
         with patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir:
             view._sync_url("device", 1)
-        mock_redir.assert_called_once_with("plugins:netbox_librenms_plugin:device_librenms_sync", pk=1)
+        # No request/server_key in scope → bare reversed sync URL (no query string).
+        (url,), _ = mock_redir.call_args
+        assert isinstance(url, str) and "server_key" not in url
+        assert "1" in url
 
     def test_sync_url_vm(self):
         view = self._view()
         with patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir:
             view._sync_url("vm", 1)
-        mock_redir.assert_called_once_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=1)
+        (url,), _ = mock_redir.call_args
+        assert isinstance(url, str) and "server_key" not in url
+
+    def test_sync_url_propagates_server_key(self):
+        """The POST-scoped server_key is preserved on the redirect so multi-server users
+        return to the server they were working in."""
+        view = self._view()
+        view.request = MagicMock()
+        view.request.POST = {"server_key": "prod"}
+        view.request.GET = {}
+        with patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir:
+            view._sync_url("device", 1)
+        (url,), _ = mock_redir.call_args
+        assert "server_key=prod" in url
 
 
 # ---------------------------------------------------------------------------

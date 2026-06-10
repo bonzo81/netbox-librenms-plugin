@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import quote_plus
 
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
@@ -11,7 +12,6 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
-from urllib.parse import quote_plus
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
@@ -748,7 +748,16 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
     def _sync_url(self, object_type, pk):
         name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
-        return redirect(f"plugins:netbox_librenms_plugin:{name}", pk=pk)
+        url = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": pk})
+        # Propagate the active multi-server server_key so redirects land on the server the
+        # user was working in, not the default tab.
+        request = getattr(self, "request", None)
+        server_key = ""
+        if request is not None:
+            server_key = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
+        if server_key:
+            url = f"{url}?server_key={quote_plus(server_key)}"
+        return redirect(url)
 
     def post(self, request, pk):
         object_type = request.POST.get("object_type", "device")

@@ -375,6 +375,19 @@ def validate_device_for_import(
             existing_vm = None
             _flag_ambiguous_librenms_id(result, librenms_id, exc)
 
+        # Cross-model collision: the same librenms_id on both a VM and a Device is ambiguous.
+        # Without this, the VM lookup wins and the Device lookup below is skipped, silently
+        # binding to the VM. Detect it and fail closed (the device block is gated on the flag).
+        if existing_vm is not None:
+            try:
+                _device_collision = find_by_librenms_id(Device, librenms_id, server_key)
+            except AmbiguousLibreNMSIdError as exc:
+                _device_collision = None
+                _flag_ambiguous_librenms_id(result, librenms_id, exc)
+            if _device_collision is not None:
+                _flag_ambiguous_librenms_id(result, librenms_id, "matches both a VirtualMachine and a Device")
+                existing_vm = None
+
         if existing_vm:
             logger.info(f"Found existing VM: {existing_vm.name} (matched by librenms_id={librenms_id})")
             result["existing_device"] = existing_vm
@@ -401,8 +414,9 @@ def validate_device_for_import(
 
         # Check for existing Device (by librenms_id custom field).
         # find_by_librenms_id() covers both the new per-server JSON format
-        # and legacy bare-integer values so neither is missed.
-        if not result["existing_device"]:
+        # and legacy bare-integer values so neither is missed. Skip when an ambiguity
+        # (intra-model or cross-model) was already flagged — binding must fail closed.
+        if not result["existing_device"] and not result["ambiguous_librenms_id"]:
             try:
                 existing_device = find_by_librenms_id(Device, librenms_id, server_key)
             except AmbiguousLibreNMSIdError as exc:

@@ -481,7 +481,9 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         # imported as a VM even though import_as_vm=False (or vice versa).
         CrossModel = Device if import_as_vm else VirtualMachine
 
-        librenms_id = libre_device.get("device_id")
+        # Coerce up front so malformed values (e.g. "42.0", floats, booleans) are rejected
+        # rather than truncated by int() and matched to the wrong record.
+        librenms_id = coerce_librenms_id(libre_device.get("device_id"))
         hostname = libre_device.get("hostname", "")
         sys_name = libre_device.get("sysName", "")
 
@@ -491,13 +493,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
         def _lookup_in_model(m):
             """Return (device, match_type) for model m, or (None, None)."""
-            if librenms_id is not None and not isinstance(librenms_id, bool):
-                try:
-                    dev = find_by_librenms_id(m, int(librenms_id), server_key)
-                    if dev:
-                        return dev, "librenms_id"
-                except (ValueError, TypeError):
-                    pass
+            if librenms_id is not None:
+                dev = find_by_librenms_id(m, librenms_id, server_key)
+                if dev:
+                    return dev, "librenms_id"
             resolved_name = validation.get("resolved_name")
             if resolved_name:
                 dev = m.objects.filter(name__iexact=resolved_name).first()

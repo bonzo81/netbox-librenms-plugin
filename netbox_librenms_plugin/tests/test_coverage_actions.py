@@ -70,7 +70,9 @@ class TestSaveDevice:
 
         response = _save_device(device)
         assert response.status_code == 409
-        assert b"Integrity error" in response.content
+        assert b"integrity constraint" in response.content
+        # Raw DB exception detail must not leak to the client.
+        assert b"duplicate key" not in response.content
 
     def test_success_returns_none(self):
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -98,7 +100,9 @@ class TestSaveDevice:
         device.save.assert_called_once_with(update_fields=["name"])
         device.full_clean.assert_not_called()
         assert response.status_code == 400
-        assert b"Invalid field value" in response.content
+        assert b"field value is invalid" in response.content
+        # Raw DB exception detail must not leak to the client.
+        assert b"value too long" not in response.content
 
     def test_update_fields_databaseerror_returns_409_not_500(self):
         """save(update_fields=...) forces an UPDATE; a concurrent delete makes it affect 0
@@ -116,7 +120,9 @@ class TestSaveDevice:
         device.save.assert_called_once_with(update_fields=["name"])
         device.full_clean.assert_not_called()
         assert response.status_code == 409
-        assert b"Database error" in response.content
+        assert b"changed or deleted" in response.content
+        # Raw DB exception detail must not leak to the client.
+        assert b"did not affect any rows" not in response.content
 
 
 class TestResolveNamingPreferences:
@@ -2646,7 +2652,8 @@ class TestSaveDevicePath:
         result = _save_device(mock_device)
         assert result is not None
         assert result.status_code == 409
-        assert b"Integrity error" in result.content
+        assert b"integrity constraint" in result.content
+        assert b"Duplicate key" not in result.content
 
     def test_should_enable_vc_detection_when_cached(self):
         """Line 168: VC data already cached → returns True."""

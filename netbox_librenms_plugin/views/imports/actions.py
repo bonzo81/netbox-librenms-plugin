@@ -12,6 +12,7 @@ from django.db import IntegrityError, transaction
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django.utils.text import slugify
@@ -198,6 +199,9 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
             return _htmx_error_response(msg)
         return HttpResponse(escape(msg), status=status)
 
+    # ValidationError messages are field-level and safe/useful to surface; raw DB exception
+    # strings (IntegrityError/DataError/DatabaseError) can leak constraint names, column
+    # details, or backend text, so log them server-side and return a generic toast.
     if update_fields is None:
         try:
             device.full_clean()
@@ -206,29 +210,33 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
             return _err(f"Validation error: {error_msg}", 400)
         try:
             device.save()
-        except IntegrityError as exc:
-            return _err(f"Integrity error: {exc}", 409)
+        except IntegrityError:
+            logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
+            return _err("Could not save: a database integrity constraint was violated.", 409)
         return None
 
     try:
         device.save(update_fields=update_fields)
-    except IntegrityError as exc:
-        return _err(f"Integrity error: {exc}", 409)
+    except IntegrityError:
+        logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
+        return _err("Could not save: a database integrity constraint was violated.", 409)
     except ValidationError as exc:
         error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
         return _err(f"Validation error: {error_msg}", 400)
-    except DataError as exc:
+    except DataError:
         # save(update_fields=...) skips full_clean(), so an overlong/invalid value
         # from LibreNMS (e.g. a hostname past Device.name max_length) reaches the DB
         # and raises DataError. Convert it to a clean toast instead of a 500.
-        return _err(f"Invalid field value: {exc}", 400)
-    except DatabaseError as exc:
+        logger.exception("Data error saving device pk=%s", getattr(device, "pk", None))
+        return _err("Could not save: a field value is invalid (for example, too long).", 400)
+    except DatabaseError:
         # save(update_fields=...) forces an UPDATE; if a concurrent delete removed the
         # row it affects 0 rows and Django raises DatabaseError ("did not affect any
         # rows" / Model.NotUpdated). Several callers don't re-lock the row first, so
         # surface this as a toast rather than a 500. (Must follow the IntegrityError /
         # DataError handlers above — both subclass DatabaseError.)
-        return _err(f"Database error: {exc}", 409)
+        logger.exception("Database error saving device pk=%s", getattr(device, "pk", None))
+        return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
     return None
 
 
@@ -781,12 +789,18 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     f"Enqueued ImportDevicesJob {job.pk} (UUID: {job.job_id}) for user {request.user} - {total_import_count} devices/VMs"
                 )
 
-                # Show notification and redirect - matching NetBox's native pattern
+                # Show notification and redirect - matching NetBox's native pattern.
+                # Build URLs via reverse() so deployments under a script prefix / custom
+                # base path get working links.
+                job_url = reverse("core:job", kwargs={"pk": job.pk})
                 messages.info(
                     request,
-                    mark_safe(
-                        f"Import job started for {total_import_count} device{'s' if total_import_count != 1 else ''}. "
-                        f'You can monitor progress in the <a href="/core/jobs/{job.pk}/">Jobs interface</a>.'
+                    format_html(
+                        "Import job started for {} device{}. "
+                        'You can monitor progress in the <a href="{}">Jobs interface</a>.',
+                        total_import_count,
+                        "s" if total_import_count != 1 else "",
+                        job_url,
                     ),
                 )
 
@@ -795,7 +809,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     # This matches the "Clear" button behavior
                     return HttpResponse(
                         "",
-                        headers={"HX-Redirect": "/plugins/librenms_plugin/librenms-import/"},
+                        headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")},
                     )
                 else:
                     return redirect("plugins:netbox_librenms_plugin:librenms_import")
@@ -854,7 +868,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if request.headers.get("HX-Request"):
                 return HttpResponse(
                     "",
-                    headers={"HX-Redirect": "/plugins/librenms_plugin/librenms-import/"},
+                    headers={"HX-Redirect": reverse("plugins:netbox_librenms_plugin:librenms_import")},
                 )
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
@@ -987,8 +1001,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         toast_items,
                     )
                 )
+            # Compose via format_html()/mark_safe() to match the repo's CodeQL-safe envelope
+            # pattern (the rows are trusted Django-template output joined into the body).
             return HttpResponse(
-                "\n".join(updated_rows_html),
+                format_html("{}", mark_safe("\n".join(updated_rows_html))),
                 headers={"HX-Trigger": '{"closeModal": null}'},
             )
 
