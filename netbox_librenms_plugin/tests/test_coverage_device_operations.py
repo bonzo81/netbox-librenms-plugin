@@ -316,6 +316,33 @@ class TestValidateDeviceStateMachine:
         result["can_import"] = len(result["issues"]) == 0
         assert result["can_import"] is False
 
+    def test_vm_match_with_ambiguous_device_lookup_drops_vm_binding(self):
+        """VM matches by librenms_id but the cross-model Device collision check is itself
+        ambiguous (raises): the VM binding must be dropped and the import fail closed,
+        never rebound as a definitive 'librenms_id' match."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError
+
+        matched_vm = MagicMock()
+        matched_vm.name = "vm01"
+
+        result = self._run_validate(
+            self._base_device(),
+            patches_overrides=[
+                patch(
+                    "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                    # 1st call (VM) → a match; 2nd call (cross-model Device check) → ambiguous.
+                    side_effect=[matched_vm, AmbiguousLibreNMSIdError("dup device pk=3, pk=4")],
+                ),
+            ],
+        )
+        assert result["can_import"] is False
+        assert result["ambiguous_librenms_id"] is True
+        # VM binding must be dropped — not surfaced as the existing object/match.
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] != "librenms_id"
+
     def test_new_vm_without_cluster_is_not_ready(self):
         """New VM import with no cluster available must not be ready."""
         result = self._run_validate(self._base_device(hostname="vm01"), import_as_vm=True)

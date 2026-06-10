@@ -307,6 +307,10 @@ class TestMoveInterfaceToWinnerView:
         locked_iface.full_clean.assert_called_once()
         locked_iface.save.assert_not_called()
         assert b"django-messages" in resp.content
+        # Error contract (see _fail): HTMX errors are an OOB toast at HTTP 200 with
+        # HX-Reswap:none and no HX-Refresh — never the success refresh response.
+        assert resp.status_code == 200
+        assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
 
     def test_save_integrity_error_rejected_with_409(self):
@@ -353,6 +357,10 @@ class TestMoveInterfaceToWinnerView:
         # success response by the absence of the HX-Refresh header.
         locked_iface.save.assert_called_once()
         assert b"django-messages" in resp.content
+        # Error contract (see _fail): HTMX errors are an OOB toast at HTTP 200 with
+        # HX-Reswap:none and no HX-Refresh — never the success refresh response.
+        assert resp.status_code == 200
+        assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
 
     def test_marker_repointed_under_lock_is_rejected(self):

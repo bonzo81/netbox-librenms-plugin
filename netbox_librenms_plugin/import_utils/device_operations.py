@@ -382,8 +382,12 @@ def validate_device_for_import(
             try:
                 _device_collision = find_by_librenms_id(Device, librenms_id, server_key)
             except AmbiguousLibreNMSIdError as exc:
+                # An ambiguous device lookup is itself a fail-closed condition: drop the
+                # VM binding too so the block below cannot rebind it as a definitive
+                # "librenms_id" match (the import is already flagged ambiguous).
                 _device_collision = None
                 _flag_ambiguous_librenms_id(result, librenms_id, exc)
+                existing_vm = None
             if _device_collision is not None:
                 _flag_ambiguous_librenms_id(result, librenms_id, "matches both a VirtualMachine and a Device")
                 existing_vm = None

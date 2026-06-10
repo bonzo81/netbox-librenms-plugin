@@ -928,7 +928,11 @@ class TestSyncIPAddressesViewUnknownServerKey:
 
         with (
             patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None) as mock_build,
+            # Drive the REAL failure mode end to end: LibreNMSAPI raises KeyError for an
+            # unknown key, and the real build_librenms_api must swallow it into None so
+            # the view degrades gracefully. Mocking build_librenms_api=None directly would
+            # keep passing even if that try/except regressed — this exercises the swallow.
+            patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI", side_effect=KeyError("ghost")) as mock_cls,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect") as mock_redirect,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
@@ -937,7 +941,7 @@ class TestSyncIPAddressesViewUnknownServerKey:
             view.request = _make_request(post_data={"server_key": "ghost", "select": ["10.0.0.1/24"]})
             result = view.post(view.request, object_type="device", pk=1)
 
-        mock_build.assert_called_once_with("ghost")
+        mock_cls.assert_called_once_with(server_key="ghost")
         mock_msgs.error.assert_called_once()
         # Must redirect back to the IP-sync tab (resolved server_key), not just "somewhere".
         mock_redirect.assert_called_once_with("/sync/?tab=ipaddresses&server_key=default")
