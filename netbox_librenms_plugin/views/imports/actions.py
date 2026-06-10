@@ -1982,15 +1982,29 @@ class CreatePlatformFromImportView(
 
                 if create_mapping and librenms_os:
                     if not PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists():
-                        try:
-                            with transaction.atomic():
-                                PlatformMapping.objects.create(
-                                    librenms_os=librenms_os.lower(),
-                                    netbox_platform=platform,
-                                )
-                        except IntegrityError:
-                            # Concurrent request created the mapping; safe to ignore.
-                            pass
+                        # Re-check the add permission at the write site. The upfront gate only
+                        # requires ("add", PlatformMapping) when no mapping existed at preflight;
+                        # if one existed then but was deleted since, this branch would otherwise
+                        # create a mapping the caller was never authorized for. Skip rather than
+                        # error — the Platform is already created and is the primary action.
+                        from utilities.permissions import get_permission_for_model
+
+                        if request.user.has_perm(get_permission_for_model(PlatformMapping, "add")):
+                            try:
+                                with transaction.atomic():
+                                    PlatformMapping.objects.create(
+                                        librenms_os=librenms_os.lower(),
+                                        netbox_platform=platform,
+                                    )
+                            except IntegrityError:
+                                # Concurrent request created the mapping; safe to ignore.
+                                pass
+                        else:
+                            logger.warning(
+                                "CreatePlatformFromImportView: skipped PlatformMapping create for OS %r — "
+                                "user lacks add permission (mapping was removed after the preflight check).",
+                                librenms_os,
+                            )
         except ValidationError as exc:
             logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
             detail = exc.message_dict if hasattr(exc, "message_dict") else str(exc)

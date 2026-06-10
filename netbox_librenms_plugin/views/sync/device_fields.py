@@ -461,10 +461,24 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             mapping_created = False
             mapping_error = None
             mapping_existed = False
+            mapping_skipped_no_perm = False
             if create_mapping and librenms_os:
+                from utilities.permissions import get_permission_for_model
+
                 existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
                 if existing is not None:
                     mapping_existed = True
+                elif not request.user.has_perm(get_permission_for_model(PlatformMapping, "add")):
+                    # Re-check the add permission at the write site. The upfront gate only
+                    # requires it when no mapping existed at preflight; if one existed then but
+                    # was deleted since, creating here would bypass the permission. Skip rather
+                    # than fail — the platform is already assigned and is the primary action.
+                    mapping_skipped_no_perm = True
+                    logger.warning(
+                        "CreateAndAssignPlatformView: skipped PlatformMapping create for OS '%s' — "
+                        "user lacks add permission (mapping was removed after the preflight check).",
+                        librenms_os,
+                    )
                 else:
                     try:
                         with transaction.atomic():
@@ -500,6 +514,11 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.info(
                 request,
                 f"Platform mapping for '{librenms_os}' already exists; not modified.",
+            )
+        elif mapping_skipped_no_perm:
+            messages.warning(
+                request,
+                f"Platform mapping for '{librenms_os}' was not created — you lack permission to add mappings.",
             )
 
         return self._sync_redirect(request, pk)

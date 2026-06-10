@@ -1156,6 +1156,35 @@ class TestCreateAndAssignPlatformView:
 
         mock_mapping_cls.assert_not_called()
 
+    def test_mapping_skipped_when_lacking_add_perm_at_write(self):
+        """TOCTOU guard: a mapping existed at the preflight gate (so add wasn't required) but
+        was deleted before the write. The write-site permission re-check must skip the create
+        rather than bypass the permission — and warn the user."""
+        view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
+        )
+        # Upfront object-permission gate passes (user has change Device / add Platform); the
+        # write-site re-check is what must catch the missing PlatformMapping add permission.
+        view.require_object_permissions = MagicMock(return_value=None)
+        req.user.has_perm = MagicMock(return_value=False)  # write-site add-PlatformMapping check denied
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.first.return_value = None  # deleted since preflight
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+        ):
+            view.post(req, pk=1)
+
+        # No mapping created without permission, and the user is told why.
+        mock_mapping_cls.assert_not_called()
+        assert any("not created" in c.args[1] for c in mock_msg.warning.call_args_list)
+
     def test_required_object_permissions_include_platformmapping_when_mapping_will_be_created(self):
         """create_mapping on + OS supplied + no existing mapping → ('add', PlatformMapping)
         is added to required_object_permissions BEFORE require_all_permissions runs."""
