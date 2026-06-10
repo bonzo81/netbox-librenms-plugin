@@ -1177,8 +1177,38 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         # The OOB controller's own device id — so a re-import recognises the merged device.
         oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
 
-    host_match = model.objects.filter(host_q).first()
-    oob_match = model.objects.filter(oob_q).first()
+    # Pull two rows per side so a duplicate within either result set is detectable.
+    host_matches = list(model.objects.filter(host_q)[:2])
+    oob_matches = list(model.objects.filter(oob_q)[:2])
+
+    # Fail closed on intra-set ambiguity: two distinct rows sharing the same host (or
+    # OOB) librenms_id is a data-integrity violation — binding to whichever sorts first
+    # would silently attach sync/migration work to the wrong object.
+    if len(host_matches) > 1:
+        logger.warning(
+            "Ambiguous librenms_id %r for %s on server %r: multiple host matches (pk=%s, pk=%s) "
+            "— refusing to bind (fail closed).",
+            librenms_id,
+            model.__name__,
+            server_key,
+            host_matches[0].pk,
+            host_matches[1].pk,
+        )
+        return None
+    if len(oob_matches) > 1:
+        logger.warning(
+            "Ambiguous librenms_id %r for %s on server %r: multiple OOB matches (pk=%s, pk=%s) "
+            "— refusing to bind (fail closed).",
+            librenms_id,
+            model.__name__,
+            server_key,
+            oob_matches[0].pk,
+            oob_matches[1].pk,
+        )
+        return None
+
+    host_match = host_matches[0] if host_matches else None
+    oob_match = oob_matches[0] if oob_matches else None
     if host_match is not None and oob_match is not None and host_match.pk != oob_match.pk:
         logger.warning(
             "Ambiguous librenms_id %r for %s on server %r: host match pk=%s but OOB match "

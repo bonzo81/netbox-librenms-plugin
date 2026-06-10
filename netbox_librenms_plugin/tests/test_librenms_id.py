@@ -7,6 +7,17 @@ and migrate_legacy_librenms_id.
 from unittest.mock import MagicMock
 
 
+def _qs_returning(rows):
+    """Build a mock queryset whose ``[:2]`` slice yields ``rows``.
+
+    ``find_by_librenms_id`` calls ``list(model.objects.filter(q)[:2])`` per side, so the
+    test double must support slice indexing rather than ``.first()``.
+    """
+    qs = MagicMock()
+    qs.__getitem__.return_value = rows
+    return qs
+
+
 class TestGetLibreNMSDeviceId:
     """Tests for get_librenms_device_id()."""
 
@@ -118,7 +129,7 @@ class TestFindByLibreNMSId:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         find_by_librenms_id(mock_model, 42, "default")
 
@@ -147,11 +158,11 @@ class TestFindByLibreNMSId:
     def test_returns_first_matching_object(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
 
-        expected = MagicMock()
+        expected = MagicMock(pk=7)
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = expected
+        mock_qs.__getitem__.return_value = [expected]
 
         result = find_by_librenms_id(mock_model, 42, "default")
         assert result is expected
@@ -164,7 +175,7 @@ class TestFindByLibreNMSId:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         result = find_by_librenms_id(mock_model, 999, "production")
         assert result is None
@@ -202,7 +213,7 @@ class TestFindByLibreNMSId:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         find_by_librenms_id(mock_model, 42)
 
@@ -235,8 +246,11 @@ class TestFindByLibreNMSId:
         mock_model = MagicMock(__name__="Device")  # __name__ used in the fail-closed log
         host_obj = MagicMock(pk=1)
         oob_obj = MagicMock(pk=2)
-        # filter() is called twice (host_q, then oob_q); return distinct rows.
-        mock_model.objects.filter.return_value.first.side_effect = [host_obj, oob_obj]
+        # filter() is called twice (host_q, then oob_q); each result is sliced [:2].
+        mock_model.objects.filter.side_effect = [
+            _qs_returning([host_obj]),
+            _qs_returning([oob_obj]),
+        ]
 
         assert find_by_librenms_id(mock_model, 42, "default") is None
 
@@ -247,7 +261,7 @@ class TestFindByLibreNMSId:
 
         mock_model = MagicMock()
         same = MagicMock(pk=5)
-        mock_model.objects.filter.return_value.first.side_effect = [same, same]
+        mock_model.objects.filter.side_effect = [_qs_returning([same]), _qs_returning([same])]
 
         assert find_by_librenms_id(mock_model, 42, "default") is same
 
@@ -258,9 +272,37 @@ class TestFindByLibreNMSId:
 
         mock_model = MagicMock()
         host_obj = MagicMock(pk=1)
-        mock_model.objects.filter.return_value.first.side_effect = [host_obj, None]
+        mock_model.objects.filter.side_effect = [_qs_returning([host_obj]), _qs_returning([])]
 
         assert find_by_librenms_id(mock_model, 42, "default") is host_obj
+
+    def test_fail_closed_on_duplicate_host_matches(self):
+        """Two distinct rows sharing the same host librenms_id is a data-integrity
+        violation — refuse to bind to either rather than picking whichever sorts first."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock(__name__="Device")
+        # Host query returns two rows; OOB query is irrelevant (host ambiguity fails first).
+        mock_model.objects.filter.side_effect = [
+            _qs_returning([MagicMock(pk=1), MagicMock(pk=2)]),
+            _qs_returning([]),
+        ]
+
+        assert find_by_librenms_id(mock_model, 42, "default") is None
+
+    def test_fail_closed_on_duplicate_oob_matches(self):
+        """Two distinct rows sharing the same OOB librenms_id is likewise rejected."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock(__name__="Device")
+        mock_model.objects.filter.side_effect = [
+            _qs_returning([]),
+            _qs_returning([MagicMock(pk=3), MagicMock(pk=4)]),
+        ]
+
+        assert find_by_librenms_id(mock_model, 42, "default") is None
 
 
 class TestMigrateLegacyLibreNMSId:
@@ -506,7 +548,7 @@ class TestOOBHelpers:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         find_by_librenms_id(mock_model, 42, "primary")
 
@@ -525,7 +567,7 @@ class TestOOBHelpers:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         find_by_librenms_id(mock_model, 17, "primary")
 
@@ -541,7 +583,7 @@ class TestOOBHelpers:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         result = find_by_librenms_id(mock_model, 999, "primary")
         assert result is None
@@ -1012,7 +1054,7 @@ class TestMarkLibreNMSMigrated:
         assert entry.get("oob") is None
         # Mock model.objects.filter: should return empty queryset for either id or oob lookup
         mock_model = MagicMock()
-        mock_model.objects.filter.return_value.first.return_value = None
+        mock_model.objects.filter.return_value.__getitem__.return_value = []
         assert find_by_librenms_id(mock_model, 99, "default") is None
 
         # Prove the function actually built the lookup (not a vacuous pass): the

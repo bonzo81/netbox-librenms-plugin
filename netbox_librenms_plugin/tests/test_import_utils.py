@@ -1257,9 +1257,10 @@ class TestDeviceNamingPreferencesLegacy:
         existing = MagicMock()
         existing.name = "core-switch"
         existing.serial = ""
-        # find_by_librenms_id now issues two queries (host + OOB); both miss here, then the
-        # hostname query returns the existing device.
-        mock_device.objects.filter.return_value.first.side_effect = [None, None, existing]
+        # find_by_librenms_id consumes the queryset via list(qs[:2]) per side (host + OOB);
+        # both miss here (empty slice), then the hostname query's .first() returns existing.
+        mock_device.objects.filter.return_value.__getitem__.return_value = []
+        mock_device.objects.filter.return_value.first.return_value = existing
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1376,8 +1377,11 @@ class TestNameMatchesWithNamingPreferencesLegacy:
                         isinstance(child, tuple) and "librenms_id" in child[0] for child in q.children
                     ):
                         mock_qs.first.return_value = hit
+                        # find_by_librenms_id consumes the queryset via list(qs[:2]).
+                        mock_qs.__getitem__.return_value = [hit] if hit is not None else []
                         return mock_qs
                 mock_qs.first.return_value = None
+                mock_qs.__getitem__.return_value = []
                 return mock_qs
 
             return side_effect
@@ -1898,8 +1902,11 @@ class TestSerialNumberMatching:
             )
             if q_has_librenms:
                 result.first.return_value = existing
+                # find_by_librenms_id consumes the queryset via list(qs[:2]).
+                result.__getitem__.return_value = [existing]
             else:
                 result.first.return_value = None
+                result.__getitem__.return_value = []
             return result
 
         self.mock_device.objects.filter.side_effect = device_filter
@@ -1942,11 +1949,15 @@ class TestSerialNumberMatching:
             )
             if q_has_librenms:
                 result.first.return_value = existing
+                # find_by_librenms_id consumes the queryset via list(qs[:2]).
+                result.__getitem__.return_value = [existing]
             elif "serial" in kwargs:
                 result.first.return_value = None
+                result.__getitem__.return_value = []
                 result.exclude.return_value.first.return_value = None
             else:
                 result.first.return_value = None
+                result.__getitem__.return_value = []
             return result
 
         self.mock_device.objects.filter.side_effect = device_filter
@@ -1988,8 +1999,11 @@ class TestSerialNumberMatching:
             )
             if q_has_librenms:
                 result.first.return_value = existing
+                # find_by_librenms_id consumes the queryset via list(qs[:2]).
+                result.__getitem__.return_value = [existing]
             else:
                 result.first.return_value = None
+                result.__getitem__.return_value = []
             return result
 
         self.mock_device.objects.filter.side_effect = device_filter
@@ -2230,6 +2244,8 @@ class TestNameMatchesWithNamingPreferences:
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
             result.first.return_value = existing if q_has_librenms else None
+            # find_by_librenms_id now consumes the queryset via list(qs[:2]) per side.
+            result.__getitem__.return_value = [existing] if q_has_librenms else []
             result.exclude.return_value.first.return_value = None
             return result
 
@@ -2484,6 +2500,8 @@ class TestLegacyLibreNMSIdMigration:
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
             result.first.return_value = existing if q_has_librenms else None
+            # find_by_librenms_id now consumes the queryset via list(qs[:2]) per side.
+            result.__getitem__.return_value = [existing] if q_has_librenms else []
             return result
 
         self.mock_device.objects.filter.side_effect = device_filter
@@ -3578,9 +3596,10 @@ class TestDeviceNamingPreferences:
         existing.serial = ""
         existing.virtual_chassis = None
         existing.vc_position = None
-        # find_by_librenms_id now issues two queries (host + OOB); both miss here, then the
-        # hostname query returns the existing device.
-        mock_device.objects.filter.return_value.first.side_effect = [None, None, existing]
+        # find_by_librenms_id consumes the queryset via list(qs[:2]) per side (host + OOB);
+        # both miss here (empty slice), then the hostname query's .first() returns existing.
+        mock_device.objects.filter.return_value.__getitem__.return_value = []
+        mock_device.objects.filter.return_value.first.return_value = existing
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
