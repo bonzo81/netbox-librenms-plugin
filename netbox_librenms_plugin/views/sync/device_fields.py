@@ -11,6 +11,7 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.html import escape
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from virtualization.models import VirtualMachine
 
@@ -529,17 +530,21 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         """Redirect to the device sync tab, preserving the POST-scoped server_key so a
         multi-server user returns to the same server tab instead of the default one.
 
-        The server_key is reflected only inside an explicit allowlist guard
-        (``requested in get_available_servers()``). That membership check is the barrier
-        CodeQL recognises for py/url-redirection (CWE-601) — the redirect target is always a
-        reverse()-built internal path with an optional, allowlisted query value.
+        The server_key is reflected only when it matches a configured server, and the final
+        redirect is gated by Django's ``url_has_allowed_host_and_scheme`` with the sink inside
+        the validated branch — the open-redirect barrier CodeQL recognises for py/url-redirection
+        (CWE-601). Mirrors :func:`mixins._safe_redirect_response`.
         """
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         requested = (request.POST.get("server_key") or "").strip()
         if requested and requested in LibreNMSAPI.get_available_servers():
-            url = f"{url}?server_key={quote_plus(requested)}"
+            candidate = f"{url}?server_key={quote_plus(requested)}"
+            if url_has_allowed_host_and_scheme(
+                candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+            ):
+                return redirect(candidate)
         return redirect(url)
 
 
@@ -752,15 +757,20 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
         url = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": pk})
         # Propagate the active multi-server server_key so redirects land on the server the
-        # user was working in. Reflect it only inside an explicit allowlist guard so the
-        # request value can't steer the redirect target — the barrier CodeQL recognises for
-        # py/url-redirection (CWE-601).
+        # user was working in. Reflect it only for a configured server, and gate the final
+        # redirect on Django's url_has_allowed_host_and_scheme with the sink inside the
+        # validated branch — the open-redirect barrier CodeQL recognises (CWE-601). Mirrors
+        # mixins._safe_redirect_response.
         request = getattr(self, "request", None)
         requested = ""
         if request is not None:
             requested = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
-        if requested and requested in LibreNMSAPI.get_available_servers():
-            url = f"{url}?server_key={quote_plus(requested)}"
+        if request is not None and requested and requested in LibreNMSAPI.get_available_servers():
+            candidate = f"{url}?server_key={quote_plus(requested)}"
+            if url_has_allowed_host_and_scheme(
+                candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+            ):
+                return redirect(candidate)
         return redirect(url)
 
     def post(self, request, pk):
