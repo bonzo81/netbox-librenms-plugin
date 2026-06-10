@@ -295,6 +295,27 @@ class TestValidateDeviceStateMachine:
         assert result["existing_match_type"] == "ambiguous_librenms_id"
         assert any("matches more than one" in w for w in result["warnings"])
 
+    def test_flag_ambiguous_is_a_durable_blocker(self):
+        """The ambiguity must land in issues (not only warnings) so the readiness step's
+        `can_import = len(issues) == 0` recompute cannot silently re-enable the import."""
+        from netbox_librenms_plugin.import_utils.device_operations import _flag_ambiguous_librenms_id
+
+        result = {
+            "can_import": True,
+            "existing_match_type": None,
+            "ambiguous_librenms_id": False,
+            "warnings": [],
+            "issues": [],
+        }
+        _flag_ambiguous_librenms_id(result, 42, Exception("dup host pk=1, pk=2"))
+
+        assert result["ambiguous_librenms_id"] is True
+        assert result["can_import"] is False
+        assert any("matches more than one" in i for i in result["issues"])
+        # Simulate the later readiness recompute with no other issues — must stay blocked.
+        result["can_import"] = len(result["issues"]) == 0
+        assert result["can_import"] is False
+
     def test_new_vm_without_cluster_is_not_ready(self):
         """New VM import with no cluster available must not be ready."""
         result = self._run_validate(self._base_device(hostname="vm01"), import_as_vm=True)

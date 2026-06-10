@@ -181,16 +181,23 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
 
     An ambiguous id is a data-integrity violation; treating it as "not found" would let
     the device import as new (or bind to an arbitrary row), so fail closed instead.
+
+    The message is appended to ``issues`` (not just ``warnings``) because the readiness
+    step recomputes ``can_import`` from ``issues`` — a warning alone would be silently
+    overridden back to importable when no other issue is present.
     """
     logger.warning("Import validation blocked — ambiguous librenms_id %r: %s", librenms_id, exc)
+    result["ambiguous_librenms_id"] = True
     result["can_import"] = False
     if result.get("existing_match_type") != "ambiguous_librenms_id":
         result["existing_match_type"] = "ambiguous_librenms_id"
-        result["warnings"].append(
+        message = (
             f"LibreNMS ID {librenms_id} matches more than one existing NetBox record; import "
             "blocked to avoid binding to the wrong object. Resolve the duplicate librenms_id "
             "assignment, then retry."
         )
+        result["warnings"].append(message)
+        result["issues"].append(message)
 
 
 def validate_device_for_import(
@@ -274,6 +281,7 @@ def validate_device_for_import(
         "resolved_name": None,  # Final device name after applying user preferences
         "existing_device": None,
         "existing_match_type": None,  # Track how existing device was matched
+        "ambiguous_librenms_id": False,  # True when the librenms_id matches >1 NetBox object (import blocked)
         "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs", "oob_candidate", "promote_to_host", "merge_netbox_devices"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "serial_duplicate": False,  # True when incoming serial is already on a different device
