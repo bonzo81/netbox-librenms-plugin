@@ -145,7 +145,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             return None
         links_data = []
         for link in links:
+            if not isinstance(link, dict):
+                continue
             local_port_name = local_ports_map.get(str(link.get("local_port_id")))
+            if local_port_name is None:
+                # Fall back to the LibreNMS-reported local_port name so name-based
+                # resolution still works when the ports map misses or ports fetch failed.
+                local_port_name = link.get("local_port")
             links_data.append(
                 {
                     "local_port": local_port_name,
@@ -201,6 +207,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                     )
                     return links_data
                 for link in oob_links:
+                    if not isinstance(link, dict):
+                        continue
                     oob_port_id = link.get("local_port_id")
                     oob_local_port = oob_local_ports_map.get(str(oob_port_id)) if oob_port_id else None
                     if oob_local_port is None:

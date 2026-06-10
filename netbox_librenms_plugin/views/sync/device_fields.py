@@ -8,8 +8,10 @@ from django.utils.text import slugify
 
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
+from urllib.parse import quote_plus
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
@@ -360,7 +362,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         if not platform_name:
             messages.error(request, "Platform name is required")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return self._sync_redirect(request, pk)
 
         manufacturer = None
         if manufacturer_id:
@@ -398,7 +400,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         request,
                         f"Platform '{platform_name}' could not be created: {error_msg}",
                     )
-                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                    return self._sync_redirect(request, pk)
                 except IntegrityError as e:
                     # A concurrent request created this platform between our existence
                     # check and our save. Reuse the winner (the goal is reuse-or-create)
@@ -416,7 +418,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                             request,
                             f"Platform '{platform_name}' could not be created: {e}",
                         )
-                        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                        return self._sync_redirect(request, pk)
             else:
                 # Reuse the existing platform unchanged — do not touch its
                 # manufacturer/vendor scoping; we only assign it and add the mapping.
@@ -427,7 +429,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             except Device.DoesNotExist:
                 transaction.set_rollback(True)
                 messages.error(request, "Device no longer exists.")
-                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                return self._sync_redirect(request, pk)
 
             device.platform = platform
             try:
@@ -444,7 +446,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     request,
                     f"Device (pk={pk}) validation failed: {error_msg}",
                 )
-                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                return self._sync_redirect(request, pk)
             try:
                 device.save()
             except IntegrityError as e:
@@ -454,7 +456,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     request,
                     f"Error saving device (pk={pk}): {e}",
                 )
-                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                return self._sync_redirect(request, pk)
 
             mapping_created = False
             mapping_error = None
@@ -500,7 +502,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 f"Platform mapping for '{librenms_os}' already exists; not modified.",
             )
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return self._sync_redirect(request, pk)
+
+    @staticmethod
+    def _sync_redirect(request, pk):
+        """Redirect to the device sync tab, preserving the POST-scoped server_key so a
+        multi-server user returns to the same server tab instead of the default one."""
+        url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = (request.POST.get("server_key") or "").strip()
+        if server_key:
+            url = f"{url}?server_key={quote_plus(server_key)}"
+        return redirect(url)
 
 
 class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):

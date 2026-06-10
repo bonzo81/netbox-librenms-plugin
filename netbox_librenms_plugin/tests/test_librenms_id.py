@@ -122,13 +122,18 @@ class TestFindByLibreNMSId:
 
         find_by_librenms_id(mock_model, 42, "default")
 
-        mock_model.objects.filter.assert_called_once()
-        # Verify the Q predicate covers both the server-key JSON branch and legacy bare-int/string branches
-        call_args = mock_model.objects.filter.call_args
-        q_arg = call_args[0][0]
-        assert isinstance(q_arg, Q)
-        assert q_arg.connector == "OR"
-        assert set(q_arg.children) == {
+        # Host and OOB predicate sets are queried separately (so a host match and a
+        # different OOB match can be detected and rejected). Their union must still cover
+        # the server-key JSON branch, the __id/__oob__id dict forms, and the legacy
+        # bare-int/string branches.
+        assert mock_model.objects.filter.call_count == 2
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            q_arg = call[0][0]
+            assert isinstance(q_arg, Q)
+            assert q_arg.connector == "OR"
+            all_children |= set(q_arg.children)
+        assert all_children == {
             ("custom_field_data__librenms_id__default", 42),
             ("custom_field_data__librenms_id__default", "42"),
             ("custom_field_data__librenms_id__default__id", 42),
@@ -166,10 +171,13 @@ class TestFindByLibreNMSId:
 
         # Any server_key must include legacy bare-int/string fallback conditions
         # so that devices imported before multi-server support are still found.
-        call_args = mock_model.objects.filter.call_args
-        q_arg = call_args[0][0]
-        assert isinstance(q_arg, Q)
-        assert set(q_arg.children) == {
+        # (Predicates are split across the host and OOB queries — aggregate them.)
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            q_arg = call[0][0]
+            assert isinstance(q_arg, Q)
+            all_children |= set(q_arg.children)
+        assert all_children == {
             ("custom_field_data__librenms_id__production", 999),
             ("custom_field_data__librenms_id__production", "999"),
             ("custom_field_data__librenms_id__production__id", 999),
@@ -198,14 +206,16 @@ class TestFindByLibreNMSId:
 
         find_by_librenms_id(mock_model, 42)
 
-        mock_model.objects.filter.assert_called_once()
-        call_args = mock_model.objects.filter.call_args
-        q_arg = call_args[0][0]
-        assert isinstance(q_arg, Q)
-        assert q_arg.connector == "OR"
-        # The JSON-path branch must use "default" as the server key; exact tuple check prevents
-        # duplicate or missing branches from going undetected.
-        assert set(q_arg.children) == {
+        # The JSON-path branch must use "default" as the server key; exact tuple check
+        # across the host + OOB queries prevents duplicate or missing branches.
+        assert mock_model.objects.filter.call_count == 2
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            q_arg = call[0][0]
+            assert isinstance(q_arg, Q)
+            assert q_arg.connector == "OR"
+            all_children |= set(q_arg.children)
+        assert all_children == {
             ("custom_field_data__librenms_id__default", 42),
             ("custom_field_data__librenms_id__default", "42"),
             ("custom_field_data__librenms_id__default__id", 42),
@@ -215,6 +225,42 @@ class TestFindByLibreNMSId:
             ("custom_field_data__librenms_id", 42),
             ("custom_field_data__librenms_id", "42"),
         }
+
+    def test_fail_closed_when_host_and_oob_match_different_rows(self):
+        """If the host query matches one object and the OOB query a *different* one, the
+        result is ambiguous — return None rather than binding to whichever sorts first."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock(__name__="Device")  # __name__ used in the fail-closed log
+        host_obj = MagicMock(pk=1)
+        oob_obj = MagicMock(pk=2)
+        # filter() is called twice (host_q, then oob_q); return distinct rows.
+        mock_model.objects.filter.return_value.first.side_effect = [host_obj, oob_obj]
+
+        assert find_by_librenms_id(mock_model, 42, "default") is None
+
+    def test_same_row_for_host_and_oob_is_returned(self):
+        """When both queries resolve to the same row, it is returned (not ambiguous)."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        same = MagicMock(pk=5)
+        mock_model.objects.filter.return_value.first.side_effect = [same, same]
+
+        assert find_by_librenms_id(mock_model, 42, "default") is same
+
+    def test_host_match_wins_when_no_oob_match(self):
+        """Host identity is returned when only the host query matches."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        host_obj = MagicMock(pk=1)
+        mock_model.objects.filter.return_value.first.side_effect = [host_obj, None]
+
+        assert find_by_librenms_id(mock_model, 42, "default") is host_obj
 
 
 class TestMigrateLegacyLibreNMSId:
@@ -464,10 +510,13 @@ class TestOOBHelpers:
 
         find_by_librenms_id(mock_model, 42, "primary")
 
-        call_args = mock_model.objects.filter.call_args
-        q_arg = call_args[0][0]
-        assert ("custom_field_data__librenms_id__primary__id", 42) in q_arg.children
-        assert ("custom_field_data__librenms_id__primary__id", "42") in q_arg.children
+        # Host and OOB predicate sets are now queried separately, so aggregate the
+        # children across every filter() call rather than inspecting only the last.
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            all_children |= set(call[0][0].children)
+        assert ("custom_field_data__librenms_id__primary__id", 42) in all_children
+        assert ("custom_field_data__librenms_id__primary__id", "42") in all_children
 
     def test_find_by_matches_oob_id(self):
         """find_by_librenms_id Q includes __oob__id sub-key lookup."""
@@ -969,8 +1018,10 @@ class TestMarkLibreNMSMigrated:
         # Prove the function actually built the lookup (not a vacuous pass): the
         # combined Q must target the id/oob predicates and must NEVER match on the
         # _migrated_to marker, so a migrated-only donor can't be returned.
-        q_arg = mock_model.objects.filter.call_args[0][0]
-        lookups = [child[0] for child in q_arg.children]
+        # Host and OOB predicates are queried separately now — aggregate across calls.
+        lookups = []
+        for call in mock_model.objects.filter.call_args_list:
+            lookups += [child[0] for child in call[0][0].children]
         assert any(lk == "custom_field_data__librenms_id__default__id" for lk in lookups)
         assert any(lk == "custom_field_data__librenms_id__default__oob__id" for lk in lookups)
         assert all("_migrated_to" not in lk for lk in lookups)

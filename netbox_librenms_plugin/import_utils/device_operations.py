@@ -1315,3 +1315,18 @@ def fetch_device_with_cache(
             cache.set(cache_key, libre_device, timeout=api.cache_timeout)
 
     return libre_device
+
+
+def __getattr__(name):
+    """Lazily re-export ``bulk_import_devices_shared`` to satisfy the
+    ``import_utils/device_operations.py`` export contract.
+
+    A top-level ``from .bulk_import import bulk_import_devices_shared`` would be a
+    circular import (``bulk_import`` imports ``validate_device_for_import`` from this
+    module at load time), so PEP 562 defers the import until the attribute is accessed.
+    """
+    if name == "bulk_import_devices_shared":
+        from .bulk_import import bulk_import_devices_shared
+
+        return bulk_import_devices_shared
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

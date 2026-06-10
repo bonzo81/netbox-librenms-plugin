@@ -20,6 +20,23 @@ from unittest.mock import MagicMock, patch
 # =============================================================================
 
 
+def _q_leaves(q):
+    """Flatten a Django Q into a set of (lookup, value) leaf tuples.
+
+    Lets tests assert the predicates a Q composes without coupling to Q's string
+    representation (quote/order formatting), which is a framework internal.
+    """
+    from django.db.models import Q
+
+    leaves = set()
+    for child in q.children:
+        if isinstance(child, Q):
+            leaves |= _q_leaves(child)
+        else:
+            leaves.add(child)
+    return leaves
+
+
 def _mock_obj(model_name="device", pk=1, name="test-device"):
     obj = MagicMock()
     obj._meta = MagicMock()
@@ -96,14 +113,14 @@ class TestLibreNMSIdQ:
         the Q must query the __id and __oob__id JSON paths, not just the scalar path."""
         from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
 
-        result_str = str(_librenms_id_q("default", 42))
-        assert "custom_field_data__librenms_id__default__id" in result_str
-        assert "custom_field_data__librenms_id__default__oob__id" in result_str
-        # The JSON string variant must be present on BOTH dict paths (JSON may store the
-        # id as "42"), not merely the integer form — assert the quoted value on each path
-        # so this fails if only the int-form predicates are emitted.
-        assert "custom_field_data__librenms_id__default__id', '42'" in result_str
-        assert "custom_field_data__librenms_id__default__oob__id', '42'" in result_str
+        leaves = _q_leaves(_librenms_id_q("default", 42))
+        # Both dict JSON paths must be queried, with BOTH the int and the JSON-string
+        # variant (JSON may store the id as "42"). Assert on the composed predicates rather
+        # than the Q's string form so framework formatting changes don't break the test.
+        assert ("custom_field_data__librenms_id__default__id", 42) in leaves
+        assert ("custom_field_data__librenms_id__default__id", "42") in leaves
+        assert ("custom_field_data__librenms_id__default__oob__id", 42) in leaves
+        assert ("custom_field_data__librenms_id__default__oob__id", "42") in leaves
 
     def test_non_int_string_value_except_caught(self):
         """Non-convertible string 'abc' → ValueError caught, base Q returned (lines 42-43)."""

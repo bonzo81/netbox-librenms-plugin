@@ -101,6 +101,7 @@ class TestBaseCableTableViewGetLinksData:
         obj = _mock_obj()
 
         for bad_payload in ([{"local_port_id": 1}], None, "oops"):
+            view = self._make_view()  # fresh per case so each proves it sets the error itself
             view._librenms_api.get_device_links.return_value = (True, bad_payload)
             with patch.object(view, "get_ports_data", return_value={"ports": []}):
                 assert view.get_links_data(obj) is None
@@ -113,6 +114,7 @@ class TestBaseCableTableViewGetLinksData:
         obj = _mock_obj()
 
         for bad_links in (None, {}, {"a": 1}, "nope"):
+            view = self._make_view()  # fresh per case so each proves it sets the error itself
             view._librenms_api.get_device_links.return_value = (True, {"links": bad_links})
             with patch.object(view, "get_ports_data", return_value={"ports": []}):
                 assert view.get_links_data(obj) is None

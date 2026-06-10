@@ -2193,6 +2193,14 @@ class AddAsOOBView(
                             f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission to add an interface.",
                         )
                     )
+                elif iface_reason == "invalid_name":
+                    deferred_messages.append(
+                        (
+                            messages.WARNING,
+                            f"OOB linked, but OOB IP {oob_ip_str} not set — the chosen interface name is "
+                            "invalid (too long or contains unsupported characters).",
+                        )
+                    )
                 elif oob_iface is None:
                     deferred_messages.append(
                         (
@@ -2341,7 +2349,8 @@ class AddAsOOBView(
         change-Device-only user, so re-verify ``add`` here before creating. Symmetric to
         the re-check in :meth:`_attach_oob_ip`.
         """
-        from django.db import IntegrityError
+        from django.core.exceptions import ValidationError
+        from django.db import DataError, IntegrityError
         from dcim.models import Interface
         from utilities.permissions import get_permission_for_model
 
@@ -2362,7 +2371,15 @@ class AddAsOOBView(
             # dcim_interface_unique_device_name constraint — means we just reuse the winner.
             try:
                 with transaction.atomic():
-                    return Interface.objects.create(device=device, name=name, type="other"), None
+                    iface = Interface(device=device, name=name, type="other")
+                    # Validate field formats/length (an invalid/oversized name would otherwise
+                    # raise ValidationError/DataError and surface as a 500). Skip the uniqueness
+                    # check — the DB constraint + IntegrityError branch below handle the race.
+                    iface.full_clean(validate_unique=False)
+                    iface.save()
+                    return iface, None
+            except (ValidationError, DataError):
+                return None, "invalid_name"
             except IntegrityError:
                 # Lock the row we hand back: the OOB-IP assignment is generic-relational,
                 # not FK-protected, so a concurrent delete before the IP save would orphan

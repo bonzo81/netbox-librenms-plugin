@@ -1145,45 +1145,53 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
                 return None
         except ValueError:
             return None
-    q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
-    # Also match when the namespaced value was stored as a string (e.g. {"production": "42"}).
-    q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
-    # Match when value stored as {"id": librenms_id, "oob": {...}} — new dict-with-id form.
-    q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": librenms_id})
-    q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": str(librenms_id)})
-    # Match when librenms_id is the OOB device id — so re-import recognises merged device.
-    q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": librenms_id})
-    q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": str(librenms_id)})
-    # Always include legacy bare-integer and bare-string IDs as a universal fallback.
-    # Legacy records were created before multi-server support; they should be visible
-    # regardless of which server is currently active.
-    q |= Q(custom_field_data__librenms_id=librenms_id)
-    q |= Q(custom_field_data__librenms_id=str(librenms_id))
-    # When a string ID looks like an integer, also match the numeric JSON form so
-    # "42" matches records that store the value as the JSON number 42.
-    # Strip whitespace and canonicalize leading-zero forms ("042", "42 ") → "42".
-    if isinstance(librenms_id, str):
-        cleaned = librenms_id.strip()
-        try:
-            int_value = int(cleaned)
-            if int_value > 0:
-                canonical_str = str(int_value)
-                q |= Q(**{f"custom_field_data__librenms_id__{server_key}": canonical_str})
-                q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
-                q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": canonical_str})
-                q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": int_value})
-                q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": canonical_str})
-                q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": int_value})
-                q |= Q(custom_field_data__librenms_id=canonical_str)
-                q |= Q(custom_field_data__librenms_id=int_value)
-        except ValueError:
-            pass
-    # The OR can match more than one row in rare cross-linked states (e.g. an id
-    # that is a host id on one device and an OOB id on another). `.first()` is
-    # already deterministic here: Device/VirtualMachine define Meta.ordering
-    # ('name', 'pk') and Interface/VMInterface order by (device, name), so the
-    # lowest-ordered row wins rather than an arbitrary DB result.
-    return model.objects.filter(q).first()
+
+    # Build host-identity and OOB-identity predicates SEPARATELY. Folding both into one
+    # OR + .first() can silently bind to the wrong NetBox object when one row matches by
+    # host id and a *different* row matches by OOB id; query each set and fail closed on a
+    # cross-row collision rather than trusting model ordering to pick "the" row.
+    def _id_variants(value):
+        """Value plus its string / canonical-int forms so "042"/" 42 " match JSON 42."""
+        variants = [value, str(value)]
+        if isinstance(value, str):
+            try:
+                int_value = int(value.strip())
+            except ValueError:
+                int_value = None
+            if int_value is not None and int_value > 0:
+                variants += [str(int_value), int_value]
+        seen = []
+        for v in variants:
+            if v not in seen:
+                seen.append(v)
+        return seen
+
+    host_q = Q()
+    oob_q = Q()
+    for v in _id_variants(librenms_id):
+        # Namespaced scalar form, the new dict-with-id form ({"id": .., "oob": {..}}), and
+        # the legacy bare integer/string (pre multi-server) all identify the HOST device.
+        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}": v})
+        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": v})
+        host_q |= Q(custom_field_data__librenms_id=v)
+        # The OOB controller's own device id — so a re-import recognises the merged device.
+        oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
+
+    host_match = model.objects.filter(host_q).first()
+    oob_match = model.objects.filter(oob_q).first()
+    if host_match is not None and oob_match is not None and host_match.pk != oob_match.pk:
+        logger.warning(
+            "Ambiguous librenms_id %r for %s on server %r: host match pk=%s but OOB match "
+            "pk=%s — refusing to bind to either (fail closed).",
+            librenms_id,
+            model.__name__,
+            server_key,
+            host_match.pk,
+            oob_match.pk,
+        )
+        return None
+    # Host identity wins when both resolve to the same row (or only one matched).
+    return host_match or oob_match
 
 
 def get_librenms_oob(obj, server_key: str = "default") -> dict | None:

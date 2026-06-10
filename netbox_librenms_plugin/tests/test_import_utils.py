@@ -1257,7 +1257,9 @@ class TestDeviceNamingPreferencesLegacy:
         existing = MagicMock()
         existing.name = "core-switch"
         existing.serial = ""
-        mock_device.objects.filter.return_value.first.side_effect = [None, existing]
+        # find_by_librenms_id now issues two queries (host + OOB); both miss here, then the
+        # hostname query returns the existing device.
+        mock_device.objects.filter.return_value.first.side_effect = [None, None, existing]
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -3576,7 +3578,9 @@ class TestDeviceNamingPreferences:
         existing.serial = ""
         existing.virtual_chassis = None
         existing.vc_position = None
-        mock_device.objects.filter.return_value.first.side_effect = [None, existing]
+        # find_by_librenms_id now issues two queries (host + OOB); both miss here, then the
+        # hostname query returns the existing device.
+        mock_device.objects.filter.return_value.first.side_effect = [None, None, existing]
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 

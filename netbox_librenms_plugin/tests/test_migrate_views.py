@@ -467,6 +467,7 @@ class TestTransferDeviceIPView:
                 return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
             ),
             patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
@@ -476,6 +477,9 @@ class TestTransferDeviceIPView:
                 locked_donor,
                 locked_winner,
             ]
+            # The IPAddress row is now re-fetched under select_for_update; return the same
+            # logical address so its assignment is validated from the locked row.
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
             resp = view.post(req, pk=10, ip_kind="oob")
         # The locked rows are the ones mutated and saved.
         assert locked_donor.oob_ip is None
@@ -510,6 +514,7 @@ class TestTransferDeviceIPView:
                 return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
             ),
             patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
@@ -517,6 +522,8 @@ class TestTransferDeviceIPView:
                 locked_donor,
                 locked_winner,
             ]
+            # Locked re-fetch returns the address still assigned to the donor (device_id=10).
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
             resp = view.post(req, pk=10, ip_kind="oob")
 
         # Refused (409 surfaced via toast); neither side mutated/saved.

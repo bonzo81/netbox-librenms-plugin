@@ -5101,17 +5101,43 @@ class TestResolveOOBInterface:
         with (
             patch("dcim.models.Interface") as mock_iface_cls,
             patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
-            # create() is wrapped in a nested savepoint; stub transaction so this
+            # create is wrapped in a nested savepoint; stub transaction so this
             # non-DB unit test doesn't require a real connection.
             patch("netbox_librenms_plugin.views.imports.actions.transaction"),
         ):
             # No locked row exists → this is a real create.
             mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
-            mock_iface_cls.objects.create.return_value = created
+            mock_iface_cls.return_value = created  # Interface(...) constructor returns our mock
             iface, reason = view._resolve_oob_interface(req, dev)
-        mock_iface_cls.objects.create.assert_called_once_with(device=dev, name="idrac0", type="other")
+        # Built + validated (skipping the unique check) + saved, not objects.create().
+        mock_iface_cls.assert_called_once_with(device=dev, name="idrac0", type="other")
+        created.full_clean.assert_called_once_with(validate_unique=False)
+        created.save.assert_called_once()
         # The created interface must be returned — the OOB-IP attach path depends on it.
         assert iface is created and reason is None
+
+    def test_create_new_interface_invalid_name_returns_reason(self):
+        """An invalid/oversized name raises ValidationError on full_clean → reason
+        'invalid_name' (surfaced as a warning) instead of a 500."""
+        from django.core.exceptions import ValidationError
+
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "x" * 500})
+        req.user.has_perm.return_value = True
+        dev = MagicMock()
+        bad = MagicMock()
+        bad.full_clean.side_effect = ValidationError("name too long")
+        with (
+            patch("dcim.models.Interface") as mock_iface_cls,
+            patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+        ):
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
+            mock_iface_cls.return_value = bad
+            iface, reason = view._resolve_oob_interface(req, dev)
+        assert iface is None
+        assert reason == "invalid_name"
+        bad.save.assert_not_called()
 
     def test_new_reuses_existing_locked_interface(self):
         """A (device, name) interface that already exists under the lock is reused — no

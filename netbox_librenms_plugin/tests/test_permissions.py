@@ -855,6 +855,7 @@ class TestSafeRedirectUrl:
 
         mixin = LibreNMSPermissionMixin()
         mixin.request = MagicMock()
+        mixin.request.method = "POST"  # explicit: exercise the non-GET fallback path on purpose
         mixin.request.user.has_perm.return_value = False
         mixin.request.path = "/safe/page/"
         mixin.request.META = {"HTTP_REFERER": "http://evil.com/steal"}
@@ -875,6 +876,7 @@ class TestSafeRedirectUrl:
 
         mixin = LibreNMSPermissionMixin()
         mixin.request = MagicMock()
+        mixin.request.method = "POST"  # explicit: exercise the non-GET fallback path on purpose
         mixin.request.user.has_perm.return_value = False
         mixin.request.path = "/safe/page/"
         mixin.request.META = {"HTTP_REFERER": "http://evil.com/steal"}

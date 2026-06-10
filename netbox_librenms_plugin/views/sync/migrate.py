@@ -431,6 +431,13 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             donor_ip = getattr(donor, field, None)
             if donor_ip is None:
                 return self._fail(request, f"Donor has no {human} to transfer.", status=409)
+            # Lock the IPAddress row itself before validating its assignment below: the
+            # device FKs are locked but the address is not, so a concurrent reassignment
+            # could otherwise change assigned_object between this check and the FK update,
+            # leaving winner.primary_ip*/oob_ip pointing at an address it no longer owns.
+            donor_ip = IPAddress.objects.select_for_update().filter(pk=donor_ip.pk).first()
+            if donor_ip is None:
+                return self._fail(request, f"Donor's {human} no longer exists.", status=410)
             if getattr(winner, field, None) is not None:
                 return self._fail(
                     request,
