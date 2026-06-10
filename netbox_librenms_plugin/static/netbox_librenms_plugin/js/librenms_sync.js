@@ -327,6 +327,10 @@ function initializeTableCheckboxes(tableId) {
         toggleAll.addEventListener('change', function () {
             liveCheckboxes().forEach(checkbox => {
                 checkbox.checked = toggleAll.checked;
+                // Fire a bubbling change so the auto-select handler (cross-page parent /
+                // LAG member inclusion) runs for select-all too, not just single clicks.
+                // That handler is idempotent, so a double fire is harmless.
+                checkbox.dispatchEvent(new Event('change', { bubbles: true }));
             });
         });
     }
@@ -1397,6 +1401,9 @@ function initializeCheckboxListeners() {
         toggleAll.addEventListener('change', function () {
             liveCheckboxes().forEach(checkbox => {
                 checkbox.checked = toggleAll.checked;
+                // Route select-all through the auto-select handler (cross-page parent /
+                // LAG member inclusion); idempotent, so a double fire is harmless.
+                checkbox.dispatchEvent(new Event('change', { bubbles: true }));
             });
             updateBulkActionButton();
         });

@@ -349,6 +349,18 @@ class BaseInterfaceTableView(
                     all_ports_final, ps_data, device_os=device_os
                 )
                 librenms_data["port_stack_relationships"] = relationships
+            else:
+                # _has_lag_signals() already decided this device has LAG/sub-interface
+                # relationships, so a failed fetch means the LAG/Parent column is silently
+                # incomplete. Warn the user (mirrors the OOB-incomplete handling) instead of
+                # dropping the enrichment without a trace.
+                logger.warning("port_stack fetch failed for device %s: %s", self.librenms_id, ps_data)
+                messages.warning(
+                    request,
+                    "Interfaces refreshed, but LAG/sub-interface relationship data could not be "
+                    "fetched from LibreNMS; the Parent / LAG column may be incomplete. "
+                    "See server logs for details.",
+                )
 
         # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it
         # (which would leave downstream views — SingleInterfaceVerifyView,
@@ -848,14 +860,16 @@ class BaseInterfaceTableView(
             """Return True if nb_rel_iface corresponds to lnms_port_dict."""
             if nb_rel_iface is None or lnms_port_dict is None:
                 return False
-            # Primary: stored librenms_id (port_id) comparison — field-name-independent
-            if server_key:
-                stored_id = get_librenms_device_id(nb_rel_iface, server_key, auto_save=False)
-                lnms_pid = lnms_port_dict.get("port_id")
-                if stored_id is not None and lnms_pid is not None:
-                    target = int(lnms_pid) if str(lnms_pid).isdigit() else None
-                    if target is not None:
-                        return stored_id == target
+            # Primary: stored librenms_id (port_id) comparison — field-name-independent.
+            # Default to "default" so the stable-id match is never silently disabled on the
+            # default-server path (where server_key may arrive empty); name matching below is
+            # the fragile fallback and must not pre-empt a stable id when one is stored.
+            stored_id = get_librenms_device_id(nb_rel_iface, server_key or "default", auto_save=False)
+            lnms_pid = lnms_port_dict.get("port_id")
+            if stored_id is not None and lnms_pid is not None:
+                target = int(lnms_pid) if str(lnms_pid).isdigit() else None
+                if target is not None:
+                    return stored_id == target
             # Fallback: name match — try both name fields to be field-agnostic
             nb_name = nb_rel_iface.name
             return nb_name == lnms_port_dict.get("ifName") or nb_name == lnms_port_dict.get("ifDescr")
