@@ -17,6 +17,7 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     find_by_librenms_id,
     get_interface_name_field,
+    get_librenms_device_id,
     get_librenms_sync_device,
     normalize_librenms_port_id,
     set_librenms_device_id,
@@ -180,11 +181,8 @@ class SyncInterfacesView(
 
     def _get_cached_relationships(self, obj, server_key):
         """Return port_stack_relationships from the cached port data, or empty dict."""
-        cache_obj = obj
-        if isinstance(obj, Device) and not get_librenms_device_id(obj, server_key, auto_save=False):
-            sync_device = get_librenms_sync_device(obj, server_key=server_key)
-            if sync_device is not None:
-                cache_obj = sync_device
+        # Same VC-scoped key the writer uses (see get_cached_ports_data).
+        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
         if cached_data:
             return cached_data.get("port_stack_relationships", {})

@@ -414,8 +414,13 @@ document.addEventListener('change', function (e) {
         const memberRows = document.querySelectorAll('tr[data-member-of-lag="' + portId + '"]');
         memberRows.forEach(function (memberRow) {
             const memberCheckbox = memberRow.querySelector('input[name="select"]');
-            if (memberCheckbox) {
+            // Only act (and dispatch) when the state actually flips — the equality guard
+            // makes this idempotent and prevents a dispatch loop with this same handler.
+            if (memberCheckbox && memberCheckbox.checked !== checkbox.checked) {
                 memberCheckbox.checked = checkbox.checked;
+                // Run the same handler for the member so its own second-order rules apply
+                // (a member that is also a sub-interface child injects/removes its parent).
+                memberCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
                 changed = true;
             }
         });
@@ -430,6 +435,8 @@ document.addEventListener('change', function (e) {
             const parentCheckbox = parentRow.querySelector('input[name="select"]');
             if (parentCheckbox && !parentCheckbox.checked) {
                 parentCheckbox.checked = true;
+                // Propagate up a nested parent chain and inject the parent's own select_port_id.
+                parentCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
                 changed = true;
             }
         } else {
@@ -1183,6 +1190,9 @@ function handleInterfaceChange(select, value) {
         body: JSON.stringify({
             device_id: value,
             interface_name: select.dataset.interface,
+            // Stable port_id of this row so the server picks the correct cached row even when
+            // display names collide (host vs OOB controller); interface_name is the fallback.
+            port_id: document.querySelector('tr[data-interface="' + select.dataset.rowId + '"]')?.dataset.portId || null,
             interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
         })

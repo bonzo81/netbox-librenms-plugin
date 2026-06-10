@@ -595,7 +595,10 @@ class LibreNMSAPI:
         Resolve LAG membership and sub-interface parent relationships from LibreNMS data.
 
         Universal rules (vendor-agnostic, hardcoded):
-          1. LAG aggregate is always the 'low' entry in a port_stack pair.
+          1. The LAG aggregate is normally the 'low' entry in a port_stack pair, but the
+             aggregate side is determined authoritatively by _is_lag_aggregate() (ifType
+             ieee8023adLag or a configured name pattern), not by position — so a pair whose
+             aggregate is on the 'high' side is still mapped member->aggregate correctly.
           2. Skip any pair where either port name contains ':' (Nokia SAP entries).
           3. Strip '.N' suffix to resolve Junos sub-unit names to physical-level ports.
           4. Sub-interface detection: if low_name starts with high_name + '.' and the

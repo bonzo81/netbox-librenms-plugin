@@ -542,7 +542,11 @@ class BaseInterfaceTableView(
             # Scope to host rows: ports_data is merged host + OOB, and an OOB controller
             # can reuse a host port_id. Letting an OOB row win here would attach the wrong
             # aggregate/parent to the host interface during lag/parent enrichment.
-            by_port_id = {p["port_id"]: p for p in ports_data if p.get("port_id") and p.get("_source") != "oob"}
+            by_port_id = {
+                normalize_librenms_port_id(p.get("port_id")): p
+                for p in ports_data
+                if normalize_librenms_port_id(p.get("port_id")) is not None and p.get("_source") != "oob"
+            }
 
             # Pre-fetch all interfaces for all potential chassis members
             # (_build_interface_lookup_maps select_relateds lag/parent for devices).
@@ -853,7 +857,13 @@ class BaseInterfaceTableView(
           2. NetBox interface name matches the LibreNMS ifName field
           3. NetBox interface name matches the LibreNMS ifDescr field
         """
-        port_id = port.get("port_id")
+        # Normalize every port_id to int. The relationship maps can come back from the
+        # cache with string keys (a JSON round-trip stringifies dict keys) while the
+        # port_id values on the port dicts stay int — without normalizing, the .get()
+        # lookups silently miss and valid LAG/parent relationships vanish from the table.
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        port_id_to_lag = {normalize_librenms_port_id(k): v for k, v in port_id_to_lag.items()}
+        port_id_to_parent = {normalize_librenms_port_id(k): v for k, v in port_id_to_parent.items()}
         nb_iface = port.get("netbox_interface")
 
         def _related_iface_matches(nb_rel_iface, lnms_port_dict) -> bool:
@@ -875,7 +885,7 @@ class BaseInterfaceTableView(
             return nb_name == lnms_port_dict.get("ifName") or nb_name == lnms_port_dict.get("ifDescr")
 
         # --- LAG ---
-        lnms_lag_port_id = port_id_to_lag.get(port_id) if port_id else None
+        lnms_lag_port_id = normalize_librenms_port_id(port_id_to_lag.get(port_id)) if port_id else None
         agg_port = by_id.get(lnms_lag_port_id) if lnms_lag_port_id else None
         lnms_lag_name = agg_port.get(interface_name_field) if agg_port else None
 
@@ -898,7 +908,7 @@ class BaseInterfaceTableView(
             port["lag_sync_status"] = None
 
         # --- Parent ---
-        lnms_parent_port_id = port_id_to_parent.get(port_id) if port_id else None
+        lnms_parent_port_id = normalize_librenms_port_id(port_id_to_parent.get(port_id)) if port_id else None
         parent_port = by_id.get(lnms_parent_port_id) if lnms_parent_port_id else None
         lnms_parent_name = parent_port.get(interface_name_field) if parent_port else None
 

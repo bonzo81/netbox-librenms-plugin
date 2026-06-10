@@ -265,7 +265,9 @@ class TestGetLibreNMSSyncDeviceFallbacks:
 
 
 class TestGetTablePaginateCountValueError:
-    """Tests for get_table_paginate_count ValueError path (lines 169-170)."""
+    """Tests for get_table_paginate_count fallback paths: a non-integer per_page hits the
+    ValueError handler, and a zero/negative per_page hits the `< 1` guard — both fall back
+    to the NetBox default rather than propagating to the paginator."""
 
     def test_invalid_per_page_falls_back_to_default(self):
         from netbox_librenms_plugin.utils import get_table_paginate_count

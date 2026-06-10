@@ -315,6 +315,31 @@ class TestSingleInterfaceVerifyView:
         view.require_object_permissions_json = MagicMock(return_value=None)
         return view
 
+    def test_denied_without_view_device_permission(self):
+        """The verify endpoint must reject a user lacking dcim.view_device (no probing
+        arbitrary device IDs for cached interface data)."""
+        import json
+
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        # Simulate the real object-permission gate denying access.
+        view.require_object_permissions_json = MagicMock(
+            return_value=JsonResponse({"error": "Missing permissions: dcim.view_device"}, status=403)
+        )
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 1, "interface_name": "eth0"}).encode()
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = None
+        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+            with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
+                response = view.post(request)
+
+        assert response.status_code == 403
+        # Must deny before touching the cache.
+        mock_cache.get.assert_not_called()
+
     def test_returns_400_when_no_device_id(self):
         """Returns 400 JSON error when no device_id in request body."""
         import json

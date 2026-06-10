@@ -27,6 +27,7 @@ from netbox_librenms_plugin.utils import (
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
     get_vlan_sync_css_class,
+    normalize_librenms_port_id,
 )
 
 from ..base.cables_view import BaseCableTableView
@@ -155,6 +156,10 @@ class SingleInterfaceVerifyView(
         # device's cached verify payload by raw pk.
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
 
+        # Read-only verify endpoint: only require object-view permission, not plugin write.
+        if error := self.require_object_permissions_json("POST"):
+            return error
+
         # Normalise to the VC sync device so cache keys match what the sync view stored
         if selected_device.virtual_chassis:
             primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
@@ -171,10 +176,27 @@ class SingleInterfaceVerifyView(
         cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
 
         if cached_data:
-            port_data = next(
-                (port for port in cached_data.get("ports", []) if port.get(interface_name_field) == interface_name),
-                None,
-            )
+            ports = cached_data.get("ports", [])
+            # Prefer the stable port_id the client posts (data-port-id on the row): display
+            # names can collide (an OOB controller can reuse a host interface name), so a
+            # name-only match can recompute and patch the wrong cached row. Exclude OOB rows
+            # from both paths so a host row is never shadowed by a same-named controller port.
+            posted_port_id = normalize_librenms_port_id(data.get("port_id"))
+            port_data = None
+            if posted_port_id is not None:
+                port_data = next(
+                    (
+                        p
+                        for p in ports
+                        if normalize_librenms_port_id(p.get("port_id")) == posted_port_id and p.get("_source") != "oob"
+                    ),
+                    None,
+                )
+            if port_data is None:
+                port_data = next(
+                    (p for p in ports if p.get(interface_name_field) == interface_name and p.get("_source") != "oob"),
+                    None,
+                )
 
             if port_data:
                 table_class = VCInterfaceTable if selected_device.virtual_chassis else LibreNMSInterfaceTable
@@ -209,9 +231,9 @@ class SingleInterfaceVerifyView(
                 # Host-scope the map (mirror get_context_data): an OOB controller reusing a
                 # host port_id must not override the host row during lag/parent enrichment.
                 by_port_id = {
-                    p["port_id"]: p
+                    normalize_librenms_port_id(p.get("port_id")): p
                     for p in cached_data.get("ports", [])
-                    if p.get("port_id") and p.get("_source") != "oob"
+                    if normalize_librenms_port_id(p.get("port_id")) is not None and p.get("_source") != "oob"
                 }
                 BaseInterfaceTableView._enrich_port_with_lag_parent(
                     port_data,
