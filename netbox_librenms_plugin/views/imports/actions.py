@@ -2005,6 +2005,15 @@ class CreatePlatformFromImportView(
                                 "user lacks add permission (mapping was removed after the preflight check).",
                                 librenms_os,
                             )
+                            # Surface it in the modal too — but only after the Platform commits,
+                            # so we don't warn about a skipped side-effect of a rolled-back write.
+                            transaction.on_commit(
+                                lambda os=librenms_os: messages.warning(
+                                    request,
+                                    f"Platform created, but the LibreNMS-OS mapping for '{os}' was not added — "
+                                    "you lack permission to add mappings.",
+                                )
+                            )
         except ValidationError as exc:
             logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
             detail = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
@@ -2040,7 +2049,10 @@ class CreatePlatformFromImportView(
         else:
             row_html = mark_safe("")
 
-        return HttpResponse(oob_modal + row_html, content_type="text/html")
+        response = HttpResponse(oob_modal + row_html, content_type="text/html")
+        # Emit any queued messages (e.g. a skipped-mapping warning) as an OOB toast. No-op
+        # when nothing is queued, so the normal success path is unchanged.
+        return _attach_messages_oob(response, request)
 
 
 class AddAsOOBView(
