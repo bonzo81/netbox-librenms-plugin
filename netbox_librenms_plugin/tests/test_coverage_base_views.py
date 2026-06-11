@@ -2051,6 +2051,52 @@ class TestBaseInterfaceTableViewPost:
         mock_get_cache_key.assert_called_with(obj, "ports", "default")
         mock_get_last_fetched_key.assert_called_with(obj, "ports", "default")
 
+    def test_post_lag_inference_excludes_oob_ports(self):
+        """port_stack is scoped to the main device, so its lazy-fetch trigger must ignore
+        OOB rows. A LAG signal that exists only on an OOB-controller port must not provoke a
+        host get_port_stack() fetch (and the 'may be incomplete' warning)."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host ports carry no LAG signal; the OOB controller exposes a LAG-typed port.
+        view._librenms_api.get_ports.side_effect = [
+            (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifType": "ethernetCsmacd"}]}),
+            (True, {"ports": [{"port_id": 2, "ifName": "Po1", "ifType": "ieee8023adLag"}]}),
+        ]
+
+        captured_ports = {}
+
+        def _capture_has_lag_signals(ports):
+            captured_ports["value"] = ports
+            return False  # short-circuit the real port_stack fetch (DB-backed)
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            patch.object(view, "_has_lag_signals", side_effect=_capture_has_lag_signals),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        # _has_lag_signals saw host-only ports: the OOB-sourced LAG row was filtered out.
+        assert "value" in captured_ports
+        assert all(p.get("_source") != "oob" for p in captured_ports["value"])
+        # The OOB LAG row therefore never triggers the main-device port_stack fetch.
+        view._librenms_api.get_port_stack.assert_not_called()
+
 
 @pytest.mark.django_db
 class TestBaseInterfaceTablePostCoercesLibreNMSId:

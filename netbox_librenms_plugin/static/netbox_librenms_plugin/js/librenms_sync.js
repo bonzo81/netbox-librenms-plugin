@@ -1194,6 +1194,24 @@ function handleInterfaceChange(select, value) {
     // post the wrong row's port_id and repaint the wrong row. closest('tr') is unique.
     const row = select.closest('tr');
 
+    // Disable this row's LAG/parent sync buttons while the verify is in flight. A click landing
+    // before the response repaints the row would otherwise POST the freshly-selected member's
+    // objectId together with the *previous* member's stale relationship metadata (lag/parent
+    // port_id + name) carried by the old button markup, syncing the wrong relationship.
+    const relationshipButtons = row
+        ? Array.from(row.querySelectorAll('.lag-sync-btn, .parent-sync-btn')).filter((b) => !b.disabled)
+        : [];
+    relationshipButtons.forEach((b) => {
+        b.disabled = true;
+    });
+    const reenableRelationshipButtons = () => {
+        // Buttons whose cell a successful verify repainted are detached and replaced by fresh
+        // enabled markup; only re-enable the ones still connected to the document.
+        relationshipButtons.forEach((b) => {
+            if (b.isConnected) b.disabled = false;
+        });
+    };
+
     fetch('/plugins/librenms_plugin/verify-interface/', {
         method: 'POST',
         signal: controller.signal,
@@ -1237,10 +1255,14 @@ function handleInterfaceChange(select, value) {
                 }
                 initializeFilters();
             }
+            reenableRelationshipButtons();
         })
         .catch(error => {
-            // A superseded request was aborted on purpose — not an error to surface.
+            // A superseded request was aborted on purpose — not an error to surface. Leave the
+            // buttons disabled: the newer handleInterfaceChange call already re-disabled them and
+            // owns re-enabling once its own verify settles.
             if (error.name === 'AbortError') return;
+            reenableRelationshipButtons();
             console.error('Error verifying interface:', error.message);
         });
 }

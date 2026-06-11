@@ -334,8 +334,12 @@ class BaseInterfaceTableView(
         # Lazy port_stack fetch — only when device has LAG or sub-interface relationships.
         # Enriches the host ports we fetched regardless of OOB outcome (it's independent of
         # the OOB controller); the oob_incomplete tagging below still applies on an OOB failure.
-        all_ports_final = librenms_data.get("ports", [])
-        if self._has_lag_signals(all_ports_final):
+        # get_port_stack() is scoped to the main device, so LAG/sub-interface inference must
+        # only consider host ports. An OOB-only row matching the ifType/name heuristic would
+        # otherwise trigger a host port_stack fetch (and the "may be incomplete" warning) even
+        # when the main device has no such relationships.
+        host_ports_final = [p for p in librenms_data.get("ports", []) if p.get("_source") != "oob"]
+        if self._has_lag_signals(host_ports_final):
             ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
             if ps_success:
                 # Scope LAG name-pattern matching to this device's OS so a vendor-specific
@@ -346,7 +350,7 @@ class BaseInterfaceTableView(
                 if info_success and isinstance(device_info, dict):
                     device_os = device_info.get("os")
                 relationships = self.librenms_api.resolve_port_relationships(
-                    all_ports_final, ps_data, device_os=device_os
+                    host_ports_final, ps_data, device_os=device_os
                 )
                 librenms_data["port_stack_relationships"] = relationships
             else:
