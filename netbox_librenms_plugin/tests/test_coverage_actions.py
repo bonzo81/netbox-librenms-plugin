@@ -5402,6 +5402,18 @@ class TestMissingOOBIpPermissions:
             msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
         assert msg is not None and "add_interface" in msg
 
+    def test_invalid_ip_short_circuits_before_net_host_lookup(self):
+        """A malformed IP must return an invalid-IP warning without hitting the
+        address__net_host queryset (which would raise on it)."""
+        view = self._view()
+        req = _make_request(post={"oob_interface_id": "5"})
+        req.user.has_perm.return_value = True
+        with patch("ipam.models.IPAddress.objects") as mock_objects:
+            msg = view._missing_oob_ip_permissions(req, "not-an-ip")
+        assert msg is not None and "invalid" in msg.lower()
+        # The net_host preflight must never run for a malformed IP.
+        mock_objects.filter.assert_not_called()
+
     def test_new_interface_name_that_already_exists_does_not_require_add(self):
         """__new__ + an existing interface name is reused by _resolve_oob_interface,
         so no Interface write happens — 'add_interface' must NOT be required even for a

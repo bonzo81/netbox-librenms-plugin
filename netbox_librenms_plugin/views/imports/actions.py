@@ -2387,10 +2387,21 @@ class AddAsOOBView(
         host yet), or re-home an existing one. Check the model perms the requested
         operation actually needs so a caller with only Device-change rights can't
         mutate Interface/IPAddress through this view.
+
+        A malformed *ip_str* short-circuits to an invalid-IP warning: the
+        ``address__net_host`` preflight below would raise on it, and _attach_oob_ip()
+        would reject it anyway, so surface the same non-attachable outcome here.
         """
+        from ipaddress import ip_address as _ip
+
         from dcim.models import Interface
         from ipam.models import IPAddress
         from utilities.permissions import get_permission_for_model
+
+        try:
+            _ip(ip_str)
+        except ValueError:
+            return f"OOB linked, but OOB IP {ip_str} not set — the IP address is invalid."
 
         needed = []
         iface_id = (request.POST.get("oob_interface_id") or "").strip()
