@@ -1295,10 +1295,13 @@ class TestBulkImportDevicesViewErrorPaths:
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
                 ) as mock_redirect:
-                    view.post(request)
+                    response = view.post(request)
 
         mock_messages.error.assert_called_once()
         mock_redirect.assert_called_once_with("plugins:netbox_librenms_plugin:librenms_import")
+        # Pin the full-page contract: post() must actually return the redirect, not fall
+        # through to None or a different response.
+        assert response is mock_redirect.return_value
 
     def test_post_permission_denied(self):
         """Permission check returns error early."""
@@ -3725,6 +3728,14 @@ class TestBulkImportConfirmPartialExpiry:
         # fetched both ids (the expired one bumps cache_expired_count but isn't fatal).
         assert response.status_code == 200
         mock_render.assert_called_once()
+        # Pin the output: exactly the one surviving device renders on the confirm step, so a
+        # regression that drops the survivor (or renders a different response) is caught.
+        # (cache_expired_count is surfaced as a warning message, not a context key.)
+        template = mock_render.call_args.args[1]
+        context = mock_render.call_args.args[2]
+        assert template.endswith("bulk_import_confirm.html")
+        assert len(context["devices"]) == 1
+        assert context["device_count"] == 1
         assert call_count[0] == 2
 
 

@@ -523,13 +523,21 @@ def validate_device_for_import(
                 result["existing_device"] = existing_vm
                 result["existing_match_type"] = "hostname"
                 result["import_as_vm"] = True  # Force VM mode since VM exists
+                # Describe the VM's current LibreNMS linkage and word the warning to match it —
+                # a hostname-matched VM can already carry a librenms_id (to a different id/server),
+                # so a flat "not linked" would contradict the badge. Mirrors the primary-IP path.
+                existing_link = _describe_existing_librenms_link(existing_vm, server_key)
+                result["existing_librenms_link"] = existing_link
+                if existing_link.get("host_id"):
+                    link_note = f"already linked to LibreNMS device #{existing_link['host_id']}"
+                elif existing_link.get("oob_id"):
+                    link_note = "already linked to LibreNMS as an OOB controller"
+                else:
+                    link_note = "not linked to LibreNMS"
                 result["warnings"].append(
-                    f"VM with same hostname exists in NetBox as '{existing_vm.name}' (not linked to LibreNMS)"
+                    f"VM with same hostname exists in NetBox as '{existing_vm.name}' ({link_note})"
                 )
                 result["can_import"] = False
-                # Mirror the device path so badge state renders consistently (all-None here
-                # since this VM was matched by hostname, not librenms_id).
-                result["existing_librenms_link"] = _describe_existing_librenms_link(existing_vm, server_key)
             elif existing_device:
                 logger.info(f"Found existing device by hostname: {existing_device.name}")
                 result["existing_device"] = existing_device

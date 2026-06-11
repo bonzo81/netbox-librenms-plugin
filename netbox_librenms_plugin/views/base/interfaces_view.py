@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import quote_plus
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -57,6 +58,16 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         Should be implemented in subclasses.
         """
         raise NotImplementedError
+
+    def _failure_redirect(self, obj, server_key):
+        """Redirect to the sync tab after a refresh failure, preserving the POST-scoped
+        server_key so the user stays on the server they were working in (otherwise the next
+        retry/sync can target the session/default LibreNMS instance instead)."""
+        url = self.get_redirect_url(obj)
+        if server_key:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}server_key={quote_plus(server_key)}"
+        return redirect(url)
 
     def get_select_related_field(self, obj):
         """Determine the appropriate select_related field based on object type"""
@@ -128,7 +139,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS.")
-            return redirect(self.get_redirect_url(obj))
+            return self._failure_redirect(obj, post_server_key)
 
         # Resolve the cache scope once (the VC sync device for a member, else obj) and use
         # it for the up-front clear below and the writes further down. Mirrors cables_view.
@@ -146,7 +157,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         if not success:
             messages.error(request, librenms_data)
-            return redirect(self.get_redirect_url(obj))
+            return self._failure_redirect(obj, _server_key)
 
         # Enrich ports with VLAN data for trunk ports
         ports = librenms_data.get("ports", [])
@@ -315,7 +326,10 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
 
         # Load any user VLAN group overrides from cache (set by "apply to all")
-        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(obj, server_key)) or {}
+        # Read overrides under the same VC-scoped key SaveVlanGroupOverridesView writes
+        # (the sync device, not the viewed member) — otherwise an "apply to all" made on a VC
+        # member is lost on the next render/member switch. cache_device mirrors that writer.
+        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {}
 
         if cached_data:
             ports_data = cached_data.get("ports", [])

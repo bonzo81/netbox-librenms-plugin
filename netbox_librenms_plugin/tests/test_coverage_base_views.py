@@ -1231,6 +1231,7 @@ class TestBaseInterfaceTableViewPost:
         with (
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "rebind_api_for_server", return_value="prod"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
@@ -1239,7 +1240,9 @@ class TestBaseInterfaceTableViewPost:
             view.post(request, pk=1)
 
         mock_messages.error.assert_called_once()
-        mock_redirect.assert_called_once_with("/device/1/")
+        # The failure redirect must preserve the POST-scoped server_key so the user stays on
+        # the same LibreNMS server for the next retry.
+        mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
 
     def test_post_api_error_redirects_with_error(self):
         """When API returns failure, error message and redirect."""
@@ -1253,6 +1256,7 @@ class TestBaseInterfaceTableViewPost:
         with (
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "rebind_api_for_server", return_value="prod"),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch.object(view, "get_last_fetched_key", return_value="last-key"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
@@ -1265,7 +1269,8 @@ class TestBaseInterfaceTableViewPost:
             view.post(request, pk=1)
 
         mock_messages.error.assert_called_once_with(request, "Connection refused")
-        mock_redirect.assert_called_once_with("/device/1/")
+        # Failure redirect preserves the POST-scoped server_key (see _failure_redirect).
+        mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
         # The stale snapshot is cleared up front; a failed fetch must not re-populate it,
         # so the next render shows an empty view rather than old data.
         mock_cache.delete.assert_any_call("cache-key")

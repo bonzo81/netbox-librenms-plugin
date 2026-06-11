@@ -4,6 +4,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
+from django.urls import get_script_prefix
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
@@ -38,10 +39,11 @@ def _get_safe_redirect_url(request):
         return referrer
     # No usable Referer. On a non-GET request, request.path is often a POST-only
     # action endpoint, so redirecting the browser there would 405 — fall back to a
-    # GET-safe "/" instead. GET requests can still reload their own path.
+    # GET-safe app root instead. Use the deployment script prefix (e.g. "/netbox/")
+    # so a prefixed install doesn't bounce to the domain root. GET requests reload path.
     if getattr(request, "method", "GET") != "GET":
-        return "/"
-    return getattr(request, "path", "/")
+        return get_script_prefix()
+    return getattr(request, "path", get_script_prefix())
 
 
 def _safe_redirect_response(request):
@@ -70,9 +72,10 @@ def _safe_redirect_response(request):
             return HttpResponse("", headers={"HX-Redirect": target})
         return redirect(target)
 
+    app_root = get_script_prefix()
     if is_htmx:
-        return HttpResponse("", headers={"HX-Redirect": "/"})
-    return redirect("/")
+        return HttpResponse("", headers={"HX-Redirect": app_root})
+    return redirect(app_root)
 
 
 class LibreNMSPermissionMixin(PermissionRequiredMixin):
@@ -167,13 +170,16 @@ class NetBoxObjectPermissionMixin:
             tuple: (has_all: bool, missing: list[str])
         """
         requirements = self.required_object_permissions.get(method, [])
-        missing = []
+        missing = [get_permission_for_model(model, action) for action, model in requirements]
 
-        for action, model in requirements:
-            perm = get_permission_for_model(model, action)
-            if not self.request.user.has_perm(perm):
-                missing.append(perm)
+        # Fail closed if there's no usable request/user (e.g. the view was invoked outside
+        # dispatch()): return the required perms as "missing" so callers get a deterministic
+        # permission denial instead of an AttributeError on self.request.user.
+        user = getattr(getattr(self, "request", None), "user", None)
+        if user is None:
+            return (not missing, missing)
 
+        missing = [perm for perm in missing if not user.has_perm(perm)]
         return (len(missing) == 0, missing)
 
     def require_object_permissions(self, method):

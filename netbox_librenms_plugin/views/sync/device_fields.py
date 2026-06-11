@@ -491,14 +491,25 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     except ValidationError as e:
                         mapping_error = e.message_dict if hasattr(e, "message_dict") else str(e)
                         logger.exception("Failed to create PlatformMapping '%s' -> '%s'", librenms_os, platform_name)
-                    except IntegrityError:
-                        # Concurrent insert: mapping was created by another request
-                        mapping_existed = True
-                        logger.warning(
-                            "IntegrityError creating PlatformMapping '%s' -> '%s'; treating as already existing",
-                            librenms_os,
-                            platform_name,
-                        )
+                    except IntegrityError as e:
+                        # Only treat this as "already exists" if the row is actually present now
+                        # (a concurrent insert). An unrelated IntegrityError must not be reported
+                        # as a successful pre-existing mapping when no row was created.
+                        if PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists():
+                            mapping_existed = True
+                            logger.warning(
+                                "IntegrityError creating PlatformMapping '%s' -> '%s'; mapping present after "
+                                "re-check, treating as concurrent insert",
+                                librenms_os,
+                                platform_name,
+                            )
+                        else:
+                            mapping_error = str(e)
+                            logger.exception(
+                                "IntegrityError creating PlatformMapping '%s' -> '%s' with no existing row",
+                                librenms_os,
+                                platform_name,
+                            )
 
         if platform_created:
             msg = f"Created platform '{platform}' and assigned to device"
