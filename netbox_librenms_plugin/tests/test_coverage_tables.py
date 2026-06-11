@@ -1867,6 +1867,41 @@ class TestLibreNMSInterfaceTableInit:
         assert table.server_key == "default"
 
 
+class TestRelationshipSyncObjectType:
+    """The missing_nb relationship-sync button must carry the right object type, driven by
+    the table subclass — not a runtime self.device.cluster probe that misclassifies a
+    cluster-less VM as a device."""
+
+    def _render(self, table_cls, device):
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = table_cls(data=[], device=device, interface_name_field="ifName")
+        record = {"port_id": 5, "ifName": "eth0", "netbox_interface": None}
+        return str(
+            table._render_relationship_column(
+                lnms_name="eth0",
+                lnms_port_id=10,
+                sync_status="missing_nb",
+                record=record,
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
+            )
+        )
+
+    def test_device_table_emits_device_object_type(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        html = self._render(LibreNMSInterfaceTable, MagicMock(pk=3, virtual_chassis=None))
+        assert 'data-object-type="device"' in html
+
+    def test_vm_table_emits_virtualmachine_even_without_cluster(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
+
+        # Cluster-less VM: a self.device.cluster probe would wrongly say "device".
+        vm = MagicMock(pk=4, virtual_chassis=None, cluster=None)
+        html = self._render(LibreNMSVMInterfaceTable, vm)
+        assert 'data-object-type="virtualmachine"' in html
+
+
 # ===========================================================================
 # LibreNMSInterfaceTable._parse_group_id tests
 # ===========================================================================

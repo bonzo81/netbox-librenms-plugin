@@ -2182,6 +2182,21 @@ class TestGetPortStack:
             assert success is False, f"{bad!r} should fail"
             assert "mappings" in data
 
+    def test_non_object_payload_fails_not_empty(self, mock_librenms_api):
+        """A non-object top-level payload (list/string/null) is malformed, not 'no
+        relationships'. It must fail rather than collapse to (True, []), which would be
+        indistinguishable from a genuine empty result and skip valid sync updates."""
+        from unittest.mock import MagicMock, patch
+
+        for bad in ([{"high_port_id": 1, "low_port_id": 2}], "oops", None):
+            fake_response = MagicMock()
+            fake_response.raise_for_status = MagicMock()
+            fake_response.json.return_value = bad
+            with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+                success, data = mock_librenms_api.get_port_stack(5)
+            assert success is False, f"{bad!r} should fail"
+            assert "non-object" in data
+
 
 # =============================================================================
 # Fixture port data for resolve_port_relationships tests

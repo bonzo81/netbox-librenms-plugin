@@ -2282,7 +2282,13 @@ document.addEventListener('click', function (e) {
     const relatedPortId = isLag ? (btn.dataset.lagPortId || '') : (btn.dataset.parentPortId || '');
     const relatedName = btn.dataset.relatedName || '';
     const objectType = btn.dataset.objectType || '';
-    const objectId = btn.dataset.objectId || '';
+    // On a Virtual Chassis page the row carries a member-select dropdown; prefer the user's
+    // live selection over the server-rendered data-object-id (a name-based heuristic), so the
+    // sync POST lands on the member the user actually chose instead of the default member.
+    const row = btn.closest('tr');
+    const vcMemberSelect = row ? row.querySelector('.vc-member-select') : null;
+    const objectId =
+        (vcMemberSelect && vcMemberSelect.value) ? vcMemberSelect.value : (btn.dataset.objectId || '');
     const relatedKey = isLag ? 'lag_port_id' : 'parent_port_id';
     const relatedNameKey = isLag ? 'lag_name' : 'parent_name';
     const urlSuffix = isLag ? 'sync-interface-lag' : 'sync-interface-parent';

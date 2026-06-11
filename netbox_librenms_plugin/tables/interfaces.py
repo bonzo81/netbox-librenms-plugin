@@ -28,6 +28,11 @@ class LibreNMSInterfaceTable(tables.Table):
     Table for displaying LibreNMS interface data.
     """
 
+    # NetBox object class these rows sync against. Driven by the table subclass rather than
+    # a runtime ``self.device.cluster`` probe — a cluster-less VM has a falsy ``cluster`` and
+    # would otherwise be misclassified as a device, sending the sync POST to the wrong endpoint.
+    sync_object_type = "device"
+
     class Meta:
         """Meta options for LibreNMSInterfaceTable."""
 
@@ -461,7 +466,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 object_id = (member or self.device).pk
             else:
                 object_id = self.device.pk if self.device else ""
-            object_type = "virtualmachine" if hasattr(self.device, "cluster") and self.device.cluster else "device"
+            object_type = self.sync_object_type
             btn = format_html(
                 ' <button type="button" class="btn btn-sm btn-link p-0 {}" '
                 'data-port-id="{}" {}="{}" '
@@ -711,6 +716,9 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
     """
     Table for displaying LibreNMS VM interface data.
     """
+
+    # These rows sync against VirtualMachine objects regardless of whether the VM has a cluster.
+    sync_object_type = "virtualmachine"
 
     class Meta(LibreNMSInterfaceTable.Meta):
         """Meta options for LibreNMSVMInterfaceTable."""

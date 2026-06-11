@@ -569,7 +569,13 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
             data = response.json()
-            mappings = data.get("mappings") if isinstance(data, dict) else None
+            # A non-object top-level payload (list, string, null) is malformed — not a valid
+            # "no relationships" answer. Fail rather than silently returning (True, []), which
+            # would be indistinguishable from "no relationships" and skip valid sync updates.
+            if not isinstance(data, dict):
+                logger.warning("Unexpected port_stack response for device %s: %r", device_id, data)
+                return False, "Unexpected response format from LibreNMS (non-object payload)"
+            mappings = data.get("mappings")
             # null/missing genuinely means "no parent/LAG relationships" → empty list. But a
             # non-list (or a list with non-dict items) is a malformed response: returning
             # (True, []) there would be indistinguishable from "no relationships" and silently
