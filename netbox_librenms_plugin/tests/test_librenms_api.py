@@ -2168,6 +2168,20 @@ class TestGetPortStack:
         assert success is False
         assert "Invalid JSON" in data
 
+    def test_malformed_mappings_fails_not_empty(self, mock_librenms_api):
+        """A non-list (or list-of-non-dicts) `mappings` is malformed, not 'no relationships'.
+        It must fail the call so sync doesn't silently skip valid updates."""
+        from unittest.mock import MagicMock, patch
+
+        for bad in ({"mappings": {"oops": 1}}, {"mappings": ["not-a-dict", 2]}):
+            fake_response = MagicMock()
+            fake_response.raise_for_status = MagicMock()
+            fake_response.json.return_value = bad
+            with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+                success, data = mock_librenms_api.get_port_stack(5)
+            assert success is False, f"{bad!r} should fail"
+            assert "mappings" in data
+
 
 # =============================================================================
 # Fixture port data for resolve_port_relationships tests

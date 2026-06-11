@@ -569,10 +569,17 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
             data = response.json()
-            # data.get("mappings", []) still yields None when the key is present but null;
-            # normalise so callers (resolve_port_relationships) never iterate a non-list.
             mappings = data.get("mappings") if isinstance(data, dict) else None
-            return True, mappings if isinstance(mappings, list) else []
+            # null/missing genuinely means "no parent/LAG relationships" → empty list. But a
+            # non-list (or a list with non-dict items) is a malformed response: returning
+            # (True, []) there would be indistinguishable from "no relationships" and silently
+            # skip valid sync updates, so fail the call instead and let the caller surface it.
+            if mappings is None:
+                return True, []
+            if not isinstance(mappings, list) or any(not isinstance(item, dict) for item in mappings):
+                logger.warning("Unexpected port_stack response for device %s: %r", device_id, data)
+                return False, "Unexpected response format from LibreNMS (invalid 'mappings' payload)"
+            return True, mappings
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "Device not found in LibreNMS"
