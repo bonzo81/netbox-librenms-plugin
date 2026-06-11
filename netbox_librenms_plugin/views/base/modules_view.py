@@ -2406,6 +2406,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if row.get("_source") == "oob":
             for _flag in ("can_install", "can_replace", "can_update_serial", "can_update_interface_binding"):
                 row[_flag] = False
+            # The bay/type resolution above can also stamp model-editing payloads
+            # (add-mapping / add-module-type / incomplete-type prompts) that mutate the HOST
+            # device's bay/type modelling. Drop those on OOB rows too — same reason.
+            for _key in (
+                "model_suggestion",
+                "type_suggestion",
+                "module_type_create",
+                "module_type_ambiguity",
+                "device_type_incomplete",
+                "model_incomplete",
+            ):
+                row.pop(_key, None)
 
         return row
 

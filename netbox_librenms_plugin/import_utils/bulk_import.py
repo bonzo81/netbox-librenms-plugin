@@ -591,12 +591,20 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         logger.warning("Bulk re-check blocked — ambiguous librenms_id %r: %s", librenms_id, exc)
         validation["can_import"] = False
         validation["is_ready"] = False
+        validation["ambiguous_librenms_id"] = True
         validation["existing_match_type"] = "ambiguous_librenms_id"
-        validation.setdefault("warnings", []).append(
+        message = (
             f"LibreNMS ID {librenms_id} matches more than one existing NetBox record; import "
             "blocked to avoid binding to the wrong object. Resolve the duplicate librenms_id "
             "assignment, then retry."
         )
+        # Append to issues (not just warnings) — a later recalculate_validation_status()
+        # recomputes can_import from issues, so a warning alone would be silently re-enabled.
+        # Dedup so repeated refreshes don't stack the same message.
+        if message not in validation.setdefault("warnings", []):
+            validation["warnings"].append(message)
+        if message not in validation.setdefault("issues", []):
+            validation["issues"].append(message)
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
 

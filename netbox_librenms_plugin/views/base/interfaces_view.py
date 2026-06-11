@@ -144,17 +144,19 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return redirect(self.get_redirect_url(obj))
 
-        # Get librenms_id at the start (now scoped to the POSTed server).
-        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        # Resolve the VC sync device once (the priority member for a VC, else obj) and use it
+        # for the main librenms_id lookup too — not just the cache/OOB scope below. On VC-member
+        # pages the active librenms_id can live on the priority member, so reading it from the
+        # viewed obj would fetch/cache another member's data. Mirrors cables_view.
+        _server_key = post_server_key
+        lookup_device = get_librenms_sync_device(obj, server_key=_server_key) or obj
+
+        # Get librenms_id at the start (now scoped to the POSTed server + resolved member).
+        self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS.")
             return self._failure_redirect(request, obj, post_server_key)
-
-        # Resolve the cache scope once (the VC sync device for a member, else obj) and use
-        # it for the up-front clear below and the writes further down. Mirrors cables_view.
-        _server_key = post_server_key
-        lookup_device = get_librenms_sync_device(obj, server_key=_server_key) or obj
 
         # A refresh must actually refresh: drop the previous snapshot up front so that if
         # the fetch below fails we fall back to an empty view + visible error, rather than

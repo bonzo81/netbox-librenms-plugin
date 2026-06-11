@@ -107,7 +107,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # that simply has no links, so the caller can surface the actual error instead of
         # always saying "No links found". Reset per-call to avoid leaking a prior error.
         self._links_fetch_error = None
-        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        # Resolve the VC sync device once and use it for the main LibreNMS id + ports too —
+        # not just the OOB branch below. On VC-member pages the active librenms_id/mapping can
+        # live on the priority member, so reading it from the viewed `obj` would fetch one
+        # member's cables and cache them under another member's key (mismatched verify/sync).
+        lookup_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
         success, data = self.librenms_api.get_device_links(self.librenms_id)
         if not success:
             self._links_fetch_error = data.get("error") if isinstance(data, dict) else str(data)
@@ -125,7 +130,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             return None
 
         interface_name_field = get_interface_name_field(getattr(self, "request", None))
-        ports_data = self.get_ports_data(obj, server_key=server_key)
+        ports_data = self.get_ports_data(lookup_device, server_key=server_key)
         local_ports_map = {}
         for port in ports_data.get("ports", []):
             raw_port_id = port.get("port_id")
@@ -164,8 +169,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 }
             )
 
-        # If an OOB controller is linked, fetch its LLDP links and merge.
-        lookup_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        # If an OOB controller is linked, fetch its LLDP links and merge. Reuse the sync
+        # device resolved at the top so host + OOB data stay scoped to the same member.
         oob = get_librenms_oob(lookup_device, server_key=server_key)
         if oob and oob.get("id"):
             oob_success, oob_data = self.librenms_api.get_device_links(oob["id"])

@@ -212,6 +212,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "failed": [],
             "primary_set": [],
             "primary_no_interface": [],
+            "skipped_no_interface": [],
             "errors": {},
         }
 
@@ -234,6 +235,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     vrf = self.get_vrf_selection(request, ip_address)
 
                     interface = self._match_interface(ip_data, interfaces_by_librenms_id, interfaces_by_name)
+
+                    if interface is None:
+                        # No matching NetBox interface — the row is stale, the interface isn't
+                        # synced yet, or _match_interface refused an ambiguous port_id. Writing
+                        # here would either drop an existing IP's binding (assigned_object=None)
+                        # or create an unassigned/global address, both of which violate the
+                        # interface-assigned model. Skip the row instead of corrupting state.
+                        if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
+                            results["primary_no_interface"].append(ip_address)
+                        else:
+                            results["skipped_no_interface"].append(ip_address)
+                        continue
 
                     ip_with_mask = ip_data["ip_with_mask"]
 
@@ -260,13 +273,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                         results["created"].append(ip_address)
 
-                    # Primary-IP auto-match for the management IP. NetBox requires
-                    # the IP be interface-assigned to be a primary, so when the
-                    # interface is missing we flag it rather than silently skip.
+                    # Primary-IP auto-match for the management IP. The no-interface case is
+                    # handled above (the row was skipped before any write), so here the IP is
+                    # guaranteed interface-assigned and can satisfy NetBox's primary constraint.
                     if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
-                        if interface is None:
-                            results["primary_no_interface"].append(ip_address)
-                        elif self._set_primary_ip(obj, ip_obj):
+                        if self._set_primary_ip(obj, ip_obj):
                             results["primary_set"].append(ip_address)
 
             except Exception as exc:
@@ -290,6 +301,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "Primary IP not set for "
                 f"{', '.join(results['primary_no_interface'])} — no NetBox interface for this IP. "
                 "Sync interfaces first, then re-run.",
+            )
+        if results.get("skipped_no_interface"):
+            messages.warning(
+                request,
+                "Skipped (no matching NetBox interface): "
+                f"{', '.join(results['skipped_no_interface'])}. Sync interfaces first, then re-run.",
             )
         if results["unchanged"]:
             messages.warning(

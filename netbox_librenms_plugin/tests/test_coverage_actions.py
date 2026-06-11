@@ -5524,4 +5524,6 @@ class TestCreatePlatformFromImportManufacturer:
         mock_err.assert_called_once()
         assert "manufacturer" in mock_err.call_args[0][0].lower()
         assert result == ("ERR", mock_err.call_args[0][0])
+        # Neither the constructor nor the manager create() path persisted a Platform.
         mock_platform.assert_not_called()
+        mock_platform.objects.create.assert_not_called()

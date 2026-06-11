@@ -1743,45 +1743,81 @@ class TestSyncIPAddressesViewProcessIpSync:
         view._post_server_key = "default"
         return view
 
+    def _obj_with_iface(self, name="eth0"):
+        """Build an obj whose single interface matches port_id 5 (via get_librenms_device_id)."""
+        iface = MagicMock()
+        iface.name = name
+        obj = MagicMock()
+        obj.interfaces.all.return_value = [iface]
+        return obj, iface
+
     def test_creates_new_ip_address(self):
         view = self._setup_view()
         selected = ["10.0.0.1"]
-        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
+        # Row carries a port_id and the device has a matching interface, so the IP is created
+        # interface-assigned (the no-interface path now skips instead of creating a global IP).
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
+        obj, iface = self._obj_with_iface()
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
             with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
                 mock_ip_cls.objects.filter.return_value.first.return_value = None
-                with patch.object(view, "get_vrf_selection", return_value=None):
-                    results = view.process_ip_sync(view.request, selected, cached, MagicMock(), "device")
+                with patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5):
+                    with patch.object(view, "get_vrf_selection", return_value=None):
+                        results = view.process_ip_sync(view.request, selected, cached, obj, "device")
         assert "10.0.0.1" in results["created"]
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is iface
 
     def test_updates_existing_ip_address_different_interface(self):
         view = self._setup_view()
         selected = ["10.0.0.1"]
-        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
+        obj, iface = self._obj_with_iface()
         existing_ip = MagicMock()
-        existing_ip.assigned_object = MagicMock()  # Different from None interface
+        existing_ip.assigned_object = MagicMock()  # currently on a different interface
         existing_ip.vrf = None
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
             with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
                 mock_ip_cls.objects.filter.return_value.first.return_value = existing_ip
-                with patch.object(view, "get_vrf_selection", return_value=None):
-                    results = view.process_ip_sync(view.request, selected, cached, MagicMock(), "device")
+                with patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5):
+                    with patch.object(view, "get_vrf_selection", return_value=None):
+                        results = view.process_ip_sync(view.request, selected, cached, obj, "device")
         assert "10.0.0.1" in results["updated"]
+        assert existing_ip.assigned_object is iface
         existing_ip.save.assert_called_once()
 
     def test_unchanged_ip_address_skipped(self):
         view = self._setup_view()
         selected = ["10.0.0.1"]
-        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
+        obj, iface = self._obj_with_iface()
         existing_ip = MagicMock()
-        existing_ip.assigned_object = None  # Same as interface (None)
+        existing_ip.assigned_object = iface  # already on the matched interface
         existing_ip.vrf = None
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
             with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
                 mock_ip_cls.objects.filter.return_value.first.return_value = existing_ip
-                with patch.object(view, "get_vrf_selection", return_value=None):
-                    results = view.process_ip_sync(view.request, selected, cached, MagicMock(), "device")
+                with patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5):
+                    with patch.object(view, "get_vrf_selection", return_value=None):
+                        results = view.process_ip_sync(view.request, selected, cached, obj, "device")
         assert "10.0.0.1" in results["unchanged"]
+
+    def test_no_matching_interface_skips_without_writing(self):
+        """No NetBox interface matches the row → skip (no create/update). The old behaviour
+        created an unassigned/global IP or nulled an existing binding (data loss)."""
+        view = self._setup_view()
+        selected = ["10.0.0.1"]
+        # No port_id/interface_name → _match_interface returns None.
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
+        obj = MagicMock()
+        obj.interfaces.all.return_value = []
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
+            with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
+                mock_ip_cls.objects.filter.return_value.first.return_value = None
+                with patch.object(view, "get_vrf_selection", return_value=None):
+                    results = view.process_ip_sync(view.request, selected, cached, obj, "device")
+        assert "10.0.0.1" in results["skipped_no_interface"]
+        assert "10.0.0.1" not in results["created"]
+        mock_ip_cls.objects.create.assert_not_called()
 
     def test_ip_assigned_to_interface_matched_by_port_id(self):
         view = self._setup_view()

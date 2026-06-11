@@ -378,24 +378,17 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
         # Reject None and booleans.
         if val is None or isinstance(val, bool):
             return False
-        # Handle new per-server dict form: {"id": 42, "oob": {...}}
+        # Per-server dict form: {"id": 42, "oob": {"id": 7, ...}}. Either a host id OR an
+        # OOB id counts as a real LibreNMS linkage — set_librenms_oob() can persist an
+        # OOB-only mapping before a host id exists, and treating that member as unlinked
+        # would fall through to the master/primary-IP fallback and pick the wrong VC member.
         if isinstance(val, dict):
-            inner = val.get("id")
-            # Only ints/string-digits are valid ids — mirror coerce_librenms_id so a
-            # float like 1.0 (which int() would happily truncate) doesn't pass here but
-            # then fail coerce_librenms_id/get_librenms_device_id downstream.
-            if not isinstance(inner, (int, str)) or isinstance(inner, bool):
-                return False
-            try:
-                return int(inner) > 0
-            except (TypeError, ValueError):
-                return False
-        if not isinstance(val, (int, str)):
-            return False
-        try:
-            return int(val) > 0
-        except (TypeError, ValueError):
-            return False
+            if coerce_librenms_id(val.get("id")) is not None:
+                return True
+            oob = val.get("oob")
+            return isinstance(oob, dict) and coerce_librenms_id(oob.get("id")) is not None
+        # coerce_librenms_id mirrors the int/string-digit rules (rejects floats like 1.0).
+        return coerce_librenms_id(val) is not None
 
     if server_key is not None:
         # Priority 1: Prefer member with an explicit per-server dict mapping for server_key.

@@ -1087,6 +1087,9 @@ class TestBaseInterfaceTableViewBasics:
         with (
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api) as mock_build,
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="name"),
+            # The id lookup now runs on the resolved VC sync device; pin it to obj so the
+            # assertion stays focused on which API client (rebound vs session) is used.
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.redirect", return_value="redir") as mock_redirect,
         ):

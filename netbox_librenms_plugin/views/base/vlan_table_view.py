@@ -48,7 +48,11 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             context = {
                 "vlan_sync": self._get_error_context(
                     obj, "Selected LibreNMS server is no longer configured.", server_key=None
-                )
+                ),
+                # Preserve migrated-context flags on this error exit too (every other POST
+                # path includes them); otherwise a donor/winner device loses its migration
+                # controls on a stale-server refresh until the next full reload.
+                **build_migrated_context(obj, request.POST.get("server_key")),
             }
             return render(request, self.partial_template_name, context)
         migrated = build_migrated_context(obj, server_key)
