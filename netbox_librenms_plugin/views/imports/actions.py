@@ -1808,7 +1808,7 @@ class AddDeviceTypeMappingView(
         else:
             row_html = mark_safe("")
 
-        return HttpResponse(oob_modal + row_html, content_type="text/html")
+        return HttpResponse(format_html("{}{}", oob_modal, row_html), content_type="text/html")
 
 
 class CreatePlatformFromImportView(
@@ -2096,10 +2096,14 @@ class CreatePlatformFromImportView(
         else:
             row_html = mark_safe("")
 
-        response = HttpResponse(oob_modal + row_html, content_type="text/html")
-        # Emit any queued messages (e.g. a skipped-mapping warning) as an OOB toast. No-op
-        # when nothing is queued, so the normal success path is unchanged.
-        return _attach_messages_oob(response, request)
+        response = HttpResponse(format_html("{}{}", oob_modal, row_html), content_type="text/html")
+        # render_device_row() already attached any queued messages (it peeks, leaving them
+        # pending), so row_html already carries the #django-messages toast. Only attach here
+        # when no row was rendered — otherwise a queued warning (e.g. a skipped mapping) would
+        # render the same toast twice.
+        if libre_device is None or validation is None:
+            return _attach_messages_oob(response, request)
+        return response
 
 
 class AddAsOOBView(
@@ -3082,4 +3086,4 @@ class AddPlatformMappingView(
         else:
             row_html = mark_safe("")
 
-        return HttpResponse(oob_modal + row_html, content_type="text/html")
+        return HttpResponse(format_html("{}{}", oob_modal, row_html), content_type="text/html")
