@@ -397,6 +397,10 @@ class TestCreatePlatformFullClean:
         request.POST = {"platform_name": "test-platform"}
         request.user.has_perm.return_value = True
         view.request = request
+        # View is built via object.__new__ (no __init__), so stub the lazy API
+        # the post-success/redirect path now reads for its server_key fallback.
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default-server"
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404"),
