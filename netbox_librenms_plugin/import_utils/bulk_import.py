@@ -468,7 +468,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
             return
 
-    # existing_device was None at cache time — check if device was imported since
+    # Re-evaluate the match under current DB state. Reached when existing_device was None at
+    # cache time, or when a cached librenms_id/OOB link disappeared (cleared above) or its
+    # device was deleted — in every case re-check whether a matching NetBox object exists now,
+    # using the full id/name/serial/IP breadth so the row can't flip to importable and create
+    # a duplicate of a device that still exists under a different identity.
     if not libre_device:
         return
     try:
@@ -520,6 +524,33 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             new_device, match_type = _lookup_in_model(CrossModel)
             if new_device:
                 found_as_cross_model = True
+
+        if not new_device and not import_as_vm:
+            # Serial- and IP-based matches: validate_device_for_import() catches these, so the
+            # refresh re-check must have the same breadth. Without them a row whose
+            # librenms_id/name link disappeared (or that never matched) can flip to importable
+            # and re-import a device that already exists in NetBox under a different name —
+            # matched only by hardware serial or management IP. Device-only (VMs have no serial
+            # or primary-IP identity here). The richer serial_action/OOB-candidate heuristics
+            # stay in the full validation path; here the contract is simply: block the import.
+            from dcim.models import Device as _Device
+
+            serial = (libre_device.get("serial") or "").strip()
+            if serial and serial != "-":
+                dev = _Device.objects.filter(serial=serial).first()
+                if dev:
+                    new_device, match_type = dev, "serial"
+
+            if not new_device:
+                primary_ip = libre_device.get("ip")
+                if primary_ip:
+                    from ipam.models import IPAddress
+
+                    existing_ip = IPAddress.objects.filter(address__net_host=primary_ip).first()
+                    assigned = getattr(existing_ip, "assigned_object", None) if existing_ip else None
+                    dev = getattr(assigned, "device", None) if assigned else None
+                    if dev:
+                        new_device, match_type = dev, "primary_ip"
 
         if new_device:
             validation["existing_device"] = new_device
