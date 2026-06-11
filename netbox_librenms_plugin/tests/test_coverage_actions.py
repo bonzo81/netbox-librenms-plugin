@@ -4632,19 +4632,22 @@ class TestAddAsOOBViewPost:
         assert response.status_code == 403
 
     def test_invalid_existing_device_id_returns_htmx_error(self):
-        """POST with a non-integer existing_device_id returns HTMX error."""
+        """POST with a non-integer existing_device_id returns HTMX error — the failure is
+        the int() conversion, which raises before any ORM lookup, so the manager is never hit."""
         view = self._make_view()
         request = _make_request(post={"existing_device_id": "not-a-number"})
 
         with patch("dcim.models.Device") as mock_device:
-            does_not_exist = type("DoesNotExist", (Exception,), {})
-            mock_device.DoesNotExist = does_not_exist
-            mock_device.objects.get.side_effect = ValueError("invalid literal")
+            # DoesNotExist must be a real exception so the view's except tuple is valid; the
+            # manager itself is NOT stubbed to raise — int("not-a-number") fails first.
+            mock_device.DoesNotExist = type("DoesNotExist", (Exception,), {})
             response = view.post(request, device_id=1)
 
         assert response.status_code == 200
         assert b"Existing device not found" in response.content
         assert response["HX-Reswap"] == "none"
+        # The malformed id is rejected before any DB lookup.
+        mock_device.objects.get.assert_not_called()
 
     def test_device_does_not_exist_returns_htmx_error(self):
         """POST with an existing_device_id that refers to a deleted device returns HTMX error."""

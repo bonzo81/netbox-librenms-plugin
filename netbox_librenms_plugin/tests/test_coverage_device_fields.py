@@ -1232,9 +1232,10 @@ class TestCreateAndAssignPlatformView:
         view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
-        # No mapping exists yet for this OS — historically this added the perm upfront.
+        # The upfront gate no longer reads PlatformMapping at all (neither .exists() nor
+        # .first()), so no lookup stub is needed — the gate must not require the perm
+        # regardless of whether a mapping exists.
         mock_mapping_cls = MagicMock()
-        mock_mapping_cls.objects.filter.return_value.exists.return_value = False
 
         captured = {}
 
@@ -1264,9 +1265,9 @@ class TestCreateAndAssignPlatformView:
         view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
-        # A mapping for this OS already exists → no write → perm not required.
+        # The upfront gate no longer reads PlatformMapping (see the sibling test); the perm
+        # is never required upfront, the mapping write gates itself at its own site.
         mock_mapping_cls = MagicMock()
-        mock_mapping_cls.objects.filter.return_value.exists.return_value = True
 
         captured = {}
 

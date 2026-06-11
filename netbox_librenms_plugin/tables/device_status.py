@@ -517,16 +517,6 @@ class DeviceImportTable(tables.Table):
                 btn_icon = "mdi-alert"
                 btn_label = " Conflict"
                 btn_title = "View conflict details"
-            elif has_name_sync or has_sync_needed:
-                btn_class = "btn-outline-warning"
-                btn_icon = "mdi-information-outline"
-                btn_label = " Details"
-                btn_title = "View details"
-            elif match_type == "librenms_id" and validation.get("librenms_id_needs_migration"):
-                btn_class = "btn-outline-warning"
-                btn_icon = "mdi-database-alert"
-                btn_label = " Legacy ID"
-                btn_title = "View legacy ID migration details"
             elif (
                 match_type == "librenms_id"
                 and paired_oob_id is not None
@@ -536,6 +526,9 @@ class DeviceImportTable(tables.Table):
                 # pair. Render it with the same info-tinted styling as the OOB
                 # row so the user sees them as one paired device rather than
                 # two unrelated statuses (one green "ready", one blue "OOB").
+                # Evaluated BEFORE the generic name-sync/sync-needed branch so a
+                # paired host that also needs review still shows the Host state
+                # rather than falling back to the generic warning button.
                 btn_class = "btn-outline-info"
                 btn_icon = "mdi-server-network"
                 btn_label = " Host"
@@ -549,6 +542,16 @@ class DeviceImportTable(tables.Table):
                     _coerce_pair_id(paired_oob_id) if _coerce_pair_id(paired_oob_id) is not None else paired_oob_id
                 )
                 btn_title = f"Linked as host (paired OOB: LibreNMS #{escape(str(_oob_id_fmt))}, {escape(paired_oob_type or '')})"
+            elif has_name_sync or has_sync_needed:
+                btn_class = "btn-outline-warning"
+                btn_icon = "mdi-information-outline"
+                btn_label = " Details"
+                btn_title = "View details"
+            elif match_type == "librenms_id" and validation.get("librenms_id_needs_migration"):
+                btn_class = "btn-outline-warning"
+                btn_icon = "mdi-database-alert"
+                btn_label = " Legacy ID"
+                btn_title = "View legacy ID migration details"
             else:
                 btn_class = "btn-outline-success"
                 btn_icon = "mdi-check-circle"
