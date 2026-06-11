@@ -5,6 +5,7 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
@@ -59,14 +60,23 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         """
         raise NotImplementedError
 
-    def _failure_redirect(self, obj, server_key):
+    def _failure_redirect(self, request, obj, server_key):
         """Redirect to the sync tab after a refresh failure, preserving the POST-scoped
         server_key so the user stays on the server they were working in (otherwise the next
-        retry/sync can target the session/default LibreNMS instance instead)."""
+        retry/sync can target the session/default LibreNMS instance instead).
+
+        server_key is POST-derived, so the candidate URL is gated by Django's
+        ``url_has_allowed_host_and_scheme`` (sink inside the validated branch) — the
+        open-redirect barrier CodeQL recognises for py/url-redirection (CWE-601). The bare
+        ``url`` fallback is a pure ``reverse()`` path with no user input."""
         url = self.get_redirect_url(obj)
         if server_key:
             sep = "&" if "?" in url else "?"
-            url = f"{url}{sep}server_key={quote_plus(server_key)}"
+            candidate = f"{url}{sep}server_key={quote_plus(server_key)}"
+            if url_has_allowed_host_and_scheme(
+                candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+            ):
+                return redirect(candidate)
         return redirect(url)
 
     def get_select_related_field(self, obj):
@@ -139,7 +149,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS.")
-            return self._failure_redirect(obj, post_server_key)
+            return self._failure_redirect(request, obj, post_server_key)
 
         # Resolve the cache scope once (the VC sync device for a member, else obj) and use
         # it for the up-front clear below and the writes further down. Mirrors cables_view.
@@ -157,7 +167,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         if not success:
             messages.error(request, librenms_data)
-            return self._failure_redirect(obj, _server_key)
+            return self._failure_redirect(request, obj, _server_key)
 
         # Enrich ports with VLAN data for trunk ports
         ports = librenms_data.get("ports", [])

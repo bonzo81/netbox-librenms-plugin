@@ -1277,6 +1277,37 @@ class TestBaseInterfaceTableViewPost:
         mock_cache.delete.assert_any_call("last-key")
         mock_cache.set.assert_not_called()
 
+    def test_failure_redirect_gated_by_open_redirect_barrier(self):
+        """The appended server_key is POST-derived, so the failure redirect MUST gate the
+        candidate URL through url_has_allowed_host_and_scheme (the CodeQL py/url-redirection
+        barrier). This test fails if that barrier is removed: it would no longer be consulted,
+        and the tainted server_key would reach redirect() unchecked — exactly the open-redirect
+        regression CodeQL flagged. With the validator forced to reject, the redirect must fall
+        back to the bare reverse() URL (no server_key)."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+        view._librenms_api.get_librenms_id.return_value = None
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "rebind_api_for_server", return_value="prod"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch(
+                "netbox_librenms_plugin.views.base.interfaces_view.url_has_allowed_host_and_scheme",
+                return_value=False,
+            ) as mock_barrier,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
+        ):
+            mock_redirect.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        # The barrier must be consulted, and on rejection the tainted server_key is dropped.
+        mock_barrier.assert_called_once()
+        mock_redirect.assert_called_once_with("/device/1/")
+
     def test_post_clears_stale_cache_before_fetch(self):
         """A refresh drops the previous ports snapshot before fetching, so a later
         failure can't leave stale data behind."""
