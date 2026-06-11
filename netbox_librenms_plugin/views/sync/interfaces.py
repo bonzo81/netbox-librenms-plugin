@@ -103,8 +103,10 @@ class SyncInterfacesView(
             skipped = ", ".join(self._skipped_conflicts)
             messages.warning(
                 request,
-                f"{len(self._skipped_conflicts)} interface(s) skipped — their LibreNMS port is already "
-                f"mapped to a different interface: {skipped}.",
+                # Generic reason: the skip list covers both "port already mapped to a different
+                # interface" and ambiguous-port_id cases, so don't claim a single cause.
+                f"{len(self._skipped_conflicts)} interface(s) skipped — their LibreNMS port could not "
+                f"be safely matched to a NetBox interface (already mapped elsewhere, or ambiguous): {skipped}.",
             )
         messages.success(request, "Selected interfaces synced successfully.")
         return redirect(redirect_url)

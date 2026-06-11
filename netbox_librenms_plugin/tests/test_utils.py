@@ -466,6 +466,45 @@ class TestVirtualChassisHelpers:
 
         assert result == member_b
 
+    def test_get_librenms_sync_device_host_id_preferred_over_oob_only(self):
+        """A member holding the real host id must win over a member that only carries an
+        OOB-only mapping for the same server, even when the OOB-only member is iterated first.
+        Host-side consumers (status redirect, cable/interface main-id lookup) target this."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        # Member A (listed first): OOB-only linkage — no host id.
+        member_a = MagicMock()
+        member_a.cf = {"librenms_id": {"default": {"oob": {"id": 7, "type": "drac"}}}}
+        # Member B: the real host id.
+        member_b = MagicMock()
+        member_b.cf = {"librenms_id": {"default": {"id": 42}}}
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device, server_key="default")
+
+        assert result == member_b
+
+    def test_get_librenms_sync_device_oob_only_resolves_when_no_host_id(self):
+        """When no member has a host id, an OOB-only mapping still resolves the sync device
+        (rather than falling through to the master/primary-IP fallback and picking wrong)."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        member_a = MagicMock()
+        member_a.cf = {}
+        member_b = MagicMock()
+        member_b.cf = {"librenms_id": {"default": {"oob": {"id": 7, "type": "drac"}}}}
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device, server_key="default")
+
+        assert result == member_b
+
     def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
         """When no member has a per-server dict, fall back to legacy bare-int."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device

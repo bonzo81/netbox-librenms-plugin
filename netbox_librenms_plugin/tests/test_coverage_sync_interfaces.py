@@ -424,7 +424,8 @@ class TestSyncInterfacesViewPost:
         mock_msgs.warning.assert_called_once()
         warning_msg = mock_msgs.warning.call_args[0][1]
         assert "Gi0/1" in warning_msg
-        assert "different interface" in warning_msg
+        # Generic reason covers both "mapped elsewhere" and ambiguous-port_id skips.
+        assert "could not be safely matched" in warning_msg
         mock_msgs.success.assert_called_once()
 
 

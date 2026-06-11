@@ -374,46 +374,58 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
     vc = device.virtual_chassis
     all_members = vc.members.all()
 
-    def _is_valid_librenms_id(val):
-        # Reject None and booleans.
+    def _host_id_valid(val):
+        # A real host-side LibreNMS id: a bare int/string-digit, or the "id" of a per-server
+        # dict ({"id": 42, ...}). coerce_librenms_id mirrors the int/string rules (rejects
+        # bools and floats like 1.0).
         if val is None or isinstance(val, bool):
             return False
-        # Per-server dict form: {"id": 42, "oob": {"id": 7, ...}}. Either a host id OR an
-        # OOB id counts as a real LibreNMS linkage — set_librenms_oob() can persist an
-        # OOB-only mapping before a host id exists, and treating that member as unlinked
-        # would fall through to the master/primary-IP fallback and pick the wrong VC member.
         if isinstance(val, dict):
-            if coerce_librenms_id(val.get("id")) is not None:
-                return True
-            oob = val.get("oob")
-            return isinstance(oob, dict) and coerce_librenms_id(oob.get("id")) is not None
-        # coerce_librenms_id mirrors the int/string-digit rules (rejects floats like 1.0).
+            return coerce_librenms_id(val.get("id")) is not None
         return coerce_librenms_id(val) is not None
 
+    def _oob_id_valid(val):
+        # An OOB-only linkage: a per-server dict carrying {"oob": {"id": 7, ...}}. set_librenms_oob()
+        # can persist this before a host id exists; it's a real linkage but weaker than a host id.
+        if not isinstance(val, dict):
+            return False
+        oob = val.get("oob")
+        return isinstance(oob, dict) and coerce_librenms_id(oob.get("id")) is not None
+
     if server_key is not None:
-        # Priority 1: Prefer member with an explicit per-server dict mapping for server_key.
-        # This ensures a migrated device is preferred over one with a legacy bare-int ID.
+        # Priority 1: a member with a real host id for server_key (a migrated dict mapping is
+        # preferred over a legacy bare-int below).
         for member in all_members:
             raw_cf = member.cf.get("librenms_id")
-            if isinstance(raw_cf, dict):
-                if _is_valid_librenms_id(raw_cf.get(server_key)):
-                    return member
+            if isinstance(raw_cf, dict) and _host_id_valid(raw_cf.get(server_key)):
+                return member
 
-        # Priority 2 (legacy fallback): Any member whose librenms_id resolves for this server
+        # Priority 1b (legacy fallback): any member whose host id resolves for this server
         # (includes bare-int legacy IDs that are a universal fallback).
         for member in all_members:
-            result = get_librenms_device_id(member, server_key, auto_save=False)
-            if result:
+            if get_librenms_device_id(member, server_key, auto_save=False):
+                return member
+
+        # Priority 1c: OOB-only mapping for this server — a member linked only as an OOB
+        # controller. Evaluated LAST so a member holding the real host id always wins; without
+        # this pass an OOB-only member would fall through to the master/primary-IP fallback.
+        for member in all_members:
+            raw_cf = member.cf.get("librenms_id")
+            if isinstance(raw_cf, dict) and _oob_id_valid(raw_cf.get(server_key)):
                 return member
     else:
-        # server_key is None: match any member that has any librenms_id set (any server).
-        # Used in contexts without an active server (e.g. device status table columns).
+        # server_key is None (e.g. table columns without an active server): prefer a member
+        # with any host id on any server, then fall back to any OOB-only linkage.
         for member in all_members:
             raw_cf = member.cf.get("librenms_id")
             if isinstance(raw_cf, dict):
-                if any(_is_valid_librenms_id(v) for v in raw_cf.values()):
+                if any(_host_id_valid(v) for v in raw_cf.values()):
                     return member
-            elif _is_valid_librenms_id(raw_cf):
+            elif _host_id_valid(raw_cf):
+                return member
+        for member in all_members:
+            raw_cf = member.cf.get("librenms_id")
+            if isinstance(raw_cf, dict) and any(_oob_id_valid(v) for v in raw_cf.values()):
                 return member
 
     # Priority 2: Use master device if it has primary IP
