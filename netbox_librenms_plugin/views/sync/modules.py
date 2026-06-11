@@ -1306,8 +1306,24 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             bind_result = None
             if bind_item and server_key:
                 bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
-            if bind_result is None:
-                bind_result = _adopt_existing_template_interfaces(target_device, module)
+            # The port_id bind only associates the single LibreNMS-identified interface, but a
+            # module can also own template interfaces (e.g. breakout children like c2/1) that
+            # remain standalone and independently keep the row's "Update Interface" action on
+            # (see _count_adoptable_template_interfaces). Adopt those too when the bind found
+            # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
+            # makes the bind a no-op, the adoption is skipped, and the button never clears.
+            # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
+            if bind_result is None or bind_result.get("status") == "bound":
+                adopt_result = _adopt_existing_template_interfaces(target_device, module)
+                if bind_result is None:
+                    bind_result = adopt_result
+                elif adopt_result.get("status") == "bound":
+                    bind_result = {
+                        "status": "bound",
+                        "interface": bind_result.get("interface"),
+                        "adopted_count": (bind_result.get("adopted_count") or 0)
+                        + (adopt_result.get("adopted_count") or 0),
+                    }
         except Exception:
             bind_result = {
                 "status": "failed",

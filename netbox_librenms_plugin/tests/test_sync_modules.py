@@ -1888,6 +1888,111 @@ class TestSingleInstallInterfaceBinding:
         assert "adopted 2 existing standalone interface(s)" in mock_messages.success.call_args[0][1]
         assert response is not None
 
+    def test_update_module_interface_view_adopts_templates_even_when_port_bind_is_a_noop(self):
+        """Regression: the port_id bind and template adoption are complementary, not
+        either/or. When the LibreNMS-identified interface is already bound, the bind
+        returns 'bound' (a no-op) — adoption must STILL run so standalone template
+        interfaces (e.g. breakout children) get adopted and the row's 'Update Interface'
+        affordance clears instead of persisting after a 'success' toast."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        device = _make_device()
+
+        module = MagicMock()
+        module.pk = 967
+        module.module_type.model = "QSFP-DD-400G-ZR+"
+        module.module_bay.name = "2/x1/1/c2"
+
+        request = _make_request(
+            "POST",
+            data={"module_id": "967", "server_key": "production", "ent_index": "77"},
+        )
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch.object(view, "get_cache_key", return_value="inv-key"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
+                return_value={"status": "bound", "interface": "2/x1/1/c2", "port_id": 587},
+            ) as mock_bind,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
+                return_value={"status": "bound", "adopted_count": 1, "interfaces": ["2/x1/1/c2/1"]},
+            ) as mock_adopt,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+        ):
+            mock_cache.get.return_value = {
+                "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 587, "_librenms_ifname": "2/x1/1/c2"}],
+                "librenms_id": 999,
+            }
+            response = view.post(request, pk=24)
+
+        # Bind no-op'd on the already-bound interface, but adoption still ran...
+        mock_bind.assert_called_once()
+        mock_adopt.assert_called_once_with(device, module)
+        # ...and the merged result surfaces the adoption so the user sees real progress.
+        mock_messages.success.assert_called_once()
+        assert "adopted 1 existing standalone interface(s)" in mock_messages.success.call_args[0][1]
+        assert response is not None
+
+    def test_update_module_interface_view_skips_adoption_on_bind_conflict(self):
+        """A hard bind conflict must NOT trigger template adoption — we don't mutate past
+        an unresolved problem (e.g. an ambiguous/foreign port_id)."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        device = _make_device()
+
+        module = MagicMock()
+        module.pk = 967
+        module.module_type.model = "QSFP-DD-400G-ZR+"
+        module.module_bay.name = "2/x1/1/c2"
+
+        request = _make_request(
+            "POST",
+            data={"module_id": "967", "server_key": "production", "ent_index": "77"},
+        )
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch.object(view, "get_cache_key", return_value="inv-key"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
+                return_value={"status": "conflict", "reason": "port_id 587 already assigned elsewhere"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
+            ) as mock_adopt,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+        ):
+            mock_cache.get.return_value = {
+                "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 587, "_librenms_ifname": "2/x1/1/c2"}],
+                "librenms_id": 999,
+            }
+            view.post(request, pk=24)
+
+        mock_adopt.assert_not_called()
+        mock_messages.warning.assert_called_once()
+
     def test_replace_module_view_binds_interface_after_replace(self):
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
