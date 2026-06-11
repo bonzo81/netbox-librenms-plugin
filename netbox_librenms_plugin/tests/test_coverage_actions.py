@@ -5480,3 +5480,48 @@ class TestMissingOOBIpPermissions:
             mock_objects.filter.return_value.__getitem__.return_value = [on_iface, MagicMock()]
             msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
         assert msg is not None and "change_ipaddress" in msg
+
+
+class TestCreatePlatformFromImportManufacturer:
+    """CreatePlatformFromImportView must reject a stale/tampered manufacturer id instead of
+    silently creating a Platform with no manufacturer."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.imports.actions import CreatePlatformFromImportView
+
+        view = object.__new__(CreatePlatformFromImportView)
+        view.required_object_permissions = {}
+        return view
+
+    def test_invalid_manufacturer_id_is_rejected(self):
+        view = self._view()
+        req = _make_request(post={"platform_name": "New-OS", "manufacturer": "9999"})
+
+        mock_manuf = MagicMock()
+        mock_manuf.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_manuf.objects.get.side_effect = mock_manuf.DoesNotExist()
+        mock_platform = MagicMock()
+        mock_platform.objects.filter.return_value.exists.return_value = False
+
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch.object(
+                view,
+                "get_validated_device_with_selections",
+                return_value=(None, {"existing_device": None}, {}),
+            ),
+            patch("dcim.models.Platform", mock_platform),
+            patch("dcim.models.Manufacturer", mock_manuf),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions._htmx_error_response",
+                side_effect=lambda msg: ("ERR", msg),
+            ) as mock_err,
+        ):
+            result = view.post(req, device_id=42)
+
+        # Rejected with a manufacturer-not-found error; the Platform was never created.
+        mock_err.assert_called_once()
+        assert "manufacturer" in mock_err.call_args[0][0].lower()
+        assert result == ("ERR", mock_err.call_args[0][0])
+        mock_platform.assert_not_called()

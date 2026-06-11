@@ -20,6 +20,7 @@ from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.shortcuts import get_object_or_404, redirect
+from django.urls import get_script_prefix
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
@@ -86,7 +87,9 @@ def _safe_referer(request):
         require_https=request.is_secure(),
     ):
         return referer
-    return "/"
+    # Fall back to the app mount path (not literal "/") so non-HTMX failures land on the
+    # NetBox app root on prefixed deployments instead of the site root.
+    return get_script_prefix()
 
 
 def _hx_response(request, message, level=messages.SUCCESS, *, status=200):
@@ -455,11 +458,15 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             # can't change its device after this check but before the FK saves, which
             # would leave winner.primary_ip*/oob_ip on an interface it no longer owns.
             assigned = getattr(donor_ip, "assigned_object", None)
-            if assigned is not None:
-                # Lock the owning interface row (this transfer is device-scoped, so the
-                # assignment is a dcim Interface). A non-Interface assignment re-locks to
-                # None and fails the device_id check below — the correct fail-safe.
+            # Only re-lock when the assignment really is a dcim Interface. GenericForeignKey
+            # pks aren't unique across models, so filtering Interface by a non-Interface pk
+            # (e.g. a VMInterface) could lock an unrelated Interface and let the device_id
+            # check validate the wrong row. A non-Interface assignment fails closed (None).
+            if isinstance(assigned, Interface):
+                # Lock the owning interface row (this transfer is device-scoped).
                 assigned = Interface.objects.select_for_update().filter(pk=assigned.pk).first()
+            else:
+                assigned = None
             if getattr(assigned, "device_id", None) != winner.pk:
                 return self._fail(
                     request,

@@ -387,6 +387,7 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
     validation["librenms_id_needs_migration"] = False
     validation["name_matches"] = False
     validation["name_sync_available"] = False
+    validation["suggested_name"] = None
     validation["device_type_mismatch"] = False
     # promote_to_host follows the "absent otherwise" contract (see apply_oob_detection_result).
     validation.pop("promote_to_host", None)

@@ -457,11 +457,15 @@ class TestTransferDeviceIPView:
         view = self._setup_view()
         req = _hx_request({"server_key": "default"})
 
+        from dcim.models import Interface as InterfaceModel
+
         oob_ip = MagicMock(address="10.0.0.5/24")
         # The address must already belong to the winner for the transfer to be valid
         # (NetBox requires oob_ip on one of the device's own interfaces). The owning
         # interface is re-locked, so the locked row carries the winner's device_id.
-        oob_ip.assigned_object = MagicMock(pk=99)
+        # spec=Interface so the view's isinstance(assigned, Interface) guard accepts it.
+        oob_ip.assigned_object = MagicMock(spec=InterfaceModel)
+        oob_ip.assigned_object.pk = 99
         locked_iface = MagicMock(pk=99, device_id=20)
         # Pre-lock instances drive the pre-checks only; the view must mutate the
         # *locked* rows fetched inside the transaction.
@@ -478,7 +482,8 @@ class TestTransferDeviceIPView:
             ),
             patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
             patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
+            # Patch only the manager so Interface stays a real class for the isinstance guard.
+            patch("netbox_librenms_plugin.views.sync.migrate.Interface.objects") as mock_iface_objects,
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
@@ -492,7 +497,7 @@ class TestTransferDeviceIPView:
             # logical address so its assignment is validated from the locked row.
             mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
             # The owning interface is re-locked; return a row owned by the winner (device_id=20).
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
             resp = view.post(req, pk=10, ip_kind="oob")
         # The locked rows are the ones mutated and saved.
         assert locked_donor.oob_ip is None
@@ -513,8 +518,11 @@ class TestTransferDeviceIPView:
         view = self._setup_view()
         req = _hx_request({"server_key": "default"})
 
+        from dcim.models import Interface as InterfaceModel
+
         oob_ip = MagicMock(address="10.0.0.5/24")
-        oob_ip.assigned_object = MagicMock(pk=99)
+        oob_ip.assigned_object = MagicMock(spec=InterfaceModel)
+        oob_ip.assigned_object.pk = 99
         locked_iface = MagicMock(pk=99, device_id=10)  # still on the DONOR, not the winner
         donor = MagicMock(pk=10, oob_ip=oob_ip)
         winner = MagicMock(pk=20, name="winner", oob_ip=None)
@@ -529,7 +537,7 @@ class TestTransferDeviceIPView:
             ),
             patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
             patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.Interface.objects") as mock_iface_objects,
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
@@ -540,12 +548,53 @@ class TestTransferDeviceIPView:
             # Locked re-fetch returns the address still assigned to the donor (device_id=10).
             mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
             # The owning interface re-locks to a row still owned by the donor (device_id=10).
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
             resp = view.post(req, pk=10, ip_kind="oob")
 
         # Refused (409 surfaced via toast); neither side mutated/saved.
         assert b"django-messages" in resp.content
         assert locked_winner.oob_ip is None
+        locked_winner.save.assert_not_called()
+        locked_donor.save.assert_not_called()
+
+    def test_rejects_when_assignment_is_not_an_interface(self):
+        """A non-Interface assignment (e.g. a VMInterface) must fail closed: the Interface
+        re-lock is skipped (GenericForeignKey pks aren't unique across models, so filtering
+        Interface by an unrelated pk could lock the wrong row), so the device_id check sees
+        None and the transfer is refused."""
+        view = self._setup_view()
+        req = _hx_request({"server_key": "default"})
+
+        oob_ip = MagicMock(address="10.0.0.5/24")
+        # NOT spec=Interface → isinstance(assigned, Interface) is False → re-lock skipped.
+        oob_ip.assigned_object = MagicMock(pk=99)
+        donor = MagicMock(pk=10, oob_ip=oob_ip)
+        winner = MagicMock(pk=20, name="winner", oob_ip=None)
+        locked_donor = MagicMock(pk=10, oob_ip=oob_ip)
+        locked_winner = MagicMock(pk=20, name="winner", oob_ip=None)
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=donor),
+            patch(
+                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
+                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
+            ),
+            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.Interface.objects") as mock_iface_objects,
+            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
+            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
+        ):
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
+                locked_donor,
+                locked_winner,
+            ]
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
+            resp = view.post(req, pk=10, ip_kind="oob")
+
+        # Refused; the Interface manager was never queried (re-lock skipped), nothing saved.
+        assert b"django-messages" in resp.content
+        mock_iface_objects.select_for_update.assert_not_called()
         locked_winner.save.assert_not_called()
         locked_donor.save.assert_not_called()
 

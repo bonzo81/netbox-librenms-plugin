@@ -1982,7 +1982,10 @@ class CreatePlatformFromImportView(
             try:
                 manufacturer = Manufacturer.objects.get(pk=int(manufacturer_id))
             except (Manufacturer.DoesNotExist, ValueError, TypeError):
-                pass
+                # The user explicitly submitted a manufacturer; a stale/tampered id must be
+                # rejected, not silently dropped to None (which would persist a Platform with
+                # the wrong/no manufacturer).
+                return _htmx_error_response("Selected manufacturer not found.")
 
         try:
             with transaction.atomic():
@@ -2016,6 +2019,16 @@ class CreatePlatformFromImportView(
                             target_model.__name__,
                             target_pk,
                             platform.name,
+                        )
+                        # Surface the half-completed action: the platform was created but the
+                        # requested target vanished before the lock, so the assignment was
+                        # skipped. Warn after commit so a rolled-back create doesn't mislead.
+                        transaction.on_commit(
+                            lambda model=target_model.__name__, pk=target_pk, name=platform.name: messages.warning(
+                                request,
+                                f"Platform '{name}' was created, but the selected {model} (ID: {pk}) no longer "
+                                "exists, so it was not assigned.",
+                            )
                         )
                 else:
                     logger.info(
