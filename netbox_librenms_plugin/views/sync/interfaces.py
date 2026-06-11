@@ -229,7 +229,10 @@ class SyncInterfacesView(
                 if raw_lag is not None:
                     lag_port_id = str(raw_lag)
                     lag_entry = port_by_id.get(lag_port_id, {})
-                    lag_name = lag_entry.get("ifName", "")
+                    # Use the active display field for the name fallback: in ifDescr mode the
+                    # NetBox interface name matches ifDescr, so hinting ifName would look up the
+                    # wrong name and silently skip the LAG link. Fall back to ifName if absent.
+                    lag_name = lag_entry.get(interface_name_field) or lag_entry.get("ifName", "")
 
                     member_iface, err = _resolve_interface_by_port_id(obj, port_id, server_key)
                     if err:
@@ -266,7 +269,8 @@ class SyncInterfacesView(
                 if raw_parent is not None:
                     parent_port_id = str(raw_parent)
                     parent_entry = port_by_id.get(parent_port_id, {})
-                    parent_name = parent_entry.get("ifName", "")
+                    # Active display field for the name fallback (see the LAG branch above).
+                    parent_name = parent_entry.get(interface_name_field) or parent_entry.get("ifName", "")
 
                     child_iface, err = _resolve_interface_by_port_id(obj, port_id, server_key)
                     if err:

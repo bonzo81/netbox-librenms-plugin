@@ -1180,6 +1180,15 @@ function handleVRFChange(select, value) {
 function handleInterfaceChange(select, value) {
     const csrfToken = getCsrfToken();
     if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+    // Abort any still-in-flight verification for this select: on rapid VC-member changes an
+    // older /verify-interface/ response can otherwise arrive after a newer one and repaint the
+    // row with stale cells/relationship controls. Mirrors handleModuleChange's AbortController.
+    if (select._interfaceVerifyController) {
+        select._interfaceVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._interfaceVerifyController = controller;
+
     // Resolve the row from the changed <select> itself, not by data-interface: the same
     // interface name can appear in both the main and OOB datasets, so a name lookup can
     // post the wrong row's port_id and repaint the wrong row. closest('tr') is unique.
@@ -1187,6 +1196,7 @@ function handleInterfaceChange(select, value) {
 
     fetch('/plugins/librenms_plugin/verify-interface/', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfToken
@@ -1229,6 +1239,8 @@ function handleInterfaceChange(select, value) {
             }
         })
         .catch(error => {
+            // A superseded request was aborted on purpose — not an error to surface.
+            if (error.name === 'AbortError') return;
             console.error('Error verifying interface:', error.message);
         });
 }
