@@ -802,6 +802,41 @@ class TestCreateAndAssignPlatformView:
         mock_mapping_instance.save.assert_called_once()
         mock_msg.success.assert_called_once()
 
+    def test_mapping_existing_points_to_different_platform_warns(self):
+        """An existing OS mapping that targets a DIFFERENT platform must not be reported as
+        'already exists' — surface a warning and don't create a new mapping."""
+        view = self._view()
+        req = _make_request({"platform_name": "ios", "manufacturer": "", "librenms_os": "ios", "create_mapping": "1"})
+
+        found_platform = MagicMock(pk=5)
+        mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.filter.return_value.first.return_value = found_platform
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = MagicMock()
+
+        # Existing mapping for "ios" points at a different platform (id 999, not 5).
+        other_mapping = MagicMock(netbox_platform_id=999)
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.first.return_value = other_mapping
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=1)
+
+        # No new mapping created (PlatformMapping class never instantiated for a create), and
+        # the platform-mismatch is surfaced as a warning rather than a silent "already exists".
+        mock_mapping_cls.assert_not_called()
+        assert any("pointing to" in str(c.args) for c in mock_msg.warning.call_args_list)
+
     def test_manufacturer_not_found(self):
         """manufacturer_id provided but Manufacturer.DoesNotExist: manufacturer stays None."""
         view = self._view()
@@ -2574,3 +2609,20 @@ class TestSyncRedirectServerKeyValidation:
         url = mock_redirect.call_args[0][0]
         assert "evil.com" not in url
         assert "server_key" not in url
+
+    def test_falls_back_to_active_server_when_form_omits_key(self):
+        """When the form omits server_key, _sync_redirect reflects the active API server
+        (passed as fallback) so a multi-server user isn't dropped onto the default tab."""
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        req = _make_request(post_data={})  # no server_key in POST
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        ):
+            CreateAndAssignPlatformView._sync_redirect(req, 1, "prod")
+        url = mock_redirect.call_args[0][0]
+        assert "server_key=prod" in url

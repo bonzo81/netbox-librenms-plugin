@@ -364,7 +364,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         if not platform_name:
             messages.error(request, "Platform name is required")
-            return self._sync_redirect(request, pk)
+            return self._sync_redirect(request, pk, self.librenms_api.server_key)
 
         manufacturer = None
         if manufacturer_id:
@@ -402,7 +402,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         request,
                         f"Platform '{platform_name}' could not be created: {error_msg}",
                     )
-                    return self._sync_redirect(request, pk)
+                    return self._sync_redirect(request, pk, self.librenms_api.server_key)
                 except IntegrityError as e:
                     # A concurrent request created this platform between our existence
                     # check and our save. Reuse the winner (the goal is reuse-or-create)
@@ -420,7 +420,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                             request,
                             f"Platform '{platform_name}' could not be created: {e}",
                         )
-                        return self._sync_redirect(request, pk)
+                        return self._sync_redirect(request, pk, self.librenms_api.server_key)
             else:
                 # Reuse the existing platform unchanged — do not touch its
                 # manufacturer/vendor scoping; we only assign it and add the mapping.
@@ -431,7 +431,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             except Device.DoesNotExist:
                 transaction.set_rollback(True)
                 messages.error(request, "Device no longer exists.")
-                return self._sync_redirect(request, pk)
+                return self._sync_redirect(request, pk, self.librenms_api.server_key)
 
             device.platform = platform
             try:
@@ -448,7 +448,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     request,
                     f"Device (pk={pk}) validation failed: {error_msg}",
                 )
-                return self._sync_redirect(request, pk)
+                return self._sync_redirect(request, pk, self.librenms_api.server_key)
             try:
                 device.save()
             except IntegrityError as e:
@@ -458,7 +458,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     request,
                     f"Error saving device (pk={pk}): {e}",
                 )
-                return self._sync_redirect(request, pk)
+                return self._sync_redirect(request, pk, self.librenms_api.server_key)
 
             mapping_created = False
             mapping_error = None
@@ -468,8 +468,16 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 from utilities.permissions import get_permission_for_model
 
                 existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
-                if existing is not None:
+                if existing is not None and existing.netbox_platform_id == platform.pk:
                     mapping_existed = True
+                elif existing is not None:
+                    # A mapping for this OS exists but points at a DIFFERENT platform. Treating
+                    # it as "already exists" would silently leave future OS-based syncs resolving
+                    # to the other platform — surface it instead of claiming success.
+                    mapping_error = (
+                        f"A LibreNMS-OS mapping for '{librenms_os}' already exists pointing to "
+                        f"'{existing.netbox_platform}', not '{platform}'."
+                    )
                 elif not request.user.has_perm(get_permission_for_model(PlatformMapping, "add")):
                     # Re-check the add permission at the write site. The upfront gate only
                     # requires it when no mapping existed at preflight; if one existed then but
@@ -492,16 +500,23 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         mapping_error = e.message_dict if hasattr(e, "message_dict") else str(e)
                         logger.exception("Failed to create PlatformMapping '%s' -> '%s'", librenms_os, platform_name)
                     except IntegrityError as e:
-                        # Only treat this as "already exists" if the row is actually present now
-                        # (a concurrent insert). An unrelated IntegrityError must not be reported
-                        # as a successful pre-existing mapping when no row was created.
-                        if PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists():
+                        # Only treat this as "already exists" if a row is actually present now AND
+                        # points at the requested platform (a concurrent insert of the same
+                        # mapping). A row for a DIFFERENT platform, or an unrelated IntegrityError
+                        # with no row, must be surfaced — not reported as a successful mapping.
+                        existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
+                        if existing is not None and existing.netbox_platform_id == platform.pk:
                             mapping_existed = True
                             logger.warning(
                                 "IntegrityError creating PlatformMapping '%s' -> '%s'; mapping present after "
                                 "re-check, treating as concurrent insert",
                                 librenms_os,
                                 platform_name,
+                            )
+                        elif existing is not None:
+                            mapping_error = (
+                                f"A LibreNMS-OS mapping for '{librenms_os}' already exists pointing to "
+                                f"'{existing.netbox_platform}', not '{platform}'."
                             )
                         else:
                             mapping_error = str(e)
@@ -534,12 +549,14 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 f"Platform mapping for '{librenms_os}' was not created — you lack permission to add mappings.",
             )
 
-        return self._sync_redirect(request, pk)
+        return self._sync_redirect(request, pk, self.librenms_api.server_key)
 
     @staticmethod
-    def _sync_redirect(request, pk):
+    def _sync_redirect(request, pk, fallback_server_key=None):
         """Redirect to the device sync tab, preserving the POST-scoped server_key so a
-        multi-server user returns to the same server tab instead of the default one.
+        multi-server user returns to the same server tab instead of the default one. When the
+        form omits server_key, fall back to *fallback_server_key* (the active API server) so the
+        redirect doesn't drop a non-default server context the action actually ran against.
 
         The server_key is reflected only when it matches a configured server, and the final
         redirect is gated by Django's ``url_has_allowed_host_and_scheme`` with the sink inside
@@ -549,7 +566,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-        requested = (request.POST.get("server_key") or "").strip()
+        requested = (request.POST.get("server_key") or "").strip() or (fallback_server_key or "").strip()
         # Re-source the matched key from the trusted config rather than echoing the raw
         # request value, then gate the redirect on url_has_allowed_host_and_scheme.
         server_key = next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None)
@@ -779,6 +796,10 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         requested = ""
         if request is not None:
             requested = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
+        if not requested:
+            # Form omitted server_key — fall back to the active API server the action ran
+            # against, so a non-default-server user isn't dropped onto the default tab.
+            requested = (getattr(self.librenms_api, "server_key", "") or "").strip()
         # Re-source the matched key from the trusted config rather than echoing the raw
         # request value, then gate the redirect on url_has_allowed_host_and_scheme.
         server_key = (
