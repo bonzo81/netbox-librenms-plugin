@@ -1225,6 +1225,9 @@ class TestRefreshExistingDevice:
         # Matched via the OOB sub-key → librenms_oob, not plain librenms_id.
         assert validation["existing_match_type"] == "librenms_oob"
         assert validation["existing_librenms_link"] == {"host_id": 99, "oob_id": 42, "oob_type": "drac"}
+        # The matched host must be stored back into existing_device — a regression that only
+        # updates the badge/link fields would lose the object that downstream row logic needs.
+        assert validation["existing_device"] is host
         # A late-found existing match must never be import-ready.
         assert validation["can_import"] is False
         assert validation["is_ready"] is False

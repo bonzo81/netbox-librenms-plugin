@@ -1201,7 +1201,10 @@ class TestCreateAndAssignPlatformView:
         # Upfront object-permission gate passes (user has change Device / add Platform); the
         # write-site re-check is what must catch the missing PlatformMapping add permission.
         view.require_object_permissions = MagicMock(return_value=None)
-        req.user.has_perm = MagicMock(return_value=False)  # write-site add-PlatformMapping check denied
+        # Deny ONLY the PlatformMapping add permission at the write site; every other perm
+        # check must pass, so the test can't succeed via an unrelated permission-denied path.
+        mapping_add_perm = "netbox_librenms_plugin.add_platformmapping"
+        req.user.has_perm = MagicMock(side_effect=lambda perm: perm != mapping_add_perm)
         mock_mapping_cls = MagicMock()
         mock_mapping_cls.objects.filter.return_value.first.return_value = None  # deleted since preflight
 
@@ -1213,6 +1216,7 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
             patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+            patch("utilities.permissions.get_permission_for_model", return_value=mapping_add_perm),
         ):
             view.post(req, pk=1)
 
@@ -1220,13 +1224,15 @@ class TestCreateAndAssignPlatformView:
         mock_mapping_cls.assert_not_called()
         assert any("not created" in c.args[1] for c in mock_msg.warning.call_args_list)
 
-    def test_required_object_permissions_include_platformmapping_when_mapping_will_be_created(self):
-        """create_mapping on + OS supplied + no existing mapping → ('add', PlatformMapping)
-        is added to required_object_permissions BEFORE require_all_permissions runs."""
+    def test_required_object_permissions_never_include_platformmapping_upfront(self):
+        """Even when create_mapping is on, an OS is supplied, and no mapping exists yet, the
+        upfront POST gate must NOT require ('add', PlatformMapping): assigning the platform is
+        the primary action and must not be blocked for a user who can't create mappings. The
+        optional mapping write is gated at its own site (skip-with-warning) instead."""
         view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
-        # No mapping exists yet for this OS → a write will happen → the perm IS required.
+        # No mapping exists yet for this OS — historically this added the perm upfront.
         mock_mapping_cls = MagicMock()
         mock_mapping_cls.objects.filter.return_value.exists.return_value = False
 
@@ -1247,8 +1253,9 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
 
-        assert ("add", mock_mapping_cls) in captured["perms"], (
-            "Expected ('add', PlatformMapping) when create_mapping=True and no mapping exists yet"
+        assert ("add", mock_mapping_cls) not in captured["perms"], (
+            "('add', PlatformMapping) must not gate the upfront POST — the mapping is gated "
+            "at the write site so the primary platform-assign isn't blocked"
         )
 
     def test_required_object_permissions_exclude_platformmapping_when_mapping_exists(self):

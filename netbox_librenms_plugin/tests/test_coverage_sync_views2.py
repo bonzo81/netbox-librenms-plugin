@@ -1367,6 +1367,36 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_id == {"7": iface}
         assert by_name == {"eth0": iface}
 
+    def test_build_interface_maps_marks_duplicate_port_id_ambiguous(self):
+        """Two interfaces sharing the same stored port id must mark that id ambiguous
+        (None) rather than silently keeping the last one — so the IP isn't bound to an
+        arbitrary interface."""
+        view = self._view()
+        iface_a = MagicMock()
+        iface_a.name = "eth0"
+        iface_b = MagicMock()
+        iface_b.name = "eth1"
+        obj = MagicMock()
+        obj.interfaces.all.return_value = [iface_a, iface_b]
+        with patch(
+            "netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id",
+            return_value=7,  # both interfaces report the same port id
+        ):
+            by_id, by_name = view._build_interface_maps(obj, "default")
+        assert by_id == {"7": None}  # ambiguous → no usable target
+        assert by_name == {"eth0": iface_a, "eth1": iface_b}
+
+    def test_match_interface_fails_safe_on_ambiguous_port_id(self):
+        """An ambiguous port id (None value) must return None and NOT fall through to a
+        name match for the same id, which could bind the address just as wrongly."""
+        named = MagicMock()
+        result = self._view()._match_interface(
+            {"port_id": 7, "interface_name": "eth0"},
+            {"7": None},
+            {"eth0": named},
+        )
+        assert result is None
+
     def test_stale_interface_url_still_assigns_after_interface_synced(self):
         """Regression: cached row was enriched before the interface existed
         (``interface_url`` is None), but the interface has since been synced.

@@ -1955,19 +1955,12 @@ class CreatePlatformFromImportView(
 
         librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
 
-        # Require ("add", PlatformMapping) only when a mapping row will actually be
-        # written below — i.e. the toggle is on, an OS was supplied, and no mapping for
-        # that OS exists yet (mirrors the write guard further down). Demanding the perm
-        # for a write that won't happen would needlessly block creating the Platform.
-        # (The write block re-checks not-exists, so a concurrent insert can't slip through.)
-        will_create_mapping = (
-            create_mapping
-            and bool(librenms_os)
-            and not PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists()
-        )
+        # Do NOT gate the upfront POST on ("add", PlatformMapping): creating/assigning the
+        # Platform is the primary action and must succeed for a user who can add a Platform
+        # even when they can't create OS mappings. The optional mapping write is gated at its
+        # own site below, where a missing add-permission skips the mapping with a warning
+        # instead of failing the whole request.
         perms = [("add", Platform)]
-        if will_create_mapping:
-            perms.append(("add", PlatformMapping))
         if target_model is not None:
             perms.append(("change", target_model))
         self.required_object_permissions = {"POST": perms}

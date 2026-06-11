@@ -762,7 +762,8 @@ def validate_device_for_import(
                         # Conservative guard: at least one side must already be linked,
                         # otherwise this is more likely two unrelated devices that share
                         # serial data by coincidence (test fixtures, mis-keyed assets).
-                        if (host_link and host_link["host_id"]) or (oob_link and oob_link["host_id"]):
+                        # A LibreNMS link counts whether it's a host link or an OOB link.
+                        if any(link and (link.get("host_id") or link.get("oob_id")) for link in (host_link, oob_link)):
                             apply_merge_candidates(
                                 result,
                                 host_named={

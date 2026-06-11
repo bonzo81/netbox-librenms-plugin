@@ -449,7 +449,17 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             # primary_ip/oob_ip be assigned to one of the device's OWN interfaces, so
             # refuse to point the winner at an address still attached to the donor —
             # the interface/IP must be moved to the winner first (MoveIPAddressToWinnerView).
+            #
+            # Locking the IPAddress only pins which interface it points at, not that
+            # interface's device_id. Re-lock the owning interface so a concurrent move
+            # can't change its device after this check but before the FK saves, which
+            # would leave winner.primary_ip*/oob_ip on an interface it no longer owns.
             assigned = getattr(donor_ip, "assigned_object", None)
+            if assigned is not None:
+                # Lock the owning interface row (this transfer is device-scoped, so the
+                # assignment is a dcim Interface). A non-Interface assignment re-locks to
+                # None and fails the device_id check below — the correct fail-safe.
+                assigned = Interface.objects.select_for_update().filter(pk=assigned.pk).first()
             if getattr(assigned, "device_id", None) != winner.pk:
                 return self._fail(
                     request,

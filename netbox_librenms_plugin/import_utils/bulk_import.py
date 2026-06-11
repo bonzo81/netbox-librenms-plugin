@@ -381,6 +381,13 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
     validation["serial_confirmed"] = False
     validation["serial_duplicate"] = False
     validation["serial_role_choice_available"] = False
+    # Name-sync / migration / device-type state is also derived from the (now dropped) match;
+    # leaving it set would render a migrate/name-sync action for the old object. The fresh
+    # lookup below re-derives these only on a re-match, so reset them here.
+    validation["librenms_id_needs_migration"] = False
+    validation["name_matches"] = False
+    validation["name_sync_available"] = False
+    validation["device_type_mismatch"] = False
     # promote_to_host follows the "absent otherwise" contract (see apply_oob_detection_result).
     validation.pop("promote_to_host", None)
     validation.pop("merge_candidates", None)

@@ -149,8 +149,16 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         by_librenms_id = {}
         for iface in interfaces:
             lib_id = get_librenms_device_id(iface, server_key, auto_save=False)
-            if lib_id is not None:
-                by_librenms_id[str(lib_id)] = iface
+            if lib_id is None:
+                continue
+            key = str(lib_id)
+            if key in by_librenms_id:
+                # Two current interfaces carry the same stored port id — we can't tell which
+                # one the IP belongs to. Mark the id ambiguous (None) so _match_interface fails
+                # the row safe instead of binding the address to an arbitrary interface.
+                by_librenms_id[key] = None
+            else:
+                by_librenms_id[key] = iface
         by_name = {iface.name: iface for iface in interfaces}
         return by_librenms_id, by_name
 
@@ -167,7 +175,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """
         port_id = ip_data.get("port_id")
         if port_id is not None and str(port_id) in by_librenms_id:
-            return by_librenms_id[str(port_id)]
+            iface = by_librenms_id[str(port_id)]
+            # None marks an ambiguous port id (>1 interface shares it) — fail safe: don't
+            # fall through to a name match for the same id, which could be just as wrong.
+            return iface
         name = ip_data.get("interface_name")
         if name and name in by_name:
             return by_name[name]

@@ -459,8 +459,10 @@ class TestTransferDeviceIPView:
 
         oob_ip = MagicMock(address="10.0.0.5/24")
         # The address must already belong to the winner for the transfer to be valid
-        # (NetBox requires oob_ip on one of the device's own interfaces).
-        oob_ip.assigned_object.device_id = 20
+        # (NetBox requires oob_ip on one of the device's own interfaces). The owning
+        # interface is re-locked, so the locked row carries the winner's device_id.
+        oob_ip.assigned_object = MagicMock(pk=99)
+        locked_iface = MagicMock(pk=99, device_id=20)
         # Pre-lock instances drive the pre-checks only; the view must mutate the
         # *locked* rows fetched inside the transaction.
         donor = MagicMock(pk=10, oob_ip=oob_ip)
@@ -476,6 +478,7 @@ class TestTransferDeviceIPView:
             ),
             patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
             patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
@@ -488,6 +491,8 @@ class TestTransferDeviceIPView:
             # The IPAddress row is now re-fetched under select_for_update; return the same
             # logical address so its assignment is validated from the locked row.
             mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
+            # The owning interface is re-locked; return a row owned by the winner (device_id=20).
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
             resp = view.post(req, pk=10, ip_kind="oob")
         # The locked rows are the ones mutated and saved.
         assert locked_donor.oob_ip is None
@@ -509,7 +514,8 @@ class TestTransferDeviceIPView:
         req = _hx_request({"server_key": "default"})
 
         oob_ip = MagicMock(address="10.0.0.5/24")
-        oob_ip.assigned_object.device_id = 10  # still on the DONOR, not the winner
+        oob_ip.assigned_object = MagicMock(pk=99)
+        locked_iface = MagicMock(pk=99, device_id=10)  # still on the DONOR, not the winner
         donor = MagicMock(pk=10, oob_ip=oob_ip)
         winner = MagicMock(pk=20, name="winner", oob_ip=None)
         locked_donor = MagicMock(pk=10, oob_ip=oob_ip)
@@ -523,6 +529,7 @@ class TestTransferDeviceIPView:
             ),
             patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
             patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
+            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
             patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
             patch("netbox_librenms_plugin.views.sync.migrate.messages"),
         ):
@@ -532,6 +539,8 @@ class TestTransferDeviceIPView:
             ]
             # Locked re-fetch returns the address still assigned to the donor (device_id=10).
             mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
+            # The owning interface re-locks to a row still owned by the donor (device_id=10).
+            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
             resp = view.post(req, pk=10, ip_kind="oob")
 
         # Refused (409 surfaced via toast); neither side mutated/saved.
