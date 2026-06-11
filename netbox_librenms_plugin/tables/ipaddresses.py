@@ -14,6 +14,10 @@ class IPAddressTable(tables.Table):
     def __init__(self, *args, **kwargs):
         """Initialize IP address table."""
         super().__init__(*args, **kwargs)
+        # Identify the owning sync tab so the paginator links (inc/paginator.html builds
+        # ?tab={{ table.tab }}) keep the user on the IP Addresses tab. Without this, table.tab
+        # renders empty and paging falls back to the default (Interfaces) tab.
+        self.tab = "ipaddresses"
 
     class Meta:
         """Meta options for IPAddressTable."""
