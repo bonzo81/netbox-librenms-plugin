@@ -24,6 +24,24 @@ class TestLibreNMSPermissionMixin:
 
         assert mixin.has_write_permission() is False
 
+    def test_has_write_permission_no_request_fails_closed(self):
+        """Without self.request (invoked outside dispatch), has_write_permission()
+        returns False instead of raising AttributeError on self.request.user."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+
+        mixin = LibreNMSPermissionMixin()  # no .request assigned
+        assert mixin.has_write_permission() is False
+
+    def test_require_write_permission_no_request_returns_403(self):
+        """The write-permission denial path must short-circuit to a 403 when there is
+        no request, rather than crash in messages.error()/_safe_redirect_response()."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+
+        mixin = LibreNMSPermissionMixin()  # no .request assigned
+        response = mixin.require_write_permission()
+        assert response is not None
+        assert response.status_code == 403
+
     def test_require_write_permission_allowed(self):
         """User with write permission gets None (allowed to proceed)."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
@@ -392,6 +410,24 @@ class TestNetBoxObjectPermissionMixin:
             response = mixin.require_object_permissions("POST")
 
         assert response is None
+
+    def test_require_object_permissions_fails_closed_without_request(self):
+        """When the view is invoked outside dispatch() (no self.request), the denial
+        path must return a 403 rather than crash dereferencing self.request."""
+        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
+
+        mixin = NetBoxObjectPermissionMixin()  # no .request assigned
+        mock_model = MagicMock()
+        mixin.required_object_permissions = {"POST": [("add", mock_model)]}
+
+        with patch("netbox_librenms_plugin.views.mixins.get_permission_for_model") as mock_get:
+            mock_get.return_value = "dcim.add_interface"
+            response = mixin.require_object_permissions("POST")
+
+        # check_object_permissions returns the perms as "missing" (fail closed),
+        # and the denial handler short-circuits to a 403 instead of raising.
+        assert response is not None
+        assert response.status_code == 403
 
     def test_require_object_permissions_returns_redirect_response(self):
         """Returns redirect response with message when permissions missing."""

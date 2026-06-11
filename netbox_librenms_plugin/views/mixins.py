@@ -91,7 +91,8 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
 
     def has_write_permission(self):
         """Check if user can perform write actions."""
-        return self.request.user.has_perm(PERM_CHANGE_PLUGIN)
+        user = getattr(getattr(self, "request", None), "user", None)
+        return bool(user and user.has_perm(PERM_CHANGE_PLUGIN))
 
     def require_write_permission(self, error_message=None):
         """
@@ -105,6 +106,8 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             None if permitted, or appropriate response if denied
         """
         if not self.has_write_permission():
+            if getattr(self, "request", None) is None:
+                return HttpResponse(status=403)
             msg = error_message or "You do not have permission to perform this action."
             messages.error(self.request, msg)
 
@@ -195,6 +198,8 @@ class NetBoxObjectPermissionMixin:
         """
         has_perms, missing = self.check_object_permissions(method)
         if not has_perms:
+            if getattr(self, "request", None) is None:
+                return HttpResponse(status=403)
             missing_str = ", ".join(missing)
             msg = f"Missing permissions: {missing_str}"
             messages.error(self.request, msg)
