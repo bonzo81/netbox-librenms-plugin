@@ -1180,6 +1180,10 @@ function handleVRFChange(select, value) {
 function handleInterfaceChange(select, value) {
     const csrfToken = getCsrfToken();
     if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+    // Resolve the row from the changed <select> itself, not by data-interface: the same
+    // interface name can appear in both the main and OOB datasets, so a name lookup can
+    // post the wrong row's port_id and repaint the wrong row. closest('tr') is unique.
+    const row = select.closest('tr');
 
     fetch('/plugins/librenms_plugin/verify-interface/', {
         method: 'POST',
@@ -1192,7 +1196,7 @@ function handleInterfaceChange(select, value) {
             interface_name: select.dataset.interface,
             // Stable port_id of this row so the server picks the correct cached row even when
             // display names collide (host vs OOB controller); interface_name is the fallback.
-            port_id: document.querySelector('tr[data-interface="' + select.dataset.rowId + '"]')?.dataset.portId || null,
+            port_id: row?.dataset.portId || null,
             interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
@@ -1204,7 +1208,8 @@ function handleInterfaceChange(select, value) {
             return response.json();
         })
         .then(data => {
-            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
+            // Reuse the row resolved above so the response patches the row the user changed,
+            // not the first same-named row on the page.
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
                 row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;

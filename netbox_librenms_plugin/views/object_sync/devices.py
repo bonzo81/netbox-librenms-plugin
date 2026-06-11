@@ -131,6 +131,16 @@ class SingleInterfaceVerifyView(
 
     def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
+        # Bind the request so require_object_permissions_json() (which reads self.request)
+        # works even when post() is invoked directly rather than through dispatch().
+        self.request = request
+
+        # Gate before resolving the device: a read-only verify endpoint, this only needs
+        # dcim.view_device (model-level, like SingleModuleVerifyView). Checking first means a
+        # user without it can't probe device IDs by observing 404-vs-200 from get_object_or_404.
+        if error := self.require_object_permissions_json("POST"):
+            return error
+
         data, err = parse_request_json(request)
         if err:
             return err
@@ -155,10 +165,6 @@ class SingleInterfaceVerifyView(
         # model-level view_device perm, so a site-scoped grant would otherwise read another
         # device's cached verify payload by raw pk.
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
-
-        # Read-only verify endpoint: only require object-view permission, not plugin write.
-        if error := self.require_object_permissions_json("POST"):
-            return error
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
         if selected_device.virtual_chassis:

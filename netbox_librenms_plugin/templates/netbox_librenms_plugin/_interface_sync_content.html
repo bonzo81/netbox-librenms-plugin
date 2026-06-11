@@ -412,9 +412,13 @@
                 {% endif %}
             </div>
             <div class="modal-footer">
-                {# Hide bulk delete in migrated mode: the per-row "Move to winner" path preserves
-                   cables/IPs/MACs, so a blanket delete here would drop interfaces that should be
-                   transferred to the winner instead. #}
+                {% comment %}
+                Hide bulk delete whenever the donor is in migrated mode: the per-row "Move to
+                winner" path preserves cables/IPs/MACs, so a blanket delete would drop interfaces
+                that should be transferred. Key off migrated_to_marker (not migrated_to_winner) so
+                a donor marked migrated never falls back to bulk delete even when the winner can't
+                be resolved — exactly when the safe move path is unavailable.
+                {% endcomment %}
                 {% if interface_sync.netbox_only_interfaces and not migrated_to_marker %}
                 <button type="button" class="btn btn-danger" id="confirm-delete-interfaces">
                     <i class="mdi mdi-delete"></i> Delete Selected Interfaces

@@ -332,12 +332,15 @@ class TestSingleInterfaceVerifyView:
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = None
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device
+        ) as mock_get_obj:
             with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
                 response = view.post(request)
 
         assert response.status_code == 403
-        # Must deny before touching the cache.
+        # Must deny before resolving the device (no ID probing) and before the cache.
+        mock_get_obj.assert_not_called()
         mock_cache.get.assert_not_called()
 
     def test_returns_400_when_no_device_id(self):
