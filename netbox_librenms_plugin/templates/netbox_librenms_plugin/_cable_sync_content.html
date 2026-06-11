@@ -8,10 +8,12 @@
 <div>
 {% else %}
 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}">
-{% endif %}
+    {# Form-specific markup belongs only inside the <form>; in migrated mode the wrapper is a
+       bare <div> and a CSRF token / hidden inputs there are dead, misleading markup. #}
     {% csrf_token %}
     {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
     <input type="hidden" id="selected_port" name="select" value="">
+{% endif %}
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>
             {% if not migrated_to_marker %}

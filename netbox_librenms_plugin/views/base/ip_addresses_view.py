@@ -341,7 +341,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # rebuilt the map via live get_port_by_id() calls. Persist it under the
             # *remaining* TTL (don't extend the entry's lifetime) so subsequent cached
             # renders stop re-hitting LibreNMS until the entry would have expired anyway.
-            remaining_ttl = cache.ttl(cache_key)
+            # cache.ttl() isn't part of Django's core cache API (only django-redis-style backends
+            # expose it). Guard it like base/modules_view does so a non-Redis backend degrades to
+            # "no backfill" rather than raising AttributeError while rendering.
+            remaining_ttl = getattr(cache, "ttl", lambda k: None)(cache_key)
             if remaining_ttl and remaining_ttl > 0:
                 cache.set(
                     cache_key,
@@ -349,8 +352,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                     timeout=remaining_ttl,
                 )
 
-        # Calculate cache expiry
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses", server_key))
+        # Calculate cache expiry (cache.ttl() guarded for non-Redis backends, as above)
+        cache_ttl = getattr(cache, "ttl", lambda k: None)(self.get_cache_key(obj, "ip_addresses", server_key))
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 

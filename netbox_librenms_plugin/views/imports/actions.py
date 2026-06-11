@@ -2091,6 +2091,22 @@ class CreatePlatformFromImportView(
                                     "you lack permission to add mappings.",
                                 )
                             )
+                    else:
+                        # A mapping for this OS already exists, so create_mapping is a silent
+                        # no-op: the new Platform is assigned to the current object, but future
+                        # imports for this OS keep resolving through the pre-existing mapping.
+                        # Surface that mismatch instead of reporting a clean success.
+                        existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
+                        existing_target = getattr(existing.netbox_platform, "name", None) if existing else None
+                        transaction.on_commit(
+                            lambda os=librenms_os, target=existing_target: messages.warning(
+                                request,
+                                f"Platform created, but a LibreNMS-OS mapping for '{os}' already exists"
+                                + (f" (→ {target})" if target else "")
+                                + ". It was left unchanged, so future imports for this OS will keep using the "
+                                "existing mapping. Update the mapping if you want them to use the new platform.",
+                            )
+                        )
         except ValidationError as exc:
             logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
             detail = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
