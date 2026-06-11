@@ -858,18 +858,20 @@ class TestSafeRedirectUrl:
         request.META = {}
         request.path = "/post/only/action/"
 
-        result = _get_safe_redirect_url(request)
-        assert result == "/"
+        with patch("netbox_librenms_plugin.views.mixins.get_script_prefix", return_value="/netbox/"):
+            result = _get_safe_redirect_url(request)
+        assert result == "/netbox/"
 
     def test_no_referrer_no_path_falls_back_to_slash(self):
-        """Missing referrer and no path attribute falls back to '/'."""
+        """Missing referrer and no path attribute falls back to the deployment root."""
         from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
 
         request = MagicMock(spec=[])  # No attributes at all
         request.META = {}
 
-        result = _get_safe_redirect_url(request)
-        assert result == "/"
+        with patch("netbox_librenms_plugin.views.mixins.get_script_prefix", return_value="/netbox/"):
+            result = _get_safe_redirect_url(request)
+        assert result == "/netbox/"
 
     def test_relative_referrer_is_accepted(self):
         """Relative referrer path is accepted (no host to mismatch)."""
@@ -901,9 +903,10 @@ class TestSafeRedirectUrl:
 
         with patch("netbox_librenms_plugin.views.mixins.redirect") as mock_redirect:
             with patch("netbox_librenms_plugin.views.mixins.messages"):
-                mixin.require_write_permission()
+                with patch("netbox_librenms_plugin.views.mixins.get_script_prefix", return_value="/netbox/"):
+                    mixin.require_write_permission()
 
-        mock_redirect.assert_called_once_with("/")
+        mock_redirect.assert_called_once_with("/netbox/")
 
     def test_htmx_rejects_external_referrer(self):
         """HTMX request with external referrer uses a GET-safe "/" fallback in HX-Redirect
@@ -921,9 +924,10 @@ class TestSafeRedirectUrl:
         mixin.request.headers = {"HX-Request": "true"}
 
         with patch("netbox_librenms_plugin.views.mixins.messages"):
-            result = mixin.require_write_permission()
+            with patch("netbox_librenms_plugin.views.mixins.get_script_prefix", return_value="/netbox/"):
+                result = mixin.require_write_permission()
 
-        assert result["HX-Redirect"] == "/"
+        assert result["HX-Redirect"] == "/netbox/"
 
 
 class TestBulkImportVCPermission:
