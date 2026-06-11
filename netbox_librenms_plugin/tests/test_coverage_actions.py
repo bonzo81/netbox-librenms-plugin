@@ -66,13 +66,16 @@ class TestSaveDevice:
 
         device = MagicMock()
         device.full_clean.return_value = None
-        device.save.side_effect = IntegrityError("duplicate key")
+        raw_error = "duplicate key value violates unique constraint device_name_key"
+        device.save.side_effect = IntegrityError(raw_error)
 
         response = _save_device(device)
         assert response.status_code == 409
         assert b"integrity constraint" in response.content
-        # Raw DB exception detail must not leak to the client.
-        assert b"duplicate key" not in response.content
+        # Pin the sanitization contract: none of the raw DB exception text leaks to the
+        # client (case-insensitive full-text, not just a fragment that a partial leak passes).
+        assert raw_error.encode().lower() not in response.content.lower()
+        assert b"unique constraint" not in response.content.lower()
 
     def test_success_returns_none(self):
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -92,7 +95,8 @@ class TestSaveDevice:
         from netbox_librenms_plugin.views.imports.actions import _save_device
 
         device = MagicMock()
-        device.save.side_effect = DataError("value too long for type character varying(64)")
+        raw_error = "value too long for type character varying(64)"
+        device.save.side_effect = DataError(raw_error)
 
         response = _save_device(device, update_fields=["name"])
         # Pin the partial-save contract: the DataError must originate from save(), not from a
@@ -101,8 +105,9 @@ class TestSaveDevice:
         device.full_clean.assert_not_called()
         assert response.status_code == 400
         assert b"field value is invalid" in response.content
-        # Raw DB exception detail must not leak to the client.
-        assert b"value too long" not in response.content
+        # No part of the raw DB exception (incl. the schema-revealing column type) leaks.
+        assert raw_error.encode().lower() not in response.content.lower()
+        assert b"character varying" not in response.content.lower()
 
     def test_update_fields_databaseerror_returns_409_not_500(self):
         """save(update_fields=...) forces an UPDATE; a concurrent delete makes it affect 0
@@ -112,7 +117,8 @@ class TestSaveDevice:
         from netbox_librenms_plugin.views.imports.actions import _save_device
 
         device = MagicMock()
-        device.save.side_effect = DatabaseError("Save with update_fields did not affect any rows.")
+        raw_error = "Save with update_fields did not affect any rows."
+        device.save.side_effect = DatabaseError(raw_error)
 
         response = _save_device(device, update_fields=["name"])
         # The DatabaseError must come from the partial-update save(), so confirm
@@ -121,8 +127,8 @@ class TestSaveDevice:
         device.full_clean.assert_not_called()
         assert response.status_code == 409
         assert b"changed or deleted" in response.content
-        # Raw DB exception detail must not leak to the client.
-        assert b"did not affect any rows" not in response.content
+        # Full raw DB exception text must not leak to the client (case-insensitive).
+        assert raw_error.encode().lower() not in response.content.lower()
 
 
 class TestResolveNamingPreferences:
@@ -2647,13 +2653,15 @@ class TestSaveDevicePath:
 
         mock_device = MagicMock()
         mock_device.full_clean.return_value = None
-        mock_device.save.side_effect = IntegrityError("Duplicate key")
+        raw_error = "Duplicate key value violates unique constraint"
+        mock_device.save.side_effect = IntegrityError(raw_error)
 
         result = _save_device(mock_device)
         assert result is not None
         assert result.status_code == 409
         assert b"integrity constraint" in result.content
-        assert b"Duplicate key" not in result.content
+        # Full raw DB exception text must not leak to the client (case-insensitive).
+        assert raw_error.encode().lower() not in result.content.lower()
 
     def test_should_enable_vc_detection_when_cached(self):
         """Line 168: VC data already cached → returns True."""

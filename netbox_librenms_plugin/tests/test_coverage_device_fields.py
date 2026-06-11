@@ -1989,6 +1989,30 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         assert "evil.com" not in url
         assert "server_key" not in url
 
+    def test_sync_url_drops_server_key_when_url_validation_fails(self):
+        """Even for an allowlisted server_key, if url_has_allowed_host_and_scheme rejects the
+        candidate (the CodeQL open-redirect barrier), fall back to the bare URL. Mocking the
+        validator to False exercises that reject branch explicitly rather than relying on
+        Django's internals to accept the relative candidate."""
+        view = self._view()
+        view.request = MagicMock()
+        view.request.POST = {"server_key": "prod"}
+        view.request.GET = {}
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.url_has_allowed_host_and_scheme",
+                return_value=False,
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)
+        (url,), _ = mock_redir.call_args
+        assert "server_key" not in url
+
 
 # ---------------------------------------------------------------------------
 # ConvertLegacyLibreNMSIdView — post()
