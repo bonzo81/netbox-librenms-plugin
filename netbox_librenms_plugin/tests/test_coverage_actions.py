@@ -502,6 +502,34 @@ class TestDeviceImportHelperMixin:
         mock_render.assert_called_once()
         assert "device_import_row.html" in mock_render.call_args[0][1]
 
+    def test_post_commit_refresh_fallback_returns_200_not_error(self):
+        """A committed mutation whose post-commit row reload fails must NOT report failure:
+        surface the deferred messages + a refresh hint and return 200 with the success
+        trigger, so the user doesn't retry an action that already succeeded."""
+        from django.contrib import messages as dj_messages
+
+        view = self._make_mixin_view()
+        request = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions.messages") as mock_msgs,
+            patch(
+                "netbox_librenms_plugin.views.imports.actions._attach_messages_oob",
+                side_effect=lambda resp, req: resp,
+            ) as mock_attach,
+        ):
+            response = view.post_commit_refresh_fallback(
+                request, "closeModal", deferred_messages=[(dj_messages.INFO, "OOB attached")]
+            )
+
+        # Success-shaped response (200 + the trigger), never an HTMX error.
+        assert response.status_code == 200
+        assert response["HX-Trigger"] == "closeModal"
+        # The deferred outcome message and the "couldn't reload, refresh" hint were surfaced.
+        mock_msgs.add_message.assert_called_once_with(request, dj_messages.INFO, "OOB attached")
+        mock_msgs.warning.assert_called_once()
+        mock_attach.assert_called_once()
+
 
 class TestAttachMessagesOob:
     """Tests for the _attach_messages_oob helper."""

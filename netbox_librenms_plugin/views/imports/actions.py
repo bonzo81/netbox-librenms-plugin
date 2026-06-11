@@ -387,6 +387,30 @@ class DeviceImportHelperMixin:
             request,
         )
 
+    def post_commit_refresh_fallback(self, request, hx_trigger, deferred_messages=()):
+        """Safe HTMX response when a *committed* import mutation can't reload its row.
+
+        The OOB-attach / promote / merge handlers commit their DB mutation, clear the cached
+        import row, then re-read LibreNMS to re-render the row. If that follow-up read fails
+        (LibreNMS briefly unreachable, the cache was just cleared) the mutation has still
+        succeeded — returning an HTMX *error* would tell the user the action failed and invite
+        a retry against already-mutated state. Instead surface the outcome (any deferred
+        messages plus a refresh hint) and return 200 with the same client trigger the success
+        path uses, so the UI converges (modal refresh / close + visible toast) rather than
+        reporting a false failure.
+        """
+        for level, text in deferred_messages:
+            messages.add_message(request, level, text)
+        messages.warning(
+            request,
+            "The action was applied, but the updated row could not be reloaded — LibreNMS may "
+            "be temporarily unavailable. Refresh the page to see the latest state.",
+        )
+        response = HttpResponse(status=200)
+        if hx_trigger:
+            response["HX-Trigger"] = hx_trigger
+        return _attach_messages_oob(response, request)
+
 
 def _apply_user_selections_to_validation(
     validation: dict,
@@ -2339,7 +2363,13 @@ class AddAsOOBView(
 
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
         if not libre_device:
-            return _htmx_error_response("Device not found after action")
+            # The OOB attach already committed; don't report failure on a post-commit reload
+            # miss. Surface the deferred outcome messages and ask the client to refresh.
+            return self.post_commit_refresh_fallback(
+                request,
+                json.dumps({"validationRefresh": {"deviceId": device_id}}),
+                deferred_messages,
+            )
 
         # Transaction committed and the row response is about to render — now it is safe
         # to surface the deferred OOB messages. Queuing them earlier would leak them onto
@@ -2762,7 +2792,10 @@ class PromoteToHostView(
 
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
         if not libre_device:
-            return _htmx_error_response("Device not found after action")
+            # Promotion already committed; a post-commit reload miss must not report failure.
+            return self.post_commit_refresh_fallback(
+                request, json.dumps({"validationRefresh": {"deviceId": device_id}})
+            )
 
         response = self.render_device_row(request, libre_device, validation, selections)
         # Keep the underlying validation modal open and re-fetch its content so
@@ -2934,7 +2967,9 @@ class MergeNetBoxDevicesView(
 
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
         if not libre_device:
-            return _htmx_error_response("Device not found after merge")
+            # Merge already committed; a post-commit reload miss must not report failure
+            # (the donor is already absorbed — a retry would target stale/invalid state).
+            return self.post_commit_refresh_fallback(request, "closeModal")
 
         response = self.render_device_row(request, libre_device, validation, selections)
         response["HX-Trigger"] = "closeModal"
