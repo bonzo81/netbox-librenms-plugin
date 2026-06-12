@@ -954,7 +954,7 @@ class TestSyncIPAddressesViewCacheMiss:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_device = MagicMock(pk=1)
@@ -982,7 +982,7 @@ class TestSyncIPAddressesViewNoSelection:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_device = MagicMock(pk=1)
@@ -1010,7 +1010,7 @@ class TestSyncIPAddressesViewCreateIP:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_iface = MagicMock()
@@ -1055,7 +1055,7 @@ class TestSyncIPAddressesViewUpdateIP:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_iface = MagicMock()
@@ -1102,7 +1102,7 @@ class TestSyncIPAddressesViewUnchangedIP:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_device = MagicMock(pk=1)
@@ -1275,7 +1275,7 @@ class TestSyncIPAddressesViewVMInterface:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_vmiface = MagicMock()
