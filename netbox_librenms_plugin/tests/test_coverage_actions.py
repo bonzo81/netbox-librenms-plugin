@@ -632,12 +632,14 @@ class TestDeviceValidationDetailsView:
         return view
 
     @patch("netbox_librenms_plugin.views.imports.actions.render")
-    def test_get_device_not_found_returns_404(self, mock_render):
+    def test_get_device_not_found_returns_200_html_fragment(self, mock_render):
+        # HTMX fragment: a 4xx makes HTMX skip the swap, so the inline alert must come back 200.
         view = self._make_view()
         with patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})):
             with patch.object(view, "require_write_permission", return_value=None):
                 result = view.get(MagicMock(), device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert b"not found in LibreNMS" in result.content
 
     @patch("netbox_librenms_plugin.views.imports.actions.render")
     def test_get_with_existing_device_adds_sync_info(self, mock_render):
@@ -1079,11 +1081,13 @@ class TestDeviceVCDetailsView:
         view._librenms_api = _make_api()
         return view
 
-    def test_device_not_found_returns_404(self):
+    def test_device_not_found_returns_200_html_fragment(self):
+        # HTMX fragment swapped into the modal; HTMX skips the swap on a 4xx, so return 200.
         view = self._make_view()
         with patch("netbox_librenms_plugin.views.imports.actions.get_librenms_device_by_id", return_value=None):
             result = view.get(MagicMock(), device_id=1)
-        assert result.status_code == 404
+        assert result.status_code == 200
+        assert b"not found in LibreNMS" in result.content
 
     @patch("netbox_librenms_plugin.views.imports.actions.render")
     def test_device_found_renders_template(self, mock_render):
@@ -1757,15 +1761,17 @@ class TestDeviceVCDetailsViewAdditional:
         view._librenms_api = _make_api()
         return view
 
-    def test_device_not_found_in_librenms_returns_404(self):
-        """Line 334: device not found in LibreNMS."""
+    def test_device_not_found_in_librenms_returns_200_html_fragment(self):
+        """Device not found in LibreNMS: HTMX fragment must come back 200 (a 4xx makes HTMX skip
+        the swap), with the inline alert in the body."""
         view = self._make_view()
         request = _make_request()
 
         with patch("netbox_librenms_plugin.views.imports.actions.get_librenms_device_by_id", return_value=None):
             response = view.get(request, device_id=1)
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert b"not found in LibreNMS" in response.content
 
     def test_device_found_renders_vc_details(self):
         """DeviceVCDetailsView.get renders vc details template."""
@@ -5416,6 +5422,20 @@ class TestMissingOOBIpPermissions:
         assert msg is not None and "invalid" in msg.lower()
         # The net_host preflight must never run for a malformed IP.
         mock_objects.filter.assert_not_called()
+
+    def test_no_interface_target_skips_ip_permission_check(self):
+        """No interface selected (empty, or '__new__' without a name) => _resolve_oob_interface
+        sets no interface and oob_ip is never written, so no IPAddress add/change perm should be
+        demanded. Returning a warning here would block the intended 'choose an interface' flow."""
+        view = self._view()
+        for post in ({}, {"oob_interface_id": ""}, {"oob_interface_id": "__new__", "oob_new_interface_name": ""}):
+            req = _make_request(post=post)
+            # Deny everything except change-Device; if the IP check ran it would demand a perm.
+            req.user.has_perm.return_value = False
+            with patch("ipam.models.IPAddress.objects") as mock_objects:
+                assert view._missing_oob_ip_permissions(req, "10.0.0.9", device=MagicMock()) is None
+                # The net_host queryset must not even run when there's no interface target.
+                mock_objects.filter.assert_not_called()
 
     def test_new_interface_name_that_already_exists_does_not_require_add(self):
         """__new__ + an existing interface name is reused by _resolve_oob_interface,

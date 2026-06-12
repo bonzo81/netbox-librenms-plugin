@@ -1050,9 +1050,12 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         """Render virtual chassis details for a LibreNMS device."""
         libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
         if not libre_device:
+            # 200, not 404: this is an HTMX fragment swapped into the modal, and HTMX skips the
+            # swap on a 4xx (routing the body through error handling instead), so the inline
+            # alert would never render in place.
             return HttpResponse(
                 '<div class="alert alert-danger">Device not found in LibreNMS</div>',
-                status=404,
+                status=200,
             )
 
         vc_data = get_virtual_chassis_data(self.librenms_api, device_id)
@@ -1100,9 +1103,11 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
+            # 200, not 404 — HTMX fragment swapped into the validation-details modal; a 4xx makes
+            # HTMX skip the swap, so the inline alert would never appear in place.
             return HttpResponse(
                 '<div class="alert alert-danger">Device not found in LibreNMS</div>',
-                status=404,
+                status=200,
             )
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
@@ -1863,9 +1868,11 @@ class CreatePlatformFromImportView(
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
         if not libre_device:
+            # 200, not 404 — HTMX fragment; a 4xx makes HTMX skip the swap so this inline alert
+            # would never render in place.
             return HttpResponse(
                 '<div class="alert alert-danger">Device not found in LibreNMS.</div>',
-                status=404,
+                status=200,
             )
 
         librenms_os = (libre_device.get("os") or "").strip().lower()
@@ -2069,8 +2076,25 @@ class CreatePlatformFromImportView(
                                     mapping.full_clean()
                                     mapping.save()
                             except IntegrityError:
-                                # Concurrent request created the mapping; safe to ignore.
-                                pass
+                                # A concurrent request inserted the mapping between our existence
+                                # check and save, so ours was not applied. If the winning row
+                                # targets a *different* platform, future imports for this OS keep
+                                # resolving through it rather than the platform just created —
+                                # surface the same warning as the "already exists" branch instead
+                                # of reporting a clean success. Same-platform winner is a true no-op.
+                                winner = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
+                                if winner is not None and getattr(winner, "netbox_platform_id", None) != platform.pk:
+                                    winner_target = getattr(winner.netbox_platform, "name", None)
+                                    transaction.on_commit(
+                                        lambda os=librenms_os, target=winner_target: messages.warning(
+                                            request,
+                                            f"Platform created, but a LibreNMS-OS mapping for '{os}' already exists"
+                                            + (f" (→ {target})" if target else "")
+                                            + ". It was left unchanged, so future imports for this OS will keep "
+                                            "using the existing mapping. Update the mapping if you want them to use "
+                                            "the new platform.",
+                                        )
+                                    )
                             except ValidationError:
                                 logger.warning(
                                     "CreatePlatformFromImportView: skipped invalid PlatformMapping for OS %r",
@@ -2443,6 +2467,14 @@ class AddAsOOBView(
         needed = []
         iface_id = (request.POST.get("oob_interface_id") or "").strip()
         new_iface_name = (request.POST.get("oob_new_interface_name") or "").strip()
+        # No interface target selected — empty, or "__new__" without a name — means
+        # _resolve_oob_interface() returns no interface and oob_ip is never set, so neither an
+        # Interface nor an IPAddress mutation runs. Don't demand add/change perms (or emit a
+        # permission warning) for a write that won't happen; that just blocks the intended
+        # "choose an interface" flow with a misleading error.
+        has_interface_target = (iface_id and iface_id != "__new__") or (iface_id == "__new__" and bool(new_iface_name))
+        if not has_interface_target:
+            return None
         if iface_id == "__new__" and new_iface_name:
             # _resolve_oob_interface() reuses an existing (device, name) interface, so no
             # Interface write happens then. Only require 'add' when it doesn't already
