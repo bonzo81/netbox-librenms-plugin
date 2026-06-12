@@ -409,6 +409,11 @@ class DeviceImportHelperMixin:
         response = HttpResponse(status=200)
         if hx_trigger:
             response["HX-Trigger"] = hx_trigger
+        # The body is empty (the outcome is carried by the OOB toast + HX-Trigger). Without
+        # HX-Reswap:none HTMX would still swap that empty payload into the original target,
+        # blanking the modal/row even though the mutation already committed. OOB swaps apply
+        # regardless, so the toast and trigger still fire. Mirrors _htmx_error_response().
+        response["HX-Reswap"] = "none"
         return _attach_messages_oob(response, request)
 
 
@@ -2461,11 +2466,26 @@ class AddAsOOBView(
             needed.append(("add", IPAddress))
         else:
             already_on_selected_iface = False
-            if not ambiguous and iface_id and iface_id != "__new__":
-                try:
-                    already_on_selected_iface = getattr(existing.assigned_object, "pk", None) == int(iface_id)
-                except ValueError:
-                    already_on_selected_iface = False
+            if not ambiguous:
+                # Resolve the interface the IP would actually land on, mirroring
+                # _resolve_oob_interface(): an explicit PK, or — for the "__new__" branch — the
+                # existing (device, name) interface it reuses when one already exists. If the IP
+                # is already assigned there, _attach_oob_ip() is a no-op, so a change-Device-only
+                # user must not be blocked on change-IPAddress.
+                selected_iface_pk = None
+                if iface_id and iface_id != "__new__":
+                    try:
+                        selected_iface_pk = int(iface_id)
+                    except ValueError:
+                        selected_iface_pk = None
+                elif iface_id == "__new__" and new_iface_name and device is not None:
+                    selected_iface_pk = (
+                        Interface.objects.filter(device=device, name=new_iface_name)
+                        .values_list("pk", flat=True)
+                        .first()
+                    )
+                if selected_iface_pk is not None:
+                    already_on_selected_iface = getattr(existing.assigned_object, "pk", None) == selected_iface_pk
             if not already_on_selected_iface:
                 needed.append(("change", IPAddress))
 
@@ -2874,27 +2894,12 @@ class MergeNetBoxDevicesView(
                 return _htmx_error_response("Selected LibreNMS server is no longer configured.")
 
         winner_pk_raw = request.POST.get("winner_pk")
-        donor_pk_raw = request.POST.get("donor_pk")
-        if not winner_pk_raw or not donor_pk_raw:
-            return _htmx_error_response("Missing winner_pk or donor_pk")
+        if not winner_pk_raw:
+            return _htmx_error_response("Missing winner_pk")
         try:
             winner_pk = int(winner_pk_raw)
-            donor_pk = int(donor_pk_raw)
         except (TypeError, ValueError):
-            return _htmx_error_response("Invalid winner_pk or donor_pk")
-        if winner_pk == donor_pk:
-            return _htmx_error_response("Winner and donor must be different devices")
-
-        try:
-            winner = Device.objects.get(pk=winner_pk)
-            donor = Device.objects.get(pk=donor_pk)
-        except Device.DoesNotExist:
-            return _htmx_error_response("Winner or donor device not found")
-
-        # Permission gate: user must be able to change BOTH devices.
-        self.required_object_permissions = {"POST": [("change", Device)]}
-        if error := self.require_object_permissions("POST"):
-            return error
+            return _htmx_error_response("Invalid winner_pk")
 
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
         if not libre_device:
@@ -2906,8 +2911,26 @@ class MergeNetBoxDevicesView(
             (merge_candidates.get("oob_named") or {}).get("pk"),
         }
         candidate_pks.discard(None)
-        if {winner_pk, donor_pk} != candidate_pks:
-            return _htmx_error_response("winner_pk/donor_pk do not match the validation result's merge candidates")
+        # Derive the donor from the selected winner instead of trusting the client-posted
+        # donor_pk. The donor hidden field is kept in sync with the winner radio by inline JS;
+        # if that JS fails to run, the form would post winner_pk as its own donor (a no-op /
+        # self-merge) or a stale donor. The merge is always between this fixed pair of
+        # candidates, so the donor is unambiguously the *other* candidate — no client state
+        # needed. This also enforces that the winner is one of the two merge candidates.
+        if winner_pk not in candidate_pks or len(candidate_pks) != 2:
+            return _htmx_error_response("winner_pk does not match the validation result's merge candidates")
+        donor_pk = next(pk for pk in candidate_pks if pk != winner_pk)
+
+        try:
+            winner = Device.objects.get(pk=winner_pk)
+            donor = Device.objects.get(pk=donor_pk)
+        except Device.DoesNotExist:
+            return _htmx_error_response("Winner or donor device not found")
+
+        # Permission gate: user must be able to change BOTH devices.
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
 
         # Reject legacy bare-int librenms_id form on either side. The merge
         # helpers refuse to operate on legacy data to prevent silent migration.

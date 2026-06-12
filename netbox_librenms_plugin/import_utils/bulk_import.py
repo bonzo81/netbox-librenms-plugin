@@ -394,6 +394,32 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
     validation.pop("merge_candidates", None)
 
 
+def _reassert_new_import_blockers(validation: dict) -> None:
+    """Re-add the create-time role/cluster blocker that validate_device_for_import() attaches
+    to unmatched rows.
+
+    When a refresh drops a cached match (or never had one) and the fresh lookup finds nothing,
+    the row is back in the "new import" path. recalculate_validation_status() recomputes
+    can_import purely from the issues list, so without re-adding this blocker a row that still
+    has no role/cluster selected could flip back to importable and then fail at import time.
+
+    Guarded by the selection state (found/role/cluster), so a row where the user *has* picked a
+    role/cluster — which sets found=True and removed the issue — is left importable.
+    """
+    if validation.get("import_as_vm"):
+        cluster = validation.get("cluster") or {}
+        if not cluster.get("found") and not cluster.get("cluster"):
+            msg = "Cluster must be manually selected before importing as VM"
+            if msg not in validation.setdefault("issues", []):
+                validation["issues"].append(msg)
+    else:
+        role = validation.get("device_role") or {}
+        if not role.get("found") and not role.get("role"):
+            msg = "Device role must be manually selected before import"
+            if msg not in validation.setdefault("issues", []):
+                validation["issues"].append(msg)
+
+
 def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:
     """
     Refresh existing_device from DB to pick up changes made in NetBox since caching.
@@ -585,6 +611,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # but a late-found existing match must never be import-ready.
             validation["can_import"] = False
             validation["is_ready"] = False
+        else:
+            # No existing match at all — the row is a genuine new import. If a cached match was
+            # just cleared above, its create-time role/cluster blocker was lost; re-add it so the
+            # row can't flip to importable while still missing a required selection.
+            _reassert_new_import_blockers(validation)
+            recalculate_validation_status(validation, is_vm=import_as_vm)
     except AmbiguousLibreNMSIdError as exc:
         # An ambiguous librenms_id (matching multiple records) must block import rather
         # than fall through as "not found" and stay importable.

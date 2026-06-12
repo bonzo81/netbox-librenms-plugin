@@ -27,6 +27,7 @@ from ipam.models import IPAddress
 
 from netbox_librenms_plugin.utils import get_migrated_to_marker
 from netbox_librenms_plugin.views.mixins import (
+    LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
 )
@@ -49,8 +50,14 @@ def _resolve_winner_for_donor(donor, server_key="default"):
     marker = get_migrated_to_marker(donor, server_key)
     if not marker:
         return None, None
+    device_id = marker.get("device_id")
+    # Reject bools explicitly: bool is a subclass of int, so int(True) == 1 would
+    # otherwise resolve Device(pk=1) and misroute a move operation. A corrupt marker
+    # like {"device_id": true} must fail closed as a stale/invalid marker.
+    if isinstance(device_id, bool):
+        return None, marker
     try:
-        winner_pk = int(marker.get("device_id"))
+        winner_pk = int(device_id)
     except (TypeError, ValueError):
         return None, marker
     winner = Device.objects.filter(pk=winner_pk).first()
@@ -59,16 +66,24 @@ def _resolve_winner_for_donor(donor, server_key="default"):
     return winner, marker
 
 
-def _server_key_from_request(request, default_server_key=None):
+def _server_key_from_request(request, default_factory=None):
     """Extract the LibreNMS server key from the POST body (form field).
 
-    Pass ``default_server_key=self.librenms_api.server_key`` from views that
-    have API access so the fallback matches the active server's namespace.
-    When no default is given, ``"default"`` is used as a last-resort fallback
-    (migrate views always receive the correct key via the POST body).
+    Pass ``default_factory=lambda: self.librenms_api.server_key`` from views that
+    have API access so the fallback matches the active server's namespace rather
+    than the literal ``"default"``. The factory is a callable (not the resolved
+    value) so the API — and the DB lookup it performs — is only touched when the
+    POST body omits ``server_key``; the common path where the form supplies the
+    key never instantiates the API.
     """
-    sk = request.POST.get("server_key") or default_server_key
-    return sk if isinstance(sk, str) and sk else (default_server_key or "default")
+    sk = request.POST.get("server_key")
+    if isinstance(sk, str) and sk:
+        return sk
+    if default_factory is not None:
+        resolved = default_factory()
+        if isinstance(resolved, str) and resolved:
+            return resolved
+    return "default"
 
 
 def _safe_referer(request):
@@ -106,7 +121,7 @@ def _hx_response(request, message, level=messages.SUCCESS, *, status=200):
     return redirect(_safe_referer(request))
 
 
-class _BaseMoveToWinnerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Shared plumbing for the per-resource move endpoints."""
 
     def _gate(self, request):
@@ -181,7 +196,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         if donor is None:
             return self._fail(request, "Interface has no device.")
 
-        server_key = _server_key_from_request(request)
+        server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)
@@ -309,7 +324,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         if donor is None:
             return self._fail(request, "IP's interface has no device.", status=409)
 
-        server_key = _server_key_from_request(request)
+        server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)
@@ -400,7 +415,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
         field, human = self._FIELD_MAP[ip_kind]
 
         donor = get_object_or_404(Device, pk=pk)
-        server_key = _server_key_from_request(request)
+        server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)

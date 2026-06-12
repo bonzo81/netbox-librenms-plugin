@@ -2247,6 +2247,35 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "_source": item.get("_source", "main"),
             }
 
+        # OOB-controller modules come from a *separate* device. Comparing them against this
+        # host's bays/types/installed modules is meaningless, and the host matching below could
+        # render an OOB row as "Matched"/"Installed" whenever labels happened to line up — a
+        # false-positive comparison. Short-circuit *before* any host bay/type/status resolution
+        # and emit a read-only informational row with neutral bay/type/status. (A late post-match
+        # scrub can't undo a status the matching already computed.)
+        if item.get("_source") == "oob":
+            return {
+                "name": name,
+                "model": model_name or "-",
+                "serial": serial or "-",
+                "description": description,
+                "item_class": phys_class,
+                "module_bay": "-",
+                "module_type": "-",
+                "status": "OOB",
+                "can_install": False,
+                "module_bay_id": None,
+                "module_type_id": None,
+                "depth": depth,
+                "ent_physical_index": item.get("entPhysicalIndex"),
+                "has_installable_children": False,
+                "librenms_port_id": item.get("_librenms_port_id"),
+                "librenms_ifname": item.get("_librenms_ifname"),
+                "librenms_ifdescr": item.get("_librenms_ifdescr"),
+                "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
+                "_source": "oob",
+            }
+
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
@@ -2399,25 +2428,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if name_conflict_reason:
             row["status"] = "Name Conflict"
 
-        # OOB controller rows share this table but must never expose host-side write
-        # actions: the bay/type resolution above keys off model/name and could match an
-        # OOB row to a host bay, enabling install/replace/serial/binding on it. Stamp OOB
-        # rows read-only centrally (the _attach_interface_match guard only covers binding).
-        if row.get("_source") == "oob":
-            for _flag in ("can_install", "can_replace", "can_update_serial", "can_update_interface_binding"):
-                row[_flag] = False
-            # The bay/type resolution above can also stamp model-editing payloads
-            # (add-mapping / add-module-type / incomplete-type prompts) that mutate the HOST
-            # device's bay/type modelling. Drop those on OOB rows too — same reason.
-            for _key in (
-                "model_suggestion",
-                "type_suggestion",
-                "module_type_create",
-                "module_type_ambiguity",
-                "device_type_incomplete",
-                "model_incomplete",
-            ):
-                row.pop(_key, None)
+        # Note: OOB-controller rows never reach here — they short-circuit to a neutral
+        # read-only row before any host bay/type/status matching (see the _source == "oob"
+        # block above), so no host-side action flags or model-editing payloads are ever set.
 
         return row
 

@@ -1650,6 +1650,48 @@ class TestBuildRowSerialMismatch:
         assert row.get("can_update_serial")
         assert row.get("can_replace")
 
+    def test_oob_row_short_circuits_before_host_matching(self):
+        """An OOB-controller item whose model/name WOULD match a host bay+type must not be
+        compared against the host: it short-circuits to a neutral read-only row (status 'OOB',
+        '-' bay/type, no action flags) before any bay/type/status resolution runs."""
+        view = self._view()
+        # This bay+type would produce a "Serial Mismatch"/"Installed" match for a host row,
+        # so a regression that drops the early return would surface a host status here.
+        bay = self._make_bay(installed_serial="TESTSRL")
+        matched_type = MagicMock()
+        matched_type.model = "XCM-7s-b"
+        matched_type.pk = 5
+        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+
+        oob_item = self._make_item(serial="NS225161205")
+        oob_item["_source"] = "oob"
+
+        with (
+            patch.object(view, "_match_module_bay", return_value=bay) as mock_match_bay,
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+        ):
+            row = view._build_row(
+                oob_item,
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        # Host matching never ran, so the row carries neutral bay/type/status and no actions.
+        mock_match_bay.assert_not_called()
+        assert row["_source"] == "oob"
+        assert row["status"] == "OOB"
+        assert row["module_bay"] == "-"
+        assert row["module_type"] == "-"
+        assert row["module_bay_id"] is None
+        assert row["module_type_id"] is None
+        assert row["can_install"] is False
+        for flag in ("can_replace", "can_update_serial", "can_update_interface_binding"):
+            assert not row.get(flag)
+        for key in ("model_suggestion", "type_suggestion", "module_type_create", "installed_module_id"):
+            assert key not in row
+
     def _common_patches(self, view, bay, matched_type_name):
         """Return a stack of common patches for _build_row helper calls."""
         from unittest.mock import patch

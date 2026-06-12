@@ -798,8 +798,13 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
         mock_platform_cls.assert_not_called()
-        mock_mapping_cls.assert_called_once()
+        # The mapping must point the posted OS at the reused existing platform — pin both so a
+        # regression that maps to the wrong platform (or swaps the args) is caught.
+        mock_mapping_cls.assert_called_once_with(librenms_os="ios", netbox_platform=existing_platform)
         mock_mapping_instance.save.assert_called_once()
+        # The locked device must be assigned the existing platform (not left untouched).
+        assert mock_locked.platform is existing_platform
+        mock_locked.save.assert_called_once()
         mock_msg.success.assert_called_once()
 
     def test_mapping_existing_points_to_different_platform_warns(self):
