@@ -1307,6 +1307,39 @@ class TestSyncLagAndParentRelationships:
 
         assert member.lag is agg
 
+    def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self):
+        """A relationship that fails Interface.full_clean() (e.g. a self-LAG from stale or
+        crafted port_stack data) must be skipped, not persisted."""
+        from dcim.models import Interface
+        from django.core.exceptions import ValidationError
+        from netbox_librenms_plugin.views.sync import interfaces as mod
+
+        view = self._make_view(name_field="ifName", selected_port_ids={"11"})
+        obj = MagicMock()
+        ports_data = [
+            {"ifName": "Gi0/2", "port_id": 11},
+            {"ifName": "Po1", "port_id": 100},
+        ]
+        relationships = {"lag_members": {"11": 100}, "sub_interfaces": {}}
+        selected = []
+
+        member = MagicMock(spec=Interface, lag_id=None)
+        member.full_clean.side_effect = ValidationError("self-link not allowed")
+        agg = MagicMock(spec=Interface, type="lag", pk=100)
+
+        def resolve(o, port_id, server_key, name_hint=""):
+            return (agg, None) if port_id == "100" else (member, None)
+
+        with (
+            patch.object(mod, "_resolve_interface_by_port_id", side_effect=resolve),
+            patch.object(mod, "_interfaces_same_owner", return_value=True),
+            patch.object(mod, "transaction"),
+        ):
+            view._sync_lag_and_parent_relationships(obj, selected, ports_data, relationships, "default")
+
+        # full_clean() rejected the link → it must not be saved.
+        member.save.assert_not_called()
+
 
 # A POSTed valid non-default server_key must scope the sync to that server without 500ing on a
 # misconfigured default client. Under the stack that behavior comes from rebind_api_for_server, so

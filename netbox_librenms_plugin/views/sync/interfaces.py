@@ -4,6 +4,7 @@ from urllib.parse import quote_plus
 from dcim.models import Device, Interface, MACAddress
 from django.contrib import messages
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.http import Http404, JsonResponse
 from django.shortcuts import redirect
@@ -31,6 +32,13 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _validation_error_detail(exc: ValidationError) -> str:
+    """Flatten a ValidationError into a single human-readable string for a JSON error body."""
+    if hasattr(exc, "message_dict"):
+        return "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
+    return "; ".join(str(m) for m in exc.messages) if hasattr(exc, "messages") else str(exc)
 
 
 class SyncInterfacesView(
@@ -255,10 +263,27 @@ class SyncInterfacesView(
                                 agg_iface.name,
                             )
                         else:
-                            if isinstance(agg_iface, Interface) and agg_iface.type != "lag":
-                                agg_iface.type = "lag"
-                                agg_iface.save()
+                            # Validate before persisting: _interfaces_same_owner only checks the
+                            # device, so stale port_stack data (or a port mapped as its own
+                            # aggregate) could otherwise persist a self-LAG or other link that
+                            # Interface.clean() rejects. Set the lag type in memory so full_clean()
+                            # validates against it, then commit only on success.
                             member_iface.lag = agg_iface
+                            agg_needs_lag_type = isinstance(agg_iface, Interface) and agg_iface.type != "lag"
+                            if agg_needs_lag_type:
+                                agg_iface.type = "lag"
+                            try:
+                                member_iface.full_clean()
+                            except ValidationError as exc:
+                                logger.warning(
+                                    "Bulk sync: skipping invalid LAG link %s -> %s: %s",
+                                    member_iface.name,
+                                    agg_iface.name,
+                                    _validation_error_detail(exc),
+                                )
+                                continue
+                            if agg_needs_lag_type:
+                                agg_iface.save()
                             member_iface.save()
                             logger.info("Bulk sync: set %s.lag = %s", member_iface.name, agg_iface.name)
 
@@ -292,7 +317,19 @@ class SyncInterfacesView(
                                 parent_iface.name,
                             )
                         else:
+                            # Validate before persisting (see the LAG branch above): guards against
+                            # a self-parent or other relationship Interface.clean() would reject.
                             child_iface.parent = parent_iface
+                            try:
+                                child_iface.full_clean()
+                            except ValidationError as exc:
+                                logger.warning(
+                                    "Bulk sync: skipping invalid parent link %s -> %s: %s",
+                                    child_iface.name,
+                                    parent_iface.name,
+                                    _validation_error_detail(exc),
+                                )
+                                continue
                             child_iface.save()
                             logger.info("Bulk sync: set %s.parent = %s", child_iface.name, parent_iface.name)
 
@@ -842,12 +879,26 @@ class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         with transaction.atomic():
             # obj is always a Device here (VMs are 404'd above), so both resolved
             # interfaces are Interface instances.
-            if agg_iface.type != "lag":
+            # Validate before persisting: a crafted POST with port_id == lag_port_id resolves
+            # member == aggregate and passes the same-owner check, so full_clean() is what
+            # rejects the resulting self-LAG. Set the lag type in memory first so the relation
+            # validates, then commit only on success; surface failures as 409.
+            member_iface.lag = agg_iface
+            agg_needs_lag_type = agg_iface.type != "lag"
+            if agg_needs_lag_type:
                 agg_iface.type = "lag"
+            try:
+                member_iface.full_clean()
+            except ValidationError as exc:
+                return JsonResponse(
+                    {
+                        "error": f"Cannot link {member_iface.name} to LAG {agg_iface.name}: {_validation_error_detail(exc)}"
+                    },
+                    status=409,
+                )
+            if agg_needs_lag_type:
                 agg_iface.save()
                 logger.info("Set interface %s type=lag", agg_iface.name)
-
-            member_iface.lag = agg_iface
             member_iface.save()
             logger.info("Set %s.lag = %s", member_iface.name, agg_iface.name)
 
@@ -903,7 +954,18 @@ class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return JsonResponse({"error": "Child and parent interfaces are on different devices."}, status=409)
 
         with transaction.atomic():
+            # Validate before persisting (see SyncInterfaceLagView): full_clean() rejects a
+            # self-parent (port_id == parent_port_id) or other invalid relationship.
             child_iface.parent = parent_iface
+            try:
+                child_iface.full_clean()
+            except ValidationError as exc:
+                return JsonResponse(
+                    {
+                        "error": f"Cannot link {child_iface.name} to parent {parent_iface.name}: {_validation_error_detail(exc)}"
+                    },
+                    status=409,
+                )
             child_iface.save()
             logger.info("Set %s.parent = %s", child_iface.name, parent_iface.name)
 
