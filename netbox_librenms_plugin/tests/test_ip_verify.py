@@ -159,3 +159,23 @@ class TestNumericIDValidation:
         payload = json.loads(response.content)
         assert payload["status"] == "error"
         assert payload["message"] == "Invalid VRF ID"
+
+    def test_boolean_false_object_id_rejected_as_invalid(self):
+        # bool is an int subclass; object_id=False must hit the explicit boolean guard
+        # ("Invalid object ID"), not the falsy "No object ID provided" branch. The guard
+        # therefore has to run before `if not object_id`.
+        view = _make_view()
+        request = _make_request({"device_id": False, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"
+
+    def test_boolean_true_object_id_rejected_as_invalid(self):
+        # object_id=True would otherwise int() to 1 and validate as device #1.
+        view = _make_view()
+        request = _make_request({"device_id": True, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"

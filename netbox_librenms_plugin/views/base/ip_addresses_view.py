@@ -539,15 +539,17 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             if not ip_address:
                 return JsonResponse({"status": "error", "message": "No IP address provided"}, status=400)
 
+            # Reject JSON booleans explicitly before the falsy check: bool is an int
+            # subclass, so True/False would otherwise pass int() and validate as IDs 1/0,
+            # and object_id=False would be misreported as "No object ID provided".
+            if isinstance(object_id, bool):
+                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
+
             if not object_id:
                 return JsonResponse({"status": "error", "message": "No object ID provided"}, status=400)
 
             # Validate the client-supplied numeric IDs up front so a bad value returns a
             # clean 400 instead of raising deep in the ORM and being caught as a generic 500.
-            # Reject JSON booleans explicitly: bool is an int subclass, so True/False would
-            # otherwise pass int() and validate as IDs 1/0.
-            if isinstance(object_id, bool):
-                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
             try:
                 object_id = int(object_id)
             except (TypeError, ValueError):
