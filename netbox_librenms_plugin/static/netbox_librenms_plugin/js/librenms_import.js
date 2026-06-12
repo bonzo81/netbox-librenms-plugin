@@ -1274,6 +1274,12 @@
         // Handle Escape key to close modal
         document.addEventListener('keydown', function (event) {
             if (event.key === 'Escape') {
+                // A nested dialog (e.g. the promote-to-host modal rendered inside
+                // #htmx-modal-content) owns Escape while it is open — let Bootstrap close
+                // the topmost child, don't tear down the whole validation modal underneath it.
+                if (document.querySelector('#htmx-modal-content .modal.show')) {
+                    return;
+                }
                 if (modalElement?.classList.contains('show')) {
                     hideModal(modalElement, fallbackBackdropRef);
                 }
