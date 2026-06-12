@@ -890,9 +890,22 @@ class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             try:
                 member_iface.full_clean()
             except ValidationError as exc:
+                # Log the validation detail server-side and return a fixed message — don't
+                # echo exception text to the client (CodeQL py/stack-trace-exposure). The
+                # cross-device case is already rejected above, so this is the self-LAG /
+                # NetBox-constraint case.
+                logger.warning(
+                    "LAG link validation failed (%s -> %s): %s",
+                    member_iface.name,
+                    agg_iface.name,
+                    _validation_error_detail(exc),
+                )
                 return JsonResponse(
                     {
-                        "error": f"Cannot link {member_iface.name} to LAG {agg_iface.name}: {_validation_error_detail(exc)}"
+                        "error": (
+                            f"Cannot link {member_iface.name} to LAG {agg_iface.name}: "
+                            "invalid LAG relationship (an interface cannot be its own LAG)."
+                        )
                     },
                     status=409,
                 )
@@ -960,9 +973,20 @@ class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             try:
                 child_iface.full_clean()
             except ValidationError as exc:
+                # See SyncInterfaceLagView: log the detail, return a fixed message so
+                # exception text isn't echoed to the client (CodeQL py/stack-trace-exposure).
+                logger.warning(
+                    "Parent link validation failed (%s -> %s): %s",
+                    child_iface.name,
+                    parent_iface.name,
+                    _validation_error_detail(exc),
+                )
                 return JsonResponse(
                     {
-                        "error": f"Cannot link {child_iface.name} to parent {parent_iface.name}: {_validation_error_detail(exc)}"
+                        "error": (
+                            f"Cannot link {child_iface.name} to parent {parent_iface.name}: "
+                            "invalid relationship (an interface cannot be its own parent)."
+                        )
                     },
                     status=409,
                 )

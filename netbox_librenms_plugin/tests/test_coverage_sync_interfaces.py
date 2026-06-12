@@ -1418,3 +1418,88 @@ class TestResolveInterfaceByPortId:
         assert err is None
         assert iface is mock_iface_by_name
         mock_intf_cls.objects.get.assert_called_once_with(device=mock_device, name="lag-1")
+
+
+class TestInterfaceLinkValidationErrorNoStackTrace:
+    """LAG/parent full_clean() failures return a fixed message and log the detail —
+    the exception text must not be echoed to the client (CodeQL py/stack-trace-exposure)."""
+
+    _SENTINEL = "SENSITIVE_VALIDATION_INTERNALS"
+
+    def test_lag_link_validation_error_does_not_leak_exception(self):
+        import json
+
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView, _PortIdResolveMixin
+
+        view = object.__new__(SyncInterfaceLagView)
+        view.require_all_permissions_json = MagicMock(return_value=None)
+        view._librenms_api = MagicMock(server_key="default")
+
+        member = MagicMock()
+        member.name = "Et1"
+        member.full_clean.side_effect = ValidationError(self._SENTINEL)
+        agg = MagicMock()
+        agg.name = "Po1"
+        agg.type = "lag"
+
+        req = _make_request({"port_id": "1", "lag_port_id": "2", "server_key": "default"})
+
+        with (
+            patch.object(SyncInterfaceLagView, "_get_object", return_value=MagicMock()),
+            patch.object(
+                _PortIdResolveMixin,
+                "_resolve_interface_by_port_id",
+                side_effect=[(member, None), (agg, None)],
+            ),
+            patch("netbox_librenms_plugin.views.sync.interfaces._interfaces_same_owner", return_value=True),
+            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.logger") as mock_logger,
+        ):
+            resp = view.post(req, object_type="device", object_id=1)
+
+        assert resp.status_code == 409
+        assert self._SENTINEL not in resp.content.decode()
+        body = json.loads(resp.content)
+        assert "Cannot link Et1 to LAG Po1" in body["error"]
+        # The real detail is logged server-side, not lost.
+        assert any(self._SENTINEL in str(c.args) for c in mock_logger.warning.call_args_list)
+
+    def test_parent_link_validation_error_does_not_leak_exception(self):
+        import json
+
+        from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView, _PortIdResolveMixin
+
+        view = object.__new__(SyncInterfaceParentView)
+        view.require_all_permissions_json = MagicMock(return_value=None)
+        view._librenms_api = MagicMock(server_key="default")
+
+        child = MagicMock()
+        child.name = "Et1.100"
+        child.full_clean.side_effect = ValidationError(self._SENTINEL)
+        parent = MagicMock()
+        parent.name = "Et1"
+
+        req = _make_request({"port_id": "1", "parent_port_id": "2", "server_key": "default"})
+
+        with (
+            patch.object(SyncInterfaceParentView, "_get_object", return_value=MagicMock()),
+            patch.object(
+                _PortIdResolveMixin,
+                "_resolve_interface_by_port_id",
+                side_effect=[(child, None), (parent, None)],
+            ),
+            patch("netbox_librenms_plugin.views.sync.interfaces._interfaces_same_owner", return_value=True),
+            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.logger") as mock_logger,
+        ):
+            resp = view.post(req, object_type="device", object_id=1)
+
+        assert resp.status_code == 409
+        assert self._SENTINEL not in resp.content.decode()
+        body = json.loads(resp.content)
+        assert "Cannot link Et1.100 to parent Et1" in body["error"]
+        assert any(self._SENTINEL in str(c.args) for c in mock_logger.warning.call_args_list)
