@@ -1436,13 +1436,16 @@ class TestLibreNMSInterfaceTableInit:
         assert table.tab == "interfaces"
         assert table.prefix == "interfaces_"
 
-    def test_ipaddress_table_sets_tab(self):
+    def test_ipaddress_table_sets_tab_and_prefix(self):
         """The IP table must set tab='ipaddresses' so the paginator links (?tab={{ table.tab }})
-        keep the user on the IP Addresses tab instead of falling back to the default tab."""
+        keep the user on the IP Addresses tab, and prefix='ipaddresses_' so its per-page param is
+        namespaced (configure() passes self.prefix to get_table_paginate_count) rather than shared
+        with the generic one. Mirrors test_tab_and_prefix_set for LibreNMSInterfaceTable."""
         from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 
         table = IPAddressTable([])
         assert table.tab == "ipaddresses"
+        assert table.prefix == "ipaddresses_"
 
     def test_server_key_stored(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable

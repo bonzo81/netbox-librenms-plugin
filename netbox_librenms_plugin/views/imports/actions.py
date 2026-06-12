@@ -715,7 +715,10 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         try:
-            parsed_ids = [int(device_id) for device_id in device_ids]
+            # De-duplicate on the *parsed* int, not the raw string: a POST carrying both "1" and
+            # "01" coerces to the same device id, which would otherwise import it twice. dict
+            # keys preserve first-seen order. Mirrors BulkImportConfirmView's seen_ids guard.
+            parsed_ids = list(dict.fromkeys(int(device_id) for device_id in device_ids))
         except (TypeError, ValueError):
             if is_htmx:
                 return HttpResponse("Invalid device identifier", status=400)

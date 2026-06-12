@@ -18,6 +18,13 @@ class IPAddressTable(tables.Table):
         # ?tab={{ table.tab }}) keep the user on the IP Addresses tab. Without this, table.tab
         # renders empty and paging falls back to the default (Interfaces) tab.
         self.tab = "ipaddresses"
+        # Give this table its own pagination namespace. configure() passes self.prefix to
+        # get_table_paginate_count() (and RequestConfig), which keys per_page on
+        # "{prefix}per_page"; left empty, the IP table shares the generic per-page param with
+        # other tabs instead of reading "ipaddresses_per_page". Orthogonal to self.tab. Matches
+        # the cables/modules/interfaces/vlans tables; preserve an explicit caller override.
+        if not self.prefix:
+            self.prefix = "ipaddresses_"
 
     class Meta:
         """Meta options for IPAddressTable."""
