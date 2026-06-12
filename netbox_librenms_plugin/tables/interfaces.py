@@ -456,17 +456,22 @@ class LibreNMSInterfaceTable(tables.Table):
         if sync_status == "missing_nb" and lnms_port_id:
             port_id = record.get("port_id", "")
             nb_iface = record.get("netbox_interface")
+            row_object_id = record.get("selected_object_id")
             # Resolve the row's member device first. On a VC page self.device is the viewed
             # member, which may not own this row's interface — without this, a missing_nb
-            # sync would target the wrong device.
+            # sync would target the wrong device. Prefer (1) the matched NetBox interface's
+            # device, (2) the row-selected object stamped by format_interface_data (authoritative
+            # for the cross-page member switch), then (3) the name-based VC heuristic.
             if nb_iface and hasattr(nb_iface, "device_id"):
                 object_id = nb_iface.device_id
+            elif row_object_id:
+                object_id = row_object_id
             elif self.device is not None and getattr(self.device, "virtual_chassis", None):
                 member = get_virtual_chassis_member(self.device, record.get(self.interface_name_field))
                 object_id = (member or self.device).pk
             else:
                 object_id = self.device.pk if self.device else ""
-            object_type = self.sync_object_type
+            object_type = record.get("selected_object_type") or self.sync_object_type
             btn = format_html(
                 ' <button type="button" class="btn btn-sm btn-link p-0 {}" '
                 'data-port-id="{}" {}="{}" '
@@ -604,6 +609,14 @@ class LibreNMSInterfaceTable(tables.Table):
         else:
             port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
+
+        # Stamp the row's actual object so the relationship sync button targets it even when the
+        # row has no matching NetBox interface yet (missing_nb). This is set here, where the
+        # caller passes the row-selected device (e.g. the cross-page VC member switch), so the
+        # missing_nb branch in _render_relationship_column can prefer it over the
+        # name-based VC heuristic, which would otherwise post to the wrong device.
+        port_data["selected_object_id"] = getattr(device, "pk", None)
+        port_data["selected_object_type"] = self.sync_object_type
 
         # Clear description if it matches interface name
         if port_data["ifAlias"] == port_data["ifName"] or port_data["ifAlias"] == port_data["ifDescr"]:

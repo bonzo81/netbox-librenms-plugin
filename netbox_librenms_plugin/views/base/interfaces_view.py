@@ -878,12 +878,16 @@ class BaseInterfaceTableView(
             # Default to "default" so the stable-id match is never silently disabled on the
             # default-server path (where server_key may arrive empty); name matching below is
             # the fragile fallback and must not pre-empt a stable id when one is stored.
-            stored_id = get_librenms_device_id(nb_rel_iface, server_key or "default", auto_save=False)
-            lnms_pid = lnms_port_dict.get("port_id")
-            if stored_id is not None and lnms_pid is not None:
-                target = int(lnms_pid) if str(lnms_pid).isdigit() else None
-                if target is not None:
-                    return stored_id == target
+            # Normalize both sides: get_librenms_device_id() can return a string-backed
+            # custom-field value ("123"), so compare against the normalized port_id to avoid a
+            # spurious "123" != 123 miss that would drop us to the fragile name fallback for a
+            # renamed LAG/parent interface whose stable ids actually agree.
+            stored_id = normalize_librenms_port_id(
+                get_librenms_device_id(nb_rel_iface, server_key or "default", auto_save=False)
+            )
+            target = normalize_librenms_port_id(lnms_port_dict.get("port_id"))
+            if stored_id is not None and target is not None:
+                return stored_id == target
             # Fallback: name match — try both name fields to be field-agnostic
             nb_name = nb_rel_iface.name
             return nb_name == lnms_port_dict.get("ifName") or nb_name == lnms_port_dict.get("ifDescr")
