@@ -1714,6 +1714,15 @@ def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
     entry = cf_value.get(server_key)
     if not isinstance(entry, dict):
         return None
+    # A live host or OOB link takes precedence over a stale _migrated_to marker: if the
+    # same entry still resolves via find_by_librenms_id(), leaving the donor in migrated
+    # mode is a contradictory state. Treat the marker as obsolete when an active id/oob
+    # link exists on the entry.
+    if coerce_librenms_id(entry.get("id")) is not None:
+        return None
+    oob = entry.get("oob")
+    if isinstance(oob, dict) and coerce_librenms_id(oob.get("id")) is not None:
+        return None
     marker = entry.get("_migrated_to")
     if not isinstance(marker, dict):
         return None

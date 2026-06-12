@@ -508,7 +508,7 @@ class TestApplyOobDetectionResult:
 
 
 # =============================================================================
-# TestApplyMergeCandidates - 4 tests
+# TestApplyMergeCandidates - 8 tests
 # =============================================================================
 
 
@@ -569,3 +569,57 @@ class TestApplyMergeCandidates:
             warning="merge warning",
         )
         assert result["warnings"] == ["existing", "merge warning"]
+
+    def test_clears_oob_candidate(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["oob_candidate"] = {"device": object(), "type": "idrac", "version": None, "ip": None}
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge needed",
+        )
+        assert result["oob_candidate"] is None
+
+    def test_clears_serial_conflict_flags(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["serial_duplicate"] = True
+        result["serial_confirmed"] = True
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge needed",
+        )
+        assert result["serial_duplicate"] is False
+        assert result["serial_confirmed"] is False
+
+    def test_removes_promote_to_host(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["promote_to_host"] = {"existing_libre_id": 5, "existing_oob_type": "idrac", "existing_device": object()}
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge needed",
+        )
+        assert "promote_to_host" not in result
+
+    def test_disables_serial_role_choice(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["serial_role_choice_available"] = True
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge needed",
+        )
+        assert result["serial_role_choice_available"] is False

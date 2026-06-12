@@ -25,6 +25,12 @@ from .virtual_chassis import (
 
 logger = logging.getLogger(__name__)
 
+# Stable fragment of the ambiguous-librenms_id blocker message. Shared by the writer
+# (the AmbiguousLibreNMSIdError handler) and the cleaner (the pre-lookup reset in
+# _refresh_existing_device) so a resolved duplicate's stale message is reliably removed
+# regardless of which librenms_id value was interpolated into it.
+_AMBIGUOUS_LIBRENMS_ID_MARKER = "matches more than one existing NetBox record"
+
 
 def _is_job_cancelled(job) -> bool:
     """
@@ -525,6 +531,21 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         hostname = libre_device.get("hostname", "")
         sys_name = libre_device.get("sysName", "")
 
+        # Clear any stale ambiguous-librenms_id blocker set by a prior refresh before
+        # re-running the lookup. If the duplicate still exists, _lookup_in_model() below
+        # re-raises AmbiguousLibreNMSIdError and the except handler re-adds the blocker;
+        # if it was resolved since, the row must not stay blocked until cache expiry.
+        if validation.get("ambiguous_librenms_id"):
+            validation["ambiguous_librenms_id"] = False
+            if validation.get("existing_match_type") == "ambiguous_librenms_id":
+                validation["existing_match_type"] = None
+            for _key in ("issues", "warnings"):
+                msgs = validation.get(_key)
+                if isinstance(msgs, list):
+                    validation[_key] = [
+                        m for m in msgs if not (isinstance(m, str) and _AMBIGUOUS_LIBRENMS_ID_MARKER in m)
+                    ]
+
         new_device = None
         match_type = None
         found_as_cross_model = False
@@ -626,7 +647,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         validation["ambiguous_librenms_id"] = True
         validation["existing_match_type"] = "ambiguous_librenms_id"
         message = (
-            f"LibreNMS ID {librenms_id} matches more than one existing NetBox record; import "
+            f"LibreNMS ID {librenms_id} {_AMBIGUOUS_LIBRENMS_ID_MARKER}; import "
             "blocked to avoid binding to the wrong object. Resolve the duplicate librenms_id "
             "assignment, then retry."
         )
