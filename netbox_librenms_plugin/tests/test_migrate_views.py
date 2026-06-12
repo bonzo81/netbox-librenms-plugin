@@ -727,3 +727,116 @@ class TestMoveIPAddressToWinnerView:
         sfu_filter_calls = mock_iface_objects.select_for_update.return_value.filter.call_args_list
         assert any("pk" in c.kwargs for c in sfu_filter_calls)  # donor re-lock
         assert any("name" in c.kwargs for c in sfu_filter_calls)  # winner lookup
+
+
+# ── non-HTMX redirect fallback (preserve tab + server_key) ────────────────────
+
+
+def _nonhtmx_request(post=None, referer=None):
+    """Build a plain (non-HTMX) request; no usable Referer unless *referer* given."""
+    req = MagicMock()
+    post = post or {}
+    req.POST = MagicMock()
+    req.POST.get = lambda k, d=None: post.get(k, d)
+    req.headers = {}  # no HX-Request -> the degraded redirect path
+    req.META = {"HTTP_REFERER": referer} if referer else {}
+    req.get_host = lambda: "testserver"
+    req.is_secure = lambda: False
+    req.user = MagicMock(is_superuser=True)
+    req._messages = MagicMock()  # so messages.error() has storage to write to
+    return req
+
+
+class TestSyncTabUrl:
+    """_sync_tab_url builds the donor device sync URL with tab + server_key."""
+
+    def test_includes_tab_and_server_key(self):
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.views.sync.migrate import _sync_tab_url
+
+        base = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[7])
+        assert _sync_tab_url(7, "ipaddresses", "siteB") == f"{base}?tab=ipaddresses&server_key=siteB"
+
+    def test_quotes_server_key(self):
+        from netbox_librenms_plugin.views.sync.migrate import _sync_tab_url
+
+        assert "server_key=a+b%2Fc" in _sync_tab_url(7, "interfaces", "a b/c")
+
+    def test_omits_server_key_when_empty(self):
+        from netbox_librenms_plugin.views.sync.migrate import _sync_tab_url
+
+        url = _sync_tab_url(7, "interfaces", "")
+        assert url.endswith("?tab=interfaces")
+        assert "server_key=" not in url
+
+
+class TestSafeRefererFallback:
+    """_safe_referer prefers a valid same-site Referer, else the server-built fallback."""
+
+    def _req(self, referer=None):
+        req = MagicMock()
+        req.META = {"HTTP_REFERER": referer} if referer else {}
+        req.get_host = lambda: "testserver"
+        req.is_secure = lambda: False
+        return req
+
+    def test_returns_fallback_when_no_referer(self):
+        from netbox_librenms_plugin.views.sync.migrate import _safe_referer
+
+        assert _safe_referer(self._req(), fallback="/sync/?tab=interfaces") == "/sync/?tab=interfaces"
+
+    def test_valid_same_site_referer_wins_over_fallback(self):
+        from netbox_librenms_plugin.views.sync.migrate import _safe_referer
+
+        req = self._req(referer="http://testserver/p/")
+        assert _safe_referer(req, fallback="/sync/") == "http://testserver/p/"
+
+    def test_external_referer_rejected_uses_fallback(self):
+        # The open-redirect guard must still reject a cross-host Referer, then
+        # land on the internal fallback rather than the attacker URL.
+        from netbox_librenms_plugin.views.sync.migrate import _safe_referer
+
+        req = self._req(referer="http://evil.example/p/")
+        assert _safe_referer(req, fallback="/sync/") == "/sync/"
+
+    def test_no_referer_no_fallback_uses_script_prefix(self):
+        from django.urls import get_script_prefix
+
+        from netbox_librenms_plugin.views.sync.migrate import _safe_referer
+
+        assert _safe_referer(self._req(), fallback=None) == get_script_prefix()
+
+
+class TestNonHtmxFallbackRedirect:
+    """A plain POST with no Referer still lands on the donor sync tab + server."""
+
+    def _setup_view(self):
+        from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
+
+        view = MoveInterfaceToWinnerView()
+        view.require_all_permissions = MagicMock(return_value=None)
+        return view
+
+    def test_missing_referer_preserves_tab_and_server_key(self):
+        from django.urls import reverse
+
+        view = self._setup_view()
+        req = _nonhtmx_request({"server_key": "siteB"})
+        donor = MagicMock(pk=10, cf={})
+        interface = MagicMock(pk=5, name="Eth0", device=donor)
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
+            patch(
+                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
+                return_value=(None, None),
+            ),
+        ):
+            resp = view.post(req, pk=5)
+
+        # Degraded non-HTMX path: a real redirect carrying tab + server context,
+        # not the bare app mount path.
+        expected = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[10])
+        assert resp.status_code in (301, 302)
+        assert resp.url == f"{expected}?tab=interfaces&server_key=siteB"

@@ -12,6 +12,7 @@ appropriate NetBox model permission on the object being moved.
 """
 
 import logging
+from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface
 from django.contrib import messages
@@ -20,7 +21,7 @@ from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.shortcuts import get_object_or_404, redirect
-from django.urls import get_script_prefix
+from django.urls import get_script_prefix, reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
@@ -86,14 +87,33 @@ def _server_key_from_request(request, default_factory=None):
     return "default"
 
 
-def _safe_referer(request):
+def _sync_tab_url(device_pk, tab, server_key):
+    """Build the device's LibreNMS sync URL for *tab*, preserving *server_key*.
+
+    Used as the non-HTMX fallback target when a plain POST carries no usable
+    Referer: without this the redirect would drop the active sync tab and server
+    context, bouncing the user to the bare app root instead of the donor's
+    "Migrated to ..." view they acted from.
+    """
+    url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device_pk])}?tab={tab}"
+    if server_key:
+        url += f"&server_key={quote_plus(server_key)}"
+    return url
+
+
+def _safe_referer(request, fallback=None):
     """
     Return the request's ``Referer`` only when it points back at this
-    site, otherwise ``"/"``.
+    site, otherwise *fallback* (or the app mount path).
 
     ``Referer`` is a client-controlled header, so it must be validated
     against the current host before being used as a redirect target —
     trusting it blindly is an open-redirect vector.
+
+    *fallback* is an internal, server-built URL (see :func:`_sync_tab_url`); it is
+    used as-is so a missing Referer still lands on the right sync tab/server. When
+    no fallback is supplied, fall back to the app mount path (not literal ``"/"``)
+    so prefixed deployments land on the NetBox app root rather than the site root.
     """
     referer = request.META.get("HTTP_REFERER")
     if referer and url_has_allowed_host_and_scheme(
@@ -102,23 +122,22 @@ def _safe_referer(request):
         require_https=request.is_secure(),
     ):
         return referer
-    # Fall back to the app mount path (not literal "/") so non-HTMX failures land on the
-    # NetBox app root on prefixed deployments instead of the site root.
-    return get_script_prefix()
+    return fallback or get_script_prefix()
 
 
-def _hx_response(request, message, level=messages.SUCCESS, *, status=200):
+def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallback_url=None):
     """
     Common HTMX response: queue a Django messages flash and emit the
     ``HX-Refresh`` header so the sync page re-renders with the row gone.
 
-    For non-HTMX requests, queue the message and redirect to the
-    validated Referer or '/'.
+    For non-HTMX requests, queue the message and redirect to the validated
+    Referer, falling back to *fallback_url* (the donor's sync tab) so the
+    server/tab context survives a missing Referer.
     """
     messages.add_message(request, level, message)
     if request.headers.get("HX-Request"):
         return HttpResponse(status=status, headers={"HX-Refresh": "true"})
-    return redirect(_safe_referer(request))
+    return redirect(_safe_referer(request, fallback_url))
 
 
 def _reconcile_donor_device_ip_fks(donor, winner):
@@ -174,6 +193,12 @@ def _reconcile_donor_device_ip_fks(donor, winner):
 class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Shared plumbing for the per-resource move endpoints."""
 
+    # Per-request, server-built non-HTMX redirect fallback (donor sync tab +
+    # server_key). Set by each post() once the donor device and server_key are
+    # known; until then it stays None and _fail/_hx_response fall back to the app
+    # mount path (there is no donor device to redirect to yet).
+    _fallback_url = None
+
     def _gate(self, request):
         """
         Plugin-write + object-perm gate.  Returns a response on failure
@@ -218,7 +243,7 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
             resp["HX-Reswap"] = "none"
             return resp
         messages.error(request, msg)
-        return redirect(_safe_referer(request))
+        return redirect(_safe_referer(request, self._fallback_url))
 
 
 class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
@@ -251,6 +276,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             return self._fail(request, "Interface has no device.")
 
         server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
+        self._fallback_url = _sync_tab_url(donor.pk, "interfaces", server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)
@@ -346,7 +372,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         message = f"Moved interface '{interface.name}' to {winner.name}."
         if notes:
             message += " " + "; ".join(notes) + "."
-        return _hx_response(request, message)
+        return _hx_response(request, message, fallback_url=self._fallback_url)
 
 
 class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
@@ -388,6 +414,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             return self._fail(request, "IP's interface has no device.", status=409)
 
         server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
+        self._fallback_url = _sync_tab_url(donor.pk, "ipaddresses", server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)
@@ -447,7 +474,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
         if notes:
             message += " " + "; ".join(notes) + "."
-        return _hx_response(request, message)
+        return _hx_response(request, message, fallback_url=self._fallback_url)
 
 
 class TransferDeviceIPView(_BaseMoveToWinnerView):
@@ -484,6 +511,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
 
         donor = get_object_or_404(Device, pk=pk)
         server_key = _server_key_from_request(request, default_factory=lambda: self.librenms_api.server_key)
+        self._fallback_url = _sync_tab_url(donor.pk, "ipaddresses", server_key)
         winner, marker = _resolve_winner_for_donor(donor, server_key)
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)
@@ -568,4 +596,5 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
         return _hx_response(
             request,
             f"Transferred {human} ({donor_ip}) to {winner.name}.",
+            fallback_url=self._fallback_url,
         )
