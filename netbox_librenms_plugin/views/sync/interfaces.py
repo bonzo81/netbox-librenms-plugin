@@ -811,7 +811,10 @@ class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         raise Http404("LAG membership sync is only supported for device interfaces.")
 
     def post(self, request, object_type, object_id):
-        if error := self.require_all_permissions("POST"):
+        # JSON endpoint (the fetch() caller parses an error JSON body): require_all_permissions
+        # would return the mixin's HTML/redirect on denial, breaking that path. Use the _json
+        # variant like the sibling DeleteNetBoxInterfacesView.
+        if error := self.require_all_permissions_json("POST"):
             return error
 
         obj = self._get_object(object_type, object_id)
@@ -872,7 +875,9 @@ class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         else:
             raise Http404("Invalid object type.")
 
-        if error := self.require_all_permissions("POST"):
+        # JSON endpoint — use the _json permission variant so a denied POST returns a JSON 403
+        # the fetch() caller can parse, not the mixin's HTML/redirect. Mirrors SyncInterfaceLagView.
+        if error := self.require_all_permissions_json("POST"):
             return error
 
         obj = self._get_object(object_type, object_id)

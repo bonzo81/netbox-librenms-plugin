@@ -81,13 +81,14 @@ class TestSyncInterfaceParentViewPermissions:
     POST permission must be scoped to the object type, not hardcoded to Interface."""
 
     def _stop_after_perms(self):
-        """Patch require_all_permissions to short-circuit post() right after the
-        dynamic permission dict is set, returning a sentinel response."""
+        """Patch the JSON permission gate to short-circuit post() right after the dynamic
+        permission dict is set, returning a sentinel response. The view uses the _json variant
+        (it's a fetch() endpoint), so that's the method to intercept."""
         return patch.object(
             __import__(
                 "netbox_librenms_plugin.views.sync.interfaces", fromlist=["SyncInterfaceParentView"]
             ).SyncInterfaceParentView,
-            "require_all_permissions",
+            "require_all_permissions_json",
             return_value=_denied_response(),
         )
 

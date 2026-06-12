@@ -1198,17 +1198,29 @@ function handleInterfaceChange(select, value) {
     // before the response repaints the row would otherwise POST the freshly-selected member's
     // objectId together with the *previous* member's stale relationship metadata (lag/parent
     // port_id + name) carried by the old button markup, syncing the wrong relationship.
-    const relationshipButtons = row
-        ? Array.from(row.querySelectorAll('.lag-sync-btn, .parent-sync-btn')).filter((b) => !b.disabled)
-        : [];
-    relationshipButtons.forEach((b) => {
-        b.disabled = true;
-    });
+    // Tag the buttons *this* flow disables with data-verify-locked so re-enabling can target
+    // exactly them by re-querying the live row, rather than replaying a captured list. Two
+    // reasons: (1) on rapid changes a second handler captures an empty set (the buttons are
+    // already disabled) and the first is aborted without re-enabling — re-querying the marker
+    // lets whichever request settles last restore them; (2) the relationship sync click handler
+    // also disables its own button mid-POST (and keeps it disabled on success), so we must not
+    // re-enable a button it owns — only ones we marked. We only lock currently-enabled buttons,
+    // so a button already disabled by an in-flight sync is left untouched.
+    if (row) {
+        row.querySelectorAll('.lag-sync-btn:not([disabled]), .parent-sync-btn:not([disabled])').forEach((b) => {
+            b.disabled = true;
+            b.dataset.verifyLocked = '1';
+        });
+    }
     const reenableRelationshipButtons = () => {
-        // Buttons whose cell a successful verify repainted are detached and replaced by fresh
-        // enabled markup; only re-enable the ones still connected to the document.
-        relationshipButtons.forEach((b) => {
-            if (b.isConnected) b.disabled = false;
+        if (!row) return;
+        // Re-query so the request that settles last re-enables whatever is still verify-locked,
+        // even buttons a superseded (aborted) request had locked. Buttons whose cell a successful
+        // verify repainted are gone from the row (replaced by fresh enabled markup), so they're
+        // simply not found here.
+        row.querySelectorAll('.lag-sync-btn[data-verify-locked], .parent-sync-btn[data-verify-locked]').forEach((b) => {
+            delete b.dataset.verifyLocked;
+            b.disabled = false;
         });
     };
 

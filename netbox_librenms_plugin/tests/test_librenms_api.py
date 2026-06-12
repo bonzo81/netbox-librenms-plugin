@@ -2154,6 +2154,21 @@ class TestGetPortStack:
         assert success is True
         assert data == []
 
+    def test_error_status_without_mappings_fails_not_empty(self, mock_librenms_api):
+        """An error payload (e.g. {"status": "error"}) omits 'mappings' just like a genuine
+        "no relationships" answer. It must fail — not normalise to (True, []) — so a real API
+        failure isn't masked as "no LAG/parent relationships" and skip valid sync updates."""
+        from unittest.mock import MagicMock, patch
+
+        fake_response = MagicMock()
+        fake_response.json.return_value = {"status": "error", "message": "device polling disabled"}
+        fake_response.raise_for_status = MagicMock()
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+            success, data = mock_librenms_api.get_port_stack(5)
+
+        assert success is False
+        assert data == "device polling disabled"
+
     def test_returns_error_on_invalid_json(self, mock_librenms_api):
         """A non-JSON body (response.json() raises ValueError) must surface as
         (False, error) instead of letting the exception escape."""

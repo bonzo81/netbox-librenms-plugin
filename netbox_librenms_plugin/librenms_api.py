@@ -581,6 +581,16 @@ class LibreNMSAPI:
             # (True, []) there would be indistinguishable from "no relationships" and silently
             # skip valid sync updates, so fail the call instead and let the caller surface it.
             if mappings is None:
+                # An error payload (e.g. {"status": "error", "message": ...}) also omits
+                # mappings. Returning (True, []) there would mask a real API failure as "no
+                # relationships" and skip valid syncs, so honor an explicit error status. A
+                # genuine "no relationships" answer has no status (or "ok"), so it still
+                # falls through to the empty result.
+                status = data.get("status")
+                if isinstance(status, str) and status.lower() != "ok":
+                    message = data.get("message") or "LibreNMS reported an error fetching port stack"
+                    logger.warning("port_stack error status for device %s: %r", device_id, data)
+                    return False, str(message)
                 return True, []
             if not isinstance(mappings, list) or any(not isinstance(item, dict) for item in mappings):
                 logger.warning("Unexpected port_stack response for device %s: %r", device_id, data)
