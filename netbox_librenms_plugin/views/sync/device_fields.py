@@ -820,7 +820,15 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return error
 
         model, obj = self._get_model_and_object(object_type, pk)
-        server_key = self.librenms_api.server_key
+        # Rebind the API client to the POST-scoped server before any lookup/migration so the
+        # legacy-ID conversion is verified (get_device_info), conflict-checked
+        # (find_by_librenms_id) and written (migrate_legacy_librenms_id) under the same server
+        # namespace the user is acting on — otherwise a multi-server page could check server A
+        # while redirecting back to server B and write the mapping under the wrong key.
+        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return self._sync_url(object_type, pk)
 
         # Verify the device actually has a legacy bare-int librenms_id
         cf_value = obj.custom_field_data.get("librenms_id")

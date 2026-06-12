@@ -18,10 +18,11 @@
 {% else %}
 <form method="post"
     action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
-{% endif %}
-    {% endwith %}
+    {# Form-only inputs live inside the form branch so migrated (donor) mode, which renders a plain <div> wrapper, never emits hidden fields outside any <form>. #}
     {% csrf_token %}
     {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
+{% endif %}
+    {% endwith %}
     {% block table_actions %}
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>

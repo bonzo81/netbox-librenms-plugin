@@ -1271,6 +1271,118 @@ class TestDeviceImportTableRenderActions:
         assert "btn-outline-warning" in result
         assert "Details" in result
 
+    def test_existing_oob_candidate_shows_add_as_oob_button(self):
+        """serial_action == 'oob_candidate' renders the purple "Add as OOB controller" button."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "serial",
+                "serial_action": "oob_candidate",
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-purple" in result
+        assert "mdi-chip" in result
+        assert "Add as OOB controller" in result
+
+    def test_existing_oob_linked_shows_linked_oob_button_with_paired_host(self):
+        """existing_match_type == 'librenms_oob' renders the info "Linked as OOB controller"
+        button and surfaces the paired host id in the title."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_oob",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"host_id": 42},
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-info" in result
+        assert "mdi-chip" in result
+        assert "Linked as OOB controller (paired host: LibreNMS #42)" in result
+
+    def test_existing_paired_host_shows_host_button(self):
+        """A librenms_id match whose link carries an oob_id distinct from the host id renders
+        the info "Host" button (the host half of a host/OOB pair), escaping the oob type."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"host_id": 42, "oob_id": 99, "oob_type": "idrac"},
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-info" in result
+        assert "mdi-server-network" in result
+        assert "Linked as host (paired OOB: LibreNMS #99, idrac)" in result
+
 
 # ===========================================================================
 # DeviceImportTable._build_validation_details_url tests

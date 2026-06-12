@@ -1299,10 +1299,12 @@ class TestBulkImportDevicesViewErrorPaths:
                 with patch(
                     "netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock()
                 ) as mock_redirect:
-                    view.post(request)
+                    result = view.post(request)
 
         mock_messages.error.assert_called_once()
         mock_redirect.assert_called_once_with("plugins:netbox_librenms_plugin:librenms_import")
+        # Assert the redirect response is actually returned, not just that redirect() ran.
+        assert result is mock_redirect.return_value
 
     def test_post_invalid_device_id_htmx_returns_400(self):
         """A non-int device_id on the HTMX path returns a raw 400."""
@@ -4376,12 +4378,14 @@ class TestBulkImportEdgePaths:
                                 # Patch ImportDevicesJob at the point it's imported inside post()
                                 with patch("netbox_librenms_plugin.jobs.ImportDevicesJob") as MockJob:
                                     MockJob.enqueue.return_value = mock_job
-                                    view.post(request)
+                                    result = view.post(request)
 
         # Pin the regression this test is named for: the background path must actually
         # enqueue the job, not merely take some redirecting branch.
         MockJob.enqueue.assert_called_once()
         mock_redirect.assert_called()
+        # The redirect response must actually be returned, not just produced.
+        assert result is mock_redirect.return_value
 
         # ...and the enqueued job must carry the request's inputs forward, not be enqueued
         # empty: the selected device id (parsed to int), the active server namespace, and

@@ -640,6 +640,17 @@ class SingleCableVerifyView(BaseCableTableView):
                     }
                     link_data = {k: v for k, v in link_data.items() if k in _raw_keys}
 
+                    # The verify response returns formatted_row HTML directly (it does not pass
+                    # through LibreNMSCableTable.render_local_port), so re-apply the OOB badge
+                    # here to match the initial render — otherwise a verified OOB cable row loses
+                    # the badge and looks like a plain host-port row. Markup mirrors
+                    # tables/cables.py render_local_port.
+                    oob_badge = (
+                        ' <span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
+                        if link_data.get("_source") == "oob"
+                        else ""
+                    )
+
                     # Re-enrich remote side from current NetBox state
                     remote_hostname = link_data.get("remote_device", "")
                     if remote_hostname:
@@ -682,7 +693,7 @@ class SingleCableVerifyView(BaseCableTableView):
 
                         formatted_row["cable_status"] = safe_cable_status
                         formatted_row["local_port"] = (
-                            f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{safe_local_port}</a>'
+                            f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{safe_local_port}</a>{oob_badge}'
                         )
                         formatted_row["remote_port"] = (
                             f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
@@ -715,7 +726,7 @@ class SingleCableVerifyView(BaseCableTableView):
                                 </form>
                             """
                     else:
-                        formatted_row["local_port"] = escape(local_port)
+                        formatted_row["local_port"] = f"{escape(local_port)}{oob_badge}"
                         # Keep remote port name visible, add URL if available
                         remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
                         safe_remote_port = escape(remote_port_name)

@@ -121,6 +121,56 @@ def _hx_response(request, message, level=messages.SUCCESS, *, status=200):
     return redirect(_safe_referer(request))
 
 
+def _reconcile_donor_device_ip_fks(donor, winner):
+    """Keep the donor valid after a move re-homes an interface/IP onto the winner.
+
+    NetBox requires ``Device.primary_ip4``/``primary_ip6``/``oob_ip`` to reference an address
+    assigned to one of that device's *own* interfaces. Moving an interface (with its addresses)
+    or an IP to the winner can leave one of those donor FKs pointing at an address now living on
+    a winner-owned interface — an invalid state that surfaces the next time the donor is
+    full_clean()'d. For each such dangling FK, transfer the designation to the winner when its
+    slot is free, otherwise clear it on the donor. Only the touched FK column is saved
+    (``update_fields``) so we don't trip ``full_clean()`` on pre-existing unrelated
+    inconsistencies, mirroring :class:`TransferDeviceIPView`.
+
+    Must run inside the caller's ``transaction.atomic()`` with both devices already locked.
+    Returns human-readable notes describing what was reconciled (for the response message).
+    """
+    notes = []
+    for field, human in (
+        ("primary_ip4", "primary IPv4"),
+        ("primary_ip6", "primary IPv6"),
+        ("oob_ip", "OOB IP"),
+    ):
+        donor_ip_id = getattr(donor, f"{field}_id", None)
+        # Real FK columns are plain ints; the isinstance guard also makes this a clean no-op
+        # against the mock-based unit tests (a MagicMock id is not an int).
+        if not isinstance(donor_ip_id, int) or isinstance(donor_ip_id, bool):
+            continue
+        # Lock the address row before reading its assignment so a concurrent reassignment can't
+        # change assigned_object between this check and the FK save.
+        ip = IPAddress.objects.select_for_update().filter(pk=donor_ip_id).first()
+        if ip is None:
+            continue
+        assigned = ip.assigned_object
+        # Only reconcile when the address now sits on a winner-owned interface (the move just
+        # detached it from the donor). A non-Interface assignment (e.g. a VMInterface) has no
+        # device_id and is left untouched.
+        if getattr(assigned, "device_id", None) != winner.pk:
+            continue
+        if getattr(winner, f"{field}_id", None) is None:
+            setattr(winner, field, ip)
+            setattr(donor, field, None)
+            winner.save(update_fields=[field])
+            donor.save(update_fields=[field])
+            notes.append(f"transferred donor {human} to {winner.name}")
+        else:
+            setattr(donor, field, None)
+            donor.save(update_fields=[field])
+            notes.append(f"cleared donor {human} (winner already had a {human})")
+    return notes
+
+
 class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Shared plumbing for the per-resource move endpoints."""
 
@@ -284,10 +334,15 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                     status=409,
                 )
 
-        return _hx_response(
-            request,
-            f"Moved interface '{interface.name}' to {winner.name}.",
-        )
+            # The moved interface may carry an address the donor still points at via
+            # primary_ip4/primary_ip6/oob_ip; reconcile those device FKs so the donor isn't
+            # left referencing an address now on a winner-owned interface.
+            notes = _reconcile_donor_device_ip_fks(donor, winner)
+
+        message = f"Moved interface '{interface.name}' to {winner.name}."
+        if notes:
+            message += " " + "; ".join(notes) + "."
+        return _hx_response(request, message)
 
 
 class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
@@ -376,10 +431,15 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             ip.assigned_object = winner_iface
             ip.save(update_fields=["assigned_object_type", "assigned_object_id"])
 
-        return _hx_response(
-            request,
-            f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'.",
-        )
+            # The moved address may itself be the donor's primary_ip4/primary_ip6/oob_ip;
+            # reconcile those device FKs so the donor isn't left referencing an address now on a
+            # winner-owned interface.
+            notes = _reconcile_donor_device_ip_fks(donor, winner)
+
+        message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
+        if notes:
+            message += " " + "; ".join(notes) + "."
+        return _hx_response(request, message)
 
 
 class TransferDeviceIPView(_BaseMoveToWinnerView):

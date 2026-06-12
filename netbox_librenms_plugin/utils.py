@@ -1597,9 +1597,18 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
     if winner_id is None and donor_id is not None:
         winner_entry["id"] = donor_id
         summary["host_id_from_donor"] = donor_id
-    elif winner_id is not None and donor_id is not None and winner_oob is None and not donor_oob:
+    elif (
+        winner_id is not None
+        and donor_id is not None
+        and donor_id != winner_id
+        and winner_oob is None
+        and not donor_oob
+    ):
         # Demote donor's host id into winner's oob slot — but ONLY when the donor has no real
-        # OOB of its own. If the donor is shaped like {"id": ..., "oob": {...}}, its actual OOB
+        # OOB and the donor host id actually differs from the winner's. Equal ids are the same
+        # host linkage (a duplicate mapping), not an OOB controller, so demoting them would
+        # fabricate a fake OOB link on the merged device.
+        # If the donor is shaped like {"id": ..., "oob": {...}}, its actual OOB
         # controller (inherited by the donor_oob path below) takes precedence over demoting the
         # donor's host id, otherwise the real OOB link would be lost. Infer type from donor name.
         match = OOB_TYPE_PATTERN.search(donor.name or "")

@@ -1,7 +1,7 @@
 import logging
 from urllib.parse import quote_plus
 
-from dcim.models import Device
+from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
@@ -144,22 +144,37 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Used to re-resolve the target interface at sync time instead of trusting
         the cached ``interface_url`` (see ``_match_interface``).
+
+        For a Device in a Virtual Chassis, all member interfaces are indexed (not just the
+        viewed member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``:
+        LibreNMS treats a VC as one logical device, so a VC member IP can legitimately resolve to
+        an interface on another member. Duplicate names are marked ambiguous (None) the same way
+        duplicate port ids are, so a same-named interface on another member can't silently rebind
+        the address to the wrong interface.
         """
-        interfaces = list(obj.interfaces.all())
+        if isinstance(obj, Device) and getattr(obj, "virtual_chassis", None):
+            member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
+            interfaces = list(Interface.objects.filter(device__in=member_ids))
+        else:
+            interfaces = list(obj.interfaces.all())
         by_librenms_id = {}
+        by_name = {}
         for iface in interfaces:
             lib_id = get_librenms_device_id(iface, server_key, auto_save=False)
-            if lib_id is None:
-                continue
-            key = str(lib_id)
-            if key in by_librenms_id:
-                # Two current interfaces carry the same stored port id — we can't tell which
-                # one the IP belongs to. Mark the id ambiguous (None) so _match_interface fails
-                # the row safe instead of binding the address to an arbitrary interface.
-                by_librenms_id[key] = None
+            if lib_id is not None:
+                key = str(lib_id)
+                if key in by_librenms_id:
+                    # Two current interfaces carry the same stored port id — we can't tell which
+                    # one the IP belongs to. Mark the id ambiguous (None) so _match_interface fails
+                    # the row safe instead of binding the address to an arbitrary interface.
+                    by_librenms_id[key] = None
+                else:
+                    by_librenms_id[key] = iface
+            if iface.name in by_name:
+                # Same fail-safe for duplicate names (common across VC members): ambiguous → None.
+                by_name[iface.name] = None
             else:
-                by_librenms_id[key] = iface
-        by_name = {iface.name: iface for iface in interfaces}
+                by_name[iface.name] = iface
         return by_librenms_id, by_name
 
     @staticmethod
