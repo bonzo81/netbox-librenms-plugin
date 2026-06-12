@@ -267,6 +267,26 @@ def _adopt_existing_template_interfaces(device, module):
     }
 
 
+def _module_interface_update_message(bind_result, location):
+    """Compose the success message for a bound module-interface update.
+
+    A single ``post`` can both bind the primary LibreNMS-identified interface
+    (``interface``/``port_id`` present) and adopt standalone template interfaces
+    (``adopted_count``). When both happen, report both so the primary bind isn't
+    silently hidden behind the adoption tally.
+    """
+    interface_name = bind_result.get("interface")
+    adopted_count = bind_result.get("adopted_count") or 0
+    if interface_name and adopted_count:
+        return (
+            f"Updated interface {interface_name} for {location} and "
+            f"adopted {adopted_count} existing standalone interface(s)."
+        )
+    if adopted_count:
+        return f"Updated interfaces for {location}: adopted {adopted_count} existing standalone interface(s)."
+    return f"Updated interface {interface_name} for {location}."
+
+
 def _get_vc_member_positions(device):
     """Compatibility wrapper for VC member position lookups."""
     return get_vc_member_positions(device)
@@ -1321,6 +1341,10 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
                     bind_result = {
                         "status": "bound",
                         "interface": bind_result.get("interface"),
+                        # Keep the primary bind's port_id so the merged result still
+                        # carries the bound interface's LibreNMS identity, not just the
+                        # adoption tally.
+                        "port_id": bind_result.get("port_id"),
                         "adopted_count": (bind_result.get("adopted_count") or 0)
                         + (adopt_result.get("adopted_count") or 0),
                     }
@@ -1333,18 +1357,8 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         if bind_result is None:
             messages.error(request, "No LibreNMS interface identity is available for this row.")
         elif bind_result.get("status") == "bound":
-            adopted_count = bind_result.get("adopted_count")
-            if adopted_count:
-                messages.success(
-                    request,
-                    f"Updated interfaces for {module.module_type.model} in {module.module_bay.name}: "
-                    f"adopted {adopted_count} existing standalone interface(s).",
-                )
-            else:
-                messages.success(
-                    request,
-                    f"Updated interface {bind_result['interface']} for {module.module_type.model} in {module.module_bay.name}.",
-                )
+            location = f"{module.module_type.model} in {module.module_bay.name}"
+            messages.success(request, _module_interface_update_message(bind_result, location))
         else:
             messages.warning(
                 request,

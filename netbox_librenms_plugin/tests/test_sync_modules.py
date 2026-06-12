@@ -5419,3 +5419,32 @@ class TestPredictModuleInterfaceNamesSignal:
             assert get_module_template_interface_names(device, module) == ["Gi1/0/1"]
         finally:
             predict_module_interface_names.disconnect(boom)
+
+
+class TestModuleInterfaceUpdateMessage:
+    """_module_interface_update_message reports bind and adoption distinctly."""
+
+    @staticmethod
+    def _msg(bind_result):
+        from netbox_librenms_plugin.views.sync.modules import _module_interface_update_message
+
+        return _module_interface_update_message(bind_result, "QSFP-100G in Bay 1")
+
+    def test_bind_only_names_the_interface(self):
+        msg = self._msg({"status": "bound", "interface": "Et1/1", "port_id": 42})
+        assert msg == "Updated interface Et1/1 for QSFP-100G in Bay 1."
+
+    def test_adopt_only_reports_count(self):
+        msg = self._msg({"status": "bound", "adopted_count": 3})
+        assert msg == ("Updated interfaces for QSFP-100G in Bay 1: adopted 3 existing standalone interface(s).")
+
+    def test_bind_and_adopt_reports_both(self):
+        # The merged result keeps the interface name (not port_id) in the message;
+        # both the bind and the adoption must remain visible to the user.
+        msg = self._msg({"status": "bound", "interface": "Et1/1", "port_id": 42, "adopted_count": 2})
+        assert "Updated interface Et1/1 for QSFP-100G in Bay 1" in msg
+        assert "adopted 2 existing standalone interface(s)" in msg
+
+    def test_zero_adopted_count_treated_as_bind_only(self):
+        msg = self._msg({"status": "bound", "interface": "Et1/1", "adopted_count": 0})
+        assert msg == "Updated interface Et1/1 for QSFP-100G in Bay 1."
