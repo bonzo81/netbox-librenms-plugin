@@ -234,7 +234,11 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
     on the winner first.
     """
 
-    required_object_permissions = {"POST": [("change", Interface)]}
+    # Requires change Device too: on success the move calls
+    # _reconcile_donor_device_ip_fks(), which writes device-level FKs
+    # (winner/donor primary_ip4/primary_ip6/oob_ip). NetBoxObjectPermissionMixin is
+    # model-level only, so Device must be in the declared boundary.
+    required_object_permissions = {"POST": [("change", Interface), ("change", Device)]}
 
     def post(self, request, pk):
         gate = self._gate(request)
@@ -360,7 +364,11 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
       relationship to migrate).
     """
 
-    required_object_permissions = {"POST": [("change", IPAddress)]}
+    # Requires change Device too: on success the move calls
+    # _reconcile_donor_device_ip_fks(), which writes device-level FKs
+    # (winner/donor primary_ip4/primary_ip6/oob_ip). NetBoxObjectPermissionMixin is
+    # model-level only, so Device must be in the declared boundary.
+    required_object_permissions = {"POST": [("change", IPAddress), ("change", Device)]}
 
     def post(self, request, pk):
         gate = self._gate(request)
