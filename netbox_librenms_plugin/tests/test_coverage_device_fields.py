@@ -819,7 +819,8 @@ class TestCreateAndAssignPlatformView:
 
         mock_device_cls = MagicMock()
         mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = MagicMock()
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         # Existing mapping for "ios" points at a different platform (id 999, not 5).
         other_mapping = MagicMock(netbox_platform_id=999)
@@ -841,6 +842,10 @@ class TestCreateAndAssignPlatformView:
         # the platform-mismatch is surfaced as a warning rather than a silent "already exists".
         mock_mapping_cls.assert_not_called()
         assert any("pointing to" in str(c.args) for c in mock_msg.warning.call_args_list)
+        # The mapping conflict is non-fatal: the primary action (assign the found platform to
+        # the locked device and persist it) must still happen, not warn-and-return.
+        assert mock_locked.platform is found_platform
+        mock_locked.save.assert_called_once()
 
     def test_manufacturer_not_found(self):
         """manufacturer_id provided but Manufacturer.DoesNotExist: manufacturer stays None."""

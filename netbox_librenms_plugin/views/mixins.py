@@ -305,10 +305,23 @@ class LibreNMSAPIMixin:
         is unknown/misconfigured (a stale page or tampered request) — the caller
         surfaces a user-facing fragment error instead of an unhandled 500.
         """
+        from netbox_librenms_plugin.librenms_api import build_librenms_api
+
         server_key = (server_key or "").strip()
         if not server_key:
-            return self.librenms_api.server_key
-        from netbox_librenms_plugin.librenms_api import build_librenms_api
+            # No posted key: fall back to the session/default server. Reuse an already-built
+            # client if present; otherwise build the default via build_librenms_api(None),
+            # which returns None on a misconfigured/missing default rather than raising. Going
+            # through self.librenms_api here would construct LibreNMSAPI() directly and could
+            # raise KeyError/ValueError, defeating this helper's fail-closed None contract.
+            cached_api = getattr(self, "_librenms_api", None)
+            if cached_api is not None:
+                return cached_api.server_key
+            api = build_librenms_api(None)
+            if api is None:
+                return None
+            self._librenms_api = api
+            return api.server_key
 
         api = build_librenms_api(server_key)
         if api is None:

@@ -65,6 +65,30 @@ class TestLibreNMSAPIMixinRebindApiForServer:
             assert m.rebind_api_for_server("ghost") is None
         assert m._librenms_api is original
 
+    def test_empty_key_no_cached_api_builds_default(self):
+        """No POSTed key and no cached client → build the default via build_librenms_api(None),
+        cache it, and return its key — never touching the LibreNMSAPI() property directly."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m._librenms_api = None
+        default_api = MagicMock(server_key="default")
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=default_api) as mock_build:
+            assert m.rebind_api_for_server("") == "default"
+        mock_build.assert_called_once_with(None)
+        assert m._librenms_api is default_api  # cached for reuse
+
+    def test_empty_key_misconfigured_default_returns_none(self):
+        """No POSTed key, no cached client, and the default server is misconfigured
+        (build_librenms_api returns None) → fail closed with None instead of raising."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m._librenms_api = None
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            assert m.rebind_api_for_server("") is None
+        assert m._librenms_api is None
+
 
 class TestLibreNMSAPIMixinGetContextData:
     """Tests for LibreNMSAPIMixin.get_context_data (lines 275-282)."""

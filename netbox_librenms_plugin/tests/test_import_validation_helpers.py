@@ -557,18 +557,20 @@ class TestApplyMergeCandidates:
         )
         assert result["can_import"] is False
 
-    def test_appends_warning(self):
+    def test_resets_stale_warnings_to_merge_warning(self):
         from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
 
+        # Stale serial/hostname-detection warnings present from earlier in the pass are
+        # dropped: merge mode supersedes them, leaving only the merge warning.
         result = self._base_result()
-        result["warnings"] = ["existing"]
+        result["warnings"] = ["hostname differs", "already has an OOB controller linked"]
         apply_merge_candidates(
             result,
             host_named={"pk": 1, "name": "h", "librenms_link": None},
             oob_named={"pk": 2, "name": "o", "librenms_link": None},
             warning="merge warning",
         )
-        assert result["warnings"] == ["existing", "merge warning"]
+        assert result["warnings"] == ["merge warning"]
 
     def test_clears_oob_candidate(self):
         from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates

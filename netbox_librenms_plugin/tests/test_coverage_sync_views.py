@@ -1878,6 +1878,50 @@ class TestSyncIPAddressesViewProcessIpSync:
                         view.process_ip_sync(view.request, selected, cached, obj, "virtualmachine")
         assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_vmiface
 
+    def test_ambiguous_port_id_skips_without_binding(self):
+        """Two current interfaces carry the same stored LibreNMS port id → the row must skip
+        (fail-safe) rather than bind the IP to an arbitrary interface."""
+        view = self._setup_view()
+        selected = ["10.0.0.1"]
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}]
+        iface_a = MagicMock()
+        iface_a.name = "eth0"
+        iface_b = MagicMock()
+        iface_b.name = "eth1"
+        obj = MagicMock()
+        obj.interfaces.all.return_value = [iface_a, iface_b]
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
+            with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
+                mock_ip_cls.objects.filter.return_value.first.return_value = None
+                # Both interfaces resolve to the SAME stored port id 5 → ambiguous (None).
+                with patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5):
+                    with patch.object(view, "get_vrf_selection", return_value=None):
+                        results = view.process_ip_sync(view.request, selected, cached, obj, "device")
+        assert "10.0.0.1" in results["skipped_no_interface"]
+        mock_ip_cls.objects.create.assert_not_called()
+
+    def test_ambiguous_interface_name_skips_without_binding(self):
+        """Two current interfaces share the same name and carry no stored port id → the name
+        match is ambiguous (None) → skip instead of binding to the wrong interface."""
+        view = self._setup_view()
+        selected = ["10.0.0.1"]
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_name": "eth0"}]
+        iface_a = MagicMock()
+        iface_a.name = "eth0"
+        iface_b = MagicMock()
+        iface_b.name = "eth0"
+        obj = MagicMock()
+        obj.interfaces.all.return_value = [iface_a, iface_b]
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
+            with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
+                mock_ip_cls.objects.filter.return_value.first.return_value = None
+                # No stored port id on either interface → name fallback, which is ambiguous.
+                with patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=None):
+                    with patch.object(view, "get_vrf_selection", return_value=None):
+                        results = view.process_ip_sync(view.request, selected, cached, obj, "device")
+        assert "10.0.0.1" in results["skipped_no_interface"]
+        mock_ip_cls.objects.create.assert_not_called()
+
 
 class TestSyncIPAddressesViewDisplaySyncResults:
     def test_created_calls_success(self):

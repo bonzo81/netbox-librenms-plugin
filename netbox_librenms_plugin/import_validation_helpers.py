@@ -221,8 +221,12 @@ def apply_merge_candidates(
     # "absent otherwise" contract — the merge path has no promotion target.
     result.pop("promote_to_host", None)
     result["serial_role_choice_available"] = False
-    result.setdefault("warnings", [])
-    result["warnings"].append(warning)
+    # Merge supersedes the serial/hostname-detection signals that ran earlier in this
+    # validation pass, so their warnings (e.g. "hostname differs", "already has an OOB
+    # controller linked", "serial conflict") would now contradict the merge guidance.
+    # Reset to just the merge warning; later validation stages (role/platform/cluster)
+    # append their own warnings after this point, so nothing actionable is lost.
+    result["warnings"] = [warning]
 
 
 def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None:

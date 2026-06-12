@@ -358,7 +358,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         if not platform_name:
             messages.error(request, "Platform name is required")
-            return self._sync_redirect(request, pk, self.librenms_api.server_key)
+            return self._sync_redirect(request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None))
 
         manufacturer = None
         if manufacturer_id:
@@ -396,7 +396,9 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         request,
                         f"Platform '{platform_name}' could not be created: {error_msg}",
                     )
-                    return self._sync_redirect(request, pk, self.librenms_api.server_key)
+                    return self._sync_redirect(
+                        request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
+                    )
                 except IntegrityError as e:
                     # A concurrent request created this platform between our existence
                     # check and our save. Reuse the winner (the goal is reuse-or-create)
@@ -414,7 +416,9 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                             request,
                             f"Platform '{platform_name}' could not be created: {e}",
                         )
-                        return self._sync_redirect(request, pk, self.librenms_api.server_key)
+                        return self._sync_redirect(
+                            request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
+                        )
             else:
                 # Reuse the existing platform unchanged — do not touch its
                 # manufacturer/vendor scoping; we only assign it and add the mapping.
@@ -425,7 +429,9 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             except Device.DoesNotExist:
                 transaction.set_rollback(True)
                 messages.error(request, "Device no longer exists.")
-                return self._sync_redirect(request, pk, self.librenms_api.server_key)
+                return self._sync_redirect(
+                    request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
+                )
 
             device.platform = platform
             try:
@@ -442,7 +448,9 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     request,
                     f"Device (pk={pk}) validation failed: {error_msg}",
                 )
-                return self._sync_redirect(request, pk, self.librenms_api.server_key)
+                return self._sync_redirect(
+                    request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
+                )
             try:
                 device.save()
             except IntegrityError as e:
@@ -452,7 +460,9 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     request,
                     f"Error saving device (pk={pk}): {e}",
                 )
-                return self._sync_redirect(request, pk, self.librenms_api.server_key)
+                return self._sync_redirect(
+                    request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
+                )
 
             mapping_created = False
             mapping_error = None
@@ -543,7 +553,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 f"Platform mapping for '{librenms_os}' was not created — you lack permission to add mappings.",
             )
 
-        return self._sync_redirect(request, pk, self.librenms_api.server_key)
+        return self._sync_redirect(request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None))
 
     @staticmethod
     def _sync_redirect(request, pk, fallback_server_key=None):
