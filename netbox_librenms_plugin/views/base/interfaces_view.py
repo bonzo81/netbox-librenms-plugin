@@ -539,10 +539,18 @@ class BaseInterfaceTableView(
                 ports_data = []
             matched_interface_ids = set()
 
-            # Build port_stack relationship maps from cached data
+            # Build port_stack relationship maps from cached data. Normalize the keys once
+            # here rather than per-port inside _enrich_port_with_lag_parent (called once per
+            # non-OOB port): a JSON cache round-trip stringifies dict keys while the port_id
+            # values on the port dicts stay int, so without normalizing the .get() lookups
+            # silently miss and valid LAG/parent relationships vanish from the table.
             port_stack_relationships = cached_data.get("port_stack_relationships", {})
-            lag_members = port_stack_relationships.get("lag_members", {})
-            sub_interfaces = port_stack_relationships.get("sub_interfaces", {})
+            lag_members = {
+                normalize_librenms_port_id(k): v for k, v in port_stack_relationships.get("lag_members", {}).items()
+            }
+            sub_interfaces = {
+                normalize_librenms_port_id(k): v for k, v in port_stack_relationships.get("sub_interfaces", {}).items()
+            }
             # Scope to host rows: ports_data is merged host + OOB, and an OOB controller
             # can reuse a host port_id. Letting an OOB row win here would attach the wrong
             # aggregate/parent to the host interface during lag/parent enrichment.
@@ -861,13 +869,9 @@ class BaseInterfaceTableView(
           2. NetBox interface name matches the LibreNMS ifName field
           3. NetBox interface name matches the LibreNMS ifDescr field
         """
-        # Normalize every port_id to int. The relationship maps can come back from the
-        # cache with string keys (a JSON round-trip stringifies dict keys) while the
-        # port_id values on the port dicts stay int — without normalizing, the .get()
-        # lookups silently miss and valid LAG/parent relationships vanish from the table.
+        # port_id_to_lag / port_id_to_parent arrive already key-normalized from the caller
+        # (see the cached-data branch in get/post), so they're used directly here.
         port_id = normalize_librenms_port_id(port.get("port_id"))
-        port_id_to_lag = {normalize_librenms_port_id(k): v for k, v in port_id_to_lag.items()}
-        port_id_to_parent = {normalize_librenms_port_id(k): v for k, v in port_id_to_parent.items()}
         nb_iface = port.get("netbox_interface")
 
         def _related_iface_matches(nb_rel_iface, lnms_port_dict) -> bool:
