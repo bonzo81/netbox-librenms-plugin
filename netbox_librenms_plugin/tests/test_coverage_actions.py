@@ -5554,3 +5554,84 @@ class TestCreatePlatformFromImportManufacturer:
         # Neither the constructor nor the manager create() path persisted a Platform.
         mock_platform.assert_not_called()
         mock_platform.objects.create.assert_not_called()
+
+
+class TestOOBInterfaceSelectTemplate:
+    """The OOB interface picker toggles the "new name" input via a script block
+    (extracted from an inline onchange) so it works under CSP and is maintainable."""
+
+    def _render(self):
+        from django.template.loader import render_to_string
+
+        return render_to_string(
+            "netbox_librenms_plugin/htmx/_oob_interface_select.html",
+            {
+                "libre_device": {"device_id": 7},
+                "oob_interfaces": [],
+                "oob_suggested_interface_id": None,
+                "oob_default_new_name": "",
+                "validation": {},
+            },
+        )
+
+    def test_no_inline_onchange_handler(self):
+        assert "onchange=" not in self._render()
+
+    def test_wires_change_handler_via_script_block(self):
+        html = self._render()
+        assert 'addEventListener("change"' in html
+        # Targets this device's own select id (namespaced by device_id).
+        assert 'getElementById("oob-iface-7")' in html
+
+
+class TestMergeNetBoxDevicesViewDonorDerivation:
+    """The merge view derives the donor from winner_pk + merge_candidates and
+    ignores the client-posted donor_pk, which a stale/failed inline sync script
+    could otherwise leave equal to winner_pk (a self-merge of moving data)."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def test_ignores_posted_donor_pk_equal_to_winner(self):
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        # Bogus client state: donor_pk == winner_pk (inline sync script never ran).
+        request = _make_request(post={"winner_pk": "20", "donor_pk": "20"})
+
+        winner = MagicMock(pk=20, custom_field_data={"librenms_id": {"default": {"id": 20}}})
+        donor = MagicMock(pk=10, custom_field_data={"librenms_id": {"default": {"id": 10}}})
+        locked_winner = MagicMock(pk=20, name="w", oob_ip_id=None, oob_ip=None)
+        locked_donor = MagicMock(pk=10, name="d", oob_ip_id=None, oob_ip=None)
+
+        validation = {"merge_candidates": {"host_named": {"pk": 20}, "oob_named": {"pk": 10}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        with (
+            patch("dcim.models.Device") as mock_device,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
+            patch("netbox_librenms_plugin.views.imports.actions.cache"),
+            patch("netbox_librenms_plugin.utils.merge_librenms_links", return_value={}) as mock_merge,
+            patch("netbox_librenms_plugin.utils.mark_librenms_migrated"),
+        ):
+            mock_device.DoesNotExist = Exception
+            mock_device.objects.get.side_effect = lambda pk: {20: winner, 10: donor}[pk]
+            mock_device.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
+                locked_winner,
+                locked_donor,
+            ]
+            resp = view.post(request, device_id=99)
+
+        assert resp.status_code == 200
+        # Donor is the *other* merge candidate (pk=10), never the posted self-pk=20.
+        mock_merge.assert_called_once()
+        called_winner, called_donor = mock_merge.call_args[0][:2]
+        assert called_winner is locked_winner
+        assert called_donor is locked_donor

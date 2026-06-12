@@ -11,8 +11,7 @@ oob_default_new_name.
 {% endcomment %}
 <div class="mb-2 text-start">
   <label class="form-label small mb-1" for="oob-iface-{{ libre_device.device_id }}">OOB IP interface</label>
-  <select name="oob_interface_id" id="oob-iface-{{ libre_device.device_id }}" class="form-select form-select-sm"
-          onchange="var creating = this.value === '__new__'; document.getElementById('oob-new-iface-{{ libre_device.device_id }}').style.display = creating ? 'block' : 'none'; var nameInput = document.getElementById('oob-new-iface-name-{{ libre_device.device_id }}'); nameInput.disabled = !creating; nameInput.required = creating;">
+  <select name="oob_interface_id" id="oob-iface-{{ libre_device.device_id }}" class="form-select form-select-sm">
     {% for iface in oob_interfaces %}
       <option value="{{ iface.pk }}" {% if iface.pk == oob_suggested_interface_id %}selected{% endif %}>{{ iface.name }}</option>
     {% endfor %}
@@ -20,7 +19,7 @@ oob_default_new_name.
   </select>
   <div id="oob-new-iface-{{ libre_device.device_id }}" class="mt-1"{% if oob_suggested_interface_id %} style="display:none"{% endif %}>
     <label for="oob-new-iface-name-{{ libre_device.device_id }}" class="visually-hidden">New interface name</label>
-    {# Disabled (not submitted) when an existing interface is selected; enabled + required when creating. onchange keeps it in sync. #}
+    {# Disabled (not submitted) when an existing interface is selected; enabled + required when creating. The select's change handler keeps it in sync. #}
     <input type="text" name="oob_new_interface_name" id="oob-new-iface-name-{{ libre_device.device_id }}"
            class="form-control form-control-sm"
            value="{{ oob_default_new_name }}" placeholder="New interface name"
@@ -30,3 +29,22 @@ oob_default_new_name.
   <small class="text-muted d-block mt-1">On save, OOB IP {{ validation.oob_candidate.ip }} will be set as the device's OOB IP on the interface selected above.</small>
   {% endif %}
 </div>
+{% comment %}
+Toggle the "new interface name" input when "+ Create new interface" is (de)selected.
+Extracted from an inline onchange; this fragment is HTMX-swapped and sibling script
+blocks in device_validation_details.html run the same way.
+{% endcomment %}
+<script>
+  (function() {
+    var select = document.getElementById("oob-iface-{{ libre_device.device_id }}");
+    if (!select) return;
+    var container = document.getElementById("oob-new-iface-{{ libre_device.device_id }}");
+    var nameInput = document.getElementById("oob-new-iface-name-{{ libre_device.device_id }}");
+    select.addEventListener("change", function() {
+      var creating = this.value === "__new__";
+      container.style.display = creating ? "block" : "none";
+      nameInput.disabled = !creating;
+      nameInput.required = creating;
+    });
+  })();
+</script>
