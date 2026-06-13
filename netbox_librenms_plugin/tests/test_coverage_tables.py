@@ -1902,6 +1902,42 @@ class TestRelationshipSyncObjectType:
         assert 'data-object-type="virtualmachine"' in html
 
 
+class TestMigratedModeSuppressesRelationshipButton:
+    """On a migrated donor page the per-row LAG/parent sync button must be suppressed: it
+    POSTs directly via librenms_sync.js, so a live button would let a migrated donor mutate
+    relationship state even though the bulk sync form is hidden. Only the badge should show."""
+
+    def _render(self, migrated):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(
+                data=[], device=MagicMock(pk=3, virtual_chassis=None), interface_name_field="ifName"
+            )
+        table.migrated_to_marker = migrated
+        record = {"port_id": 5, "ifName": "eth0", "netbox_interface": None}
+        return str(
+            table._render_relationship_column(
+                lnms_name="eth0",
+                lnms_port_id=10,
+                sync_status="missing_nb",
+                record=record,
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
+            )
+        )
+
+    def test_button_present_in_normal_mode(self):
+        html = self._render(migrated=False)
+        assert "parent-sync-btn" in html
+
+    def test_button_suppressed_in_migrated_mode(self):
+        html = self._render(migrated=True)
+        assert "parent-sync-btn" not in html
+        # The status badge must still render so the relationship state stays visible.
+        assert "Not in NetBox" in html
+
+
 # ===========================================================================
 # LibreNMSInterfaceTable._parse_group_id tests
 # ===========================================================================
@@ -2994,6 +3030,14 @@ class TestLibreNMSVMInterfaceTable:
             table = LibreNMSVMInterfaceTable(data=[], device=mock_device)
 
         assert table.tab == "interfaces"
+
+    def test_parent_column_is_in_sequence(self):
+        """The Parent/LAG column must be exposed on VM pages — VMInterface supports
+        sub-interface parents and the relationship sync path resolves VMInterface targets,
+        so omitting it from the sequence would make the feature unreachable for VMs."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
+
+        assert "parent" in LibreNMSVMInterfaceTable.Meta.sequence
 
 
 # ===========================================================================

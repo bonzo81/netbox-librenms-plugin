@@ -816,8 +816,10 @@ def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint:
             else:
                 iface = VMInterface.objects.get(virtual_machine=obj, name=name_hint)
             return iface, None
-        except Exception:
+        except (Interface.DoesNotExist, VMInterface.DoesNotExist):
             pass
+        except (Interface.MultipleObjectsReturned, VMInterface.MultipleObjectsReturned):
+            return None, f"Interface name '{name_hint}' is ambiguous on {obj}"
 
     return None, f"Interface with LibreNMS port_id {port_id} not found on {obj}"
 

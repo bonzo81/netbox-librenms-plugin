@@ -630,6 +630,10 @@ class BaseInterfaceTableView(
                     )
 
             table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
+            # Propagate donor "migrated mode" so the table suppresses per-row LAG/parent sync
+            # buttons (the bulk form is already hidden by the template; the row buttons POST
+            # directly, so they must be stripped here too to keep a migrated donor read-only).
+            table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
             table.configure(request)
 
             # Identify NetBox-only interfaces (interfaces in NetBox but not in LibreNMS)

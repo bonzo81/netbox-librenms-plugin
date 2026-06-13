@@ -630,8 +630,7 @@ class TestAddDeviceToLibreNMSViewPost:
         assert view.required_object_permissions == {"POST": [("change", Device)]}
 
     def test_invalid_object_type_returns_400_without_perm_check(self):
-        """Bad client input (missing/unknown object_type) must surface a 400 immediately,
-        without triggering the permission check — there's no model to check against yet."""
+        """Bad object_type returns 400 immediately, before any permission check (no model to check yet)."""
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = _make_view(AddDeviceToLibreNMSView)
@@ -1829,6 +1828,29 @@ class TestSyncIPAddressesViewProcessIpSync:
         assert "10.0.0.1" in results["created"], results
         created = IPAddress.objects.get(address="10.0.0.1/24")
         assert created.assigned_object == iface
+
+    def test_existing_bound_ip_not_unbound_when_no_interface(self):
+        """An already-bound IP keeps its binding when no interface resolves: the row is skipped, never unbound or saved."""
+        view = self._setup_view()
+        selected = ["10.0.0.1"]
+        # No port_id/interface_name → _match_interface returns None.
+        cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_url": None}]
+        obj = MagicMock()
+        obj.interfaces.all.return_value = []
+        bound_iface = MagicMock()
+        existing_ip = MagicMock()
+        existing_ip.assigned_object = bound_iface  # already bound to a real interface
+        existing_ip.vrf = None
+        with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
+            with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
+                mock_ip_cls.objects.filter.return_value.first.return_value = existing_ip
+                with patch.object(view, "get_vrf_selection", return_value=None):
+                    results = view.process_ip_sync(view.request, selected, cached, obj, "device")
+        assert "10.0.0.1" in results["skipped_no_interface"]
+        # The existing binding must be untouched — neither nulled nor persisted.
+        assert existing_ip.assigned_object is bound_iface
+        existing_ip.save.assert_not_called()
+        mock_ip_cls.objects.create.assert_not_called()
 
     def test_ip_assigned_to_interface_matched_by_port_id(self):
         from ipam.models import IPAddress

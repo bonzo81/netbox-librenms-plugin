@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tables.interfaces import (
 )
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleTable
 from netbox_librenms_plugin.utils import (
+    build_migrated_context,
     cache_remaining_ttl,
     get_interface_name_field,
     get_librenms_device_id,
@@ -211,6 +212,11 @@ class SingleInterfaceVerifyView(
                     device=selected_device,
                     interface_name_field=interface_name_field,
                     server_key=server_key,
+                )
+                # Mirror the main table render: a migrated donor's verify response must not
+                # re-introduce the per-row LAG/parent sync button (which posts directly).
+                table.migrated_to_marker = bool(
+                    build_migrated_context(selected_device, server_key).get("migrated_to_marker")
                 )
                 # Recompute the LAG/parent relationship for the *selected* member so the
                 # Parent/LAG cell isn't left showing the previously-rendered device's status.

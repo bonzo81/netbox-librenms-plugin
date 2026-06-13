@@ -61,6 +61,10 @@ class LibreNMSInterfaceTable(tables.Table):
         # Default the key so render_librenms_id's get_librenms_device_id(self.server_key) lookup
         # falls back to the "default" server entry; a None key would miss {"default": 42} values.
         self.server_key = server_key or "default"
+        # Donor "migrated mode": when set, the bulk sync form is hidden and donors must
+        # not mutate relationship state. Suppress the per-row LAG/parent sync buttons too,
+        # otherwise librenms_sync.js could still POST them and sync a migrated donor.
+        self.migrated_to_marker = False
         # Lazily-built {(librenms_type, librenms_speed): mapping} cache so render_type doesn't run
         # 1-2 InterfaceTypeMapping queries for every interface row (the table is small and static).
         self._interface_type_mapping_cache = None
@@ -453,7 +457,11 @@ class LibreNMSInterfaceTable(tables.Table):
         )
         badge = format_html("{}{}", status_badge, name_badge)
 
-        if sync_status == "missing_nb" and lnms_port_id:
+        # On a migrated donor page the inline sync controls are suppressed: the per-row
+        # .lag-sync-btn/.parent-sync-btn POST directly via librenms_sync.js, so leaving them
+        # active would let a migrated donor mutate parent/LAG state despite the bulk form
+        # being hidden. Render only the status badge in that mode.
+        if sync_status == "missing_nb" and lnms_port_id and not self.migrated_to_marker:
             port_id = record.get("port_id", "")
             nb_iface = record.get("netbox_interface")
             row_object_id = record.get("selected_object_id")
@@ -744,6 +752,10 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
             "mtu",
             "enabled",
             "description",
+            # VMInterface supports sub-interface parents (LAG is skipped for VMs), and the
+            # relationship sync path resolves VMInterface targets — so the Parent/LAG column
+            # must be exposed here too, otherwise the feature is unreachable on VM pages.
+            "parent",
         ]
         attrs = {
             "class": "table table-hover object-list",

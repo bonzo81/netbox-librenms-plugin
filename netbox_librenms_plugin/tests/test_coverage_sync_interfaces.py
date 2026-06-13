@@ -1441,6 +1441,76 @@ class TestResolveInterfaceByPortId:
         assert err is not None
         assert "ambiguous" in err.lower()
 
+    def test_name_hint_does_not_exist_falls_through_to_not_found(self):
+        """A name-hint miss (DoesNotExist) is swallowed and reported as not-found."""
+        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+        from dcim.models import Device, Interface
+
+        mock_device = MagicMock(spec=Device)
+        mock_device.virtual_chassis = None
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
+        ):
+            mock_intf_cls.objects.filter.return_value = []
+            # Wire the real exception classes so the narrowed except clause is valid.
+            mock_intf_cls.DoesNotExist = Interface.DoesNotExist
+            mock_intf_cls.MultipleObjectsReturned = Interface.MultipleObjectsReturned
+            mock_intf_cls.objects.get.side_effect = Interface.DoesNotExist
+            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
+
+        assert iface is None
+        assert err is not None
+        assert "not found" in err.lower()
+
+    def test_name_hint_multiple_matches_returns_ambiguous(self):
+        """A name-hint matching multiple interfaces returns an ambiguity error, not a silent
+        not-found — the narrowed except surfaces MultipleObjectsReturned distinctly."""
+        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+        from dcim.models import Device, Interface
+
+        mock_device = MagicMock(spec=Device)
+        mock_device.virtual_chassis = None
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
+        ):
+            mock_intf_cls.objects.filter.return_value = []
+            mock_intf_cls.DoesNotExist = Interface.DoesNotExist
+            mock_intf_cls.MultipleObjectsReturned = Interface.MultipleObjectsReturned
+            mock_intf_cls.objects.get.side_effect = Interface.MultipleObjectsReturned
+            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
+
+        assert iface is None
+        assert err is not None
+        assert "ambiguous" in err.lower()
+
+    def test_name_hint_unexpected_error_propagates(self):
+        """A real DB/runtime fault during the name-hint lookup must propagate, not be masked
+        as a silent not-found (the old bare `except Exception` hid these faults)."""
+        import pytest
+        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+        from dcim.models import Device, Interface
+
+        mock_device = MagicMock(spec=Device)
+        mock_device.virtual_chassis = None
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
+        ):
+            mock_intf_cls.objects.filter.return_value = []
+            mock_intf_cls.DoesNotExist = Interface.DoesNotExist
+            mock_intf_cls.MultipleObjectsReturned = Interface.MultipleObjectsReturned
+            mock_intf_cls.objects.get.side_effect = RuntimeError("database is down")
+            with pytest.raises(RuntimeError):
+                _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
+
 
 class TestInterfaceLinkValidationErrorNoStackTrace:
     """LAG/parent full_clean() failures return a fixed message and log the detail —
