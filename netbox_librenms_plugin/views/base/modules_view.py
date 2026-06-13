@@ -363,7 +363,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Fetch ports once and reuse in subsequent enrichment steps.
         ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
         ports_error = None
-        if not ports_success or not isinstance(ports_data, dict):
+        # A success flag is not enough: a dict whose "ports" is missing/None or carries
+        # non-dict entries makes _enrich_inventory_port_identity()/_merge_transceiver_data()
+        # silently no-op, leaving port-id enrichment incomplete. Treat that as a fetch
+        # failure so the snapshot below is NOT cached as complete (and the user is warned),
+        # instead of silently serving a degraded module list until TTL/manual refresh.
+        ports_payload_ok = (
+            ports_success
+            and isinstance(ports_data, dict)
+            and isinstance(ports_data.get("ports"), list)
+            and all(isinstance(port, dict) for port in ports_data["ports"])
+        )
+        if not ports_payload_ok:
             ports_error = str(ports_data) if ports_data else "unknown error"
             ports_data = {}
 
@@ -451,9 +462,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             logger.warning("Transceiver fetch failed for device %s: %s", self.librenms_id, txr_error)
             messages.warning(request, "Inventory refreshed, but transceiver fetch failed; see server logs for details.")
         if oob_failed:
+            # Keep the toast generic — the device/OOB ids are already in the logger.warning
+            # above (line ~418); surfacing internal LibreNMS ids in the UI is needless leakage
+            # and inconsistent with the ports/transceiver toasts.
             messages.warning(
                 request,
-                f"Inventory refreshed, but OOB controller inventory fetch failed (device {self.librenms_id}, OOB id {oob_id}); see server logs for details.",
+                "Inventory refreshed, but OOB controller inventory fetch failed; see server logs for details.",
             )
         if not txr_error and not oob_failed and not ports_error:
             messages.success(request, "Inventory data refreshed successfully.")

@@ -1978,6 +1978,7 @@ class TestSingleInstallInterfaceBinding:
                 side_effect=RuntimeError("adoption blew up"),
             ) as mock_adopt,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.modules.logger") as mock_logger,
             patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {
@@ -1994,6 +1995,9 @@ class TestSingleInstallInterfaceBinding:
         # Adoption failure surfaced separately as a warning.
         mock_messages.warning.assert_called_once()
         assert "adopting standalone" in mock_messages.warning.call_args[0][1].lower()
+        # The suppressed adoption traceback must be logged server-side (the toast says
+        # "see server logs for details"), not silently swallowed.
+        mock_logger.exception.assert_called_once()
         assert response is not None
 
     def test_update_module_interface_view_adopts_templates_even_when_port_bind_is_a_noop(self):

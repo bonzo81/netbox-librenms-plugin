@@ -1,5 +1,6 @@
 """Sync action views for module/inventory installation from LibreNMS."""
 
+import logging
 import re
 
 from django.contrib import messages
@@ -29,6 +30,8 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _modules_redirect_response(request, sync_url):
@@ -1351,6 +1354,11 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             if bind_item and server_key:
                 bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
         except Exception:
+            logger.exception(
+                "Unexpected error binding interface to module (device %s, module %s)",
+                target_device.pk,
+                module.pk,
+            )
             bind_result = {
                 "status": "failed",
                 "reason": "unexpected error while associating interface to installed module",
@@ -1367,6 +1375,11 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
                 try:
                     adopt_result = _adopt_existing_template_interfaces(target_device, module)
                 except Exception:
+                    logger.exception(
+                        "Unexpected error adopting standalone template interfaces (device %s, module %s)",
+                        target_device.pk,
+                        module.pk,
+                    )
                     # The adoption step is isolated so its failure can't clobber an
                     # already-committed primary bind: that interface is bound regardless, and
                     # reporting "failed" would make a retry look like a fresh conflict. Only the

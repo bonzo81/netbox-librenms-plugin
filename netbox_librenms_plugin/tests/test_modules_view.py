@@ -406,6 +406,46 @@ class TestMergeTransceiverDataPortIdentity:
         )
         mock_messages.success.assert_not_called()
 
+    def test_post_treats_malformed_ports_payload_as_fetch_failure(self):
+        """get_ports() returning success with a dict whose "ports" is missing/None (or carries
+        non-dict entries) makes port-id enrichment silently no-op. That degraded snapshot must
+        NOT be cached as complete — it has to clear the cache and warn, like a hard ports
+        failure — otherwise interface matching stays incomplete until TTL/manual refresh."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_inventory.return_value = (True, [])
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        # success=True and a dict, but "ports" is None (not a list of dicts) → malformed.
+        view._librenms_api.get_ports.return_value = (True, {"ports": None})
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            view.post(request, pk=1)
+
+        mock_cache.set.assert_not_called()  # degraded snapshot not persisted as complete
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        mock_messages.warning.assert_called_once_with(
+            request,
+            "Inventory refreshed, but port metadata fetch failed; interface matching may be incomplete."
+            " See server logs for details.",
+        )
+        mock_messages.success.assert_not_called()
+
     def test_post_skips_cache_on_oob_inventory_failure(self):
         """When the OOB inventory fetch fails, the main-only snapshot must NOT be cached
         under the current oob fingerprint — otherwise get_context_data() accepts it as
@@ -443,6 +483,10 @@ class TestMergeTransceiverDataPortIdentity:
         mock_cache.delete.assert_called_once_with("test_cache_key")  # the active device's stale entry cleared
         mock_messages.warning.assert_called_once()  # user is told the OOB inventory fetch failed
         mock_messages.success.assert_not_called()  # warning, not success
+        # The toast must stay generic — internal LibreNMS ids (777 / OOB 999) belong only in
+        # the server log, not the UI.
+        warn_msg = mock_messages.warning.call_args[0][1]
+        assert "777" not in warn_msg and "999" not in warn_msg and "OOB id" not in warn_msg
 
     def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self):
         """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so
