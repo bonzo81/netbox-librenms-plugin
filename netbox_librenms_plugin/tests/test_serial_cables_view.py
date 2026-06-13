@@ -13,10 +13,49 @@ Covers:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_serial_device(name, csp_names=(), cp_names=()):
+    """Create a real Device with optional ConsoleServerPorts / ConsolePorts.
+
+    The serial cable logic resolves CSPs/CPs and inspects their ``.cable`` state via real
+    ORM lookups, so these tests build real NetBox objects instead of MagicMock stand-ins —
+    a MagicMock CSP would happily report any ``.cable`` value the test set, never exercising
+    the actual termination wiring.
+    """
+    from dcim.models import (
+        ConsolePort,
+        ConsoleServerPort,
+        Device,
+        DeviceRole,
+        DeviceType,
+        Manufacturer,
+        Site,
+    )
+
+    site, _ = Site.objects.get_or_create(name="SerSite", slug="ser-site")
+    mfr, _ = Manufacturer.objects.get_or_create(name="SerMfr", slug="ser-mfr")
+    dtype, _ = DeviceType.objects.get_or_create(model="SerDT", slug="ser-dt", defaults={"manufacturer": mfr})
+    role, _ = DeviceRole.objects.get_or_create(name="SerRole", slug="ser-role", defaults={"color": "00ff00"})
+    dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active")
+    csps = [ConsoleServerPort.objects.create(device=dev, name=n) for n in csp_names]
+    cps = [ConsolePort.objects.create(device=dev, name=n) for n in cp_names]
+    return dev, csps, cps
+
+
+def _cable_together(term_a, term_b):
+    """Create a real Cable between two terminations (NetBox 4.x multi-termination API)."""
+    from dcim.models import Cable
+
+    cable = Cable(a_terminations=[term_a], b_terminations=[term_b])
+    cable.save()
+    return cable
 
 
 def _mock_obj(pk=1, has_csps=True):
@@ -171,55 +210,51 @@ class TestGetLinksDataSerial:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestEnrichLocalPortSerial:
-    """enrich_local_port resolves ConsoleServerPort for serial rows."""
+    """enrich_local_port resolves ConsoleServerPort for serial rows against a real device."""
 
     def test_csp_found_sets_url_and_id(self):
-        """When CSP exists by name, URL and netbox_local_interface_id are set."""
+        """When a CSP exists by name on the device, its id and real URL are set on the link."""
         view = _make_view()
-
-        csp = MagicMock()
-        csp.pk = 99
-
-        obj = _mock_obj()
-        obj.consoleserverports.filter.return_value.first.return_value = csp
+        obj, (csp,), _ = _make_serial_device("ser-enrich-found", csp_names=["ttyS7"])
 
         link = {"local_port": "ttyS7", "local_port_id": "serial:1007", "_source": "serial"}
+        view.enrich_local_port(link, obj)
 
-        with patch("netbox_librenms_plugin.views.base.cables_view.reverse", return_value="/dcim/csp/99/") as mock_rev:
-            view.enrich_local_port(link, obj)
-
-        assert link["netbox_local_interface_id"] == 99
-        assert link["local_port_url"] == "/dcim/csp/99/"
-        mock_rev.assert_called_once_with("dcim:consoleserverport", args=[99])
+        assert link["netbox_local_interface_id"] == csp.pk
+        # Real reverse("dcim:consoleserverport", args=[pk]) → URL containing the CSP pk.
+        assert str(csp.pk) in link["local_port_url"]
 
     def test_csp_not_found_no_url_set(self):
-        """When CSP name doesn't match, no URL or id is set."""
+        """When no CSP matches the serial port name, no URL or id is set."""
         view = _make_view()
-
-        obj = _mock_obj()
-        obj.consoleserverports.filter.return_value.first.return_value = None
+        obj, _, _ = _make_serial_device("ser-enrich-miss", csp_names=["ttyS1"])
 
         link = {"local_port": "ttyS99", "local_port_id": "serial:1099", "_source": "serial"}
-
         view.enrich_local_port(link, obj)
 
         assert "local_port_url" not in link
         assert "netbox_local_interface_id" not in link
 
-    def test_serial_does_not_touch_interfaces(self):
-        """Serial rows should never query obj.interfaces."""
-        view = _make_view()
+    def test_serial_resolves_via_csp_not_interface(self):
+        """A serial row must resolve through ConsoleServerPorts, never Interfaces.
 
-        obj = _mock_obj()
-        obj.consoleserverports.filter.return_value.first.return_value = None
+        The device has an Interface whose name collides with the serial port name but no
+        matching CSP; the serial path must ignore the interface and leave the link
+        unresolved (proving it queried CSPs, not interfaces)."""
+        from dcim.models import Interface
+
+        view = _make_view()
+        obj, _, _ = _make_serial_device("ser-enrich-iface")
+        # A same-named Interface exists, but the serial path must not pick it up.
+        Interface.objects.create(device=obj, name="ttyS3", type="other")
 
         link = {"local_port": "ttyS3", "local_port_id": "serial:1003", "_source": "serial"}
+        view.enrich_local_port(link, obj)
 
-        with patch("netbox_librenms_plugin.views.base.cables_view.reverse"):
-            view.enrich_local_port(link, obj)
-
-        obj.interfaces.filter.assert_not_called()
+        assert "local_port_url" not in link
+        assert "netbox_local_interface_id" not in link
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +262,13 @@ class TestEnrichLocalPortSerial:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestCheckSerialCableStatus:
-    """check_serial_cable_status sets correct cable_status and can_create_cable."""
+    """check_serial_cable_status sets correct cable_status and can_create_cable.
+
+    Driven against real ConsoleServerPort / Cable objects so the ``.cable`` state it branches
+    on reflects actual NetBox termination wiring, not a value preset on a MagicMock.
+    """
 
     def test_no_csp_id_not_found(self):
         """Missing netbox_local_interface_id -> 'Console Server Port Not Found'."""
@@ -239,54 +279,36 @@ class TestCheckSerialCableStatus:
         assert link["can_create_cable"] is False
 
     def test_csp_with_cable(self):
-        """CSP that has a cable -> 'Cable Found' with cable_url."""
+        """A real cabled CSP -> 'Cable Found' with the real cable_url."""
         view = _make_view()
-        cable = MagicMock()
-        cable.pk = 55
+        dev, (csp,), _ = _make_serial_device("ser-csp-cabled", csp_names=["ttyS7"])
+        _, _, (cp,) = _make_serial_device("ser-cp-peer", cp_names=["con0"])
+        cable = _cable_together(csp, cp)
 
-        csp = MagicMock()
-        csp.cable = cable
-
-        link = {"_source": "serial", "netbox_local_interface_id": 99}
-
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.ConsoleServerPort") as MockCSP,
-            patch("netbox_librenms_plugin.views.base.cables_view.reverse", return_value="/dcim/cables/55/"),
-        ):
-            MockCSP.objects.get.return_value = csp
-            view.check_serial_cable_status(link)
+        link = {"_source": "serial", "netbox_local_interface_id": csp.pk}
+        view.check_serial_cable_status(link)
 
         assert link["cable_status"] == "Cable Found"
-        assert link["cable_url"] == "/dcim/cables/55/"
+        assert str(cable.pk) in link["cable_url"]
         assert link["can_create_cable"] is False
 
     def test_csp_without_cable(self):
-        """CSP with no cable -> 'No Cable'."""
+        """A real uncabled CSP -> 'No Cable'."""
         view = _make_view()
+        dev, (csp,), _ = _make_serial_device("ser-csp-nocable", csp_names=["ttyS7"])
 
-        csp = MagicMock()
-        csp.cable = None
-
-        link = {"_source": "serial", "netbox_local_interface_id": 99}
-
-        with patch("netbox_librenms_plugin.views.base.cables_view.ConsoleServerPort") as MockCSP:
-            MockCSP.objects.get.return_value = csp
-            view.check_serial_cable_status(link)
+        link = {"_source": "serial", "netbox_local_interface_id": csp.pk}
+        view.check_serial_cable_status(link)
 
         assert link["cable_status"] == "No Cable"
         assert link["can_create_cable"] is False
 
     def test_csp_does_not_exist(self):
-        """If DB lookup raises DoesNotExist -> 'Console Server Port Not Found'."""
-        from dcim.models import ConsoleServerPort
-
+        """A pk with no ConsoleServerPort raises DoesNotExist -> 'Console Server Port Not Found'."""
         view = _make_view()
-        link = {"_source": "serial", "netbox_local_interface_id": 999}
+        link = {"_source": "serial", "netbox_local_interface_id": 999999}
 
-        with patch("netbox_librenms_plugin.views.base.cables_view.ConsoleServerPort") as MockCSP:
-            MockCSP.DoesNotExist = ConsoleServerPort.DoesNotExist
-            MockCSP.objects.get.side_effect = ConsoleServerPort.DoesNotExist
-            view.check_serial_cable_status(link)
+        view.check_serial_cable_status(link)
 
         assert link["cable_status"] == "Console Server Port Not Found in NetBox"
 
@@ -617,8 +639,14 @@ class TestEnrichSerialRemote:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestHandleSerialCableCreation:
-    """SyncCablesView.handle_serial_cable_creation creates CSP <-> CP cables."""
+    """SyncCablesView.handle_serial_cable_creation creates CSP <-> CP cables.
+
+    The CSP/CP lookups and their ``.cable`` state are exercised against real NetBox objects;
+    ``create_cable`` (which performs the actual cable write and needs a real request/permission
+    context) is the one collaborator left patched, so these tests target the handler's resolve
+    + duplicate/missing detection logic end to end."""
 
     def _make_sync_view(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -630,39 +658,30 @@ class TestHandleSerialCableCreation:
         return view
 
     def test_creates_cable_when_both_sides_found(self):
-        """When CSP and CP both exist and are uncabled, creates cable and returns valid."""
-        from dcim.models import ConsolePort, ConsoleServerPort
-
+        """When a real CSP and CP both exist and are uncabled, create_cable is invoked and the
+        result is valid."""
         view = self._make_sync_view()
-
-        csp = MagicMock(spec=ConsoleServerPort)
-        csp.cable = None
-
-        cp = MagicMock(spec=ConsolePort)
-        cp.cable = None
+        _, (csp,), _ = _make_serial_device("ser-hsc-csp", csp_names=["ttyS7"])
+        _, _, (cp,) = _make_serial_device("ser-hsc-cp", cp_names=["con0"])
 
         link_data = {
             "_source": "serial",
             "local_port": "ttyS7",
-            "netbox_local_interface_id": 99,
-            "netbox_remote_interface_id": 77,
+            "netbox_local_interface_id": csp.pk,
+            "netbox_remote_interface_id": cp.pk,
         }
         interface = {"device_id": 1, "local_port_id": "serial:1007"}
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.ConsoleServerPort") as MockCSP,
-            patch("netbox_librenms_plugin.views.sync.cables.ConsolePort") as MockCP,
-            patch.object(view, "create_cable", return_value=True) as mock_create,
-        ):
-            MockCSP.objects.get.return_value = csp
-            MockCSP.DoesNotExist = ConsoleServerPort.DoesNotExist
-            MockCP.objects.get.return_value = cp
-            MockCP.DoesNotExist = ConsolePort.DoesNotExist
+        with patch.object(view, "create_cable", return_value=True) as mock_create:
             result = view.handle_serial_cable_creation(link_data, interface)
 
         assert result["status"] == "valid"
         assert result["interface"] == "ttyS7"
-        mock_create.assert_called_once_with(csp, cp, view.request)
+        mock_create.assert_called_once()
+        passed_csp, passed_cp, passed_req = mock_create.call_args[0]
+        assert passed_csp.pk == csp.pk
+        assert passed_cp.pk == cp.pk
+        assert passed_req is view.request
 
     def test_missing_csp_id_returns_missing_remote(self):
         """When netbox_local_interface_id is absent, returns missing_remote."""
@@ -693,55 +712,39 @@ class TestHandleSerialCableCreation:
         assert result["status"] == "missing_remote"
 
     def test_existing_cable_on_csp_returns_duplicate(self):
-        """When CSP already has a cable, returns duplicate."""
-        from dcim.models import ConsolePort, ConsoleServerPort
-
+        """When the real CSP already has a cable, the handler returns duplicate."""
         view = self._make_sync_view()
-
-        csp = MagicMock(spec=ConsoleServerPort)
-        csp.cable = MagicMock()  # has cable
-
-        cp = MagicMock(spec=ConsolePort)
-        cp.cable = None
+        _, (csp,), _ = _make_serial_device("ser-hsc-dup-csp", csp_names=["ttyS7"])
+        _, _, (peer_cp,) = _make_serial_device("ser-hsc-dup-peer", cp_names=["conX"])
+        _cable_together(csp, peer_cp)  # csp is now cabled
+        _, _, (cp,) = _make_serial_device("ser-hsc-dup-target", cp_names=["con0"])
 
         link_data = {
             "_source": "serial",
             "local_port": "ttyS7",
-            "netbox_local_interface_id": 99,
-            "netbox_remote_interface_id": 77,
+            "netbox_local_interface_id": csp.pk,
+            "netbox_remote_interface_id": cp.pk,
         }
         interface = {"device_id": 1, "local_port_id": "serial:1007"}
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.cables.ConsoleServerPort") as MockCSP,
-            patch("netbox_librenms_plugin.views.sync.cables.ConsolePort") as MockCP,
-        ):
-            MockCSP.objects.get.return_value = csp
-            MockCSP.DoesNotExist = ConsoleServerPort.DoesNotExist
-            MockCP.objects.get.return_value = cp
-            MockCP.DoesNotExist = ConsolePort.DoesNotExist
-            result = view.handle_serial_cable_creation(link_data, interface)
+        result = view.handle_serial_cable_creation(link_data, interface)
 
         assert result["status"] == "duplicate"
 
     def test_csp_does_not_exist_returns_missing_remote(self):
-        """DoesNotExist on CSP lookup returns missing_remote."""
-        from dcim.models import ConsoleServerPort
-
+        """A netbox_local_interface_id with no ConsoleServerPort returns missing_remote."""
         view = self._make_sync_view()
+        _, _, (cp,) = _make_serial_device("ser-hsc-nocsp", cp_names=["con0"])
 
         link_data = {
             "_source": "serial",
             "local_port": "ttyS7",
-            "netbox_local_interface_id": 9999,
-            "netbox_remote_interface_id": 77,
+            "netbox_local_interface_id": 9999999,  # no such CSP
+            "netbox_remote_interface_id": cp.pk,
         }
         interface = {"device_id": 1, "local_port_id": "serial:1007"}
 
-        with patch("netbox_librenms_plugin.views.sync.cables.ConsoleServerPort") as MockCSP:
-            MockCSP.DoesNotExist = ConsoleServerPort.DoesNotExist
-            MockCSP.objects.get.side_effect = ConsoleServerPort.DoesNotExist
-            result = view.handle_serial_cable_creation(link_data, interface)
+        result = view.handle_serial_cable_creation(link_data, interface)
 
         assert result["status"] == "missing_remote"
 
