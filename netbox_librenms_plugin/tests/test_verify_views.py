@@ -256,6 +256,43 @@ class TestSingleInterfaceVerifyView:
         data = json.loads(response.content)
         assert data["status"] == "error"
 
+    @patch("netbox_librenms_plugin.views.object_sync.devices.BaseInterfaceTableView")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
+    def test_verify_normalizes_relationship_map_keys(self, mock_cache, mock_get_obj, mock_table_cls, mock_base):
+        """Cached relationship maps with stringified port_id keys must be normalized to
+        ints before enrichment, mirroring the main table path — otherwise the int-keyed
+        lookup in _enrich_port_with_lag_parent silently drops Parent/LAG context."""
+        device = MagicMock()
+        device.virtual_chassis = None
+        device.interfaces.all.return_value = []
+        device.interfaces.filter.return_value.first.return_value = None
+        mock_get_obj.return_value = device
+
+        mock_cache.get.return_value = {
+            "ports": [{"port_id": 10, "ifName": "Et1", "_source": "host"}],
+            "port_stack_relationships": {
+                "lag_members": {"10": 20},  # stringified keys, as they can arrive from cache
+                "sub_interfaces": {"10": 30},
+            },
+        }
+        mock_table_cls.return_value.format_interface_data.return_value = {"ok": True}
+
+        view = self._make_view()
+        view.require_object_permissions_json = MagicMock(return_value=None)
+        view.get_cache_key = MagicMock(return_value="ck")
+        request = _make_request(
+            {"device_id": 5, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 10}
+        )
+        response = view.post(request)
+
+        assert response.status_code == 200
+        mock_base._enrich_port_with_lag_parent.assert_called_once()
+        _, lag_members, sub_interfaces, *_ = mock_base._enrich_port_with_lag_parent.call_args.args
+        assert 10 in lag_members and "10" not in lag_members
+        assert 10 in sub_interfaces and "10" not in sub_interfaces
+
 
 # ---------------------------------------------------------------------------
 # SingleIPAddressVerifyView — object-permission gate (real DB, real has_perm)

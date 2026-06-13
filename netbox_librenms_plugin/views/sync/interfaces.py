@@ -790,10 +790,20 @@ def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint:
         return None, f"Unsupported object type: {type(obj).__name__}"
 
     target_id = int(port_id) if str(port_id).isdigit() else None
-    for iface in iface_qs:
-        stored_id = get_librenms_device_id(iface, server_key, auto_save=False)
-        if stored_id is not None and target_id is not None and stored_id == target_id:
-            return iface, None
+    # Collect every interface in scope whose stored LibreNMS id matches, then fail on
+    # ambiguity rather than binding lag/parent to an arbitrary first match. Mirrors the
+    # ambiguity-safe behaviour of _resolve_device_interface()/_resolve_vm_interface():
+    # two interfaces carrying the same stale librenms_id must surface, not silently pick one.
+    matches = []
+    if target_id is not None:
+        for iface in iface_qs:
+            stored_id = get_librenms_device_id(iface, server_key, auto_save=False)
+            if stored_id is not None and stored_id == target_id:
+                matches.append(iface)
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        return None, f"LibreNMS port_id {port_id} is ambiguous on {obj} (matches multiple interfaces)"
 
     if name_hint:
         try:

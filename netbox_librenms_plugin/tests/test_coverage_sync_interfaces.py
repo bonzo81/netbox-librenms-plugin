@@ -1419,6 +1419,28 @@ class TestResolveInterfaceByPortId:
         assert iface is mock_iface_by_name
         mock_intf_cls.objects.get.assert_called_once_with(device=mock_device, name="lag-1")
 
+    def test_ambiguous_port_id_returns_error_not_first_match(self):
+        """Two interfaces carrying the same stale librenms_id must fail as ambiguous,
+        not silently bind lag/parent to whichever happens to be first."""
+        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+        from dcim.models import Device, Interface
+
+        mock_device = MagicMock(spec=Device)
+        iface_a = MagicMock(spec=Interface)
+        iface_b = MagicMock(spec=Interface)
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=42),
+        ):
+            mock_intf_cls.objects.filter.return_value = [iface_a, iface_b]
+            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production")
+
+        assert iface is None
+        assert err is not None
+        assert "ambiguous" in err.lower()
+
 
 class TestInterfaceLinkValidationErrorNoStackTrace:
     """LAG/parent full_clean() failures return a fixed message and log the detail —

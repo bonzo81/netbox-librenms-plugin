@@ -661,8 +661,18 @@ class LibreNMSAPI:
         # Guard against malformed payload items (non-dict) so a single bad entry from
         # LibreNMS doesn't crash the whole relationship resolution with AttributeError.
         safe_ports = [p for p in ports if isinstance(p, dict)]
-        by_id = {p["port_id"]: p for p in safe_ports if p.get("port_id") is not None}
-        by_name = {p["ifName"]: p for p in safe_ports if p.get("ifName")}
+        # Only ports with both a usable port_id and a non-empty string ifName feed the
+        # lookup maps: downstream relationship resolution does string ops on ifName
+        # (regex .search(), `":" in name`, suffix splits), so a non-string ifName (e.g. a
+        # numeric value from a malformed payload) would raise at runtime. A port without a
+        # usable name can't be name-matched anyway, so dropping it loses nothing.
+        safe_named_ports = [
+            p
+            for p in safe_ports
+            if p.get("port_id") is not None and isinstance(p.get("ifName"), str) and p.get("ifName")
+        ]
+        by_id = {p["port_id"]: p for p in safe_named_ports}
+        by_name = {p["ifName"]: p for p in safe_named_ports}
 
         compiled_patterns = []
         for pattern_str in lag_patterns.values():

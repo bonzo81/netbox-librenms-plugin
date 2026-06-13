@@ -2357,6 +2357,18 @@ class TestResolvePortRelationships:
         result = mock_librenms_api.resolve_port_relationships(ports, NOKIA_PORT_STACK[:1], lag_patterns={})
         assert result["lag_members"] == {101: 102}
 
+    def test_non_string_ifname_ports_are_skipped(self, mock_librenms_api):
+        """A port with a non-string ifName must not crash the downstream string ops
+        (regex .search(), ':' membership, suffix splits); it is dropped from the maps."""
+        ports = [
+            {"port_id": 501, "ifName": 12345, "ifType": "ethernetCsmacd"},  # malformed: non-string
+            {"port_id": 502, "ifName": "lag9", "ifType": "ieee8023adLag"},
+        ]
+        stack = [{"high_port_id": 501, "low_port_id": 502}]
+        # Must not raise; the malformed port is excluded so the pair is simply skipped.
+        result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns={})
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
+
     @pytest.mark.django_db
     def test_db_patterns_scoped_to_device_os(self, mock_librenms_api):
         """With device_os set, only that OS's stored pattern is loaded — a pattern from a

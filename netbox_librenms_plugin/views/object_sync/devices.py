@@ -234,6 +234,16 @@ class SingleInterfaceVerifyView(
                     nb_iface = selected_device.interfaces.filter(name=interface_name).first()
                 port_data["netbox_interface"] = nb_iface
                 relationships = cached_data.get("port_stack_relationships", {})
+                # Normalize the relationship-map keys (mirror get_context_data):
+                # _enrich_port_with_lag_parent looks them up by normalized port_id, so a
+                # cached map with stringified keys would otherwise drop valid Parent/LAG
+                # context on the inline verify response even though the table renders it.
+                lag_members = {
+                    normalize_librenms_port_id(k): v for k, v in relationships.get("lag_members", {}).items()
+                }
+                sub_interfaces = {
+                    normalize_librenms_port_id(k): v for k, v in relationships.get("sub_interfaces", {}).items()
+                }
                 # Host-scope the map (mirror get_context_data): an OOB controller reusing a
                 # host port_id must not override the host row during lag/parent enrichment.
                 by_port_id = {
@@ -243,8 +253,8 @@ class SingleInterfaceVerifyView(
                 }
                 BaseInterfaceTableView._enrich_port_with_lag_parent(
                     port_data,
-                    relationships.get("lag_members", {}),
-                    relationships.get("sub_interfaces", {}),
+                    lag_members,
+                    sub_interfaces,
                     by_port_id,
                     interface_name_field,
                     server_key or "",
