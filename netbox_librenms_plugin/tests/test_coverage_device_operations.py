@@ -343,6 +343,36 @@ class TestValidateDeviceStateMachine:
         assert result["existing_device"] is None
         assert result["existing_match_type"] != "librenms_id"
 
+    def test_ambiguous_librenms_id_blocks_hostname_rebind(self):
+        """When the librenms_id is ambiguous, the hostname/serial/IP fallback must NOT run
+        and rebind existing_device — even when a NetBox device shares the hostname, the
+        import has to stay fail-closed on the ambiguity rather than silently adopt a match."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError
+
+        hostname_match = MagicMock()
+        hostname_match.name = "router01"
+        # A NetBox Device DOES exist with this hostname; the guard must ignore it.
+        mock_device = MagicMock()
+        mock_device.objects.filter.return_value.first.return_value = hostname_match
+        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        result = self._run_validate(
+            self._base_device(),
+            patches_overrides=[
+                patch(
+                    "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                    side_effect=AmbiguousLibreNMSIdError("dup host pk=1, pk=2"),
+                ),
+                patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
+            ],
+        )
+        assert result["ambiguous_librenms_id"] is True
+        # Fail-closed: the hostname match must NOT be adopted as the existing device.
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_librenms_id"
+
     def test_new_vm_without_cluster_is_not_ready(self):
         """New VM import with no cluster available must not be ready."""
         result = self._run_validate(self._base_device(hostname="vm01"), import_as_vm=True)

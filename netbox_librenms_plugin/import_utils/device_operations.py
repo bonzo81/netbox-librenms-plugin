@@ -500,8 +500,11 @@ def validate_device_for_import(
                                 f"LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
                             )
 
-        # Only check hostname/serial/IP if not already matched by librenms_id
-        if not result["existing_device"]:
+        # Only check hostname/serial/IP if not already matched by librenms_id.
+        # Skip when an ambiguous librenms_id was flagged — hostname/serial/IP matching
+        # would otherwise rebind existing_device/existing_match_type and defeat the
+        # fail-closed ambiguity contract (mirrors the librenms_id block guard above).
+        if not result["existing_device"] and not result["ambiguous_librenms_id"]:
             # Check by hostname/name - Check both VMs and Devices for conflicts
             existing_vm = VirtualMachine.objects.filter(name__iexact=hostname).first()
             existing_device = Device.objects.filter(name__iexact=hostname).first()

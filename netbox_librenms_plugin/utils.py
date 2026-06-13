@@ -1154,7 +1154,12 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         return None
     if isinstance(librenms_id, bool):
         return None
-    if isinstance(librenms_id, (int, float)) and librenms_id <= 0:
+    # Reject floats and arbitrary non-scalar objects before they reach _id_variants()
+    # and the ORM predicates: only int/str representations honour the int-only contract
+    # enforced by coerce_librenms_id() (which a positive float would otherwise bypass).
+    if not isinstance(librenms_id, (int, str)):
+        return None
+    if isinstance(librenms_id, int) and librenms_id <= 0:
         return None
     if isinstance(librenms_id, str):
         cleaned = librenms_id.strip()

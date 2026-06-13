@@ -40,11 +40,16 @@ blocks in device_validation_details.html run the same way.
     if (!select) return;
     var container = document.getElementById("oob-new-iface-{{ libre_device.device_id }}");
     var nameInput = document.getElementById("oob-new-iface-name-{{ libre_device.device_id }}");
-    select.addEventListener("change", function() {
-      var creating = this.value === "__new__";
+    function syncCreateState() {
+      var creating = select.value === "__new__";
       container.style.display = creating ? "block" : "none";
       nameInput.disabled = !creating;
       nameInput.required = creating;
-    });
+    }
+    select.addEventListener("change", syncCreateState);
+    // Sync once on load so the input matches the rendered selection even if it
+    // differs from the server-side display logic (e.g. a stale/missing suggested
+    // option leaves a different option selected than the template assumed).
+    syncCreateState();
   })();
 </script>

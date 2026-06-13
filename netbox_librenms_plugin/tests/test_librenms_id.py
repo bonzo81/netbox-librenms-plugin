@@ -311,6 +311,26 @@ class TestFindByLibreNMSId:
         with pytest.raises(AmbiguousLibreNMSIdError):
             find_by_librenms_id(mock_model, 42, "default")
 
+    def test_float_input_rejected_without_querying(self):
+        """A positive float bypasses the int-only coerce_librenms_id() contract, so it
+        must be rejected up front — never reaching the ORM predicates."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        assert find_by_librenms_id(mock_model, 42.0, "default") is None
+        mock_model.objects.filter.assert_not_called()
+
+    def test_non_scalar_input_rejected_without_querying(self):
+        """Arbitrary non-int/str objects (e.g. a dict) must fail closed before the
+        lookup queries rather than being coerced into junk variants."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        assert find_by_librenms_id(mock_model, {"id": 42}, "default") is None
+        mock_model.objects.filter.assert_not_called()
+
 
 class TestMigrateLegacyLibreNMSId:
     """Tests for migrate_legacy_librenms_id()."""

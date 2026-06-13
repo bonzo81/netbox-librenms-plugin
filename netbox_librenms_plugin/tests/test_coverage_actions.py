@@ -5583,6 +5583,16 @@ class TestOOBInterfaceSelectTemplate:
         # Targets this device's own select id (namespaced by device_id).
         assert 'getElementById("oob-iface-7")' in html
 
+    def test_initializes_create_state_on_load(self):
+        """The script must sync the "new name" input once on load (not only on change), so
+        the input matches the rendered selection even if it differs from the server-side
+        display logic (e.g. a stale/missing suggested option)."""
+        html = self._render()
+        assert "function syncCreateState()" in html
+        # Bound to change AND invoked immediately so initial state is authoritative.
+        assert 'addEventListener("change", syncCreateState)' in html
+        assert "syncCreateState();" in html
+
 
 class TestMergeNetBoxDevicesViewDonorDerivation:
     """The merge view derives the donor from winner_pk + merge_candidates and
