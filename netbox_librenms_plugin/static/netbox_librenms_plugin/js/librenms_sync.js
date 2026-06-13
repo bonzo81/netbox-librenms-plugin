@@ -1274,7 +1274,12 @@ function handleInterfaceChange(select, value) {
             // buttons disabled: the newer handleInterfaceChange call already re-disabled them and
             // owns re-enabling once its own verify settles.
             if (error.name === 'AbortError') return;
-            reenableRelationshipButtons();
+            // A genuine verify failure means the row was NOT repainted for the newly-selected
+            // member, so the verify-locked LAG/parent buttons still carry the *previous* member's
+            // lag/parent port_id. Re-enabling them here would let a retry combine the new
+            // vcMemberSelect value with that stale relationship metadata and sync the wrong
+            // relationship onto the wrong interface. Keep them disabled until a successful verify
+            // repaints the row (which replaces the button markup with fresh, consistent data).
             console.error('Error verifying interface:', error.message);
         });
 }

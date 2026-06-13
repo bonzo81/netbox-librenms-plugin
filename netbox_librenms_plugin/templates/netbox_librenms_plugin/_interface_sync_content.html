@@ -335,9 +335,11 @@
                     <i class="mdi mdi-alert me-2"></i>
                     {% if migrated_to_marker %}
                     {% if migrated_to_winner %}
-                    <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
-                    the LibreNMS data. Moving an interface reassigns it, along with related cables/IPs/MACs, to the
-                    migration winner.
+                    {# Migrated donor: this is a transfer-only flow (no bulk delete), so the copy #}
+                    {# must describe moving interfaces to the winner, not deleting them. #}
+                    <strong>Migrated device:</strong> The following interfaces exist in NetBox but are not found in the
+                    LibreNMS data. Use <em>Move</em> on a row to transfer that interface — together with its cables, IPs
+                    and MACs — to {{ migrated_to_winner.name }}.
                     {% else %}
                     <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
                     the LibreNMS data. The migration winner is unavailable, so these interfaces can't be moved until the
@@ -357,6 +359,8 @@
                         <table class="table table-hover">
                             <thead>
                                 <tr>
+                                    {# In migrated mode the bulk-delete button is hidden, so the #}
+                                    {# select-all column is a dead control — drop it entirely. #}
                                     {% if not migrated_to_marker %}
                                     <th>
                                         <input type="checkbox" id="select-all-netbox-interfaces"
@@ -374,6 +378,8 @@
                             <tbody>
                                 {% for interface in interface_sync.netbox_only_interfaces %}
                                 <tr>
+                                    {# Per-row bulk-select checkbox: only meaningful for the bulk #}
+                                    {# delete path, which is hidden in migrated mode. #}
                                     {% if not migrated_to_marker %}
                                     <td>
                                         <input type="checkbox" name="interface_ids" value="{{ interface.id }}"

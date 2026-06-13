@@ -34,3 +34,26 @@ def test_no_multiline_single_hash_comments():
     assert not offenders, "Multi-line `{# #}` comments render as literal text — use `{% comment %}`:\n" + "\n".join(
         offenders
     )
+
+
+def test_netbox_only_modal_hides_bulk_select_in_migrated_mode():
+    """In migrated-donor mode the NetBox-only modal is transfer-only (per-row Move), so the
+    bulk-select controls (select-all header + per-row checkboxes) must be hidden and the copy
+    must describe moving — not deleting — interfaces. The bulk-delete button is already gated
+    on ``not migrated_to_marker``; this guards the rest of the conversion against regressing."""
+    src = (TEMPLATES_DIR / "netbox_librenms_plugin" / "_interface_sync_content.html").read_text(encoding="utf-8")
+
+    def _guard_precedes(needle):
+        """The nearest ``{% if ... %}`` before *needle* must be the migrated guard."""
+        idx = src.index(needle)
+        before = src[:idx]
+        last_if = before.rfind("{% if ")
+        assert last_if != -1, f"no enclosing {{% if %}} before {needle!r}"
+        return "{% if not migrated_to_marker %}" in before[last_if:]
+
+    # Both bulk-select inputs must sit inside a `not migrated_to_marker` guard.
+    assert _guard_precedes('id="select-all-netbox-interfaces"')
+    assert _guard_precedes('name="interface_ids"')
+    # Transfer-oriented copy must be present for migrated mode.
+    assert "Migrated device:" in src
+    assert "Use <em>Move</em>" in src
