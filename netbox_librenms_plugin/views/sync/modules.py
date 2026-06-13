@@ -873,10 +873,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             item, index_map, bays, exact_mappings, regex_mappings
         )
 
-        if parent_module_id:
-            bay_dict = {bay.name: bay for bay in bays if bay.module_id == parent_module_id}
-        else:
-            bay_dict = {bay.name: bay for bay in bays if not bay.module_id}
+        bay_dict = InstallBranchView._candidate_bays_for_item(bays, parent_module_id)
 
         # Match module bay using preloaded mapping data
         matched_bay = InstallBranchView._match_bay(
@@ -1037,6 +1034,33 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         return bay.installed_module.pk
 
             current = parent
+
+    @staticmethod
+    def _candidate_bays_for_item(bays, parent_module_id):
+        """Return the name→bay dict to match an inventory item against.
+
+        - When the item traces to an installed parent module, scope to that module's child
+          bays (so duplicate bay names resolve to the right parent).
+        - Otherwise match against the SAME combined set the table uses (``all_bays``):
+          device-level bays plus every module-scoped bay, device bays winning on a name
+          collision. This is essential for items whose matched bay is module-scoped but
+          whose hierarchy does not resolve a parent module — the common case being a
+          synthetic transceiver rendered as a top-level row whose ``Transceiver N/M`` bay
+          lives under an installed line card (those bays are module-scoped, never top-level).
+          Without it, bulk install skips such a row as "no matching bay" even though the
+          table matched it and a single install (which trusts the table's bay) succeeds.
+        """
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        if parent_module_id:
+            return {bay.name: bay for bay in bays if bay.module_id == parent_module_id}
+
+        device_bays = {bay.name: bay for bay in bays if not bay.module_id}
+        module_scoped_bays: dict = {}
+        for bay in bays:
+            if bay.module_id:
+                module_scoped_bays.setdefault(bay.module_id, {})[bay.name] = bay
+        return BaseModuleTableView._compute_all_bays(device_bays, module_scoped_bays)
 
     @staticmethod
     def _match_bay(

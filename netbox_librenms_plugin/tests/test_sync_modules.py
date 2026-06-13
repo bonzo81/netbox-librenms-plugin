@@ -530,6 +530,56 @@ class TestRenderNameDepth:
 # ---------------------------------------------------------------------------
 
 
+class TestCandidateBaysForItem:
+    """InstallBranchView._candidate_bays_for_item selects the bay set to match against.
+
+    Regression: bulk install (_install_single) skipped module-scoped 'Transceiver N/M' bays
+    as 'no matching bay' for orphan synthetic transceiver rows, because the no-parent branch
+    used top-level bays only — while the table matches against the combined all_bays set and
+    a single install succeeds. The helper must mirror the table's all_bays for the no-parent
+    case so bulk install stays consistent with what the user sees and with single install.
+    """
+
+    @staticmethod
+    def _b(name, module_id=None, pk=None):
+        bay = MagicMock()
+        bay.name = name
+        bay.module_id = module_id
+        bay.pk = pk if pk is not None else abs(hash((name, module_id))) % 100000
+        return bay
+
+    def test_orphan_item_includes_module_scoped_bays(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        top = self._b("Slot 1", module_id=None)
+        txr = self._b("Transceiver 0/19", module_id=942)  # module-scoped, never top-level
+        result = InstallBranchView._candidate_bays_for_item([top, txr], parent_module_id=None)
+
+        # The module-scoped transceiver bay must be reachable (old code returned top-level only).
+        assert result.get("Transceiver 0/19") is txr
+        assert result.get("Slot 1") is top
+
+    def test_parent_scoped_returns_only_that_modules_bays(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        a = self._b("Transceiver 0/19", module_id=942)
+        b = self._b("Transceiver 0/19", module_id=943)
+        top = self._b("Slot 1", module_id=None)
+        result = InstallBranchView._candidate_bays_for_item([a, b, top], parent_module_id=942)
+
+        assert result == {"Transceiver 0/19": a}  # only module 942's bays, nothing else
+
+    def test_device_bay_wins_on_name_collision(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device_bay = self._b("Bay 1", module_id=None)
+        scoped_bay = self._b("Bay 1", module_id=942)
+        result = InstallBranchView._candidate_bays_for_item([scoped_bay, device_bay], parent_module_id=None)
+
+        # Device-level bay takes precedence over a same-named module-scoped bay (mirrors all_bays).
+        assert result["Bay 1"] is device_bay
+
+
 class TestMatchBayByPosition:
     """_match_bay_by_position resolves position-based bay names for SFPs in converters."""
 
