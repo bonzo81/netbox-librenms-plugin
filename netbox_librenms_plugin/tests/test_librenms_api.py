@@ -2169,6 +2169,25 @@ class TestGetPortStack:
         assert success is False
         assert data == "device polling disabled"
 
+    def test_error_status_with_mappings_present_still_fails(self, mock_librenms_api):
+        """An error payload can still carry mappings (e.g. {"status": "error", "mappings": []}).
+        The explicit error status must be honored *before* consuming mappings, so it fails
+        rather than being read as 'no relationships' and silently skipping valid sync."""
+        from unittest.mock import MagicMock, patch
+
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "status": "error",
+            "message": "stale poll",
+            "mappings": [],
+        }
+        fake_response.raise_for_status = MagicMock()
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+            success, data = mock_librenms_api.get_port_stack(5)
+
+        assert success is False
+        assert data == "stale poll"
+
     def test_returns_error_on_invalid_json(self, mock_librenms_api):
         """A non-JSON body (response.json() raises ValueError) must surface as
         (False, error) instead of letting the exception escape."""

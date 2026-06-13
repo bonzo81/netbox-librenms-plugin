@@ -1194,6 +1194,14 @@ function handleInterfaceChange(select, value) {
     // post the wrong row's port_id and repaint the wrong row. closest('tr') is unique.
     const row = select.closest('tr');
 
+    // Remember the last server-confirmed member so a failed verify can roll the dropdown back
+    // to it — otherwise the user is stranded on an unverified selection while the row HTML and
+    // relationship metadata still belong to the previous member. Seed once from the originally
+    // rendered <option selected> (the current NetBox assignment, which is verified).
+    if (typeof select._lastVerifiedMember === 'undefined') {
+        select._lastVerifiedMember = select.querySelector('option[selected]')?.value ?? null;
+    }
+
     // Disable this row's LAG/parent sync buttons while the verify is in flight. A click landing
     // before the response repaints the row would otherwise POST the freshly-selected member's
     // objectId together with the *previous* member's stale relationship metadata (lag/parent
@@ -1222,6 +1230,18 @@ function handleInterfaceChange(select, value) {
             delete b.dataset.verifyLocked;
             b.disabled = false;
         });
+    };
+
+    // On a verify failure (non-success payload or a non-abort error), roll the dropdown back to
+    // the last confirmed member so the visible selection matches the row's current HTML, then
+    // re-enable the controls — the row is now consistent again and the user can retry. With no
+    // confirmed baseline yet, keep the controls locked rather than re-enabling on an unverified
+    // selection (which would let a retry post the previous member's stale lag/parent port_id).
+    const rollbackToLastVerified = () => {
+        if (select._lastVerifiedMember != null) {
+            select.value = select._lastVerifiedMember;
+            reenableRelationshipButtons();
+        }
     };
 
     fetch('/plugins/librenms_plugin/verify-interface/', {
@@ -1266,13 +1286,16 @@ function handleInterfaceChange(select, value) {
                     parentCell.innerHTML = formattedRow.parent;
                 }
                 initializeFilters();
-                // Only re-enable once the row has been repainted for the newly-selected
-                // member. A 2xx response with data.status !== 'success' (application-level
-                // failure/conflict) does NOT repaint the row, so the verify-locked LAG/parent
-                // buttons still carry the *previous* member's lag/parent port_id — re-enabling
-                // them there would let a retry post stale relationship metadata. Mirror the
-                // .catch() rationale and keep them disabled until a successful verify settles.
+                // This member is now server-confirmed: record it as the rollback target and
+                // re-enable the relationship controls (the row HTML now matches this member).
+                select._lastVerifiedMember = value;
                 reenableRelationshipButtons();
+            } else {
+                // 2xx with data.status !== 'success' (application-level failure/conflict): the
+                // row was NOT repainted, so the verify-locked LAG/parent buttons still carry the
+                // previous member's lag/parent port_id. Roll the dropdown back to the last
+                // confirmed member (restoring a consistent row) before re-enabling.
+                rollbackToLastVerified();
             }
         })
         .catch(error => {
@@ -1280,13 +1303,12 @@ function handleInterfaceChange(select, value) {
             // buttons disabled: the newer handleInterfaceChange call already re-disabled them and
             // owns re-enabling once its own verify settles.
             if (error.name === 'AbortError') return;
-            // A genuine verify failure means the row was NOT repainted for the newly-selected
-            // member, so the verify-locked LAG/parent buttons still carry the *previous* member's
-            // lag/parent port_id. Re-enabling them here would let a retry combine the new
-            // vcMemberSelect value with that stale relationship metadata and sync the wrong
-            // relationship onto the wrong interface. Keep them disabled until a successful verify
-            // repaints the row (which replaces the button markup with fresh, consistent data).
+            // A genuine verify failure (HTTP error / network) means the row was NOT repainted for
+            // the newly-selected member. Roll the dropdown back to the last confirmed member so
+            // the visible selection matches the unchanged row, then re-enable — rather than
+            // stranding the user on an unverified selection with locked controls.
             console.error('Error verifying interface:', error.message);
+            rollbackToLastVerified();
         });
 }
 
