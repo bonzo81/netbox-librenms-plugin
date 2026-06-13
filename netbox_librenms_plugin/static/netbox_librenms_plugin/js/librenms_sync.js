@@ -1266,8 +1266,14 @@ function handleInterfaceChange(select, value) {
                     parentCell.innerHTML = formattedRow.parent;
                 }
                 initializeFilters();
+                // Only re-enable once the row has been repainted for the newly-selected
+                // member. A 2xx response with data.status !== 'success' (application-level
+                // failure/conflict) does NOT repaint the row, so the verify-locked LAG/parent
+                // buttons still carry the *previous* member's lag/parent port_id — re-enabling
+                // them there would let a retry post stale relationship metadata. Mirror the
+                // .catch() rationale and keep them disabled until a successful verify settles.
+                reenableRelationshipButtons();
             }
-            reenableRelationshipButtons();
         })
         .catch(error => {
             // A superseded request was aborted on purpose — not an error to surface. Leave the

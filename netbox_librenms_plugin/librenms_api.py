@@ -671,7 +671,11 @@ class LibreNMSAPI:
             for p in safe_ports
             if p.get("port_id") is not None and isinstance(p.get("ifName"), str) and p.get("ifName")
         ]
-        by_id = {p["port_id"]: p for p in safe_named_ports}
+        # Normalize port_id keys to str: ports (this map) and port_stack (high/low_port_id
+        # below) are independent LibreNMS payloads, so a str-vs-int discrepancy between them
+        # would silently miss every by_id.get() lookup and drop valid relationships. Coercing
+        # both sides to str makes the match type-agnostic.
+        by_id = {str(p["port_id"]): p for p in safe_named_ports}
         by_name = {p["ifName"]: p for p in safe_named_ports}
 
         compiled_patterns = []
@@ -703,11 +707,13 @@ class LibreNMSAPI:
                 continue
             high_id = entry.get("high_port_id")
             low_id = entry.get("low_port_id")
+            # 0 is the ifStack sentinel for "no port" (stack top/bottom), so a falsy id is
+            # intentionally skipped here rather than looked up.
             if not high_id or not low_id:
                 continue
 
-            high_port = by_id.get(high_id)
-            low_port = by_id.get(low_id)
+            high_port = by_id.get(str(high_id))
+            low_port = by_id.get(str(low_id))
             if not high_port or not low_port:
                 continue
 

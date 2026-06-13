@@ -2300,6 +2300,24 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {101: 102}
         assert result["sub_interfaces"] == {}
 
+    def test_string_port_stack_ids_match_int_port_ids(self, mock_librenms_api):
+        """port_stack and ports are independent LibreNMS payloads: a str high/low_port_id
+        must still match int port_id keys (and vice versa), or the by_id lookup silently
+        misses and valid relationships are dropped. Regression for key-type normalization."""
+        # NOKIA_PORTS carries int port_ids 101/102; reference them as strings in the stack.
+        str_stack = [{"high_port_id": "101", "low_port_id": "102"}]
+        result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, str_stack, lag_patterns={})
+        assert result["lag_members"] == {101: 102}
+        # And the inverse: int stack ids against str port_ids.
+        str_ports = [
+            {"port_id": "101", "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
+            {"port_id": "102", "ifName": "lag-1", "ifType": "ieee8023adLag"},
+        ]
+        result = mock_librenms_api.resolve_port_relationships(
+            str_ports, [{"high_port_id": 101, "low_port_id": 102}], lag_patterns={}
+        )
+        assert result["lag_members"] == {"101": "102"}
+
     def test_nokia_sap_excluded_when_colon_in_name(self, mock_librenms_api):
         """Nokia SAP entries (colon in name) must be excluded from output."""
         result = mock_librenms_api.resolve_port_relationships(NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={})
