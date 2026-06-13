@@ -134,7 +134,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             return ""
         if not success or not isinstance(info, dict):
             return ""
-        return (info.get("ip") or "").strip()
+        # Best-effort contract: a malformed-but-dict-shaped payload (e.g. {"ip": 123})
+        # must not raise on .strip(); only strip a genuine string, else fall back to "".
+        ip_value = info.get("ip")
+        return ip_value.strip() if isinstance(ip_value, str) else ""
 
     def _flag_management_ip(self, enriched_data, mgmt_ip):
         """Mark the entry whose IP equals the device's LibreNMS management IP.
@@ -298,9 +301,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
         if fetch_fresh:
             success, ip_data = self.get_ip_addresses(obj)
-            # Bail out on a failed fetch instead of enriching an error payload and
-            # rendering an empty table under a success banner.
-            if not success:
+            # Bail out on a failed *or malformed* fetch instead of enriching an error payload
+            # and rendering an empty table under a success banner. A success flag with a
+            # non-list payload (dict/string) or a list with non-dict entries makes
+            # enrich_ip_data() silently drop every row and caches that empty snapshot as
+            # complete, so treat it as a fetch failure.
+            if not success or not isinstance(ip_data, list) or any(not isinstance(item, dict) for item in ip_data):
                 return None
             # Resolve the management IP once here (live LibreNMS call) and cache it
             # below so cached renders don't re-hit the API.

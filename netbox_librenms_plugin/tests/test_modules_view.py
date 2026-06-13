@@ -105,6 +105,25 @@ def _load_contrib_bay_mappings():
 class TestMergeTransceiverDataPortIdentity:
     """Transceiver merge should preserve stable port identity metadata."""
 
+    def test_malformed_transceiver_payload_returns_error_without_crashing(self):
+        """A truthy success with a non-list payload (or a list of non-dicts) must surface as an
+        error string — not 500 on txr.get(...) — so the caller skips the cache and warns."""
+        view = _make_view()
+        view.librenms_id = 100
+        seed = [{"entPhysicalIndex": 1, "entPhysicalName": "Gi0/1"}]
+
+        # dict payload under success=True
+        view._librenms_api.get_device_transceivers.return_value = (True, {"unexpected": "dict"})
+        inventory, error = view._merge_transceiver_data(list(seed))
+        assert inventory == seed  # untouched
+        assert error and "malformed transceiver payload" in error
+
+        # list with a non-dict entry
+        view._librenms_api.get_device_transceivers.return_value = (True, [{"entity_physical_index": 2}, "bad"])
+        inventory, error = view._merge_transceiver_data(list(seed))
+        assert inventory == seed
+        assert error and "malformed transceiver payload" in error
+
     def test_synthetic_item_includes_port_identity_metadata(self):
         view = _make_view()
         view.librenms_id = 100

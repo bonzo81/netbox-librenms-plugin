@@ -1350,8 +1350,15 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         module = get_object_or_404(Module, pk=module_id, device=target_device)
 
         bind_result = None
+        # A primary interface is bindable only with both a cache-resolved item AND a server
+        # context. Distinguish "there is no primary to bind" (bind_item falsy) from "a primary
+        # exists but we never attempted the bind" (bind_item set, server_key blank): the latter
+        # must not fall through to the adoption-only success path below, or we'd report success
+        # while the row's primary port_id was never associated.
+        primary_bindable = bool(bind_item)
+        primary_bind_attempted = bool(bind_item and server_key)
         try:
-            if bind_item and server_key:
+            if primary_bind_attempted:
                 bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
         except Exception:
             logger.exception(
@@ -1371,7 +1378,14 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
             # makes the bind a no-op, the adoption is skipped, and the button never clears.
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
-            if bind_result is None or bind_result.get("status") == "bound":
+            if primary_bindable and not primary_bind_attempted:
+                # Primary identity exists but there was no server context to bind it; don't
+                # adopt-and-succeed as if the row were fully handled.
+                bind_result = {
+                    "status": "failed",
+                    "reason": "no LibreNMS server context to associate the interface",
+                }
+            elif bind_result is None or bind_result.get("status") == "bound":
                 try:
                     adopt_result = _adopt_existing_template_interfaces(target_device, module)
                 except Exception:

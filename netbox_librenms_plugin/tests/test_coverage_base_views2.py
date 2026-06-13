@@ -1138,6 +1138,28 @@ class TestPrepareContextInterfaceNameFieldNone:
         mock_gif.assert_called_once_with(request)
         assert result is None  # returns None because cache miss
 
+    def test_fetch_fresh_malformed_ip_payload_returns_none(self):
+        """A success flag with a non-list get_ip_addresses() payload (or a list with non-dict
+        entries) must be treated as a fetch failure — return None before enrichment so post()
+        neither renders an empty table under a success banner nor caches the empty snapshot."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch.object(view, "get_ip_addresses", return_value=(True, {"unexpected": "dict"})),
+            patch.object(view, "_resolve_management_ip", return_value="") as mock_mgmt,
+            patch.object(view, "enrich_ip_data") as mock_enrich,
+        ):
+            result = view._prepare_context(request, obj, "ifName", fetch_fresh=True)
+
+        assert result is None
+        mock_mgmt.assert_not_called()  # bail before the live mgmt-ip lookup
+        mock_enrich.assert_not_called()  # never enrich a malformed payload
+        mock_cache.set.assert_not_called()  # never cache the empty snapshot as complete
+
     def test_cached_render_reuses_cached_ports_without_live_calls(self):
         """A warm-cache render must enrich from the cached ports_by_id map and never call
         get_port_by_id(), so the IP tab keeps working when LibreNMS is unavailable."""

@@ -2847,3 +2847,10 @@ class TestBaseIPAddressTableViewFlagManagementIp:
         view = self._make_view()
         view._librenms_api.get_device_info.return_value = (True, {"ip": ""})
         assert view._resolve_management_ip() == ""
+
+    def test_resolve_blank_when_mgmt_ip_not_a_string(self):
+        """A malformed-but-dict-shaped payload (e.g. {"ip": 123}) must fall back to "" rather
+        than raising AttributeError on .strip() and 500-ing the fresh refresh."""
+        view = self._make_view()
+        view._librenms_api.get_device_info.return_value = (True, {"ip": 123})
+        assert view._resolve_management_ip() == ""
