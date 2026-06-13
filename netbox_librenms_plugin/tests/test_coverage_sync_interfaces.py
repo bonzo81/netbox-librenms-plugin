@@ -1228,117 +1228,101 @@ class TestSyncInterfacesViewSyncSelected:
 
 
 class TestSyncLagAndParentRelationships:
+    """Outcome tests for the bulk LAG/parent relationship sync, driven against real NetBox
+    Device/Interface objects (the real _resolve_interface_by_port_id, _interfaces_same_owner and
+    Interface.full_clean run) so the linking — and the new per-row owner pinning — is verified
+    end-to-end rather than re-asserting mock calls."""
+
+    @staticmethod
+    def _make_device():
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        site = Site.objects.create(name="LagSite", slug="lag-site")
+        mfr = Manufacturer.objects.create(name="LagMfr", slug="lag-mfr")
+        dtype = DeviceType.objects.create(manufacturer=mfr, model="LagDT", slug="lag-dt")
+        role = DeviceRole.objects.create(name="LagRole", slug="lag-role", color="0000ff")
+        return Device.objects.create(name="lag-dev", device_type=dtype, role=role, site=site, status="active")
+
+    @staticmethod
+    def _iface(device, name, port_id, itype="1000base-t"):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = Interface.objects.create(device=device, name=name, type=itype)
+        set_librenms_device_id(iface, port_id, "default")
+        iface.save()
+        return iface
+
     def _make_view(self, name_field="ifName", selected_port_ids=None):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
         view.interface_name_field = name_field
+        view.request = MagicMock()
+        view.request.POST = {}  # no per-row device_selection → owner defaults to the page device
         if selected_port_ids is not None:
             view._selected_port_ids = set(selected_port_ids)
         return view
 
-    def test_duplicate_display_name_members_not_collapsed(self):
-        """In ifDescr mode two member ports can share a display name; both must still be
-        linked to their LAG. Keying selection by port_id (not the colliding name) is the fix."""
-        from dcim.models import Interface
-        from netbox_librenms_plugin.views.sync import interfaces as mod
+    def test_duplicate_display_name_members_not_collapsed(self, db):
+        """In ifDescr mode two member ports share a display name; both must still be linked to
+        their LAG. Keying selection by port_id (not the colliding name) is the fix."""
+        device = self._make_device()
+        m1 = self._iface(device, "Gi0/1", 10)
+        m2 = self._iface(device, "Gi0/2", 11)
+        agg = self._iface(device, "Po1", 100, itype="lag")
 
-        view = self._make_view(name_field="ifDescr")
-        obj = MagicMock()
-
-        # Two members share ifDescr "Ethernet" but have distinct port_ids; both in LAG 100.
         ports_data = [
             {"ifDescr": "Ethernet", "ifName": "Gi0/1", "port_id": 10},
             {"ifDescr": "Ethernet", "ifName": "Gi0/2", "port_id": 11},
             {"ifDescr": "Po1", "ifName": "Po1", "port_id": 100},
         ]
         relationships = {"lag_members": {"10": 100, "11": 100}, "sub_interfaces": {}}
-        selected = ["Ethernet"]  # both member rows carry the same checkbox value
 
-        members = {
-            "10": MagicMock(spec=Interface, lag_id=None),
-            "11": MagicMock(spec=Interface, lag_id=None),
-        }
-        agg = MagicMock(spec=Interface, type="lag", pk=100)
+        view = self._make_view(name_field="ifDescr")
+        view._sync_lag_and_parent_relationships(device, ["Ethernet"], ports_data, relationships, "default")
 
-        def resolve(o, port_id, server_key, name_hint=""):
-            return (agg, None) if port_id == "100" else (members[port_id], None)
+        m1.refresh_from_db()
+        m2.refresh_from_db()
+        assert m1.lag_id == agg.pk
+        assert m2.lag_id == agg.pk
 
-        with (
-            patch.object(mod, "_resolve_interface_by_port_id", side_effect=resolve),
-            patch.object(mod, "_interfaces_same_owner", return_value=True),
-            patch.object(mod, "transaction"),
-        ):
-            view._sync_lag_and_parent_relationships(obj, selected, ports_data, relationships, "default")
-
-        # Both members linked to the aggregate — the duplicate display name didn't collapse.
-        assert members["10"].lag is agg
-        assert members["11"].lag is agg
-        members["10"].save.assert_called()
-        members["11"].save.assert_called()
-
-    def test_member_selected_only_by_stable_id_is_linked(self):
+    def test_member_selected_only_by_stable_id_is_linked(self, db):
         """A port present only via select_port_id (not selected by display name) is still
         processed by the relationship sync."""
-        from dcim.models import Interface
-        from netbox_librenms_plugin.views.sync import interfaces as mod
+        device = self._make_device()
+        member = self._iface(device, "Gi0/2", 11)
+        agg = self._iface(device, "Po1", 100, itype="lag")
 
-        view = self._make_view(name_field="ifName", selected_port_ids={"11"})
-        obj = MagicMock()
         ports_data = [
             {"ifName": "Gi0/2", "port_id": 11},
             {"ifName": "Po1", "port_id": 100},
         ]
         relationships = {"lag_members": {"11": 100}, "sub_interfaces": {}}
-        selected = []  # nothing selected by name; only port_id 11 via select_port_id
-
-        member = MagicMock(spec=Interface, lag_id=None)
-        agg = MagicMock(spec=Interface, type="lag", pk=100)
-
-        def resolve(o, port_id, server_key, name_hint=""):
-            return (agg, None) if port_id == "100" else (member, None)
-
-        with (
-            patch.object(mod, "_resolve_interface_by_port_id", side_effect=resolve),
-            patch.object(mod, "_interfaces_same_owner", return_value=True),
-            patch.object(mod, "transaction"),
-        ):
-            view._sync_lag_and_parent_relationships(obj, selected, ports_data, relationships, "default")
-
-        assert member.lag is agg
-
-    def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self):
-        """A relationship that fails Interface.full_clean() (e.g. a self-LAG from stale or
-        crafted port_stack data) must be skipped, not persisted."""
-        from dcim.models import Interface
-        from django.core.exceptions import ValidationError
-        from netbox_librenms_plugin.views.sync import interfaces as mod
 
         view = self._make_view(name_field="ifName", selected_port_ids={"11"})
-        obj = MagicMock()
-        ports_data = [
-            {"ifName": "Gi0/2", "port_id": 11},
-            {"ifName": "Po1", "port_id": 100},
-        ]
-        relationships = {"lag_members": {"11": 100}, "sub_interfaces": {}}
-        selected = []
+        view._sync_lag_and_parent_relationships(device, [], ports_data, relationships, "default")
 
-        member = MagicMock(spec=Interface, lag_id=None)
-        member.full_clean.side_effect = ValidationError("self-link not allowed")
-        agg = MagicMock(spec=Interface, type="lag", pk=100)
+        member.refresh_from_db()
+        assert member.lag_id == agg.pk
 
-        def resolve(o, port_id, server_key, name_hint=""):
-            return (agg, None) if port_id == "100" else (member, None)
+    def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self, db):
+        """A relationship that fails Interface.full_clean() (a self-LAG from stale/crafted
+        port_stack data) must be skipped, not persisted."""
+        device = self._make_device()
+        member = self._iface(device, "Gi0/2", 11)
 
-        with (
-            patch.object(mod, "_resolve_interface_by_port_id", side_effect=resolve),
-            patch.object(mod, "_interfaces_same_owner", return_value=True),
-            patch.object(mod, "transaction"),
-        ):
-            view._sync_lag_and_parent_relationships(obj, selected, ports_data, relationships, "default")
+        ports_data = [{"ifName": "Gi0/2", "port_id": 11}]
+        # Self-LAG: the member's aggregate resolves back to itself (port_id 11 → 11), which
+        # Interface.full_clean() rejects.
+        relationships = {"lag_members": {"11": 11}, "sub_interfaces": {}}
 
-        # full_clean() rejected the link → it must not be saved.
-        member.save.assert_not_called()
+        view = self._make_view(name_field="ifName", selected_port_ids={"11"})
+        view._sync_lag_and_parent_relationships(device, [], ports_data, relationships, "default")
+
+        member.refresh_from_db()
+        assert member.lag_id is None  # invalid self-LAG was not persisted
 
 
 # A POSTed valid non-default server_key must scope the sync to that server without 500ing on a
@@ -1510,6 +1494,75 @@ class TestResolveInterfaceByPortId:
             mock_intf_cls.objects.get.side_effect = RuntimeError("database is down")
             with pytest.raises(RuntimeError):
                 _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
+
+
+class TestResolveInterfaceByPortIdExpectedOwner:
+    """Real-DB coverage for the expected_owner guard in _resolve_interface_by_port_id.
+
+    The librenms_id search spans every VC member, so a stale/reused id can resolve uniquely onto
+    a *different* member than the row was synced to. Exercised against real VC + Interface objects
+    (not mocks) so the cross-member resolution and the owner check are validated end-to-end.
+    Each test takes pytest-django's ``db`` fixture to enable real database access.
+    """
+
+    @staticmethod
+    def _make_vc_members():
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site, VirtualChassis
+
+        site = Site.objects.create(name="VCSite", slug="vc-site")
+        mfr = Manufacturer.objects.create(name="VCMfr", slug="vc-mfr")
+        dtype = DeviceType.objects.create(manufacturer=mfr, model="VCDT", slug="vc-dt")
+        role = DeviceRole.objects.create(name="VCRole", slug="vc-role", color="00ff00")
+        vc = VirtualChassis.objects.create(name="VC-1")
+        common = {"device_type": dtype, "role": role, "site": site, "status": "active", "virtual_chassis": vc}
+        member1 = Device.objects.create(name="vc-m1", vc_position=1, **common)
+        member2 = Device.objects.create(name="vc-m2", vc_position=2, **common)
+        return member1, member2
+
+    @staticmethod
+    def _iface_with_librenms_id(device, name, port_id, server_key="default"):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = Interface.objects.create(device=device, name=name, type="1000base-t")
+        set_librenms_device_id(iface, port_id, server_key)
+        iface.save()
+        return iface
+
+    def test_rejects_match_on_a_different_vc_member(self, db):
+        """port_id resolves uniquely onto member2's interface; resolving from member1 with
+        expected_owner=member1 must reject it (the fix) — and accept it without the guard."""
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+
+        member1, member2 = self._make_vc_members()
+        iface2 = self._iface_with_librenms_id(member2, "Gi0/1", 42)
+
+        # Without the guard: the VC-wide search finds member2's interface (the latent bug).
+        found, err = _resolve_interface_by_port_id(member1, "42", "default")
+        assert err is None
+        assert found == iface2
+
+        # With expected_owner pinned to member1: the foreign-member match is rejected.
+        found, err = _resolve_interface_by_port_id(member1, "42", "default", expected_owner=(member1.pk, None))
+        assert found is None
+        assert err and "different owner" in err
+
+        # With expected_owner matching the real owner (member2): accepted.
+        found, err = _resolve_interface_by_port_id(member1, "42", "default", expected_owner=(member2.pk, None))
+        assert err is None
+        assert found == iface2
+
+    def test_accepts_match_on_the_expected_member(self, db):
+        """An interface that genuinely lives on the expected member resolves cleanly."""
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
+
+        member1, _ = self._make_vc_members()
+        iface1 = self._iface_with_librenms_id(member1, "Gi0/1", 7)
+
+        found, err = _resolve_interface_by_port_id(member1, "7", "default", expected_owner=(member1.pk, None))
+        assert err is None
+        assert found == iface1
 
 
 class TestInterfaceLinkValidationErrorNoStackTrace:

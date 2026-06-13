@@ -232,6 +232,16 @@ class SyncInterfacesView(
                 if port_id not in port_by_id:
                     continue
 
+                # Pin both ends of the relationship to the owner this row was synced onto (the
+                # per-row device_selection target, or the VM). The VC-wide port_id search can
+                # otherwise resolve a child/parent uniquely onto a *different* member that carries
+                # the same stale librenms_id, persisting lag/parent on the wrong interface.
+                row_name = port_by_id[port_id].get(interface_name_field)
+                target_device = self._resolve_row_target_device(obj, row_name)
+                if target_device is None:
+                    continue
+                expected_owner = _interface_owner_for_object(target_device)
+
                 # LAG membership: this interface is a member of a LAG aggregate
                 raw_lag = lag_members.get(port_id, lag_members.get(int(port_id) if port_id.isdigit() else None))
                 if raw_lag is not None:
@@ -242,7 +252,9 @@ class SyncInterfacesView(
                     # wrong name and silently skip the LAG link. Fall back to ifName if absent.
                     lag_name = lag_entry.get(interface_name_field) or lag_entry.get("ifName", "")
 
-                    member_iface, err = _resolve_interface_by_port_id(obj, port_id, server_key)
+                    member_iface, err = _resolve_interface_by_port_id(
+                        obj, port_id, server_key, expected_owner=expected_owner
+                    )
                     if err:
                         logger.debug("LAG member lookup failed during bulk sync: %s", err)
                         continue
@@ -250,7 +262,9 @@ class SyncInterfacesView(
                     if not isinstance(member_iface, Interface):
                         continue  # VMInterface does not support lag
 
-                    agg_iface, err = _resolve_interface_by_port_id(obj, lag_port_id, server_key, name_hint=lag_name)
+                    agg_iface, err = _resolve_interface_by_port_id(
+                        obj, lag_port_id, server_key, name_hint=lag_name, expected_owner=expected_owner
+                    )
                     if err:
                         logger.debug("LAG aggregate lookup failed during bulk sync: %s", err)
                         continue
@@ -297,13 +311,15 @@ class SyncInterfacesView(
                     # Active display field for the name fallback (see the LAG branch above).
                     parent_name = parent_entry.get(interface_name_field) or parent_entry.get("ifName", "")
 
-                    child_iface, err = _resolve_interface_by_port_id(obj, port_id, server_key)
+                    child_iface, err = _resolve_interface_by_port_id(
+                        obj, port_id, server_key, expected_owner=expected_owner
+                    )
                     if err:
                         logger.debug("Sub-iface child lookup failed during bulk sync: %s", err)
                         continue
 
                     parent_iface, err = _resolve_interface_by_port_id(
-                        obj, parent_port_id, server_key, name_hint=parent_name
+                        obj, parent_port_id, server_key, name_hint=parent_name, expected_owner=expected_owner
                     )
                     if err:
                         logger.debug("Sub-iface parent lookup failed during bulk sync: %s", err)
@@ -404,6 +420,37 @@ class SyncInterfacesView(
         queryset = self.restricted_queryset(Device).select_for_update(of=("self",))
         return {device.pk: device for device in queryset.filter(pk__in=target_ids).order_by("pk")}
 
+    def _resolve_row_target_device(self, obj, interface_name):
+        """The Device a given interface row syncs to.
+
+        Honors the POSTed ``device_selection_<name>`` when it names a valid VC member. Returns
+        ``None`` for an invalid, stale, or inaccessible explicit target. The relationship phase
+        reuses this so a lag/parent link is pinned to the same owner the row was synced onto, not
+        an arbitrary VC member that happens to carry the same (possibly stale) librenms_id.
+        """
+        if not isinstance(obj, Device):
+            return obj
+        selected_device_id = self.request.POST.get(f"device_selection_{interface_name}")
+        if not selected_device_id:
+            return obj
+        try:
+            # Scoped: the id comes from the POST, and VC membership proves where the device
+            # sits, not that the caller's grant covers it.
+            locked_targets = getattr(self, "_locked_target_devices", None)
+            if locked_targets is None:
+                target_device = self.restricted_queryset(Device).get(id=selected_device_id)
+            else:
+                target_device = locked_targets[int(selected_device_id)]
+        except (Device.DoesNotExist, KeyError, ValueError, TypeError):
+            return None
+        # Both rows are current and locked in the HTTP sync path. Re-check that the
+        # selected device is the page device or remains in the same virtual chassis.
+        if target_device.id != obj.id and (
+            obj.virtual_chassis_id is None or target_device.virtual_chassis_id != obj.virtual_chassis_id
+        ):
+            return None
+        return target_device
+
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         """Create or update a single NetBox interface from LibreNMS data."""
         interface_name = librenms_interface.get(interface_name_field)
@@ -411,31 +458,12 @@ class SyncInterfacesView(
 
         if isinstance(obj, Device):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            device_selection_key = f"device_selection_{interface_name}"
-            selected_device_id = self.request.POST.get(device_selection_key)
-
-            if selected_device_id:
-                try:
-                    locked_targets = getattr(self, "_locked_target_devices", None)
-                    if locked_targets is None:
-                        target_device = self.restricted_queryset(Device).get(id=selected_device_id)
-                    else:
-                        target_device = locked_targets[int(selected_device_id)]
-                    # Both rows are current and locked in the HTTP sync path. Re-check that the
-                    # selected device is the page device or remains in the same virtual chassis.
-                    if target_device.id != obj.id and (
-                        obj.virtual_chassis_id is None or target_device.virtual_chassis_id != obj.virtual_chassis_id
-                    ):
-                        self._record_skipped_conflict(interface_name, "selected target unavailable")
-                        return
-                except (Device.DoesNotExist, KeyError, ValueError, TypeError):
-                    # The user explicitly selected a target. If it is stale or outside the
-                    # caller's grant, do not silently sync the row onto the page device.
-                    self._record_skipped_conflict(interface_name, "selected target unavailable")
-                    return
-            else:
-                target_device = obj
-
+            target_device = self._resolve_row_target_device(obj, interface_name)
+            if target_device is None:
+                # The user explicitly selected a target. If it is stale or outside the
+                # caller's grant, do not silently sync the row onto the page device.
+                self._record_skipped_conflict(interface_name, "selected target unavailable")
+                return
             interface = self._resolve_device_interface(target_device, interface_name, port_id, server_key)
         elif isinstance(obj, VirtualMachine):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
@@ -766,13 +794,31 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
         return JsonResponse(response_data)
 
 
-def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint: str = ""):
+def _interface_owner(iface):
+    """Owner tuple ``(device_id, virtual_machine_id)`` for an Interface/VMInterface."""
+    return (getattr(iface, "device_id", None), getattr(iface, "virtual_machine_id", None))
+
+
+def _interface_owner_for_object(obj):
+    """Owner tuple ``(device_id, virtual_machine_id)`` for the Device/VM that owns an interface,
+    matching the shape :func:`_interface_owner` produces (used as ``expected_owner``)."""
+    if isinstance(obj, Device):
+        return (obj.pk, None)
+    return (None, obj.pk)
+
+
+def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint: str = "", expected_owner=None):
     """Resolve a LibreNMS port_id to a NetBox Interface/VMInterface.
 
     1. Searches obj's interfaces for one whose librenms_id custom field matches port_id.
        For Devices in a Virtual Chassis, searches all VC member interfaces.
     2. Falls back to exact name match when name_hint is provided (e.g. interface was
        created manually without a librenms_id).
+
+    *expected_owner* (optional ``(device_id, virtual_machine_id)`` tuple): when given, a match
+    whose owner differs is rejected. Because the VC search spans every member, a stale/reused
+    librenms_id can otherwise resolve uniquely onto a *different* member than the row was synced
+    to; pinning the owner stops a lag/parent write landing on the wrong interface.
     Returns (interface, None) on success or (None, error_str) on failure.
     """
     if not port_id:
@@ -801,27 +847,45 @@ def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint:
             if stored_id is not None and stored_id == target_id:
                 matches.append(iface)
     if len(matches) == 1:
-        return matches[0], None
+        iface = matches[0]
+        if expected_owner is not None and _interface_owner(iface) != expected_owner:
+            return None, f"LibreNMS port_id {port_id} resolves to a different owner than the selected row"
+        return iface, None
     if len(matches) > 1:
         return None, f"LibreNMS port_id {port_id} is ambiguous on {obj} (matches multiple interfaces)"
 
     if name_hint:
-        try:
-            if isinstance(obj, Device):
-                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
-                    iface = Interface.objects.get(device__in=member_ids, name=name_hint)
-                else:
-                    iface = Interface.objects.get(device=obj, name=name_hint)
-            else:
-                iface = VMInterface.objects.get(virtual_machine=obj, name=name_hint)
+        iface, err = _resolve_interface_by_name_hint(obj, name_hint)
+        if err:
+            return None, err
+        if iface is not None:
+            if expected_owner is not None and _interface_owner(iface) != expected_owner:
+                return None, f"Interface name '{name_hint}' resolves to a different owner than the selected row"
             return iface, None
-        except (Interface.DoesNotExist, VMInterface.DoesNotExist):
-            pass
-        except (Interface.MultipleObjectsReturned, VMInterface.MultipleObjectsReturned):
-            return None, f"Interface name '{name_hint}' is ambiguous on {obj}"
 
     return None, f"Interface with LibreNMS port_id {port_id} not found on {obj}"
+
+
+def _resolve_interface_by_name_hint(obj, name_hint):
+    """Exact-name fallback for :func:`_resolve_interface_by_port_id`.
+
+    Returns ``(iface, None)`` on a unique match, ``(None, None)`` when nothing matches, or
+    ``(None, error_str)`` on an ambiguous name.
+    """
+    try:
+        if isinstance(obj, Device):
+            if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
+                iface = Interface.objects.get(device__in=member_ids, name=name_hint)
+            else:
+                iface = Interface.objects.get(device=obj, name=name_hint)
+        else:
+            iface = VMInterface.objects.get(virtual_machine=obj, name=name_hint)
+        return iface, None
+    except (Interface.DoesNotExist, VMInterface.DoesNotExist):
+        return None, None
+    except (Interface.MultipleObjectsReturned, VMInterface.MultipleObjectsReturned):
+        return None, f"Interface name '{name_hint}' is ambiguous on {obj}"
 
 
 def _interfaces_same_owner(a, b) -> bool:
@@ -841,18 +905,22 @@ def _interfaces_same_owner(a, b) -> bool:
 class _PortIdResolveMixin:
     """Mixin to resolve a LibreNMS port_id to a NetBox interface by librenms_id custom field, then name fallback."""
 
-    def _resolve_interface_by_port_id(self, obj, port_id: str, server_key: str, name_hint: str = ""):
-        return _resolve_interface_by_port_id(obj, port_id, server_key, name_hint)
+    def _resolve_interface_by_port_id(
+        self, obj, port_id: str, server_key: str, name_hint: str = "", expected_owner=None
+    ):
+        return _resolve_interface_by_port_id(obj, port_id, server_key, name_hint, expected_owner)
 
 
 class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Set Interface.lag (member -> aggregate) based on LibreNMS port_stack data."""
 
-    required_object_permissions = {"POST": [("change", Interface)]}
+    # The owner device is resolved through a restricted queryset (see _get_object), so state
+    # that read here: a missing grant is an explicit 403, not a puzzling 404 at the lookup.
+    required_object_permissions = {"POST": [("view", Device), ("change", Interface)]}
 
     def _get_object(self, object_type, object_id):
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, pk=object_id)
         # VMInterface has no `lag` field, so LAG membership sync is device-only. Reject
         # VMs up front rather than resolving one and failing later — that path also ran a
         # mismatched ("change", Interface) permission check. Keeps the view honestly
@@ -875,12 +943,17 @@ class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if not port_id or not lag_port_id:
             return JsonResponse({"error": "port_id and lag_port_id are required"}, status=400)
 
-        member_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(self, obj, port_id, server_key)
+        # obj is the VC member the JS posted (vcMemberSelect), so both ends of the LAG must
+        # belong to it — pin the owner so a stale librenms_id can't resolve onto another member.
+        expected_owner = _interface_owner_for_object(obj)
+        member_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
+            self, obj, port_id, server_key, expected_owner=expected_owner
+        )
         if err:
             return JsonResponse({"error": f"Member interface: {err}"}, status=404)
 
         agg_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
-            self, obj, lag_port_id, server_key, name_hint=lag_name
+            self, obj, lag_port_id, server_key, name_hint=lag_name, expected_owner=expected_owner
         )
         if err:
             return JsonResponse({"error": f"Aggregate interface: {err}"}, status=404)
@@ -938,16 +1011,18 @@ class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
     def _get_object(self, object_type, object_id):
         if object_type == "device":
-            return get_object_or_404(Device, pk=object_id)
+            return self.restrict_object_or_404(Device, pk=object_id)
         if object_type == "virtualmachine":
-            return get_object_or_404(VirtualMachine, pk=object_id)
+            return self.restrict_object_or_404(VirtualMachine, pk=object_id)
         raise Http404("Invalid object type.")
 
     def post(self, request, object_type, object_id):
+        # The owner is resolved through a restricted queryset (_get_object), so its view
+        # permission belongs in the gate too.
         if object_type == "device":
-            self.required_object_permissions = {"POST": [("change", Interface)]}
+            self.required_object_permissions = {"POST": [("view", Device), ("change", Interface)]}
         elif object_type == "virtualmachine":
-            self.required_object_permissions = {"POST": [("change", VMInterface)]}
+            self.required_object_permissions = {"POST": [("view", VirtualMachine), ("change", VMInterface)]}
         else:
             raise Http404("Invalid object type.")
 
@@ -965,12 +1040,16 @@ class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         if not port_id or not parent_port_id:
             return JsonResponse({"error": "port_id and parent_port_id are required"}, status=400)
 
-        child_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(self, obj, port_id, server_key)
+        # obj is the VC member the JS posted, so both child and parent must belong to it.
+        expected_owner = _interface_owner_for_object(obj)
+        child_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
+            self, obj, port_id, server_key, expected_owner=expected_owner
+        )
         if err:
             return JsonResponse({"error": f"Child interface: {err}"}, status=404)
 
         parent_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
-            self, obj, parent_port_id, server_key, name_hint=parent_name
+            self, obj, parent_port_id, server_key, name_hint=parent_name, expected_owner=expected_owner
         )
         if err:
             return JsonResponse({"error": f"Parent interface: {err}"}, status=404)
