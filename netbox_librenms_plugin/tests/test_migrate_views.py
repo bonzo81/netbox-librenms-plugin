@@ -17,45 +17,58 @@ import pytest
 # ── helper: get_migrated_to_marker ────────────────────────────────────────
 
 
+def _make_migrate_device(name, librenms_cf=None):
+    """Create a real Device, optionally seeding its ``librenms_id`` custom field.
+
+    The marker/winner helpers read the value through NetBox's ``device.cf`` accessor and
+    resolve the winner via ``Device.objects`` — so a real device with a real custom field
+    exercises the actual CF read + ORM lookup, not a MagicMock that would accept any shape.
+    """
+    from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+    site, _ = Site.objects.get_or_create(name="MigSite", slug="mig-site")
+    mfr, _ = Manufacturer.objects.get_or_create(name="MigMfr", slug="mig-mfr")
+    dtype, _ = DeviceType.objects.get_or_create(model="MigDT", slug="mig-dt", defaults={"manufacturer": mfr})
+    role, _ = DeviceRole.objects.get_or_create(name="MigRole", slug="mig-role", defaults={"color": "00ff00"})
+    dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active")
+    if librenms_cf is not None:
+        dev.custom_field_data["librenms_id"] = librenms_cf
+        dev.save()
+    return dev
+
+
+@pytest.mark.django_db
 class TestGetMigratedToMarker:
     def test_returns_marker_when_present_and_well_formed(self):
         from netbox_librenms_plugin.utils import get_migrated_to_marker
 
-        donor = MagicMock()
-        donor.cf = {
-            "librenms_id": {
-                "default": {"_migrated_to": {"device_id": 42, "server_key": "default", "at": "2025-01-01T00:00:00Z"}}
-            }
-        }
+        marker_data = {"device_id": 42, "server_key": "default", "at": "2025-01-01T00:00:00Z"}
+        donor = _make_migrate_device("mig-donor", {"default": {"_migrated_to": marker_data}})
         marker = get_migrated_to_marker(donor, "default")
-        assert marker == {"device_id": 42, "server_key": "default", "at": "2025-01-01T00:00:00Z"}
+        assert marker == marker_data
 
     def test_returns_none_when_no_cf(self):
         from netbox_librenms_plugin.utils import get_migrated_to_marker
 
-        donor = MagicMock()
-        donor.cf = {}
+        donor = _make_migrate_device("mig-no-cf")
         assert get_migrated_to_marker(donor, "default") is None
 
     def test_returns_none_when_server_key_missing(self):
         from netbox_librenms_plugin.utils import get_migrated_to_marker
 
-        donor = MagicMock()
-        donor.cf = {"librenms_id": {"primary": {"_migrated_to": {"device_id": 42}}}}
+        donor = _make_migrate_device("mig-wrong-key", {"primary": {"_migrated_to": {"device_id": 42}}})
         assert get_migrated_to_marker(donor, "default") is None
 
     def test_returns_none_when_marker_lacks_device_id(self):
         from netbox_librenms_plugin.utils import get_migrated_to_marker
 
-        donor = MagicMock()
-        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"server_key": "default"}}}}
+        donor = _make_migrate_device("mig-no-devid", {"default": {"_migrated_to": {"server_key": "default"}}})
         assert get_migrated_to_marker(donor, "default") is None
 
     def test_returns_none_when_legacy_bare_int(self):
         from netbox_librenms_plugin.utils import get_migrated_to_marker
 
-        donor = MagicMock()
-        donor.cf = {"librenms_id": 42}
+        donor = _make_migrate_device("mig-bare-int", 42)
         assert get_migrated_to_marker(donor, "default") is None
 
     def test_returns_none_for_none_device(self):
@@ -68,80 +81,84 @@ class TestGetMigratedToMarker:
         # treated as a valid pk (would otherwise map to device #1).
         from netbox_librenms_plugin.utils import get_migrated_to_marker
 
-        donor = MagicMock()
-        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": True, "server_key": "default"}}}}
+        donor = _make_migrate_device(
+            "mig-bool", {"default": {"_migrated_to": {"device_id": True, "server_key": "default"}}}
+        )
         assert get_migrated_to_marker(donor, "default") is None
 
     def test_returns_none_when_device_id_not_positive(self):
         from netbox_librenms_plugin.utils import get_migrated_to_marker
 
-        for bad in (0, -5):
-            donor = MagicMock()
-            donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": bad, "server_key": "default"}}}}
+        for i, bad in enumerate((0, -5)):
+            donor = _make_migrate_device(
+                f"mig-nonpos-{i}", {"default": {"_migrated_to": {"device_id": bad, "server_key": "default"}}}
+            )
             assert get_migrated_to_marker(donor, "default") is None
 
 
+@pytest.mark.django_db
 class TestBuildMigratedContext:
-    def test_no_marker_returns_none_pair_without_db_hit(self):
+    def test_no_marker_returns_none_pair(self):
         from netbox_librenms_plugin.utils import build_migrated_context
 
-        donor = MagicMock()
-        donor.cf = {}
-        # A MagicMock would let any attribute query through; assert no Device lookup.
-        with patch("dcim.models.Device") as mock_device:
-            ctx = build_migrated_context(donor, "default")
+        donor = _make_migrate_device("mig-ctx-nomarker")
+        ctx = build_migrated_context(donor, "default")
+        # No marker → the winner lookup is short-circuited (None pair), no winner resolved.
         assert ctx == {"migrated_to_marker": None, "migrated_to_winner": None}
-        mock_device.objects.filter.assert_not_called()
 
     def test_marker_present_resolves_winner(self):
         from netbox_librenms_plugin.utils import build_migrated_context
 
-        donor = MagicMock()
-        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": 42, "server_key": "default"}}}}
-        winner = MagicMock(pk=42)
-        with patch("dcim.models.Device") as mock_device:
-            mock_device.objects.filter.return_value.first.return_value = winner
-            ctx = build_migrated_context(donor, "default")
-        assert ctx["migrated_to_marker"]["device_id"] == 42
-        assert ctx["migrated_to_winner"] is winner
+        winner = _make_migrate_device("mig-ctx-winner")
+        donor = _make_migrate_device(
+            "mig-ctx-donor",
+            {"default": {"_migrated_to": {"device_id": winner.pk, "server_key": "default"}}},
+        )
+        ctx = build_migrated_context(donor, "default")
+        assert ctx["migrated_to_marker"]["device_id"] == winner.pk
+        assert ctx["migrated_to_winner"].pk == winner.pk
 
 
 # ── helper: _resolve_winner_for_donor ─────────────────────────────────────
 
 
+@pytest.mark.django_db
 class TestResolveWinnerForDonor:
     def test_returns_winner_and_marker_when_both_exist(self):
         from netbox_librenms_plugin.views.sync.migrate import _resolve_winner_for_donor
 
-        donor = MagicMock()
-        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": 42, "server_key": "default", "at": "x"}}}}
-        winner = MagicMock(pk=42)
+        winner = _make_migrate_device("mig-rw-winner")
+        donor = _make_migrate_device(
+            "mig-rw-donor",
+            {"default": {"_migrated_to": {"device_id": winner.pk, "server_key": "default", "at": "x"}}},
+        )
 
-        with patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device:
-            mock_device.objects.filter.return_value.first.return_value = winner
-            result_winner, result_marker = _resolve_winner_for_donor(donor, "default")
+        result_winner, result_marker = _resolve_winner_for_donor(donor, "default")
 
-        assert result_winner is winner
-        assert result_marker["device_id"] == 42
+        assert result_winner.pk == winner.pk
+        assert result_marker["device_id"] == winner.pk
 
     def test_returns_none_winner_when_winner_deleted(self):
         from netbox_librenms_plugin.views.sync.migrate import _resolve_winner_for_donor
 
-        donor = MagicMock()
-        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": 42, "server_key": "default", "at": "x"}}}}
+        # Create then delete a winner so the marker references a now-missing pk.
+        winner = _make_migrate_device("mig-rw-gone")
+        gone_pk = winner.pk
+        donor = _make_migrate_device(
+            "mig-rw-donor2",
+            {"default": {"_migrated_to": {"device_id": gone_pk, "server_key": "default", "at": "x"}}},
+        )
+        type(winner).objects.filter(pk=gone_pk).delete()
 
-        with patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device:
-            mock_device.objects.filter.return_value.first.return_value = None
-            winner, marker = _resolve_winner_for_donor(donor, "default")
+        winner_result, marker = _resolve_winner_for_donor(donor, "default")
 
-        assert winner is None
-        assert marker["device_id"] == 42
+        assert winner_result is None
+        assert marker["device_id"] == gone_pk
 
     def test_returns_none_when_no_marker(self):
         from netbox_librenms_plugin.views.sync.migrate import _resolve_winner_for_donor
 
-        donor = MagicMock()
-        donor.cf = {}
+        donor = _make_migrate_device("mig-rw-nomarker")
         winner, marker = _resolve_winner_for_donor(donor, "default")
         assert winner is None
         assert marker is None
@@ -151,16 +168,17 @@ class TestResolveWinnerForDonor:
         make the move operate on one Device as both donor and winner. Fail closed as stale."""
         from netbox_librenms_plugin.views.sync.migrate import _resolve_winner_for_donor
 
-        donor = MagicMock(pk=42)
-        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": 42, "server_key": "default", "at": "x"}}}}
-        self_winner = MagicMock(pk=42)
+        donor = _make_migrate_device("mig-rw-self")
+        # Point the marker at the donor's own pk.
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default", "at": "x"}}
+        }
+        donor.save()
 
-        with patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device:
-            mock_device.objects.filter.return_value.first.return_value = self_winner
-            winner, marker = _resolve_winner_for_donor(donor, "default")
+        winner, marker = _resolve_winner_for_donor(donor, "default")
 
         assert winner is None
-        assert marker["device_id"] == 42
+        assert marker["device_id"] == donor.pk
 
 
 # ── MoveInterfaceToWinnerView ─────────────────────────────────────────────
