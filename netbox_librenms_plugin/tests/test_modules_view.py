@@ -304,6 +304,36 @@ class TestMergeTransceiverDataPortIdentity:
         assert mock_merge.call_args.kwargs.get("ports_data") == ports_payload
         assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
 
+    def test_post_treats_non_list_inventory_as_fetch_failure(self):
+        """get_device_inventory is an external boundary: a success flag with a non-list
+        payload (e.g. a dict on a malformed response) must be handled as a fetch failure —
+        cache cleared + error message — not crash the iterate/mutate that assumes a list."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._librenms_api.get_librenms_id.return_value = 777
+        # success=True but the payload is a dict, not list[dict].
+        view._librenms_api.get_device_inventory.return_value = (True, {"error": "weird shape"})
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.build_migrated_context", return_value={}),
+        ):
+            view.post(request, pk=1)
+
+        # Failure branch: error surfaced, stale inventory cache cleared, and the ports fetch
+        # (which only runs after a *valid* inventory) is never reached.
+        mock_messages.error.assert_called_once()
+        mock_cache.delete.assert_called()
+        view._librenms_api.get_ports.assert_not_called()
+
     def test_post_warns_when_ports_fetch_fails(self):
         view = _make_view()
         view.model = MagicMock()
@@ -1691,6 +1721,28 @@ class TestBuildRowSerialMismatch:
             assert not row.get(flag)
         for key in ("model_suggestion", "type_suggestion", "module_type_create", "installed_module_id"):
             assert key not in row
+
+    def test_oob_row_with_integrating_ancestor_still_reports_oob(self):
+        """An OOB item that also looks like an integrated-child duplicate must stay 'OOB', not
+        flip to 'Integrated'. The OOB short-circuit runs BEFORE the integrated-child check, so
+        a controller-fed row never loses its OOB status (the ancestor lookup is never reached)."""
+        view = self._view()
+        oob_item = self._make_item(serial="NS225161205")
+        oob_item["_source"] = "oob"
+
+        with (
+            patch.object(
+                view, "_find_integrating_ancestor", return_value={"entPhysicalName": "P", "entPhysicalIndex": 1}
+            ) as mock_anc,
+            patch.object(view, "_match_module_bay", return_value=None) as mock_match_bay,
+        ):
+            row = view._build_row(oob_item, {}, {}, {})
+
+        assert row["status"] == "OOB"
+        assert row["_source"] == "oob"
+        # OOB returns before the integrated-child check even consults the ancestor.
+        mock_anc.assert_not_called()
+        mock_match_bay.assert_not_called()
 
     def _common_patches(self, view, bay, matched_type_name):
         """Return a stack of common patches for _build_row helper calls."""

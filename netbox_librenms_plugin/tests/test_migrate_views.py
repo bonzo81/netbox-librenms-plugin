@@ -144,6 +144,22 @@ class TestResolveWinnerForDonor:
         assert winner is None
         assert marker is None
 
+    def test_self_pointing_marker_returns_none_winner(self):
+        """A marker pointing back at the donor (winner.pk == donor.pk) is corrupt — it would
+        make the move operate on one Device as both donor and winner. Fail closed as stale."""
+        from netbox_librenms_plugin.views.sync.migrate import _resolve_winner_for_donor
+
+        donor = MagicMock(pk=42)
+        donor.cf = {"librenms_id": {"default": {"_migrated_to": {"device_id": 42, "server_key": "default", "at": "x"}}}}
+        self_winner = MagicMock(pk=42)
+
+        with patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device:
+            mock_device.objects.filter.return_value.first.return_value = self_winner
+            winner, marker = _resolve_winner_for_donor(donor, "default")
+
+        assert winner is None
+        assert marker["device_id"] == 42
+
 
 # ── MoveInterfaceToWinnerView ─────────────────────────────────────────────
 

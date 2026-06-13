@@ -6054,3 +6054,20 @@ class TestResolveSetPrimaryIp:
         request = self._make_request()
         with patch("netbox_librenms_plugin.utils.get_user_pref", return_value=True):
             assert resolve_set_primary_ip(request) is True
+
+
+class TestDeviceValidationDetailsTemplate:
+    """The 'Full Sync Page' link in the import-validation panel must carry the active
+    server_key so it opens on the same LibreNMS instance the user is validating against,
+    not the session/default server."""
+
+    def _source(self):
+        from django.template.loader import get_template
+
+        return get_template("netbox_librenms_plugin/htmx/device_validation_details.html").template.source
+
+    def test_full_sync_link_includes_active_server_key(self):
+        src = self._source()
+        assert "Full Sync Page" in src
+        # The href must conditionally append the active, url-encoded server_key.
+        assert "server_key={{ server_key|urlencode }}" in src

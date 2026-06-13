@@ -676,6 +676,21 @@ class TestOOBHelpers:
         set_librenms_oob(obj, 17, "primary", oob_type="idrac")
         assert get_librenms_device_id(obj, "primary") == 42
 
+    def test_set_oob_fails_closed_on_non_positive_int_host_id(self):
+        """A stored bare-int host id of 0 or negative is corrupt: it must raise rather than be
+        wrapped into a bogus {"id": 0} that get_librenms_device_id() then reads as missing.
+        Mirrors the string branch, which already routes through coerce_librenms_id()."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        import pytest
+
+        for bad in (0, -5):
+            obj = MagicMock()
+            obj.custom_field_data = {"librenms_id": {"primary": bad}}
+            obj.cf = obj.custom_field_data
+            with pytest.raises(ValueError, match="not a valid id"):
+                set_librenms_oob(obj, 17, "primary", oob_type="idrac")
+
     def test_set_oob_rejects_unknown_type(self):
         """set_librenms_oob raises ValueError for a type that doesn't match OOB_TYPE_PATTERN."""
         from netbox_librenms_plugin.utils import set_librenms_oob

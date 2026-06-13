@@ -627,6 +627,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     "role": None,
                     "available_roles": validation.get("device_role", {}).get("available_roles", []),
                 }
+                # A previously-unmatched row may still carry the "Device role must be manually
+                # selected before import" blocker; clear it now that the row resolves to an
+                # existing object, so the stale message doesn't linger in the UI.
+                remove_validation_issue(validation, "role")
             recalculate_validation_status(validation, is_vm=actual_is_vm)
             # Re-assert non-importable: recalculate sets can_import from issues list,
             # but a late-found existing match must never be import-ready.

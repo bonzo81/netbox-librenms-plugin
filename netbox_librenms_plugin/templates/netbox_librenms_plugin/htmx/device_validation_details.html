@@ -1052,7 +1052,9 @@
         <i class="mdi mdi-open-in-new"></i> View in NetBox
       </a>
       {% if validation.existing_match_type == 'librenms_id' or validation.existing_match_type == 'librenms_oob' %}
-        <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}"
+        {# Carry the active server_key so the Full Sync page opens on the same LibreNMS #}
+        {# instance the user is validating against, not the session/default server. #}
+        <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}{% if server_key %}?server_key={{ server_key|urlencode }}{% endif %}"
            class="btn btn-outline-primary btn-sm" target="_blank" rel="noopener noreferrer">
           <i class="mdi mdi-sync"></i> Full Sync Page
         </a>

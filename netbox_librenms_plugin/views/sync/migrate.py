@@ -42,8 +42,9 @@ def _resolve_winner_for_donor(donor, server_key="default"):
 
     - ``(None, None)`` when no ``_migrated_to`` marker is present.
     - ``(None, marker)`` when the marker exists but the winner device has
-      been deleted or the ``device_id`` in the marker is invalid/unparseable
-      (so callers can distinguish "no marker" from "stale marker").
+      been deleted, the ``device_id`` in the marker is invalid/unparseable, or
+      the marker points back at the donor itself (so callers can distinguish
+      "no marker" from "stale marker").
     - ``(winner, marker)`` when the marker is valid and the winner exists.
 
     ``marker`` is the dict written by :func:`mark_librenms_migrated`.
@@ -63,6 +64,11 @@ def _resolve_winner_for_donor(donor, server_key="default"):
         return None, marker
     winner = Device.objects.filter(pk=winner_pk).first()
     if winner is None:
+        return None, marker
+    # A self-pointing marker (winner == donor) is corrupt: it would make the move
+    # operate on the same Device as both donor and winner (e.g. reconciling a device's
+    # IP FKs against itself). Fail closed as a stale marker rather than resolve it.
+    if winner.pk == donor.pk:
         return None, marker
     return winner, marker
 

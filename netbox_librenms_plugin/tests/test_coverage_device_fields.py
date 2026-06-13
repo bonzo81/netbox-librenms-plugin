@@ -1244,8 +1244,10 @@ class TestCreateAndAssignPlatformView:
         )
         # The upfront gate no longer reads PlatformMapping at all (neither .exists() nor
         # .first()), so no lookup stub is needed — the gate must not require the perm
-        # regardless of whether a mapping exists.
-        mock_mapping_cls = MagicMock()
+        # regardless of whether a mapping exists. Assert against the REAL model symbol so a
+        # regression that left ('add', PlatformMapping) in the perms can't slip past a
+        # MagicMock that never equals the real class.
+        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
 
         captured = {}
 
@@ -1260,11 +1262,11 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
         ):
             view.post(req, pk=1)
 
-        assert ("add", mock_mapping_cls) not in captured["perms"], (
+        assert ("add", RealPlatformMapping) not in captured["perms"], (
             "('add', PlatformMapping) must not gate the upfront POST — the mapping is gated "
             "at the write site so the primary platform-assign isn't blocked"
         )
@@ -1276,8 +1278,9 @@ class TestCreateAndAssignPlatformView:
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
         # The upfront gate no longer reads PlatformMapping (see the sibling test); the perm
-        # is never required upfront, the mapping write gates itself at its own site.
-        mock_mapping_cls = MagicMock()
+        # is never required upfront, the mapping write gates itself at its own site. Assert
+        # against the REAL model symbol so a regression can't hide behind a MagicMock.
+        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
 
         captured = {}
 
@@ -1291,11 +1294,11 @@ class TestCreateAndAssignPlatformView:
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
             patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
         ):
             view.post(req, pk=1)
 
-        assert ("add", mock_mapping_cls) not in captured["perms"], (
+        assert ("add", RealPlatformMapping) not in captured["perms"], (
             "Did not expect ('add', PlatformMapping) when a mapping for the OS already exists"
         )
 

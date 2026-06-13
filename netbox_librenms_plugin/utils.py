@@ -1352,8 +1352,13 @@ def set_librenms_oob(
 
     entry = cf_value.get(server_key)
     if isinstance(entry, int) and not isinstance(entry, bool):
-        # Promote bare int to dict form, preserving the main device id.
-        entry = {"id": entry}
+        # Promote bare int to dict form, preserving the main device id. Pass it through
+        # coerce_librenms_id() like the string branch so a stored 0/negative host id fails
+        # closed instead of being wrapped into a bogus {"id": 0} that reads back as missing.
+        coerced = coerce_librenms_id(entry)
+        if coerced is None:
+            raise ValueError(f"Cannot attach OOB: stored librenms_id for {server_key!r} is not a valid id: {entry!r}")
+        entry = {"id": coerced}
     elif isinstance(entry, str):
         coerced = coerce_librenms_id(entry)
         if coerced:

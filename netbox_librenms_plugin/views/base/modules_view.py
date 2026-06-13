@@ -330,7 +330,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
 
-        if not success:
+        # get_device_inventory() is an external API boundary: a success flag with a
+        # non-list payload (dict/string/None on a malformed response) must be treated as a
+        # fetch failure, otherwise the iterate/mutate below turns a refresh into a 500.
+        if not success or not isinstance(inventory_data, list):
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
             messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
@@ -385,7 +388,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         oob_failed = False
         if oob_id:
             oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
-            if oob_success:
+            if oob_success and isinstance(oob_inventory, list):
                 main_max_idx = max(
                     (cast for item in inventory_data if (cast := _try_int(item.get("entPhysicalIndex"))) is not None),
                     default=0,
@@ -2219,6 +2222,37 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         name = item.get("entPhysicalName", "") or "-"
         description = item.get("entPhysicalDescr", "") or ""
 
+        # OOB-controller modules come from a *separate* device. Comparing them against this
+        # host's bays/types/installed modules is meaningless, and the host matching below could
+        # render an OOB row as "Matched"/"Installed" whenever labels happened to line up — a
+        # false-positive comparison. Short-circuit *before* any host bay/type/status resolution
+        # (and before the integrated-child check below — an OOB controller can itself expose
+        # integrated-child duplicates, which would otherwise steal the row into the "Integrated"
+        # path and drop its OOB status). Emit a read-only informational row with neutral
+        # bay/type/status. (A late post-match scrub can't undo a status the matching computed.)
+        if item.get("_source") == "oob":
+            return {
+                "name": name,
+                "model": model_name or "-",
+                "serial": serial or "-",
+                "description": description,
+                "item_class": phys_class,
+                "module_bay": "-",
+                "module_type": "-",
+                "status": "OOB",
+                "can_install": False,
+                "module_bay_id": None,
+                "module_type_id": None,
+                "depth": depth,
+                "ent_physical_index": item.get("entPhysicalIndex"),
+                "has_installable_children": False,
+                "librenms_port_id": item.get("_librenms_port_id"),
+                "librenms_ifname": item.get("_librenms_ifname"),
+                "librenms_ifdescr": item.get("_librenms_ifdescr"),
+                "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
+                "_source": "oob",
+            }
+
         # Detect "integrated child" SNMP duplicates (e.g. Nokia XIOM with a
         # fixed integrated MDA exposed as two ENTITY-MIB rows sharing the
         # same serial+model).  The child row is informational only — it has
@@ -2245,35 +2279,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "integrated_in_name": ancestor_name,
                 "integrated_in_index": integrating_ancestor.get("entPhysicalIndex"),
                 "_source": item.get("_source", "main"),
-            }
-
-        # OOB-controller modules come from a *separate* device. Comparing them against this
-        # host's bays/types/installed modules is meaningless, and the host matching below could
-        # render an OOB row as "Matched"/"Installed" whenever labels happened to line up — a
-        # false-positive comparison. Short-circuit *before* any host bay/type/status resolution
-        # and emit a read-only informational row with neutral bay/type/status. (A late post-match
-        # scrub can't undo a status the matching already computed.)
-        if item.get("_source") == "oob":
-            return {
-                "name": name,
-                "model": model_name or "-",
-                "serial": serial or "-",
-                "description": description,
-                "item_class": phys_class,
-                "module_bay": "-",
-                "module_type": "-",
-                "status": "OOB",
-                "can_install": False,
-                "module_bay_id": None,
-                "module_type_id": None,
-                "depth": depth,
-                "ent_physical_index": item.get("entPhysicalIndex"),
-                "has_installable_children": False,
-                "librenms_port_id": item.get("_librenms_port_id"),
-                "librenms_ifname": item.get("_librenms_ifname"),
-                "librenms_ifdescr": item.get("_librenms_ifdescr"),
-                "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
-                "_source": "oob",
             }
 
         # Match to NetBox module bay

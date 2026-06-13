@@ -994,6 +994,42 @@ class TestRefreshExistingDevice:
         assert validation["existing_match_type"] == "serial"
         assert validation["can_import"] is False
 
+    def test_fresh_lookup_no_role_clears_stale_role_blocker(self):
+        """When a fresh lookup resolves a previously-unmatched row to an existing role-less
+        device, the stale "Device role must be manually selected" blocker must be cleared so
+        it doesn't linger in the UI (the row is force-blocked for other reasons regardless)."""
+        from netbox_librenms_plugin.import_utils import bulk_import
+
+        serial_dev = MagicMock(pk=8)
+        serial_dev.role = None
+        validation = {
+            "existing_device": None,
+            "import_as_vm": False,
+            "issues": ["Device role must be manually selected before import"],
+            "device_role": {"available_roles": []},
+        }
+        libre_device = {"device_id": 51, "hostname": "h", "sysName": "h", "serial": "ABC123"}
+
+        def _filter(**kwargs):
+            m = MagicMock()
+            m.first.return_value = serial_dev if kwargs.get("serial") == "ABC123" else None
+            return m
+
+        with (
+            patch("dcim.models.Device") as mock_Device,
+            patch("virtualization.models.VirtualMachine") as mock_VM,
+            patch.object(bulk_import, "find_by_librenms_id", return_value=None),
+            patch.object(bulk_import, "_refresh_librenms_linkage"),
+            patch.object(bulk_import, "recalculate_validation_status"),
+        ):
+            mock_Device.objects.filter.side_effect = _filter
+            mock_VM.objects.filter.return_value.first.return_value = None
+            bulk_import._refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"] is serial_dev
+        # The stale role-blocker issue must have been removed.
+        assert all("role" not in issue.lower() for issue in validation["issues"])
+
     def test_fresh_lookup_matches_by_primary_ip_blocks_import(self):
         """As above, but the existing NetBox device is reachable only via its management IP —
         the refresh must catch it (interface-assigned IP -> device) and block the import."""
