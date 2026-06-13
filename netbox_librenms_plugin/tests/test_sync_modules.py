@@ -1938,6 +1938,64 @@ class TestSingleInstallInterfaceBinding:
         assert "adopted 2 existing standalone interface(s)" in mock_messages.success.call_args[0][1]
         assert response is not None
 
+    def test_update_module_interface_view_keeps_bind_when_adoption_raises(self):
+        """A committed primary bind must not be downgraded to 'failed' if the (separately
+        executed) template-adoption step raises afterward: the interface is bound regardless,
+        so the user gets the success toast plus a warning that adoption failed — not a
+        misleading failure that makes a retry look like a fresh conflict."""
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        view = object.__new__(UpdateModuleInterfaceView)
+        view.required_object_permissions = {}
+        device = _make_device()
+
+        module = MagicMock()
+        module.pk = 321
+        module.module_type.model = "SFP-10G-SR"
+        module.module_bay.name = "SFP 1"
+
+        request = _make_request(
+            "POST",
+            data={"module_id": "321", "server_key": "production", "ent_index": "77"},
+        )
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch.object(view, "get_cache_key", return_value="inv-key"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
+                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
+            ) as mock_bind,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
+                side_effect=RuntimeError("adoption blew up"),
+            ) as mock_adopt,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+        ):
+            mock_cache.get.return_value = {
+                "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
+                "librenms_id": 999,
+            }
+            response = view.post(request, pk=24)
+
+        mock_bind.assert_called_once()
+        mock_adopt.assert_called_once_with(device, module)
+        # Bind preserved → success toast, not downgraded to a failure.
+        mock_messages.success.assert_called_once()
+        mock_messages.error.assert_not_called()
+        # Adoption failure surfaced separately as a warning.
+        mock_messages.warning.assert_called_once()
+        assert "adopting standalone" in mock_messages.warning.call_args[0][1].lower()
+        assert response is not None
+
     def test_update_module_interface_view_adopts_templates_even_when_port_bind_is_a_noop(self):
         """Regression: the port_id bind and template adoption are complementary, not
         either/or. When the LibreNMS-identified interface is already bound, the bind

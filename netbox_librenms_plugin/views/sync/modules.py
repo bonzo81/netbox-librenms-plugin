@@ -1346,10 +1346,16 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
 
         module = get_object_or_404(Module, pk=module_id, device=target_device)
 
+        bind_result = None
         try:
-            bind_result = None
             if bind_item and server_key:
                 bind_result = _bind_interface_librenms_id(target_device, bind_item, module.pk, server_key)
+        except Exception:
+            bind_result = {
+                "status": "failed",
+                "reason": "unexpected error while associating interface to installed module",
+            }
+        else:
             # The port_id bind only associates the single LibreNMS-identified interface, but a
             # module can also own template interfaces (e.g. breakout children like c2/1) that
             # remain standalone and independently keep the row's "Update Interface" action on
@@ -1358,25 +1364,38 @@ class UpdateModuleInterfaceView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             # makes the bind a no-op, the adoption is skipped, and the button never clears.
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
             if bind_result is None or bind_result.get("status") == "bound":
-                adopt_result = _adopt_existing_template_interfaces(target_device, module)
-                if bind_result is None:
-                    bind_result = adopt_result
-                elif adopt_result.get("status") == "bound":
-                    bind_result = {
-                        "status": "bound",
-                        "interface": bind_result.get("interface"),
-                        # Keep the primary bind's port_id so the merged result still
-                        # carries the bound interface's LibreNMS identity, not just the
-                        # adoption tally.
-                        "port_id": bind_result.get("port_id"),
-                        "adopted_count": (bind_result.get("adopted_count") or 0)
-                        + (adopt_result.get("adopted_count") or 0),
-                    }
-        except Exception:
-            bind_result = {
-                "status": "failed",
-                "reason": "unexpected error while associating interface to installed module",
-            }
+                try:
+                    adopt_result = _adopt_existing_template_interfaces(target_device, module)
+                except Exception:
+                    # The adoption step is isolated so its failure can't clobber an
+                    # already-committed primary bind: that interface is bound regardless, and
+                    # reporting "failed" would make a retry look like a fresh conflict. Only the
+                    # bind-less path (nothing committed yet) downgrades to a hard failure.
+                    if bind_result is None:
+                        bind_result = {
+                            "status": "failed",
+                            "reason": "unexpected error while associating interface to installed module",
+                        }
+                    else:
+                        messages.warning(
+                            request,
+                            "Primary interface binding succeeded, but adopting standalone "
+                            "template interfaces failed; see server logs for details.",
+                        )
+                else:
+                    if bind_result is None:
+                        bind_result = adopt_result
+                    elif adopt_result.get("status") == "bound":
+                        bind_result = {
+                            "status": "bound",
+                            "interface": bind_result.get("interface"),
+                            # Keep the primary bind's port_id so the merged result still
+                            # carries the bound interface's LibreNMS identity, not just the
+                            # adoption tally.
+                            "port_id": bind_result.get("port_id"),
+                            "adopted_count": (bind_result.get("adopted_count") or 0)
+                            + (adopt_result.get("adopted_count") or 0),
+                        }
 
         if bind_result is None:
             messages.error(request, "No LibreNMS interface identity is available for this row.")

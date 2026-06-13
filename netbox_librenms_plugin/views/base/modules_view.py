@@ -331,9 +331,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
 
         # get_device_inventory() is an external API boundary: a success flag with a
-        # non-list payload (dict/string/None on a malformed response) must be treated as a
-        # fetch failure, otherwise the iterate/mutate below turns a refresh into a 500.
-        if not success or not isinstance(inventory_data, list):
+        # non-list payload (dict/string/None on a malformed response) — or a list that
+        # carries non-dict entries (e.g. [None], ["bad"]) — must be treated as a fetch
+        # failure, otherwise the iterate/mutate below turns a refresh into a 500.
+        if (
+            not success
+            or not isinstance(inventory_data, list)
+            or any(not isinstance(item, dict) for item in inventory_data)
+        ):
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
             messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
@@ -388,7 +393,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         oob_failed = False
         if oob_id:
             oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
-            if oob_success and isinstance(oob_inventory, list):
+            # Same element-shape guard as the main inventory above: a list with non-dict
+            # entries would crash the index-offset/merge loop below, so fail closed.
+            if (
+                oob_success
+                and isinstance(oob_inventory, list)
+                and all(isinstance(item, dict) for item in oob_inventory)
+            ):
                 main_max_idx = max(
                     (cast for item in inventory_data if (cast := _try_int(item.get("entPhysicalIndex"))) is not None),
                     default=0,

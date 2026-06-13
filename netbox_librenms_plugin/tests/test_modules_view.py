@@ -331,8 +331,38 @@ class TestMergeTransceiverDataPortIdentity:
         # Failure branch: error surfaced, stale inventory cache cleared, and the ports fetch
         # (which only runs after a *valid* inventory) is never reached.
         mock_messages.error.assert_called_once()
-        mock_cache.delete.assert_called()
+        # _make_view() fixes get_cache_key() to "test_cache_key"; assert the exact key so the
+        # failure path can't silently start deleting the wrong cache entry.
+        mock_cache.delete.assert_called_once_with("test_cache_key")
         view._librenms_api.get_ports.assert_not_called()
+
+    def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self):
+        """A list payload that carries non-dict entries (e.g. [None], ["bad"]) is malformed:
+        the `item["_source"] = ...` mutation loop below assumes dicts, so a bad element must
+        be treated as a fetch failure, not crash the refresh with a 500."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._librenms_api.get_librenms_id.return_value = 777
+        # success=True and a list, but one element is not a dict.
+        view._librenms_api.get_device_inventory.return_value = (True, [{"entPhysicalIndex": 1}, None])
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.build_migrated_context", return_value={}),
+        ):
+            view.post(request, pk=1)
+
+        mock_messages.error.assert_called_once()
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        view._librenms_api.get_ports.assert_not_called()  # bad inventory short-circuits before ports fetch
 
     def test_post_warns_when_ports_fetch_fails(self):
         view = _make_view()
@@ -413,6 +443,44 @@ class TestMergeTransceiverDataPortIdentity:
         mock_cache.delete.assert_called_once_with("test_cache_key")  # the active device's stale entry cleared
         mock_messages.warning.assert_called_once()  # user is told the OOB inventory fetch failed
         mock_messages.success.assert_not_called()  # warning, not success
+
+    def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self):
+        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so
+        a success flag with non-dict elements (e.g. [None]) is malformed and must be treated
+        the same as a failed OOB fetch — warning + no partial snapshot cached — not a 500."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "default"}
+        )
+
+        view._librenms_api.get_librenms_id.return_value = 777
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+        # Main inventory succeeds; the OOB controller returns success but a malformed list.
+        view._librenms_api.get_device_inventory.side_effect = lambda dev_id: (
+            (True, []) if dev_id == 777 else (True, [{"entPhysicalIndex": 1}, None])
+        )
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
+        ):
+            view.post(request, pk=1)
+
+        mock_cache.set.assert_not_called()  # no partial snapshot persisted
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        mock_messages.warning.assert_called_once()  # malformed OOB inventory treated as a fetch failure
+        mock_messages.success.assert_not_called()
 
     def test_post_skips_cache_on_transceiver_failure(self):
         """A transceiver-enrichment failure drops the synthetic transceiver rows, so the
