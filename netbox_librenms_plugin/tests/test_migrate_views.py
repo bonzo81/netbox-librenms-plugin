@@ -11,6 +11,8 @@ up the winner, run a small ORM mutation, and return an HTMX response.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # ── helper: get_migrated_to_marker ────────────────────────────────────────
 
@@ -763,60 +765,78 @@ def _nonhtmx_request(post=None, referer=None):
     return req
 
 
+@pytest.mark.django_db
 class TestReconcileDonorDeviceIpFks:
-    """_reconcile_donor_device_ip_fks must lock the owning Interface and re-read its device_id
-    from the locked row, so a concurrent interface move can't leave the winner pointing at an
-    address that has since moved off it."""
+    """Real-DB coverage for _reconcile_donor_device_ip_fks: it locks the owning Interface and
+    re-reads device_id from the locked row before transferring a device-level primary/OOB IP FK,
+    so the winner never ends up owning an address that sits on an interface it doesn't own.
 
-    def test_transfers_when_locked_interface_is_on_winner(self):
+    Exercised against real NetBox models (not mocks) so the FK transfer, the Interface lookup,
+    and the owner comparison are validated against actual ORM behavior end-to-end.
+    """
+
+    @staticmethod
+    def _make_devices():
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        site = Site.objects.create(name="ReconSite", slug="recon-site")
+        mfr = Manufacturer.objects.create(name="ReconMfr", slug="recon-mfr")
+        dtype = DeviceType.objects.create(manufacturer=mfr, model="ReconDT", slug="recon-dt")
+        role = DeviceRole.objects.create(name="ReconRole", slug="recon-role", color="ff0000")
+        common = {"device_type": dtype, "role": role, "site": site, "status": "active"}
+        winner = Device.objects.create(name="recon-winner", **common)
+        donor = Device.objects.create(name="recon-donor", **common)
+        other = Device.objects.create(name="recon-other", **common)
+        return winner, donor, other
+
+    @staticmethod
+    def _ip_on(device, addr, ifname):
         from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        iface = Interface.objects.create(device=device, name=ifname, type="1000base-t")
+        ip = IPAddress.objects.create(address=addr, assigned_object=iface)
+        return ip
+
+    def test_transfers_primary_ip_when_interface_is_on_winner(self):
+        """The donor's primary_ip4 dangles on an address now sitting on a winner-owned interface;
+        the FK is transferred to the winner and cleared on the donor."""
+        from django.db import transaction
 
         from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
 
-        donor = MagicMock(pk=10, primary_ip4_id=5, primary_ip6_id=None, oob_ip_id=None)
-        winner = MagicMock(pk=20, primary_ip4_id=None)
+        winner, donor, _ = self._make_devices()
+        ip = self._ip_on(winner, "10.10.0.1/24", "eth0")
+        # Dangling FK: donor still points at the moved address (save() skips clean()).
+        donor.primary_ip4 = ip
+        donor.save()
 
-        ip = MagicMock(pk=5)
-        ip.assigned_object = MagicMock(spec=Interface, pk=99)
-        locked_iface = MagicMock(spec=Interface, pk=99, device_id=20)  # still owned by winner
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
-            patch.object(Interface, "objects") as mock_iface_objects,
-        ):
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = ip
-            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+        with transaction.atomic():
             notes = _reconcile_donor_device_ip_fks(donor, winner)
 
-        assert winner.primary_ip4 is ip
-        assert donor.primary_ip4 is None
-        winner.save.assert_called_once_with(update_fields=["primary_ip4"])
-        # The owning Interface was re-locked (select_for_update) before the FK was reconciled.
-        mock_iface_objects.select_for_update.return_value.filter.assert_called_once_with(pk=99)
+        winner.refresh_from_db()
+        donor.refresh_from_db()
+        assert winner.primary_ip4_id == ip.pk
+        assert donor.primary_ip4_id is None
         assert any("transferred" in n for n in notes)
 
-    def test_skips_when_locked_interface_moved_off_winner(self):
-        from dcim.models import Interface
+    def test_skips_when_interface_belongs_to_a_different_device(self):
+        """If the address sits on an interface owned by neither the winner (a stale/concurrent
+        state), the locked-row device_id check rejects it: no FK is moved onto the winner."""
+        from django.db import transaction
 
         from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
 
-        donor = MagicMock(pk=10, primary_ip4_id=5, primary_ip6_id=None, oob_ip_id=None)
-        winner = MagicMock(pk=20, primary_ip4_id=None)
+        winner, donor, other = self._make_devices()
+        ip = self._ip_on(other, "10.10.0.2/24", "eth0")
+        donor.primary_ip4 = ip
+        donor.save()
 
-        ip = MagicMock(pk=5)
-        ip.assigned_object = MagicMock(spec=Interface, pk=99)
-        # The locked row shows the interface has since moved onto another device (the race).
-        locked_iface = MagicMock(spec=Interface, pk=99, device_id=999)
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
-            patch.object(Interface, "objects") as mock_iface_objects,
-        ):
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = ip
-            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+        with transaction.atomic():
             notes = _reconcile_donor_device_ip_fks(donor, winner)
 
-        winner.save.assert_not_called()
+        winner.refresh_from_db()
+        assert winner.primary_ip4_id is None  # interface not on winner → not transferred
         assert notes == []
 
 

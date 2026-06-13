@@ -192,10 +192,13 @@ def _reconcile_donor_device_ip_fks(donor, winner):
         if locked_iface is None or locked_iface.device_id != winner.pk:
             continue
         if getattr(winner, f"{field}_id", None) is None:
-            setattr(winner, field, ip)
+            # device.primary_ip4/6 / oob_ip are UNIQUE per address, so the donor must release the
+            # FK *before* the winner claims it — saving the winner first while the donor still
+            # holds the same address violates the unique constraint.
             setattr(donor, field, None)
-            winner.save(update_fields=[field])
             donor.save(update_fields=[field])
+            setattr(winner, field, ip)
+            winner.save(update_fields=[field])
             notes.append(f"transferred donor {human} to {winner.name}")
         else:
             setattr(donor, field, None)
