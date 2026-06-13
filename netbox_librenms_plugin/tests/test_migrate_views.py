@@ -763,6 +763,63 @@ def _nonhtmx_request(post=None, referer=None):
     return req
 
 
+class TestReconcileDonorDeviceIpFks:
+    """_reconcile_donor_device_ip_fks must lock the owning Interface and re-read its device_id
+    from the locked row, so a concurrent interface move can't leave the winner pointing at an
+    address that has since moved off it."""
+
+    def test_transfers_when_locked_interface_is_on_winner(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
+
+        donor = MagicMock(pk=10, primary_ip4_id=5, primary_ip6_id=None, oob_ip_id=None)
+        winner = MagicMock(pk=20, primary_ip4_id=None)
+
+        ip = MagicMock(pk=5)
+        ip.assigned_object = MagicMock(spec=Interface, pk=99)
+        locked_iface = MagicMock(spec=Interface, pk=99, device_id=20)  # still owned by winner
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
+            patch.object(Interface, "objects") as mock_iface_objects,
+        ):
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = ip
+            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+            notes = _reconcile_donor_device_ip_fks(donor, winner)
+
+        assert winner.primary_ip4 is ip
+        assert donor.primary_ip4 is None
+        winner.save.assert_called_once_with(update_fields=["primary_ip4"])
+        # The owning Interface was re-locked (select_for_update) before the FK was reconciled.
+        mock_iface_objects.select_for_update.return_value.filter.assert_called_once_with(pk=99)
+        assert any("transferred" in n for n in notes)
+
+    def test_skips_when_locked_interface_moved_off_winner(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
+
+        donor = MagicMock(pk=10, primary_ip4_id=5, primary_ip6_id=None, oob_ip_id=None)
+        winner = MagicMock(pk=20, primary_ip4_id=None)
+
+        ip = MagicMock(pk=5)
+        ip.assigned_object = MagicMock(spec=Interface, pk=99)
+        # The locked row shows the interface has since moved onto another device (the race).
+        locked_iface = MagicMock(spec=Interface, pk=99, device_id=999)
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
+            patch.object(Interface, "objects") as mock_iface_objects,
+        ):
+            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = ip
+            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+            notes = _reconcile_donor_device_ip_fks(donor, winner)
+
+        winner.save.assert_not_called()
+        assert notes == []
+
+
 class TestSyncTabUrl:
     """_sync_tab_url builds the donor device sync URL with tab + server_key."""
 

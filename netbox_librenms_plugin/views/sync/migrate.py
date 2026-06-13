@@ -181,7 +181,15 @@ def _reconcile_donor_device_ip_fks(donor, winner):
         # Only reconcile when the address now sits on a winner-owned interface (the move just
         # detached it from the donor). A non-Interface assignment (e.g. a VMInterface) has no
         # device_id and is left untouched.
-        if getattr(assigned, "device_id", None) != winner.pk:
+        if not isinstance(assigned, Interface):
+            continue
+        # Locking the IPAddress row alone doesn't stabilize the owning interface's device_id:
+        # this helper also reconciles pre-existing dangling FKs, so a concurrent interface move
+        # could flip device_id between this check and winner.save(). Lock the owning Interface
+        # and re-read device_id from the locked row so the winner can't end up owning an address
+        # that has since moved away.
+        locked_iface = Interface.objects.select_for_update().filter(pk=assigned.pk).first()
+        if locked_iface is None or locked_iface.device_id != winner.pk:
             continue
         if getattr(winner, f"{field}_id", None) is None:
             setattr(winner, field, ip)

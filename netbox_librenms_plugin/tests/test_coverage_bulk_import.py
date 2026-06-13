@@ -881,6 +881,40 @@ class TestRefreshExistingDevice:
         assert validation["can_import"] is True  # no issues
         assert validation["is_ready"] is False  # device_role.found is now missing
 
+    def test_deleted_vm_match_clears_stale_cluster_selection(self):
+        """A dropped cached VM match must reset the stale cluster selection (preserving
+        available_clusters), mirroring the device_role reset on the device path. Otherwise the
+        match-derived cluster.found=True survives and recalculate keeps the row "ready" even
+        though validate_device_for_import() requires a fresh cluster for a new VM import."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        existing = MagicMock()
+        existing.pk = 7
+        stale_cluster = MagicMock(name="cluster-A")
+        available = [stale_cluster, MagicMock(name="cluster-B")]
+        validation = {
+            "existing_device": existing,
+            "import_as_vm": True,
+            "issues": [],
+            "site": {"found": True},
+            # A cached VM match left the cluster satisfied:
+            "cluster": {"found": True, "cluster": stale_cluster, "available_clusters": available},
+        }
+
+        # The VM refresh path queries VirtualMachine, not Device.
+        with patch("virtualization.models.VirtualMachine") as mock_VM:
+            mock_VM.objects.filter.return_value.first.return_value = None  # VM deleted
+            _refresh_existing_device(validation)
+
+        assert validation["existing_device"] is None
+        # Cluster selection reset to unselected, available list preserved for the dropdown.
+        assert validation["cluster"]["found"] is False
+        assert validation["cluster"]["cluster"] is None
+        assert validation["cluster"]["available_clusters"] == available
+        # found=False feeds is_ready (see recalculate_validation_status, is_vm=True), so the row
+        # is no longer "ready" — it can't slip through without a fresh cluster choice.
+        assert validation["is_ready"] is False
+
     def test_deleted_device_clears_stale_match_derived_actions(self):
         """When the matched device is deleted, serial/OOB/merge/promote actions derived from
         it must be cleared so the UI can't offer actions on a now-gone device."""
@@ -1098,7 +1132,9 @@ class TestRefreshExistingDevice:
         assert validation["can_import"] is False
 
     def test_deleted_vm_recomputes_readiness_from_cluster(self):
-        """VM deleted → is_ready reflects cluster.found."""
+        """VM deleted → the match-derived cluster is reset (found=False), so the row is no
+        longer ready: validate_device_for_import() requires a fresh cluster for a new VM, so a
+        dropped match can't keep the row importable on a stale cluster selection."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         existing = MagicMock()
@@ -1115,8 +1151,9 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation)
 
         assert validation["existing_device"] is None
-        assert validation["can_import"] is True
-        assert validation["is_ready"] is True  # cluster.found=True
+        assert validation["can_import"] is True  # no blocking issues in this path
+        assert validation["cluster"]["found"] is False  # stale match-derived cluster cleared
+        assert validation["is_ready"] is False  # not ready until a fresh cluster is selected
 
     def test_deleted_vm_not_ready_when_no_cluster(self):
         """Deleted VM with no cluster → is_ready=False."""

@@ -4339,6 +4339,8 @@ class TestModulesRedirectResponse:
 
         req = MagicMock()
         req.headers = {}
+        req.POST = {}
+        req.GET = {}
         with patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect:
             mock_redirect.return_value = "REDIRECT"
             result = _modules_redirect_response(req, "/sync/")
@@ -4352,9 +4354,40 @@ class TestModulesRedirectResponse:
 
         req = MagicMock()
         req.headers = {"HX-Request": "true"}
+        req.POST = {}
+        req.GET = {}
         response = _modules_redirect_response(req, "/sync/")
         assert response.status_code == 204
         assert response["HX-Redirect"] == "/sync/?tab=modules#librenms-module-table"
+
+    def test_explicit_server_key_is_appended(self):
+        """A server-scoped action must keep the active server_key in the follow-up URL so the
+        user returns to the same cache namespace this request mutated/read."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+
+        req = MagicMock()
+        req.headers = {}
+        with patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect:
+            _modules_redirect_response(req, "/sync/", server_key="prod server")
+        # quote_plus encodes the value; the fragment stays last.
+        mock_redirect.assert_called_once_with("/sync/?tab=modules&server_key=prod+server#librenms-module-table")
+
+    def test_server_key_read_from_post_when_not_passed(self):
+        """Bare call sites (in views that don't compute a resolved key) still propagate the
+        server context — the helper reads server_key from the request itself."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+
+        req = MagicMock()
+        req.headers = {}
+        req.POST = {"server_key": "production"}
+        req.GET = {}
+        with patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect:
+            _modules_redirect_response(req, "/sync/")
+        mock_redirect.assert_called_once_with("/sync/?tab=modules&server_key=production#librenms-module-table")
 
 
 class TestAddBayTemplateViewWiring:

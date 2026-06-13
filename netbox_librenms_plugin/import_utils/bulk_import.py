@@ -466,6 +466,16 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                             "role": None,
                             "available_roles": validation.get("device_role", {}).get("available_roles", []),
                         }
+                    else:
+                        # VM rows are gated on cluster, not role: a dropped match must also clear
+                        # the stale cluster selection (preserving available_clusters), or
+                        # _reassert_new_import_blockers() sees found/cluster still set and lets
+                        # the row re-enter the new-import path without a fresh cluster choice.
+                        validation["cluster"] = {
+                            "found": False,
+                            "cluster": None,
+                            "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
+                        }
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                 else:
                     if hasattr(refreshed, "role") and refreshed.role:
@@ -501,6 +511,15 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                         "found": False,
                         "role": None,
                         "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                    }
+                else:
+                    # Mirror the stale-match branch: a deleted cached VM match must drop the
+                    # stale cluster selection (keeping available_clusters) so the row returns to
+                    # the same create-time state as a brand-new VM import row.
+                    validation["cluster"] = {
+                        "found": False,
+                        "cluster": None,
+                        "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
                     }
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
         except Exception as e:

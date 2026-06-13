@@ -1205,7 +1205,7 @@ class TestCreateAndAssignPlatformView:
         """TOCTOU guard: a mapping existed at the preflight gate (so add wasn't required) but
         was deleted before the write. The write-site permission re-check must skip the create
         rather than bypass the permission — and warn the user."""
-        view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
+        view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
         # Upfront object-permission gate passes (user has change Device / add Platform); the
@@ -1233,6 +1233,10 @@ class TestCreateAndAssignPlatformView:
         # No mapping created without permission, and the user is told why.
         mock_mapping_cls.assert_not_called()
         assert any("not created" in c.args[1] for c in mock_msg.warning.call_args_list)
+        # The platform itself must still be assigned to the locked device and persisted — only
+        # the secondary mapping is skipped, so this branch can't silently return pre-persist.
+        assert mock_locked.platform is mock_platform_instance
+        mock_locked.save.assert_called_once()
 
     def test_required_object_permissions_never_include_platformmapping_upfront(self):
         """Even when create_mapping is on, an OS is supplied, and no mapping exists yet, the

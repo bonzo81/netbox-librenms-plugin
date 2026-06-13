@@ -2,6 +2,7 @@
 
 import logging
 import re
+from urllib.parse import quote_plus
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -34,15 +35,26 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
-def _modules_redirect_response(request, sync_url):
+def _modules_redirect_response(request, sync_url, server_key=None):
     """Return a redirect response that works for both classic and HTMX form posts.
 
     For HTMX requests (those carrying ``HX-Request: true``) we return an empty
     200 response with an ``HX-Redirect`` header so the browser performs a full
     navigation that picks up Django messages and refreshes the modules table.
     For non-HTMX requests we return a normal Django redirect.
+
+    These module sync actions are server-scoped, so the follow-up page must stay on the
+    server whose cache namespace this request just mutated/read. The active ``server_key`` is
+    propagated as a ``?server_key=`` query param; when not passed explicitly it is read from
+    the request (POST then GET) so every redirect site keeps the server context without each
+    caller having to thread it through.
     """
-    target = f"{sync_url}?tab=modules#librenms-module-table"
+    if server_key is None:
+        server_key = request.POST.get("server_key") or request.GET.get("server_key") or ""
+    target = f"{sync_url}?tab=modules"
+    if server_key:
+        target += f"&server_key={quote_plus(str(server_key))}"
+    target += "#librenms-module-table"
     if request.headers.get("HX-Request") == "true":
         response = HttpResponse(status=204)
         response["HX-Redirect"] = target
@@ -549,7 +561,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             module_type_id = int(request.POST.get("module_type_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module bay/module type ID.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         get_object_or_404(ModuleBay, pk=module_bay_id, device=target_device)  # verify bay belongs to selected device
         module_type = get_object_or_404(ModuleType, pk=module_type_id)
@@ -560,7 +572,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                 locked_bay = ModuleBay.objects.select_for_update().get(pk=module_bay_id)
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
                     messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
-                    return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+                    return _modules_redirect_response(request, sync_url, server_key)
                 module = Module(
                     device=target_device,
                     module_bay=locked_bay,
@@ -619,7 +631,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to install module: {e}")
 
-        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+        return _modules_redirect_response(request, sync_url, server_key)
 
 
 class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -651,20 +663,20 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         if not parent_index:
             messages.error(request, "Missing parent inventory index.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         try:
             parent_index = int(parent_index)
         except ValueError:
             messages.error(request, "Invalid parent inventory index.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         # Get cached inventory data
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
@@ -678,7 +690,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         if not branch_items:
             messages.warning(request, "No installable items found in this branch.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         # Load module types (with mappings)
         module_types = get_module_types_indexed()
@@ -740,10 +752,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             skipped.append(f"{result['name']}: {bind_result['reason']}")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Branch install failed: {e}")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         _report_install_results(request, installed, skipped, failed)
-        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+        return _modules_redirect_response(request, sync_url, server_key)
 
     def _collect_branch(self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None):
         """
@@ -1156,27 +1168,27 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         selected_indices = request.POST.getlist("select")
         if not selected_indices:
             messages.warning(request, "No modules selected.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         sync_device = _get_sync_device_for_inventory(page_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         try:
             # Use dict.fromkeys to preserve order while deduplicating
             selected_list = list(dict.fromkeys(int(i) for i in selected_indices))
         except ValueError:
             messages.error(request, "Invalid selection.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
         items = [index_map[idx] for idx in selected_list if idx in index_map]
 
         if not items:
             messages.warning(request, "None of the selected indices matched cached inventory.")
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+            return _modules_redirect_response(request, sync_url, server_key)
 
         # Load ignore rules once; they're evaluated per-row inside the install
         # loop using the *resolved* target device serial, since VC rows may
