@@ -10,6 +10,8 @@ import re
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 @contextmanager
 def _patch_build_row_deps(view, match_bay_return=None):
@@ -5225,7 +5227,46 @@ class TestAddBayTemplateViewRegexMapping:
 
 
 class TestVCNormalizationReportView:
-    """VCNormalizationReportView returns 400 when there's nothing to report, HTML when there is."""
+    """VCNormalizationReportView returns 400 when there's nothing to report, HTML when there is.
+
+    The two detector-dependent paths are driven against a real VC member with a real Module so
+    the real detect_vc_normalization_noop runs end-to-end through the view (and the real
+    build_vc_normalization_report renders the real diagnostic) — not a stubbed return. A
+    NetBox InterfaceTemplate whose name carries no {module}/{vc_position} token instantiates
+    verbatim, so the vendor-shaped name is produced for real. The early-return guards
+    (missing / non-numeric module_id) stay unit tests."""
+
+    @staticmethod
+    def _vc_member_with_module(template_name, *, members=4, vc_position=3, manufacturer="Nokia", model="7250-IXR"):
+        """Build a real VC, return its *vc_position* member with a real Module installed whose
+        single InterfaceTemplate instantiates to *template_name* verbatim."""
+        from dcim.models import (
+            InterfaceTemplate,
+            Manufacturer,
+            Module,
+            ModuleBay,
+            ModuleType,
+            VirtualChassis,
+        )
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        vc = VirtualChassis.objects.create(name="vc-norm")
+        members_list = []
+        for i in range(1, members + 1):
+            dev = make_device(f"vc-norm-m{i}")
+            dev.virtual_chassis = vc
+            dev.vc_position = i
+            dev.save()
+            members_list.append(dev)
+        device = members_list[vc_position - 1]
+
+        mfr, _ = Manufacturer.objects.get_or_create(name=manufacturer, slug=manufacturer.lower())
+        mtype = ModuleType.objects.create(manufacturer=mfr, model=model)
+        InterfaceTemplate.objects.create(module_type=mtype, name=template_name, type="other")
+        bay = ModuleBay.objects.create(device=device, name="Bay c9", position="c9")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=mtype, status="active")
+        return device, module
 
     def test_get_returns_400_when_module_id_missing(self):
         from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
@@ -5247,72 +5288,53 @@ class TestVCNormalizationReportView:
         assert response.status_code == 400
         assert b"module_id" in response.content
 
+    @pytest.mark.django_db
     def test_get_returns_400_when_no_noop_detected(self):
+        """A module whose instantiated template name matches the VC member-position regex
+        means rewriting works → the real detector returns None → 400 'nothing to report'."""
         from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
 
         view = object.__new__(VCNormalizationReportView)
         view.required_object_permissions = {}
-        device = _make_device()
-        module = MagicMock()
-        request = _make_request("GET", data={"module_id": "321"})
+        # Cisco-style name matches the regex, so detect_vc_normalization_noop() returns None.
+        device, module = self._vc_member_with_module("TenGigabitEthernet1/1/1")
+        request = _make_request("GET", data={"module_id": str(module.pk)})
 
-        with (
-            patch.object(view, "require_object_permissions", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
-                side_effect=[device, module],
-            ),
-            patch(
-                "netbox_librenms_plugin.utils.detect_vc_normalization_noop",
-                return_value=None,
-            ),
-        ):
-            response = view.get(request, pk=24)
+        with patch.object(view, "require_object_permissions", return_value=None):
+            response = view.get(request, pk=device.pk)
 
         assert response.status_code == 400
         assert b"nothing to report" in response.content.lower()
 
+    @pytest.mark.django_db
     def test_get_renders_template_when_noop_detected(self):
+        """A Nokia-shaped name that the regex can't rewrite → the real detector returns a
+        diagnostic, and the real build_vc_normalization_report renders it through the view."""
         from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
 
         view = object.__new__(VCNormalizationReportView)
         view.required_object_permissions = {}
-        device = _make_device()
-        module = MagicMock()
-        request = _make_request("GET", data={"module_id": "321"})
-
-        diagnostic = {
-            "manufacturer_slug": "nokia",
-            "device_type_model": "7250-IXR",
-            "module_type_model": "QSFP-DD",
-            "module_bay_name": "Bay c9",
-            "vc_position": 3,
-            "vc_member_positions": [1, 2, 3, 4],
-            "template_pairs": [("{module}", "2/x1/1/c9")],
-            "regex": "x",
-        }
+        # "2/x1/1/c9" doesn't match the VC member-position regex → diagnostic produced.
+        device, module = self._vc_member_with_module("2/x1/1/c9", manufacturer="Nokia")
+        request = _make_request("GET", data={"module_id": str(module.pk)})
 
         with (
             patch.object(view, "require_object_permissions", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
-                side_effect=[device, module],
-            ),
-            patch(
-                "netbox_librenms_plugin.utils.detect_vc_normalization_noop",
-                return_value=diagnostic,
-            ),
+            # Keep render mocked (the MagicMock request can't drive real template rendering);
+            # the assertion is on the real report markdown built from the real diagnostic.
             patch(
                 "netbox_librenms_plugin.views.sync.modules.render",
                 return_value="rendered",
             ) as mock_render,
         ):
-            response = view.get(request, pk=24)
+            response = view.get(request, pk=device.pk)
 
         assert response == "rendered"
         ctx = mock_render.call_args[0][2]
-        assert "**VC interface normalization — no match**" in ctx["report_markdown"]
-        assert "nokia" in ctx["report_markdown"]
+        md = ctx["report_markdown"]
+        assert "**VC interface normalization — no match**" in md
+        assert "nokia" in md  # real manufacturer slug
+        assert "2/x1/1/c9" in md  # the real instantiated, non-matching template name
 
     def test_get_warns_on_invalid_selected_device_id(self):
         """Invalid selected_device_id triggers the standard warn helper but still proceeds."""
