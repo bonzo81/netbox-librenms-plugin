@@ -125,8 +125,9 @@ class TestGetLinksDataSerial:
             result = view.get_links_data(obj)
 
         view._librenms_api.get_serial_port_sensors.assert_not_called()
-        # LLDP also returns empty, so nothing to show overall → None
-        assert result is None
+        # LLDP succeeded with zero links and there are no serial rows: a *successful* empty
+        # refresh returns [] (flows through to the empty table), not None ("No links found").
+        assert result == []
 
     def test_serial_fetch_failure_does_not_append(self):
         """When sensor fetch fails, no serial rows are added (graceful degradation)."""
@@ -143,8 +144,9 @@ class TestGetLinksDataSerial:
         ):
             result = view.get_links_data(obj)
 
-        # LLDP empty + serial failed → nothing to show → None
-        assert result is None
+        # LLDP succeeded (empty) and the serial fetch failed without adding rows: a successful
+        # refresh with zero rows returns [] (no host error recorded), not None.
+        assert result == []
 
     def test_serial_row_shape(self):
         """Each appended row has the expected keys."""
