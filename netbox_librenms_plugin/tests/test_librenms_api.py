@@ -2337,6 +2337,24 @@ class TestResolvePortRelationships:
         )
         assert result["lag_members"] == {"101": "102"}
 
+    def test_sub_interface_ids_use_port_record_types_not_stack(self, mock_librenms_api):
+        """sub_interfaces must store the canonical port-record ids (like the LAG branch),
+        not the raw port_stack ids. port_stack and ports are independent payloads: storing
+        the stack's id type would make the map's keys/values mismatch the port_id values on
+        the port dicts, so a downstream port-id lookup (which uses the port-record type)
+        misses the parent mapping. Mirrors test_string_port_stack_ids_match_int_port_ids for
+        the sub-interface side."""
+        # Ports carry STRING port_ids; the stack references them as INTs.
+        str_ports = [
+            {"port_id": "205", "ifName": "ae10", "ifType": "ieee8023adLag"},
+            {"port_id": "206", "ifName": "ae10.2221", "ifType": "l2vlan"},
+        ]
+        int_stack = [{"high_port_id": 205, "low_port_id": 206}]
+        result = mock_librenms_api.resolve_port_relationships(str_ports, int_stack, lag_patterns={})
+        # Canonical (port-record) types — str keys/values, matching the LAG-branch contract,
+        # NOT the int stack ids ({206: 205}).
+        assert result["sub_interfaces"] == {"206": "205"}
+
     def test_nokia_sap_excluded_when_colon_in_name(self, mock_librenms_api):
         """Nokia SAP entries (colon in name) must be excluded from output."""
         result = mock_librenms_api.resolve_port_relationships(NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={})

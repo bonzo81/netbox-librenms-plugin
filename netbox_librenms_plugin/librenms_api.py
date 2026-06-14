@@ -728,7 +728,12 @@ class LibreNMSAPI:
                 suffix = l_name[len(h_name) + 1 :]
                 try:
                     int(suffix)  # Only numeric suffixes qualify as sub-interfaces
-                    sub_interfaces[low_id] = high_id
+                    # Store the canonical port-record ids, not the raw port_stack ids. The two
+                    # are independent LibreNMS payloads: port_stack may carry string ids while
+                    # ports carry ints (or vice versa). The LAG branch below already keys on
+                    # port["port_id"]; mirror it here so the map's types match the port records
+                    # and downstream port-id lookups don't silently miss the parent mapping.
+                    sub_interfaces[low_port["port_id"]] = high_port["port_id"]
                     continue
                 except ValueError:
                     pass  # Non-numeric suffix — fall through to LAG check
