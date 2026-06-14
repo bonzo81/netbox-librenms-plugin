@@ -63,7 +63,7 @@
             <button type="button" class="btn btn-sm btn-outline-warning"
                 hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='primary4' %}"
                 hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
-                hx-vals='{"server_key": "{{ migrated_to_marker.server_key }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'
                 hx-confirm="Transfer primary IPv4 ({{ object.primary_ip4.address }}) to {{ migrated_to_winner.name }}?">
                 <i class="mdi mdi-transfer-right"></i> Transfer primary IPv4
             </button>
@@ -72,7 +72,7 @@
             <button type="button" class="btn btn-sm btn-outline-warning"
                 hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='primary6' %}"
                 hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
-                hx-vals='{"server_key": "{{ migrated_to_marker.server_key }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'
                 hx-confirm="Transfer primary IPv6 ({{ object.primary_ip6.address }}) to {{ migrated_to_winner.name }}?">
                 <i class="mdi mdi-transfer-right"></i> Transfer primary IPv6
             </button>
@@ -81,7 +81,7 @@
             <button type="button" class="btn btn-sm btn-outline-warning"
                 hx-post="{% url 'plugins:netbox_librenms_plugin:device_transfer_ip' pk=object.pk ip_kind='oob' %}"
                 hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
-                hx-vals='{"server_key": "{{ migrated_to_marker.server_key }}"}'
+                hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'
                 hx-confirm="Transfer OOB IP ({{ object.oob_ip.address }}) to {{ migrated_to_winner.name }}?">
                 <i class="mdi mdi-transfer-right"></i> Transfer OOB IP
             </button>

@@ -15,6 +15,14 @@
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}
 <div>
+    {% comment %}
+    No POST form in migrated mode, but the interface table still renders interactive
+    relationship/VC-member dropdowns whose verify-interface POST reads the token via
+    document.querySelector('[name=csrfmiddlewaretoken]'). Emit a standalone token so those
+    JS-driven requests don't hit a null token (TypeError/403). A bare hidden input never
+    auto-submits, so it doesn't reintroduce the live-form problem flagged above.
+    {% endcomment %}
+    <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
 {% else %}
 <form method="post"
     action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
@@ -359,7 +367,7 @@
                                             class="btn btn-sm btn-outline-warning"
                                             hx-post="{% url 'plugins:netbox_librenms_plugin:interface_move_to_winner' pk=interface.id %}"
                                             hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
-                                            hx-vals='{"server_key": "{{ migrated_to_marker.server_key }}"}'
+                                            hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'
                                             hx-confirm="Move interface '{{ interface.name }}' to {{ migrated_to_winner.name }}?"
                                             title="Reassign this interface (and its cables/IPs/MACs) to {{ migrated_to_winner.name }}">
                                             <i class="mdi mdi-transfer-right"></i> Move
