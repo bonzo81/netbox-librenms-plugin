@@ -21,7 +21,7 @@ from ..utils import (
     match_librenms_hardware_to_device_type,
     set_librenms_device_id,
 )
-from ..constants import OOB_TYPE_PATTERN, normalize_oob_type
+from ..constants import normalize_oob_type
 from ..import_validation_helpers import apply_merge_candidates, apply_oob_detection_result
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
@@ -35,11 +35,15 @@ logger = logging.getLogger(__name__)
 
 
 def _detect_oob_type_from_name(name):
-    """Return canonical OOB type token (idrac/ilo/ipmi/bmc/drac) found in *name*, or None."""
+    """Return canonical OOB type token (idrac/ilo/ipmi/bmc/drac) found in *name*, or None.
+
+    Routes through normalize_oob_type() so a vendor-specific token wins over the generic
+    "oob" even when "oob" appears earlier in the name (e.g. "leaf01-oob-idrac9" -> "idrac",
+    not "oob"). A bare re.search() returns the first token and would downgrade the hint.
+    """
     if not name:
         return None
-    m = OOB_TYPE_PATTERN.search(name)
-    return m.group(1).lower() if m else None
+    return normalize_oob_type(name, "")
 
 
 def _describe_existing_librenms_link(obj, server_key):

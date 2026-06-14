@@ -1781,6 +1781,34 @@ class TestValidateDeviceChassisMatch:
         assert result["device_type"].get("device_type") is chassis_dt
 
 
+class TestDetectOOBTypeFromName:
+    """_detect_oob_type_from_name must use the same normalization as normalize_oob_type so a
+    vendor-specific token wins over the generic "oob", even when "oob" appears earlier in the
+    name. A bare re.search() returns the first token and would downgrade the hint."""
+
+    def _detect(self, name):
+        from netbox_librenms_plugin.import_utils.device_operations import _detect_oob_type_from_name
+
+        return _detect_oob_type_from_name(name)
+
+    def test_vendor_token_after_generic_oob_is_preserved(self):
+        # "oob" appears before "idrac9"; the vendor-specific token must still win.
+        assert self._detect("leaf01-oob-idrac9") == "idrac"
+
+    def test_generic_oob_only_returns_oob(self):
+        assert self._detect("switch-oob") == "oob"
+
+    def test_vendor_token_alone(self):
+        assert self._detect("ilo-mgmt-01") == "ilo"
+
+    def test_no_oob_token_returns_none(self):
+        assert self._detect("core-switch-01") is None
+
+    def test_empty_name_returns_none(self):
+        assert self._detect("") is None
+        assert self._detect(None) is None
+
+
 class TestOOBDetection:
     """Tests for OOB candidate detection in validate_device_for_import (Phase 2)."""
 
