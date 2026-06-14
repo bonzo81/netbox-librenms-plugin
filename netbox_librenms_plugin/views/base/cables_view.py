@@ -256,9 +256,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                     oob_data.get("message") if isinstance(oob_data, dict) else oob_data,
                 )
 
-        # Return None only when there is truly nothing to show (no host LLDP and no OOB rows);
-        # an OOB-only device (host librenms_id is None) still surfaces its OOB cable rows here.
-        return links_data if links_data else None
+        # Distinguish a *successful* zero-row refresh ([] — flows through to the success path in
+        # _prepare_context(), where an OOB-fetch warning can still be surfaced) from a genuine
+        # fetch failure (None — mislabeled "No links found" otherwise). A refresh is a failure
+        # only when nothing was collected AND a fetch error was recorded (host LLDP failure or a
+        # malformed payload). An empty-but-valid host result, or OOB-failure with a host success,
+        # records no host error and must return [] so the warning isn't dropped. Any collected
+        # rows (host / OOB / serial) always come back.
+        if not links_data and self._links_fetch_error:
+            return None
+        return links_data
 
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None):
         """Try to find device in NetBox first by librenms_id custom field, then by name"""

@@ -246,6 +246,46 @@ class TestBaseCableTableViewGetLinksData:
         assert result[0]["remote_device"] == "peer-sw"
         assert result[0]["local_port"] == "console0"
 
+    def test_get_links_data_successful_empty_returns_list_not_none(self):
+        """A successful refresh with zero rows must return [] (not None) so _prepare_context()
+        flows it through the success path instead of mislabeling it 'No links found'. None is
+        reserved for a genuine fetch failure."""
+        view = self._make_view()
+        obj = _mock_obj()
+        view._librenms_api.get_device_links.return_value = (True, {"links": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+        ):
+            result = view.get_links_data(obj)
+
+        # Pre-fix `return links_data if links_data else None` collapsed this empty success to None.
+        assert result == []
+        assert result is not None
+
+    def test_get_links_data_host_success_oob_failure_empty_returns_list(self):
+        """Host LLDP succeeds with zero links but the OOB controller fetch fails: must return []
+        (with _oob_links_fetch_failed set) so post() can surface the OOB warning — not None,
+        which would be mislabeled 'No links found' and drop the warning."""
+        view = self._make_view()
+        obj = _mock_obj()
+        view._librenms_api.get_device_links.side_effect = [
+            (True, {"links": []}),  # host: success, no links
+            (False, {"error": "oob down"}),  # OOB controller: fetch fails
+        ]
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value={"id": 99}),
+        ):
+            result = view.get_links_data(obj)
+
+        assert result == []
+        assert view._oob_links_fetch_failed is True
+
     def test_get_links_data_port_without_id_skipped(self):
         """Ports missing port_id are skipped when building local port map."""
         view = self._make_view()
