@@ -1210,6 +1210,19 @@
                 if (nearestModal === modalElement) {
                     event.preventDefault();
                     hideModal(modalElement, fallbackBackdropRef);
+                } else if (
+                    nearestModal &&
+                    !(typeof bootstrap !== 'undefined' && bootstrap.Modal) &&
+                    !(typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal)
+                ) {
+                    // No-Bootstrap fallback: Bootstrap's own dismiss handler isn't available to
+                    // close the nested modal, so the user would otherwise be stuck inside it.
+                    // Manually hide just the nested modal (not the outer HTMX modal).
+                    event.preventDefault();
+                    nearestModal.classList.remove('show');
+                    nearestModal.style.display = 'none';
+                    nearestModal.setAttribute('aria-hidden', 'true');
+                    nearestModal.removeAttribute('aria-modal');
                 }
             }
         });
