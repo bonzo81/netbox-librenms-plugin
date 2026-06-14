@@ -110,6 +110,22 @@ def make_serial_device(name, *, csp_names=(), cp_names=()):
     return dev, csps, cps
 
 
+def make_virtual_chassis(name, *devices):
+    """Create a VirtualChassis and enroll *devices* as members (vc_position by order).
+
+    Returns the VirtualChassis. Members are reachable via ``vc.members`` (the reverse
+    Device FK), matching what the sync code reads via ``obj.virtual_chassis.members``.
+    """
+    from dcim.models import VirtualChassis
+
+    vc = VirtualChassis.objects.create(name=name)
+    for position, dev in enumerate(devices, start=1):
+        dev.virtual_chassis = vc
+        dev.vc_position = position
+        dev.save()
+    return vc
+
+
 def cable_together(term_a, term_b):
     """Create a real Cable between two terminations (NetBox 4.x multi-termination API)."""
     from dcim.models import Cable

@@ -1336,140 +1336,114 @@ class TestSyncLagAndParentRelationships:
 # ===========================================================================
 
 
+@pytest.mark.django_db
 class TestResolveInterfaceByPortId:
-    """The function must correctly read the nested {'server_key': port_id} dict format."""
+    """The function must correctly read the nested {'server_key': port_id} dict format.
+
+    Driven against real Device / Interface objects so the real ``Interface.objects.filter``
+    query and the real ``get_librenms_device_id`` (extracting the port id from the nested
+    ``{server_key: id}`` cf) are exercised — a MagicMock standing in for the manager would
+    let a wrong-shape read or a broken filter pass unnoticed. The VC-wide name ambiguity
+    case uses a real two-member VirtualChassis. The unexpected-error propagation test stays
+    a focused unit test (it injects a non-DB RuntimeError into the lookup)."""
 
     def test_finds_interface_by_server_keyed_dict(self):
         """When librenms_id = {'production': 42}, resolves for port_id=42 and server_key='production'."""
-        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-        from dcim.models import Device, Interface
 
-        mock_device = MagicMock(spec=Device)
-        mock_iface = MagicMock(spec=Interface)
+        device = make_device("pci-byid")
+        iface = make_interface(device, "Gi0/1", iface_type="1000base-t")
+        set_librenms_device_id(iface, 42, "production")  # stored as {"production": 42}
+        iface.save()
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id") as mock_get_id,
-        ):
-            mock_intf_cls.objects.filter.return_value = [mock_iface]
-            mock_get_id.return_value = 42  # correctly extracts 42 from {"production": 42}
-
-            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production")
+        found, err = _resolve_interface_by_port_id(device, "42", "production")
 
         assert err is None
-        assert iface is mock_iface
-        mock_get_id.assert_called_once_with(mock_iface, "production", auto_save=False)
+        assert found == iface
 
     def test_returns_error_when_not_found(self):
         """Returns (None, error) when no interface has matching port_id."""
-        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-        from dcim.models import Device
 
-        mock_device = MagicMock(spec=Device)
+        device = make_device("pci-notfound")
+        # An interface exists, but carries a different port id than the one we look up.
+        iface = make_interface(device, "Gi0/1", iface_type="1000base-t")
+        set_librenms_device_id(iface, 42, "production")
+        iface.save()
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
-        ):
-            mock_intf_cls.objects.filter.return_value = [MagicMock()]
+        found, err = _resolve_interface_by_port_id(device, "99", "production")
 
-            iface, err = _resolve_interface_by_port_id(mock_device, "99", "production")
-
-        assert iface is None
+        assert found is None
         assert err is not None
 
     def test_name_hint_fallback_when_no_librenms_id(self):
-        """Falls back to name lookup when no interface has matching librenms_id."""
-        from unittest.mock import MagicMock, patch
+        """Falls back to exact name lookup when no interface has a matching librenms_id."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-        from dcim.models import Device, Interface
 
-        mock_device = MagicMock(spec=Device)
-        mock_device.virtual_chassis = None
-        mock_iface_by_name = MagicMock(spec=Interface)
+        device = make_device("pci-namehint")
+        # The interface was created manually (no librenms_id) — only the name matches.
+        iface = make_interface(device, "lag-1", iface_type="lag")
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
-        ):
-            mock_intf_cls.objects.filter.return_value = []
-            mock_intf_cls.objects.get.return_value = mock_iface_by_name
-
-            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
+        found, err = _resolve_interface_by_port_id(device, "42", "production", name_hint="lag-1")
 
         assert err is None
-        assert iface is mock_iface_by_name
-        mock_intf_cls.objects.get.assert_called_once_with(device=mock_device, name="lag-1")
+        assert found == iface
 
     def test_ambiguous_port_id_returns_error_not_first_match(self):
         """Two interfaces carrying the same stale librenms_id must fail as ambiguous,
         not silently bind lag/parent to whichever happens to be first."""
-        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-        from dcim.models import Device, Interface
 
-        mock_device = MagicMock(spec=Device)
-        iface_a = MagicMock(spec=Interface)
-        iface_b = MagicMock(spec=Interface)
+        device = make_device("pci-ambig")
+        for name in ("Gi0/1", "Gi0/2"):
+            iface = make_interface(device, name, iface_type="1000base-t")
+            set_librenms_device_id(iface, 42, "production")  # same stale id on both
+            iface.save()
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=42),
-        ):
-            mock_intf_cls.objects.filter.return_value = [iface_a, iface_b]
-            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production")
+        found, err = _resolve_interface_by_port_id(device, "42", "production")
 
-        assert iface is None
+        assert found is None
         assert err is not None
         assert "ambiguous" in err.lower()
 
     def test_name_hint_does_not_exist_falls_through_to_not_found(self):
         """A name-hint miss (DoesNotExist) is swallowed and reported as not-found."""
-        from unittest.mock import MagicMock, patch
+        from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-        from dcim.models import Device, Interface
 
-        mock_device = MagicMock(spec=Device)
-        mock_device.virtual_chassis = None
+        device = make_device("pci-namemiss")  # no interfaces at all
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
-        ):
-            mock_intf_cls.objects.filter.return_value = []
-            # Wire the real exception classes so the narrowed except clause is valid.
-            mock_intf_cls.DoesNotExist = Interface.DoesNotExist
-            mock_intf_cls.MultipleObjectsReturned = Interface.MultipleObjectsReturned
-            mock_intf_cls.objects.get.side_effect = Interface.DoesNotExist
-            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
+        found, err = _resolve_interface_by_port_id(device, "42", "production", name_hint="lag-1")
 
-        assert iface is None
+        assert found is None
         assert err is not None
         assert "not found" in err.lower()
 
     def test_name_hint_multiple_matches_returns_ambiguous(self):
         """A name-hint matching multiple interfaces returns an ambiguity error, not a silent
-        not-found — the narrowed except surfaces MultipleObjectsReturned distinctly."""
-        from unittest.mock import MagicMock, patch
+        not-found. A single Device enforces unique (device, name), so the genuine way to hit
+        MultipleObjectsReturned is a VC-wide name search across two members that each own an
+        interface of the same name."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-        from dcim.models import Device, Interface
 
-        mock_device = MagicMock(spec=Device)
-        mock_device.virtual_chassis = None
+        member1 = make_device("pci-vc-m1")
+        member2 = make_device("pci-vc-m2")
+        make_virtual_chassis("pci-vc", member1, member2)
+        # Same interface name on both members; neither has a librenms_id for port 42.
+        make_interface(member1, "lag-1", iface_type="lag")
+        make_interface(member2, "lag-1", iface_type="lag")
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
-        ):
-            mock_intf_cls.objects.filter.return_value = []
-            mock_intf_cls.DoesNotExist = Interface.DoesNotExist
-            mock_intf_cls.MultipleObjectsReturned = Interface.MultipleObjectsReturned
-            mock_intf_cls.objects.get.side_effect = Interface.MultipleObjectsReturned
-            iface, err = _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
+        found, err = _resolve_interface_by_port_id(member1, "42", "production", name_hint="lag-1")
 
-        assert iface is None
+        assert found is None
         assert err is not None
         assert "ambiguous" in err.lower()
 
@@ -1507,25 +1481,19 @@ class TestResolveInterfaceByPortIdExpectedOwner:
 
     @staticmethod
     def _make_vc_members():
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site, VirtualChassis
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
-        site = Site.objects.create(name="VCSite", slug="vc-site")
-        mfr = Manufacturer.objects.create(name="VCMfr", slug="vc-mfr")
-        dtype = DeviceType.objects.create(manufacturer=mfr, model="VCDT", slug="vc-dt")
-        role = DeviceRole.objects.create(name="VCRole", slug="vc-role", color="00ff00")
-        vc = VirtualChassis.objects.create(name="VC-1")
-        common = {"device_type": dtype, "role": role, "site": site, "status": "active", "virtual_chassis": vc}
-        member1 = Device.objects.create(name="vc-m1", vc_position=1, **common)
-        member2 = Device.objects.create(name="vc-m2", vc_position=2, **common)
+        member1 = make_device("vc-m1")
+        member2 = make_device("vc-m2")
+        make_virtual_chassis("VC-1", member1, member2)
         return member1, member2
 
     @staticmethod
     def _iface_with_librenms_id(device, name, port_id, server_key="default"):
-        from dcim.models import Interface
-
+        from netbox_librenms_plugin.tests.conftest import make_interface
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
-        iface = Interface.objects.create(device=device, name=name, type="1000base-t")
+        iface = make_interface(device, name, iface_type="1000base-t")
         set_librenms_device_id(iface, port_id, server_key)
         iface.save()
         return iface
