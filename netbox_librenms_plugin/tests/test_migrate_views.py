@@ -13,28 +13,22 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Shared real-DB builders (see tests/conftest.py).
+from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+
 
 # ── helper: get_migrated_to_marker ────────────────────────────────────────
 
 
 def _make_migrate_device(name, librenms_cf=None):
-    """Create a real Device, optionally seeding its ``librenms_id`` custom field.
+    """Positional-arg adapter over the shared ``make_device`` builder.
 
-    The marker/winner helpers read the value through NetBox's ``device.cf`` accessor and
-    resolve the winner via ``Device.objects`` — so a real device with a real custom field
-    exercises the actual CF read + ORM lookup, not a MagicMock that would accept any shape.
+    The marker/winner helpers read the librenms_id custom field through NetBox's ``device.cf``
+    accessor and resolve the winner via ``Device.objects`` — so a real device with a real CF
+    exercises the actual read + ORM lookup. This thin wrapper just preserves the positional
+    ``librenms_cf`` call style used throughout this module.
     """
-    from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-
-    site, _ = Site.objects.get_or_create(name="MigSite", slug="mig-site")
-    mfr, _ = Manufacturer.objects.get_or_create(name="MigMfr", slug="mig-mfr")
-    dtype, _ = DeviceType.objects.get_or_create(model="MigDT", slug="mig-dt", defaults={"manufacturer": mfr})
-    role, _ = DeviceRole.objects.get_or_create(name="MigRole", slug="mig-role", defaults={"color": "00ff00"})
-    dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active")
-    if librenms_cf is not None:
-        dev.custom_field_data["librenms_id"] = librenms_cf
-        dev.save()
-    return dev
+    return make_device(name, librenms_cf=librenms_cf)
 
 
 @pytest.mark.django_db
@@ -795,26 +789,12 @@ class TestReconcileDonorDeviceIpFks:
 
     @staticmethod
     def _make_devices():
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-
-        site = Site.objects.create(name="ReconSite", slug="recon-site")
-        mfr = Manufacturer.objects.create(name="ReconMfr", slug="recon-mfr")
-        dtype = DeviceType.objects.create(manufacturer=mfr, model="ReconDT", slug="recon-dt")
-        role = DeviceRole.objects.create(name="ReconRole", slug="recon-role", color="ff0000")
-        common = {"device_type": dtype, "role": role, "site": site, "status": "active"}
-        winner = Device.objects.create(name="recon-winner", **common)
-        donor = Device.objects.create(name="recon-donor", **common)
-        other = Device.objects.create(name="recon-other", **common)
-        return winner, donor, other
-
-    @staticmethod
-    def _ip_on(device, addr, ifname):
-        from dcim.models import Interface
-        from ipam.models import IPAddress
-
-        iface = Interface.objects.create(device=device, name=ifname, type="1000base-t")
-        ip = IPAddress.objects.create(address=addr, assigned_object=iface)
-        return ip
+        # Three real devices on the shared infra (winner / donor / a third owner).
+        return (
+            make_device("recon-winner"),
+            make_device("recon-donor"),
+            make_device("recon-other"),
+        )
 
     def test_transfers_primary_ip_when_interface_is_on_winner(self):
         """The donor's primary_ip4 dangles on an address now sitting on a winner-owned interface;
@@ -824,7 +804,7 @@ class TestReconcileDonorDeviceIpFks:
         from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
 
         winner, donor, _ = self._make_devices()
-        ip = self._ip_on(winner, "10.10.0.1/24", "eth0")
+        ip = ip_on(winner, "10.10.0.1/24", "eth0")
         # Dangling FK: donor still points at the moved address (save() skips clean()).
         donor.primary_ip4 = ip
         donor.save()
@@ -846,7 +826,7 @@ class TestReconcileDonorDeviceIpFks:
         from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
 
         winner, donor, other = self._make_devices()
-        ip = self._ip_on(other, "10.10.0.2/24", "eth0")
+        ip = ip_on(other, "10.10.0.2/24", "eth0")
         donor.primary_ip4 = ip
         donor.save()
 

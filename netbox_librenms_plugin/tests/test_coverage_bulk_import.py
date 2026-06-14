@@ -9,6 +9,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Shared real-DB builders (see tests/conftest.py).
+from netbox_librenms_plugin.tests.conftest import delete_keeping_pk, make_device, make_vm
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -810,49 +813,6 @@ class TestRefreshExistingDevice:
     if the production query shapes drifted.
     """
 
-    # ------------------------------------------------------------------
-    # Real-model fixtures
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _infra():
-        from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
-
-        site, _ = Site.objects.get_or_create(name="RefSite", slug="ref-site")
-        mfr, _ = Manufacturer.objects.get_or_create(name="RefMfr", slug="ref-mfr")
-        dtype, _ = DeviceType.objects.get_or_create(model="RefDT", slug="ref-dt", defaults={"manufacturer": mfr})
-        role, _ = DeviceRole.objects.get_or_create(name="RefRole", slug="ref-role", defaults={"color": "00ff00"})
-        return site, dtype, role
-
-    @classmethod
-    def _make_device(cls, name, serial="", librenms_cf=None):
-        from dcim.models import Device
-
-        site, dtype, role = cls._infra()
-        dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
-        if librenms_cf is not None:
-            dev.custom_field_data["librenms_id"] = librenms_cf
-            dev.save()
-        return dev
-
-    @classmethod
-    def _make_vm(cls, name):
-        from virtualization.models import Cluster, ClusterType, VirtualMachine
-
-        ctype, _ = ClusterType.objects.get_or_create(name="RefCType", slug="ref-ctype")
-        cluster, _ = Cluster.objects.get_or_create(name="RefCluster", defaults={"type": ctype})
-        return VirtualMachine.objects.create(name=name, cluster=cluster, status="active")
-
-    @staticmethod
-    def _delete_keeping_pk(obj):
-        """Delete the row via the queryset so the in-memory instance keeps its pk.
-
-        ``Model.delete()`` nulls ``instance.pk``; the refresh reads ``existing.pk`` to re-query,
-        so we delete through the manager to simulate "matched object vanished since caching"
-        while the cached instance still carries its original pk.
-        """
-        type(obj).objects.filter(pk=obj.pk).delete()
-
     @staticmethod
     def _device_validation(**overrides):
         """Baseline device validation dict shaped like ``validate_device_for_import`` output.
@@ -894,7 +854,7 @@ class TestRefreshExistingDevice:
         """A non-VM existing device is refreshed from the DB and its current role applied."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("ref-role-dev")
+        dev = make_device("ref-role-dev")
         validation = self._device_validation(existing_device=dev, device_role={})
 
         _refresh_existing_device(validation)
@@ -934,7 +894,7 @@ class TestRefreshExistingDevice:
         the row stays blocked."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("ref-hostname-dev")
+        dev = make_device("ref-hostname-dev")
         validation = self._device_validation(
             existing_device=dev,
             existing_match_type="hostname",  # not librenms-based
@@ -965,7 +925,7 @@ class TestRefreshExistingDevice:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         # Real device with NO librenms_id CF → linkage finds no host/OOB id → neutralizes.
-        dev = self._make_device("ref-unlinked")
+        dev = make_device("ref-unlinked")
         validation = self._device_validation(
             existing_device=dev,
             existing_match_type="librenms_id",
@@ -991,9 +951,9 @@ class TestRefreshExistingDevice:
         """Device deleted since caching → existing_device=None, role reset, readiness recomputed."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("ref-deleted")
+        dev = make_device("ref-deleted")
         validation = self._device_validation(existing_device=dev, device_role={"found": True})
-        self._delete_keeping_pk(dev)
+        delete_keeping_pk(dev)
 
         _refresh_existing_device(validation)
 
@@ -1008,7 +968,7 @@ class TestRefreshExistingDevice:
         must be cleared so the UI can't offer actions on a now-gone device."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("ref-deleted-actions")
+        dev = make_device("ref-deleted-actions")
         validation = self._device_validation(
             existing_device=dev,
             device_role={"found": True},
@@ -1019,7 +979,7 @@ class TestRefreshExistingDevice:
             merge_candidates={"host_named": {"pk": 4}, "oob_named": {"pk": 5}},
             serial_role_choice_available=True,
         )
-        self._delete_keeping_pk(dev)
+        delete_keeping_pk(dev)
 
         _refresh_existing_device(validation)
 
@@ -1039,7 +999,7 @@ class TestRefreshExistingDevice:
 
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        vm = self._make_vm("ref-vm-deleted")
+        vm = make_vm("ref-vm-deleted")
         stale_cluster = vm.cluster
         other_type, _ = ClusterType.objects.get_or_create(name="RefCType", slug="ref-ctype")
         other_cluster = Cluster.objects.create(name="RefCluster-B", type=other_type)
@@ -1048,7 +1008,7 @@ class TestRefreshExistingDevice:
             existing_device=vm,
             cluster={"found": True, "cluster": stale_cluster, "available_clusters": available},
         )
-        self._delete_keeping_pk(vm)
+        delete_keeping_pk(vm)
 
         _refresh_existing_device(validation)
 
@@ -1066,9 +1026,9 @@ class TestRefreshExistingDevice:
         issues the row is importable but not ready until a fresh cluster is chosen."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        vm = self._make_vm("ref-vm-recompute")
+        vm = make_vm("ref-vm-recompute")
         validation = self._vm_validation(existing_device=vm, cluster={"found": True})
-        self._delete_keeping_pk(vm)
+        delete_keeping_pk(vm)
 
         _refresh_existing_device(validation)
 
@@ -1080,9 +1040,9 @@ class TestRefreshExistingDevice:
         """Deleted VM with a blocking issue → can_import False and is_ready False."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        vm = self._make_vm("ref-vm-nocluster")
+        vm = make_vm("ref-vm-nocluster")
         validation = self._vm_validation(existing_device=vm, issues=["some issue"], cluster={"found": False})
-        self._delete_keeping_pk(vm)
+        delete_keeping_pk(vm)
 
         _refresh_existing_device(validation)
 
@@ -1099,7 +1059,7 @@ class TestRefreshExistingDevice:
         serial, otherwise it flips to importable and creates a duplicate."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("ref-serial-dev", serial="ABC123")
+        dev = make_device("ref-serial-dev", serial="ABC123")
         validation = self._device_validation()
         # device_id has no CF match; hostname/sysName don't match dev.name → serial is the hook.
         libre_device = {"device_id": 50, "hostname": "h", "sysName": "h", "serial": "ABC123"}
@@ -1116,7 +1076,7 @@ class TestRefreshExistingDevice:
         linger in the UI (the row is force-blocked as an existing match regardless)."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("ref-serial-role", serial="ABC124")
+        dev = make_device("ref-serial-role", serial="ABC124")
         validation = self._device_validation(issues=["Device role must be manually selected before import"])
         libre_device = {"device_id": 51, "hostname": "h", "sysName": "h", "serial": "ABC124"}
 
@@ -1134,7 +1094,7 @@ class TestRefreshExistingDevice:
 
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("ref-ip-dev")
+        dev = make_device("ref-ip-dev")
         iface = Interface.objects.create(device=dev, name="mgmt0", type="1000base-t")
         IPAddress.objects.create(address="10.0.0.9/24", assigned_object=iface)
         validation = self._device_validation()
@@ -1154,7 +1114,7 @@ class TestRefreshExistingDevice:
         ``_refresh_librenms_linkage`` re-verifies host_id == scanned id (42)."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("sw01", librenms_cf={"default": {"id": 42}})
+        dev = make_device("sw01", librenms_cf={"default": {"id": 42}})
         libre_device = {"device_id": 42, "hostname": "sw01", "sysName": "sw01"}
         validation = self._device_validation(resolved_name="sw01")
 
@@ -1175,7 +1135,7 @@ class TestRefreshExistingDevice:
         whose librenms_id CF carries an OOB sub-key pointing at the scanned id (42)."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device(
+        dev = make_device(
             "idrac-host",
             librenms_cf={"default": {"id": 99, "oob": {"id": 42, "type": "drac"}}},
         )
@@ -1198,7 +1158,7 @@ class TestRefreshExistingDevice:
         """existing=None: not matched by librenms_id, but matched by resolved_name."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("sw02-resolved")
+        dev = make_device("sw02-resolved")
         libre_device = {"device_id": 43, "hostname": "sw02", "sysName": "sw02"}
         validation = self._device_validation(resolved_name="sw02-resolved")
 
@@ -1213,7 +1173,7 @@ class TestRefreshExistingDevice:
         by resolved_name rather than crashing on int('not-an-int')."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("sw05")
+        dev = make_device("sw05")
         libre_device = {"device_id": "not-an-int", "hostname": "sw05", "sysName": "sw05"}
         validation = self._device_validation(resolved_name="sw05")
 
@@ -1227,7 +1187,7 @@ class TestRefreshExistingDevice:
         """existing=None, not matched by id or resolved_name → hostname fallback."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        dev = self._make_device("sw04")
+        dev = make_device("sw04")
         libre_device = {"device_id": 45, "hostname": "sw04", "sysName": "sw04-sysname"}
         validation = self._device_validation(resolved_name=None)
 
