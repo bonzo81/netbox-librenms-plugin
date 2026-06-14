@@ -3031,8 +3031,12 @@ class MergeNetBoxDevicesView(
             if oob_ip_transferred:
                 update_fields.append("oob_ip")
             try:
-                winner.save(update_fields=update_fields)
+                # Persist the donor first. When an oob_ip is being transferred, the donor
+                # must release the OneToOne ``oob_ip`` (set to None) before the winner can
+                # claim it — saving the winner first would momentarily point two devices at
+                # the same IP and violate the unique constraint on ``Device.oob_ip``.
                 donor.save(update_fields=update_fields)
+                winner.save(update_fields=update_fields)
             except Exception:  # pragma: no cover - defensive
                 logger.exception(
                     "MergeNetBoxDevicesView: failed to persist merge winner=%s donor=%s",
