@@ -120,29 +120,41 @@ class TestSyncInterfaceParentViewPermissions:
             view.post(_make_request(), "invalid", 1)
 
 
+@pytest.mark.django_db
 class TestInterfacesSameOwnerGuard:
     """_interfaces_same_owner gates lag/parent links so a port_stack relationship that
-    resolves across two VC members can't persist a NetBox-forbidden cross-device link."""
+    resolves across two VC members can't persist a NetBox-forbidden cross-device link.
+
+    Driven against real Interface / VMInterface objects so the genuine ``device_id`` /
+    ``virtual_machine_id`` attributes are compared, rather than values hand-set on a
+    MagicMock (which would also paper over the function reading a wrong attribute name)."""
 
     def test_same_device_is_true(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.views.sync.interfaces import _interfaces_same_owner
 
-        a = MagicMock(device_id=1, virtual_machine_id=None)
-        b = MagicMock(device_id=1, virtual_machine_id=None)
+        device = make_device("same-owner")
+        a = make_interface(device, "Gi0/1")
+        b = make_interface(device, "Gi0/2")
         assert _interfaces_same_owner(a, b) is True
 
     def test_different_device_is_false(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.views.sync.interfaces import _interfaces_same_owner
 
-        a = MagicMock(device_id=1, virtual_machine_id=None)
-        b = MagicMock(device_id=2, virtual_machine_id=None)
+        a = make_interface(make_device("owner-a"), "Gi0/1")
+        b = make_interface(make_device("owner-b"), "Gi0/1")
         assert _interfaces_same_owner(a, b) is False
 
     def test_same_vm_is_true(self):
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.tests.conftest import make_vm
         from netbox_librenms_plugin.views.sync.interfaces import _interfaces_same_owner
 
-        a = MagicMock(device_id=None, virtual_machine_id=7)
-        b = MagicMock(device_id=None, virtual_machine_id=7)
+        vm = make_vm("same-vm")
+        a = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+        b = VMInterface.objects.create(virtual_machine=vm, name="eth1")
         assert _interfaces_same_owner(a, b) is True
 
 
@@ -1235,21 +1247,16 @@ class TestSyncLagAndParentRelationships:
 
     @staticmethod
     def _make_device():
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        site = Site.objects.create(name="LagSite", slug="lag-site")
-        mfr = Manufacturer.objects.create(name="LagMfr", slug="lag-mfr")
-        dtype = DeviceType.objects.create(manufacturer=mfr, model="LagDT", slug="lag-dt")
-        role = DeviceRole.objects.create(name="LagRole", slug="lag-role", color="0000ff")
-        return Device.objects.create(name="lag-dev", device_type=dtype, role=role, site=site, status="active")
+        return make_device("lag-dev")
 
     @staticmethod
     def _iface(device, name, port_id, itype="1000base-t"):
-        from dcim.models import Interface
-
+        from netbox_librenms_plugin.tests.conftest import make_interface
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
-        iface = Interface.objects.create(device=device, name=name, type=itype)
+        iface = make_interface(device, name, iface_type=itype)
         set_librenms_device_id(iface, port_id, "default")
         iface.save()
         return iface
