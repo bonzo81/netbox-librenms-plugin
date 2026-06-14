@@ -2467,7 +2467,10 @@ class TestOOBDetection:
 
         mock_device_cls = MagicMock()
         mock_device_cls.objects.filter.return_value.first.return_value = host_named
-        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = oob_named
+        # Merge-peer discovery slices the queryset (`exclude(...)[:2]`), not `.first()`; stub the
+        # slice so the peer-lookup branch is actually exercised (the conservative "neither linked"
+        # guard then still skips the merge).
+        mock_device_cls.objects.filter.return_value.exclude.return_value.__getitem__.return_value = [oob_named]
 
         patches = self._base_patches(mock_device_cls) + [
             patch(
@@ -2513,8 +2516,9 @@ class TestOOBDetection:
 
         mock_device_cls = MagicMock()
         mock_device_cls.objects.filter.return_value.first.return_value = host_named
-        # No serial twin
-        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+        # No serial twin. Merge-peer discovery slices (`exclude(...)[:2]`); stub the slice as empty
+        # so the no-peer branch is exercised (was stubbing the unused `.first()`).
+        mock_device_cls.objects.filter.return_value.exclude.return_value.__getitem__.return_value = []
 
         patches = self._base_patches(mock_device_cls) + [
             patch(
@@ -2658,10 +2662,17 @@ class TestMergeCandidateNonUniqueSerialPeer:
     def test_single_serial_peer_still_considered(self):
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        make_device("host1")  # hostname match
-        make_device("dup-b", serial="SHARED")  # exactly one same-serial peer
+        make_device("host1")  # hostname match (no LibreNMS link)
+        # Exactly one same-serial peer, and it already has a LibreNMS link so the conservative
+        # "at least one side linked" guard passes and the merge suggestion actually fires.
+        make_device("dup-b", serial="SHARED", librenms_cf={"default": {"id": 99}})
 
         result = self._validate(self._libre("SHARED"))
 
-        # A unique peer must NOT trip the multi-peer guard.
+        # A unique peer must NOT trip the multi-peer guard...
         assert not any("Multiple NetBox devices share serial" in w for w in result["warnings"])
+        # ...and the positive outcome must actually be produced: the unique peer is paired and
+        # surfaced as a merge suggestion. (Asserting only the absence of the warning would still
+        # pass with merge detection fully disabled — this pins the real behavior.)
+        assert result["serial_action"] == "merge_netbox_devices"
+        assert result.get("merge_candidates")
