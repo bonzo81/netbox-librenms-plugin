@@ -15,47 +15,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Shared real-DB builders (see tests/conftest.py).
+from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_device
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_serial_device(name, csp_names=(), cp_names=()):
-    """Create a real Device with optional ConsoleServerPorts / ConsolePorts.
-
-    The serial cable logic resolves CSPs/CPs and inspects their ``.cable`` state via real
-    ORM lookups, so these tests build real NetBox objects instead of MagicMock stand-ins —
-    a MagicMock CSP would happily report any ``.cable`` value the test set, never exercising
-    the actual termination wiring.
-    """
-    from dcim.models import (
-        ConsolePort,
-        ConsoleServerPort,
-        Device,
-        DeviceRole,
-        DeviceType,
-        Manufacturer,
-        Site,
-    )
-
-    site, _ = Site.objects.get_or_create(name="SerSite", slug="ser-site")
-    mfr, _ = Manufacturer.objects.get_or_create(name="SerMfr", slug="ser-mfr")
-    dtype, _ = DeviceType.objects.get_or_create(model="SerDT", slug="ser-dt", defaults={"manufacturer": mfr})
-    role, _ = DeviceRole.objects.get_or_create(name="SerRole", slug="ser-role", defaults={"color": "00ff00"})
-    dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active")
-    csps = [ConsoleServerPort.objects.create(device=dev, name=n) for n in csp_names]
-    cps = [ConsolePort.objects.create(device=dev, name=n) for n in cp_names]
-    return dev, csps, cps
-
-
-def _cable_together(term_a, term_b):
-    """Create a real Cable between two terminations (NetBox 4.x multi-termination API)."""
-    from dcim.models import Cable
-
-    cable = Cable(a_terminations=[term_a], b_terminations=[term_b])
-    cable.save()
-    return cable
 
 
 def _mock_obj(pk=1, has_csps=True):
@@ -217,7 +183,7 @@ class TestEnrichLocalPortSerial:
     def test_csp_found_sets_url_and_id(self):
         """When a CSP exists by name on the device, its id and real URL are set on the link."""
         view = _make_view()
-        obj, (csp,), _ = _make_serial_device("ser-enrich-found", csp_names=["ttyS7"])
+        obj, (csp,), _ = make_serial_device("ser-enrich-found", csp_names=["ttyS7"])
 
         link = {"local_port": "ttyS7", "local_port_id": "serial:1007", "_source": "serial"}
         view.enrich_local_port(link, obj)
@@ -229,7 +195,7 @@ class TestEnrichLocalPortSerial:
     def test_csp_not_found_no_url_set(self):
         """When no CSP matches the serial port name, no URL or id is set."""
         view = _make_view()
-        obj, _, _ = _make_serial_device("ser-enrich-miss", csp_names=["ttyS1"])
+        obj, _, _ = make_serial_device("ser-enrich-miss", csp_names=["ttyS1"])
 
         link = {"local_port": "ttyS99", "local_port_id": "serial:1099", "_source": "serial"}
         view.enrich_local_port(link, obj)
@@ -246,7 +212,7 @@ class TestEnrichLocalPortSerial:
         from dcim.models import Interface
 
         view = _make_view()
-        obj, _, _ = _make_serial_device("ser-enrich-iface")
+        obj, _, _ = make_serial_device("ser-enrich-iface")
         # A same-named Interface exists, but the serial path must not pick it up.
         Interface.objects.create(device=obj, name="ttyS3", type="other")
 
@@ -281,9 +247,9 @@ class TestCheckSerialCableStatus:
     def test_csp_with_cable(self):
         """A real cabled CSP -> 'Cable Found' with the real cable_url."""
         view = _make_view()
-        dev, (csp,), _ = _make_serial_device("ser-csp-cabled", csp_names=["ttyS7"])
-        _, _, (cp,) = _make_serial_device("ser-cp-peer", cp_names=["con0"])
-        cable = _cable_together(csp, cp)
+        dev, (csp,), _ = make_serial_device("ser-csp-cabled", csp_names=["ttyS7"])
+        _, _, (cp,) = make_serial_device("ser-cp-peer", cp_names=["con0"])
+        cable = cable_together(csp, cp)
 
         link = {"_source": "serial", "netbox_local_interface_id": csp.pk}
         view.check_serial_cable_status(link)
@@ -295,7 +261,7 @@ class TestCheckSerialCableStatus:
     def test_csp_without_cable(self):
         """A real uncabled CSP -> 'No Cable'."""
         view = _make_view()
-        dev, (csp,), _ = _make_serial_device("ser-csp-nocable", csp_names=["ttyS7"])
+        dev, (csp,), _ = make_serial_device("ser-csp-nocable", csp_names=["ttyS7"])
 
         link = {"_source": "serial", "netbox_local_interface_id": csp.pk}
         view.check_serial_cable_status(link)
@@ -661,8 +627,8 @@ class TestHandleSerialCableCreation:
         """When a real CSP and CP both exist and are uncabled, create_cable is invoked and the
         result is valid."""
         view = self._make_sync_view()
-        _, (csp,), _ = _make_serial_device("ser-hsc-csp", csp_names=["ttyS7"])
-        _, _, (cp,) = _make_serial_device("ser-hsc-cp", cp_names=["con0"])
+        _, (csp,), _ = make_serial_device("ser-hsc-csp", csp_names=["ttyS7"])
+        _, _, (cp,) = make_serial_device("ser-hsc-cp", cp_names=["con0"])
 
         link_data = {
             "_source": "serial",
@@ -714,10 +680,10 @@ class TestHandleSerialCableCreation:
     def test_existing_cable_on_csp_returns_duplicate(self):
         """When the real CSP already has a cable, the handler returns duplicate."""
         view = self._make_sync_view()
-        _, (csp,), _ = _make_serial_device("ser-hsc-dup-csp", csp_names=["ttyS7"])
-        _, _, (peer_cp,) = _make_serial_device("ser-hsc-dup-peer", cp_names=["conX"])
-        _cable_together(csp, peer_cp)  # csp is now cabled
-        _, _, (cp,) = _make_serial_device("ser-hsc-dup-target", cp_names=["con0"])
+        _, (csp,), _ = make_serial_device("ser-hsc-dup-csp", csp_names=["ttyS7"])
+        _, _, (peer_cp,) = make_serial_device("ser-hsc-dup-peer", cp_names=["conX"])
+        cable_together(csp, peer_cp)  # csp is now cabled
+        _, _, (cp,) = make_serial_device("ser-hsc-dup-target", cp_names=["con0"])
 
         link_data = {
             "_source": "serial",
@@ -734,7 +700,7 @@ class TestHandleSerialCableCreation:
     def test_csp_does_not_exist_returns_missing_remote(self):
         """A netbox_local_interface_id with no ConsoleServerPort returns missing_remote."""
         view = self._make_sync_view()
-        _, _, (cp,) = _make_serial_device("ser-hsc-nocsp", cp_names=["con0"])
+        _, _, (cp,) = make_serial_device("ser-hsc-nocsp", cp_names=["con0"])
 
         link_data = {
             "_source": "serial",
