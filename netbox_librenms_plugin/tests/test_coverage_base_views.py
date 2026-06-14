@@ -1292,7 +1292,9 @@ class TestBaseInterfaceTableViewPost:
         return view
 
     def test_post_no_librenms_id_redirects_with_error(self):
-        """When librenms_id not found, error message and redirect."""
+        """When librenms_id not found, error message and redirect — and the stale ports
+        snapshot is cleared FIRST, so a failed refresh on a previously-synced device can't
+        leave old interface data for the redirected tab or downstream sync to consume."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1303,9 +1305,13 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "rebind_api_for_server", return_value="prod"),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
         ):
             mock_redirect.return_value = MagicMock()
             view.post(request, pk=1)
@@ -1314,6 +1320,11 @@ class TestBaseInterfaceTableViewPost:
         # The failure redirect must preserve the POST-scoped server_key so the user stays on
         # the same LibreNMS server for the next retry.
         mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
+        # The snapshot invalidation must run even on the missing-librenms_id path (it precedes
+        # the early return); otherwise a prior successful snapshot survives a failed refresh.
+        mock_cache.delete.assert_any_call("cache-key")
+        mock_cache.delete.assert_any_call("last-key")
+        mock_cache.set.assert_not_called()
 
     def test_post_api_error_redirects_with_error(self):
         """When API returns failure, error message and redirect."""

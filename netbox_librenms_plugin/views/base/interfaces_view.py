@@ -151,19 +151,22 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         _server_key = post_server_key
         lookup_device = get_librenms_sync_device(obj, server_key=_server_key) or obj
 
-        # Get librenms_id at the start (now scoped to the POSTed server + resolved member).
+        # A refresh must actually refresh: drop the previous snapshot up front so that if
+        # the fetch below fails we fall back to an empty view + visible error, rather than
+        # silently serving stale data (and letting the follow-up sync run on it). The
+        # success path re-populates the cache below. This must precede the missing-librenms_id
+        # return too — otherwise a failed refresh on a previously-synced device leaves the old
+        # ports snapshot in place for the redirected tab and downstream sync actions to consume.
+        cache.delete(self.get_cache_key(lookup_device, "ports", _server_key))
+        cache.delete(self.get_last_fetched_key(lookup_device, "ports", _server_key))
+
+        # Resolve librenms_id (scoped to the POSTed server + resolved member) after the cache
+        # is already invalidated, so the missing-id path can't leave stale interface data behind.
         self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS.")
             return self._failure_redirect(request, obj, post_server_key)
-
-        # A refresh must actually refresh: drop the previous snapshot up front so that if
-        # the fetch below fails we fall back to an empty view + visible error, rather than
-        # silently serving stale data (and letting the follow-up sync run on it). The
-        # success path re-populates the cache below.
-        cache.delete(self.get_cache_key(lookup_device, "ports", _server_key))
-        cache.delete(self.get_last_fetched_key(lookup_device, "ports", _server_key))
 
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
