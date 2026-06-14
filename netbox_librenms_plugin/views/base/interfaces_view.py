@@ -299,12 +299,13 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
     def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None):
         """Get the context data for the interface sync view.
 
-        ``fresh_data`` lets a caller render from an in-memory snapshot instead of the
-        cache. The OOB-ports-fetch-failure path uses this: it intentionally drops the
-        partial (main-only) cache entry so the next request re-fetches, but still needs
-        to render *this* response from the host ports it just fetched — reading the
-        now-deleted cache would render an empty table under a "showing host interfaces"
-        banner.
+        ``fresh_data`` is a render-from-snapshot escape hatch: when given, the view renders
+        from that in-memory dict instead of reading the ports cache (for a caller that built
+        a response without a preceding cache write). No in-tree caller currently passes it.
+
+        The OOB-ports-fetch-failure path does *not* use it: ``post()`` caches the host-only
+        snapshot tagged ``oob_incomplete=True`` and renders from the cache like the normal
+        flow; an inline banner (driven by that tag) surfaces the missing OOB rows.
         """
         ports_data = []
         table = None
