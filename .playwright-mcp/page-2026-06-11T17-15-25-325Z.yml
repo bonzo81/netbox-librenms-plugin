@@ -1,0 +1,1728 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - heading "NetBox Logo Community" [level=1] [ref=e5]:
+          - link "NetBox Logo Community" [ref=e6] [cursor=pointer]:
+            - /url: /
+            - img "NetBox Logo" [ref=e7]
+            - generic [ref=e8]: Community
+        - text: 󰌵 󰛨 󰂞 󰀄 󰃀 󰂚 󰖷 󰌆 󰗽
+        - generic [ref=e9]:
+          - list [ref=e10]:
+            - text: 󰍉
+            - listitem [ref=e11]:
+              - button "Organization" [ref=e12] [cursor=pointer]:
+                - generic [ref=e14]: 󰇗
+                - generic [ref=e15]: Organization
+                - text: 󰅀
+            - listitem [ref=e16]:
+              - button "Racks" [ref=e17] [cursor=pointer]:
+                - generic [ref=e19]: 󱠞
+                - generic [ref=e20]: Racks
+                - text: 󰅀
+            - listitem [ref=e21]:
+              - button "Devices" [ref=e22] [cursor=pointer]:
+                - generic [ref=e24]: 󰒋
+                - generic [ref=e25]: Devices
+                - text: 󰅀
+            - listitem [ref=e26]:
+              - button "Connections" [ref=e27] [cursor=pointer]:
+                - generic [ref=e29]: 󱘖
+                - generic [ref=e30]: Connections
+                - text: 󰅀
+            - listitem [ref=e31]:
+              - button "Wireless" [ref=e32] [cursor=pointer]:
+                - generic [ref=e34]: 󰖩
+                - generic [ref=e35]: Wireless
+                - text: 󰅀
+            - listitem [ref=e36]:
+              - button "IPAM" [ref=e37] [cursor=pointer]:
+                - generic [ref=e39]: 󰆙
+                - generic [ref=e40]: IPAM
+                - text: 󰅀
+            - listitem [ref=e41]:
+              - button "VPN" [ref=e42] [cursor=pointer]:
+                - generic [ref=e44]: 󱁊
+                - generic [ref=e45]: VPN
+                - text: 󰅀
+            - listitem [ref=e46]:
+              - button "Virtualization" [ref=e47] [cursor=pointer]:
+                - generic [ref=e49]: 󰍹
+                - generic [ref=e50]: Virtualization
+                - text: 󰅀
+            - listitem [ref=e51]:
+              - button "Circuits" [ref=e52] [cursor=pointer]:
+                - generic [ref=e54]: 󰴽
+                - generic [ref=e55]: Circuits
+                - text: 󰅀
+            - listitem [ref=e56]:
+              - button "Power" [ref=e57] [cursor=pointer]:
+                - generic [ref=e59]: 󰉁
+                - generic [ref=e60]: Power
+                - text: 󰅀
+            - listitem [ref=e61]:
+              - button "Provisioning" [ref=e62] [cursor=pointer]:
+                - generic [ref=e64]: 󱔘
+                - generic [ref=e65]: Provisioning
+                - text: 󰅀
+            - listitem [ref=e66]:
+              - button "Customization" [ref=e67] [cursor=pointer]:
+                - generic [ref=e69]: 󰦭
+                - generic [ref=e70]: Customization
+                - text: 󰅀
+            - listitem [ref=e71]:
+              - button "Operations" [ref=e72] [cursor=pointer]:
+                - generic [ref=e74]: 󰣖
+                - generic [ref=e75]: Operations
+                - text: 󰅀
+            - listitem [ref=e76]:
+              - button "Interface Name Rules" [ref=e77] [cursor=pointer]:
+                - generic [ref=e79]: 󰓡
+                - generic [ref=e80]: Interface Name Rules
+                - text: 󰅀
+            - listitem [ref=e81]:
+              - button "NSO" [ref=e82] [cursor=pointer]:
+                - generic [ref=e84]: 󱂇
+                - generic [ref=e85]: NSO
+                - text: 󰅀
+            - listitem [ref=e86]:
+              - button "LibreNMS" [ref=e87] [cursor=pointer]:
+                - generic [ref=e89]: 󰛳
+                - generic [ref=e90]: LibreNMS
+                - text: 󰅀
+            - listitem [ref=e91]:
+              - button "Data Import" [ref=e92] [cursor=pointer]:
+                - generic [ref=e94]: 󰥝
+                - generic [ref=e95]: Data Import
+                - text: 󰅀
+            - listitem [ref=e96]:
+              - button "Topology Views" [ref=e97] [cursor=pointer]:
+                - generic [ref=e99]: 󰒪
+                - generic [ref=e100]: Topology Views
+                - text: 󰅀
+            - listitem [ref=e101]:
+              - button "Netbox Routing" [ref=e102] [cursor=pointer]:
+                - generic [ref=e104]: 󱇢
+                - generic [ref=e105]: Netbox Routing
+                - text: 󰅀
+            - listitem [ref=e106]:
+              - button "Plugins" [ref=e107] [cursor=pointer]:
+                - generic [ref=e109]: 󰐱
+                - generic [ref=e110]: Plugins
+                - text: 󰅀
+            - listitem [ref=e111]:
+              - button "Admin" [ref=e112] [cursor=pointer]:
+                - generic [ref=e114]: 󰀎
+                - generic [ref=e115]: Admin
+                - text: 󰅀
+          - generic [ref=e116]:
+            - text: NetBox Community v4.6.1-Docker-5.0.1
+            - generic [ref=e117]:
+              - link "Get Cloud" [ref=e118] [cursor=pointer]:
+                - /url: https://netboxlabs.com/netbox-cloud/
+              - text: "|"
+              - link "Get Enterprise" [ref=e119] [cursor=pointer]:
+                - /url: https://netboxlabs.com/netbox-enterprise/
+    - banner [ref=e120]:
+      - generic [ref=e121]:
+        - generic [ref=e122]:
+          - generic [ref=e123]:
+            - button "Enable dark mode" [ref=e124] [cursor=pointer]:
+              - generic [ref=e125]: 󰌵
+            - text: 󰛨
+          - button "Notifications" [ref=e127] [cursor=pointer]:
+            - generic [ref=e128]:
+              - generic [ref=e129]: 󰂞
+              - generic [ref=e131]: You have unread notifications
+          - generic [ref=e132]:
+            - button "Open user menu" [ref=e133] [cursor=pointer]:
+              - generic [ref=e134]:
+                - generic [ref=e135]: admin
+                - generic [ref=e136]: Admin
+            - text: 󰀄 󰃀 󰂚 󰖷 󰌆 󰗽
+        - generic [ref=e139]:
+          - generic:
+            - generic: 󰍉
+          - textbox "Search NetBox" [ref=e140]:
+            - /placeholder: Search…
+    - generic [ref=e141]:
+      - generic [ref=e142]:
+        - generic [ref=e143]:
+          - generic [ref=e144]: Development Environment
+          - generic [ref=e146]:
+            - list "breadcrumbs" [ref=e147]:
+              - listitem [ref=e148]:
+                - link "Devices" [ref=e149] [cursor=pointer]:
+                  - /url: /dcim/devices/
+              - listitem [ref=e150]:
+                - text: /
+                - link "ITC-Lab" [ref=e151] [cursor=pointer]:
+                  - /url: /dcim/sites/1/
+            - code [ref=e152]: dcim.device:55
+          - generic [ref=e154]:
+            - generic [ref=e155]:
+              - heading "prod-lab03c-ra1" [level=1] [ref=e156]
+              - list [ref=e158]:
+                - listitem [ref=e159]:
+                  - generic "Created" [ref=e160]: 󰃳
+                  - generic "1 month ago" [ref=e161]: 2026-05-08 18:40
+                - listitem [ref=e162]:
+                  - generic "Last updated" [ref=e163]: 󰢧
+                  - generic "1 month ago" [ref=e164]: 2026-05-08 18:40
+            - generic [ref=e166]:
+              - button "󰓦 Component Sync 󰅀" [ref=e168] [cursor=pointer]
+              - button "Bookmark" [ref=e170] [cursor=pointer]:
+                - generic [ref=e171]: 󰃅
+                - text: Bookmark
+              - button "Subscribe" [ref=e173] [cursor=pointer]:
+                - generic [ref=e174]: 󰂝
+                - text: Subscribe
+          - generic [ref=e176]:
+            - link "Device" [ref=e177] [cursor=pointer]:
+              - /url: /dcim/devices/55/
+            - link "Module Bays 104" [ref=e178] [cursor=pointer]:
+              - /url: /dcim/devices/55/module-bays/
+              - text: Module Bays
+              - generic [ref=e179]: "104"
+            - link "Interfaces 207" [ref=e180] [cursor=pointer]:
+              - /url: /dcim/devices/55/interfaces/
+              - text: Interfaces
+              - generic [ref=e181]: "207"
+            - link "Console Ports 4" [ref=e182] [cursor=pointer]:
+              - /url: /dcim/devices/55/console-ports/
+              - text: Console Ports
+              - generic [ref=e183]: "4"
+            - link "NSO" [ref=e184] [cursor=pointer]:
+              - /url: /dcim/devices/55/nso/
+            - link "LibreNMS Sync" [ref=e185] [cursor=pointer]:
+              - /url: /dcim/devices/55/librenms-sync/
+            - link "Static Routes 10" [ref=e186] [cursor=pointer]:
+              - /url: /dcim/devices/55/static_routes/
+              - text: Static Routes
+              - generic [ref=e187]: "10"
+            - link "Config Context" [ref=e188] [cursor=pointer]:
+              - /url: /dcim/devices/55/config-context/
+            - link "Render Config" [ref=e189] [cursor=pointer]:
+              - /url: /dcim/devices/55/render-config/
+            - link "Contacts" [ref=e190] [cursor=pointer]:
+              - /url: /dcim/devices/55/contacts/
+            - link "Images" [ref=e191] [cursor=pointer]:
+              - /url: /dcim/devices/55/image-attachments/
+            - link "Journal" [ref=e192] [cursor=pointer]:
+              - /url: /dcim/devices/55/journal/
+            - link "Changelog" [ref=e193] [cursor=pointer]:
+              - /url: /dcim/devices/55/changelog/
+        - generic [ref=e195]:
+          - generic [ref=e196]:
+            - generic [ref=e197]:
+              - generic [ref=e198]:
+                - generic [ref=e199]: 󰒍
+                - strong [ref=e200]: LibreNMS Connections
+              - link "󰒓 Change Server" [ref=e201] [cursor=pointer]:
+                - /url: /plugins/librenms_plugin/settings/
+                - generic [ref=e202]: 󰒓
+                - text: Change Server
+            - table [ref=e204]:
+              - rowgroup [ref=e205]:
+                - row "󰗠 Production LibreNMS ID 5 󰏌" [ref=e206]:
+                  - cell "󰗠 Production LibreNMS" [ref=e207]:
+                    - generic "Currently active server" [ref=e208]: 󰗠
+                    - strong [ref=e209]: Production LibreNMS
+                  - cell "ID 5 󰏌" [ref=e210]:
+                    - link "ID 5 󰏌" [ref=e211] [cursor=pointer]:
+                      - /url: https://snmp.cnad.dev/device/device=5/
+                      - text: ID 5
+                      - generic [ref=e212]: 󰏌
+                  - cell [ref=e213]
+          - generic [ref=e214]:
+            - generic [ref=e216]:
+              - heading "LibreNMS Status" [level=5] [ref=e217]
+              - table [ref=e219]:
+                - rowgroup [ref=e220]:
+                  - row "Status 󰗠 Found" [ref=e221]:
+                    - rowheader "Status" [ref=e222]
+                    - cell "󰗠 Found" [ref=e223]:
+                      - generic [ref=e224]:
+                        - generic [ref=e225]: 󰗠
+                        - text: Found
+                  - row "ID 5" [ref=e226]:
+                    - rowheader "ID" [ref=e227]
+                    - cell "5" [ref=e228]
+                  - row "Hostname 2001:730:31:0:84:116:255:7" [ref=e229]:
+                    - rowheader "Hostname" [ref=e230]
+                    - cell "2001:730:31:0:84:116:255:7" [ref=e231]
+                  - row "sysName prod-lab03c-ra1" [ref=e232]:
+                    - rowheader "sysName" [ref=e233]
+                    - cell "prod-lab03c-ra1" [ref=e234]
+                  - row "Serial NS204662488 󰗠" [ref=e235]:
+                    - rowheader "Serial" [ref=e236]
+                    - cell "NS204662488 󰗠" [ref=e237]:
+                      - text: NS204662488
+                      - generic "Serial matches NetBox" [ref=e238]:
+                        - generic [ref=e239]: 󰗠
+                  - row "OS Version 23.10.R4-1" [ref=e240]:
+                    - rowheader "OS Version" [ref=e241]
+                    - cell "23.10.R4-1" [ref=e242]
+                  - row "LibreNMS Link 󰏌 View" [ref=e243]:
+                    - rowheader "LibreNMS Link" [ref=e244]
+                    - cell "󰏌 View" [ref=e245]:
+                      - link "󰏌 View" [ref=e246] [cursor=pointer]:
+                        - /url: https://snmp.cnad.dev/device/device=5/
+                        - generic [ref=e247]: 󰏌
+                        - text: View
+            - generic [ref=e249]:
+              - heading "Device Information Sync" [level=5] [ref=e250]
+              - table [ref=e252]:
+                - rowgroup [ref=e253]:
+                  - row "Field NetBox Value LibreNMS Value" [ref=e254]:
+                    - columnheader "Field" [ref=e255]
+                    - columnheader "NetBox Value" [ref=e256]
+                    - columnheader "LibreNMS Value" [ref=e257]
+                - rowgroup [ref=e258]:
+                  - row "Name 󰋽 prod-lab03c-ra1 󰗠 prod-lab03c-ra1" [ref=e259]:
+                    - cell "Name 󰋽" [ref=e260]:
+                      - text: Name
+                      - generic "Name check uses your sysName and strip domain preferences. For virtual chassis members, the VC naming pattern is also applied." [ref=e261]: 󰋽
+                    - cell "prod-lab03c-ra1 󰗠" [ref=e262]:
+                      - generic [ref=e263]:
+                        - generic [ref=e264]: prod-lab03c-ra1
+                        - generic "Synced with LibreNMS" [ref=e266]:
+                          - generic [ref=e267]: 󰗠
+                    - cell "prod-lab03c-ra1" [ref=e268]
+                  - row "Device Type 7750 SR-7s 󰗠 7750 SR-7s" [ref=e269]:
+                    - cell "Device Type" [ref=e270]
+                    - cell "7750 SR-7s 󰗠" [ref=e271]:
+                      - generic [ref=e272]:
+                        - link "7750 SR-7s" [ref=e274] [cursor=pointer]:
+                          - /url: /dcim/device-types/19/
+                        - generic "Synced with LibreNMS" [ref=e276]:
+                          - generic [ref=e277]: 󰗠
+                    - cell "7750 SR-7s" [ref=e278]
+                  - row "Serial Number NS204662488 󰗠 NS204662488" [ref=e279]:
+                    - cell "Serial Number" [ref=e280]
+                    - cell "NS204662488 󰗠" [ref=e281]:
+                      - generic [ref=e282]:
+                        - generic [ref=e283]: NS204662488
+                        - generic "Synced with LibreNMS" [ref=e285]:
+                          - generic [ref=e286]: 󰗠
+                    - cell "NS204662488" [ref=e287]
+                  - row "Platform timos 󰗠 timos" [ref=e288]:
+                    - cell "Platform" [ref=e289]
+                    - cell "timos 󰗠" [ref=e290]:
+                      - generic [ref=e291]:
+                        - link "timos" [ref=e293] [cursor=pointer]:
+                          - /url: /dcim/platforms/5/
+                        - generic "Synced with LibreNMS" [ref=e295]:
+                          - generic [ref=e296]: 󰗠
+                    - cell "timos" [ref=e297]:
+                      - generic [ref=e299]: timos
+                  - row "Location ITC-Lab ITC-Lab 󰗠" [ref=e300]:
+                    - cell "Location" [ref=e301]
+                    - cell "ITC-Lab" [ref=e302]
+                    - cell "ITC-Lab 󰗠" [ref=e303]:
+                      - generic [ref=e304]:
+                        - generic [ref=e305]: ITC-Lab
+                        - generic "Synced with NetBox" [ref=e307]:
+                          - generic [ref=e308]: 󰗠
+          - generic [ref=e309]:
+            - tablist [ref=e310]:
+              - tab "Interfaces" [ref=e311] [cursor=pointer]
+              - tab "Cables" [ref=e312] [cursor=pointer]
+              - tab "IP Addresses" [ref=e313] [cursor=pointer]
+              - tab "VLANs" [ref=e314] [cursor=pointer]
+              - tab "Modules" [selected] [ref=e315] [cursor=pointer]
+            - group [ref=e316]:
+              - radio "ifDescr"
+              - generic [ref=e317] [cursor=pointer]: ifDescr
+              - radio "ifName" [checked]
+              - generic [ref=e318] [cursor=pointer]: ifName
+          - generic [ref=e319]:
+            - text: 󰗠 󰓨 󰌹 󰌺 󰏫 󰀦 󰅙 󰀦 󰋼 󰗠 󰓨 󰗠 󰓨
+            - tabpanel "Modules" [ref=e320]:
+              - generic [ref=e321]:
+                - heading "Module Sync" [level=2] [ref=e322]
+                - button "Refresh Modules" [ref=e325] [cursor=pointer]
+              - generic [ref=e326]:
+                - generic: 󰗠
+                - generic [ref=e327]:
+                  - generic [ref=e328]: Showing inventory items from LibreNMS matched against NetBox module bays and module types.
+                  - generic [ref=e329]: "Cache expires in: 4m 31s"
+                - button "󰏔 Install Selected" [ref=e332] [cursor=pointer]:
+                  - generic [ref=e333]: 󰏔
+                  - text: Install Selected
+                - generic [ref=e334]:
+                  - generic [ref=e335]:
+                    - generic [ref=e336]: Showing 1-49 of 49
+                    - navigation "Pagination options" [ref=e337]:
+                      - button "Per Page 󰅀" [ref=e339] [cursor=pointer]
+                  - table [ref=e340]:
+                    - rowgroup [ref=e341]:
+                      - row "Toggle all Name Model Serial Description Class Module Bay Module Type Status Actions" [ref=e342]:
+                        - columnheader "Toggle all" [ref=e343]:
+                          - checkbox "Toggle all" [ref=e344]
+                        - columnheader "Name" [ref=e345]:
+                          - link "Name" [ref=e346] [cursor=pointer]:
+                            - /url: "?tab=modules&modules_sort=name"
+                        - columnheader "Model" [ref=e347]:
+                          - link "Model" [ref=e348] [cursor=pointer]:
+                            - /url: "?tab=modules&modules_sort=model"
+                        - columnheader "Serial" [ref=e349]:
+                          - link "Serial" [ref=e350] [cursor=pointer]:
+                            - /url: "?tab=modules&modules_sort=serial"
+                        - columnheader "Description" [ref=e351]:
+                          - link "Description" [ref=e352] [cursor=pointer]:
+                            - /url: "?tab=modules&modules_sort=description"
+                        - columnheader "Class" [ref=e353]:
+                          - link "Class" [ref=e354] [cursor=pointer]:
+                            - /url: "?tab=modules&modules_sort=item_class"
+                        - columnheader "Module Bay" [ref=e355]:
+                          - link "Module Bay" [ref=e356] [cursor=pointer]:
+                            - /url: "?tab=modules&modules_sort=module_bay"
+                        - columnheader "Module Type" [ref=e357]:
+                          - link "Module Type" [ref=e358] [cursor=pointer]:
+                            - /url: "?tab=modules&modules_sort=module_type"
+                        - columnheader "Status" [ref=e359]:
+                          - link "Status" [ref=e360] [cursor=pointer]:
+                            - /url: "?tab=modules&modules_sort=status"
+                        - columnheader "Actions" [ref=e361]
+                    - rowgroup [ref=e362]:
+                      - row "Chassis 1 PowShelf 1 PM 1 3HE11183AARB01 NS2044W0118 - 󰚥 powerSupply PM 1 SR7s-PM Installed" [ref=e363]:
+                        - cell [ref=e364]:
+                          - checkbox [ref=e365]
+                        - cell "Chassis 1 PowShelf 1 PM 1" [ref=e366]
+                        - cell "3HE11183AARB01" [ref=e367]:
+                          - link "3HE11183AARB01" [ref=e368] [cursor=pointer]:
+                            - /url: /dcim/module-types/1883/
+                        - cell "NS2044W0118" [ref=e369]
+                        - cell "-" [ref=e370]
+                        - cell "󰚥 powerSupply" [ref=e371]:
+                          - generic [ref=e372]: 󰚥
+                          - text: powerSupply
+                        - cell "PM 1" [ref=e373]:
+                          - link "PM 1" [ref=e374] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1886/
+                        - cell "SR7s-PM" [ref=e375]:
+                          - link "SR7s-PM" [ref=e376] [cursor=pointer]:
+                            - /url: /dcim/module-types/1883/
+                        - cell "Installed" [ref=e377]:
+                          - generic [ref=e378]: Installed
+                        - cell [ref=e379]
+                      - row "Chassis 1 PowShelf 1 PM 2 3HE11183AARB01 NS2044W0106 - 󰚥 powerSupply PM 2 SR7s-PM Installed" [ref=e380]:
+                        - cell [ref=e381]:
+                          - checkbox [ref=e382]
+                        - cell "Chassis 1 PowShelf 1 PM 2" [ref=e383]
+                        - cell "3HE11183AARB01" [ref=e384]:
+                          - link "3HE11183AARB01" [ref=e385] [cursor=pointer]:
+                            - /url: /dcim/module-types/1883/
+                        - cell "NS2044W0106" [ref=e386]
+                        - cell "-" [ref=e387]
+                        - cell "󰚥 powerSupply" [ref=e388]:
+                          - generic [ref=e389]: 󰚥
+                          - text: powerSupply
+                        - cell "PM 2" [ref=e390]:
+                          - link "PM 2" [ref=e391] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1887/
+                        - cell "SR7s-PM" [ref=e392]:
+                          - link "SR7s-PM" [ref=e393] [cursor=pointer]:
+                            - /url: /dcim/module-types/1883/
+                        - cell "Installed" [ref=e394]:
+                          - generic [ref=e395]: Installed
+                        - cell [ref=e396]
+                      - row "Chassis 1 PowShelf 1 PM 3 3HE11183AARB01 NS2044W0089 - 󰚥 powerSupply PM 3 SR7s-PM Installed" [ref=e397]:
+                        - cell [ref=e398]:
+                          - checkbox [ref=e399]
+                        - cell "Chassis 1 PowShelf 1 PM 3" [ref=e400]
+                        - cell "3HE11183AARB01" [ref=e401]:
+                          - link "3HE11183AARB01" [ref=e402] [cursor=pointer]:
+                            - /url: /dcim/module-types/1883/
+                        - cell "NS2044W0089" [ref=e403]
+                        - cell "-" [ref=e404]
+                        - cell "󰚥 powerSupply" [ref=e405]:
+                          - generic [ref=e406]: 󰚥
+                          - text: powerSupply
+                        - cell "PM 3" [ref=e407]:
+                          - link "PM 3" [ref=e408] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1888/
+                        - cell "SR7s-PM" [ref=e409]:
+                          - link "SR7s-PM" [ref=e410] [cursor=pointer]:
+                            - /url: /dcim/module-types/1883/
+                        - cell "Installed" [ref=e411]:
+                          - generic [ref=e412]: Installed
+                        - cell [ref=e413]
+                      - row "Chassis 1 PowShelf 1 PM 4 3HE11183AARB01 NS2432W0697 - 󰚥 powerSupply PM 4 SR7s-PM Installed" [ref=e414]:
+                        - cell [ref=e415]:
+                          - checkbox [ref=e416]
+                        - cell "Chassis 1 PowShelf 1 PM 4" [ref=e417]
+                        - cell "3HE11183AARB01" [ref=e418]:
+                          - link "3HE11183AARB01" [ref=e419] [cursor=pointer]:
+                            - /url: /dcim/module-types/1883/
+                        - cell "NS2432W0697" [ref=e420]
+                        - cell "-" [ref=e421]
+                        - cell "󰚥 powerSupply" [ref=e422]:
+                          - generic [ref=e423]: 󰚥
+                          - text: powerSupply
+                        - cell "PM 4" [ref=e424]:
+                          - link "PM 4" [ref=e425] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1889/
+                        - cell "SR7s-PM" [ref=e426]:
+                          - link "SR7s-PM" [ref=e427] [cursor=pointer]:
+                            - /url: /dcim/module-types/1883/
+                        - cell "Installed" [ref=e428]:
+                          - generic [ref=e429]: Installed
+                        - cell [ref=e430]
+                      - row "Slot 1 3HE16474AARA01 NS225161205 - 󰢮 ioModule Card 1 XCM-7s-b Installed" [ref=e431]:
+                        - cell [ref=e432]:
+                          - checkbox [ref=e433]
+                        - cell "Slot 1" [ref=e434]
+                        - cell "3HE16474AARA01" [ref=e435]:
+                          - link "3HE16474AARA01" [ref=e436] [cursor=pointer]:
+                            - /url: /dcim/module-types/75/
+                        - cell "NS225161205" [ref=e437]
+                        - cell "-" [ref=e438]
+                        - cell "󰢮 ioModule" [ref=e439]:
+                          - generic [ref=e440]: 󰢮
+                          - text: ioModule
+                        - cell "Card 1" [ref=e441]:
+                          - link "Card 1" [ref=e442] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1874/
+                        - cell "XCM-7s-b" [ref=e443]:
+                          - link "XCM-7s-b" [ref=e444] [cursor=pointer]:
+                            - /url: /dcim/module-types/75/
+                        - cell "Installed" [ref=e445]:
+                          - generic [ref=e446]: Installed
+                        - cell [ref=e447]
+                      - row "└─ MDA 1/1 3HE12391AARK01 NS2217F6334 - 󰢮 mdaModule └─ 1/1 MDA-s36-400gb-qsfpdd Installed" [ref=e448]:
+                        - cell [ref=e449]:
+                          - checkbox [ref=e450]
+                        - cell "└─ MDA 1/1" [ref=e451]:
+                          - generic [ref=e452]: └─ MDA 1/1
+                        - cell "3HE12391AARK01" [ref=e453]:
+                          - link "3HE12391AARK01" [ref=e454] [cursor=pointer]:
+                            - /url: /dcim/module-types/1887/
+                        - cell "NS2217F6334" [ref=e455]
+                        - cell "-" [ref=e456]
+                        - cell "󰢮 mdaModule" [ref=e457]:
+                          - generic [ref=e458]: 󰢮
+                          - text: mdaModule
+                        - cell "└─ 1/1" [ref=e459]:
+                          - generic [ref=e460]:
+                            - text: └─
+                            - link "1/1" [ref=e461] [cursor=pointer]:
+                              - /url: /dcim/module-bays/1978/
+                        - cell "MDA-s36-400gb-qsfpdd" [ref=e462]:
+                          - link "MDA-s36-400gb-qsfpdd" [ref=e463] [cursor=pointer]:
+                            - /url: /dcim/module-types/1887/
+                        - cell "Installed" [ref=e464]:
+                          - generic [ref=e465]: Installed
+                        - cell [ref=e466]
+                      - row "└─ 1/1/c1 CFP2/QSFP28 X42AU0D CFP2/QSFP28 󰈀 port └─ 1/c1 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e467]:
+                        - cell [ref=e468]:
+                          - checkbox [ref=e469]
+                        - cell "└─ 1/1/c1" [ref=e470]:
+                          - generic [ref=e472]:
+                            - text: └─
+                            - link "1/1/c1" [ref=e473] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3615/
+                        - cell "CFP2/QSFP28" [ref=e474]
+                        - cell "X42AU0D" [ref=e475]
+                        - cell "CFP2/QSFP28" [ref=e476]
+                        - cell "󰈀 port" [ref=e477]:
+                          - generic [ref=e478]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c1" [ref=e479]:
+                          - generic [ref=e480]:
+                            - text: └─
+                            - link "1/c1" [ref=e481] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2018/
+                        - cell "No matching type" [ref=e482]
+                        - cell "No Type 󰀪" [ref=e483]:
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e484]: No Type
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e485]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e486]:
+                          - link "󰜄 Add Mapping" [ref=e487] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=CFP2%2FQSFP28&description=Auto-suggested%3A+maps+LibreNMS+model+%27CFP2%2FQSFP28%27+described+as+%27CFP2%2FQSFP28%27+fitted+in+bay+%271%2Fc1%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e488]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e489] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=CFP2%2FQSFP28&part_number=CFP2%2FQSFP28&manufacturer=10&description=CFP2%2FQSFP28&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e490]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c2 3HE10550AARA01 NOK IPU3BFUEAA U4GAPEF CFP2/QSFP28 󰈀 port └─ 1/c2 QSFP28-100G-LR4 Installed" [ref=e491]:
+                        - cell [ref=e492]:
+                          - checkbox [ref=e493]
+                        - cell "└─ 1/1/c2" [ref=e494]:
+                          - generic [ref=e496]:
+                            - text: └─
+                            - link "1/1/c2" [ref=e497] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3581/
+                        - cell "3HE10550AARA01 NOK IPU3BFUEAA" [ref=e498]:
+                          - link "3HE10550AARA01 NOK IPU3BFUEAA" [ref=e499] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "U4GAPEF" [ref=e500]
+                        - cell "CFP2/QSFP28" [ref=e501]
+                        - cell "󰈀 port" [ref=e502]:
+                          - generic [ref=e503]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c2" [ref=e504]:
+                          - generic [ref=e505]:
+                            - text: └─
+                            - link "1/c2" [ref=e506] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2019/
+                        - cell "QSFP28-100G-LR4" [ref=e507]:
+                          - link "QSFP28-100G-LR4" [ref=e508] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "Installed" [ref=e509]:
+                          - generic [ref=e510]: Installed
+                        - cell [ref=e511]
+                      - row "└─ 1/1/c4 CFP2/QSFP28 MT1949DM00016 CFP2/QSFP28 󰈀 port └─ 1/c4 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e512]:
+                        - cell [ref=e513]:
+                          - checkbox [ref=e514]
+                        - cell "└─ 1/1/c4" [ref=e515]:
+                          - generic [ref=e517]:
+                            - text: └─
+                            - link "1/1/c4" [ref=e518] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3623/
+                        - cell "CFP2/QSFP28" [ref=e519]
+                        - cell "MT1949DM00016" [ref=e520]
+                        - cell "CFP2/QSFP28" [ref=e521]
+                        - cell "󰈀 port" [ref=e522]:
+                          - generic [ref=e523]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c4" [ref=e524]:
+                          - generic [ref=e525]:
+                            - text: └─
+                            - link "1/c4" [ref=e526] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2021/
+                        - cell "No matching type" [ref=e527]
+                        - cell "No Type 󰀪" [ref=e528]:
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e529]: No Type
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e530]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e531]:
+                          - link "󰜄 Add Mapping" [ref=e532] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=CFP2%2FQSFP28&description=Auto-suggested%3A+maps+LibreNMS+model+%27CFP2%2FQSFP28%27+described+as+%27CFP2%2FQSFP28%27+fitted+in+bay+%271%2Fc4%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e533]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e534] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=CFP2%2FQSFP28&part_number=CFP2%2FQSFP28&manufacturer=10&description=CFP2%2FQSFP28&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e535]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c5 CFP2/QSFP28 MT1947DM00023 CFP2/QSFP28 󰈀 port └─ 1/c5 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e536]:
+                        - cell [ref=e537]:
+                          - checkbox [ref=e538]
+                        - cell "└─ 1/1/c5" [ref=e539]:
+                          - generic [ref=e541]:
+                            - text: └─
+                            - link "1/1/c5" [ref=e542] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3602/
+                        - cell "CFP2/QSFP28" [ref=e543]
+                        - cell "MT1947DM00023" [ref=e544]
+                        - cell "CFP2/QSFP28" [ref=e545]
+                        - cell "󰈀 port" [ref=e546]:
+                          - generic [ref=e547]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c5" [ref=e548]:
+                          - generic [ref=e549]:
+                            - text: └─
+                            - link "1/c5" [ref=e550] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2022/
+                        - cell "No matching type" [ref=e551]
+                        - cell "No Type 󰀪" [ref=e552]:
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e553]: No Type
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e554]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e555]:
+                          - link "󰜄 Add Mapping" [ref=e556] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=CFP2%2FQSFP28&description=Auto-suggested%3A+maps+LibreNMS+model+%27CFP2%2FQSFP28%27+described+as+%27CFP2%2FQSFP28%27+fitted+in+bay+%271%2Fc5%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e557]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e558] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=CFP2%2FQSFP28&part_number=CFP2%2FQSFP28&manufacturer=10&description=CFP2%2FQSFP28&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e559]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c6 3HE10550AAAA01 ALU IPU3BFUAAA LG217F931818 CFP2/QSFP28 󰈀 port └─ 1/c6 QSFP28-100G-LR4 Installed" [ref=e560]:
+                        - cell [ref=e561]:
+                          - checkbox [ref=e562]
+                        - cell "└─ 1/1/c6" [ref=e563]:
+                          - generic [ref=e565]:
+                            - text: └─
+                            - link "1/1/c6" [ref=e566] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3584/
+                        - cell "3HE10550AAAA01 ALU IPU3BFUAAA" [ref=e567]:
+                          - link "3HE10550AAAA01 ALU IPU3BFUAAA" [ref=e568] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "LG217F931818" [ref=e569]
+                        - cell "CFP2/QSFP28" [ref=e570]
+                        - cell "󰈀 port" [ref=e571]:
+                          - generic [ref=e572]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c6" [ref=e573]:
+                          - generic [ref=e574]:
+                            - text: └─
+                            - link "1/c6" [ref=e575] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2023/
+                        - cell "QSFP28-100G-LR4" [ref=e576]:
+                          - link "QSFP28-100G-LR4" [ref=e577] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "Installed" [ref=e578]:
+                          - generic [ref=e579]: Installed
+                        - cell [ref=e580]
+                      - row "└─ 1/1/c7 3HE10550AAAA01 ALU IPU3BFUAAA LG217F931819 CFP2/QSFP28 󰈀 port └─ 1/c7 QSFP28-100G-LR4 Installed" [ref=e581]:
+                        - cell [ref=e582]:
+                          - checkbox [ref=e583]
+                        - cell "└─ 1/1/c7" [ref=e584]:
+                          - generic [ref=e586]:
+                            - text: └─
+                            - link "1/1/c7" [ref=e587] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3627/
+                        - cell "3HE10550AAAA01 ALU IPU3BFUAAA" [ref=e588]:
+                          - link "3HE10550AAAA01 ALU IPU3BFUAAA" [ref=e589] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "LG217F931819" [ref=e590]
+                        - cell "CFP2/QSFP28" [ref=e591]
+                        - cell "󰈀 port" [ref=e592]:
+                          - generic [ref=e593]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c7" [ref=e594]:
+                          - generic [ref=e595]:
+                            - text: └─
+                            - link "1/c7" [ref=e596] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2024/
+                        - cell "QSFP28-100G-LR4" [ref=e597]:
+                          - link "QSFP28-100G-LR4" [ref=e598] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "Installed" [ref=e599]:
+                          - generic [ref=e600]: Installed
+                        - cell [ref=e601]
+                      - row "└─ 1/1/c8 CFP2/QSFP28 PR20E7C36379 CFP2/QSFP28 󰈀 port └─ 1/c8 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e602]:
+                        - cell [ref=e603]:
+                          - checkbox [ref=e604]
+                        - cell "└─ 1/1/c8" [ref=e605]:
+                          - generic [ref=e607]:
+                            - text: └─
+                            - link "1/1/c8" [ref=e608] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3653/
+                        - cell "CFP2/QSFP28" [ref=e609]
+                        - cell "PR20E7C36379" [ref=e610]
+                        - cell "CFP2/QSFP28" [ref=e611]
+                        - cell "󰈀 port" [ref=e612]:
+                          - generic [ref=e613]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c8" [ref=e614]:
+                          - generic [ref=e615]:
+                            - text: └─
+                            - link "1/c8" [ref=e616] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2025/
+                        - cell "No matching type" [ref=e617]
+                        - cell "No Type 󰀪" [ref=e618]:
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e619]: No Type
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e620]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e621]:
+                          - link "󰜄 Add Mapping" [ref=e622] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=CFP2%2FQSFP28&description=Auto-suggested%3A+maps+LibreNMS+model+%27CFP2%2FQSFP28%27+described+as+%27CFP2%2FQSFP28%27+fitted+in+bay+%271%2Fc8%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e623]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e624] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=CFP2%2FQSFP28&part_number=CFP2%2FQSFP28&manufacturer=10&description=CFP2%2FQSFP28&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e625]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c9 CFP2/QSFP28 VE172300001 CFP2/QSFP28 󰈀 port └─ 1/c9 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e626]:
+                        - cell [ref=e627]:
+                          - checkbox [ref=e628]
+                        - cell "└─ 1/1/c9" [ref=e629]:
+                          - generic [ref=e631]:
+                            - text: └─
+                            - link "1/1/c9" [ref=e632] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3613/
+                        - cell "CFP2/QSFP28" [ref=e633]
+                        - cell "VE172300001" [ref=e634]
+                        - cell "CFP2/QSFP28" [ref=e635]
+                        - cell "󰈀 port" [ref=e636]:
+                          - generic [ref=e637]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c9" [ref=e638]:
+                          - generic [ref=e639]:
+                            - text: └─
+                            - link "1/c9" [ref=e640] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2026/
+                        - cell "No matching type" [ref=e641]
+                        - cell "No Type 󰀪" [ref=e642]:
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e643]: No Type
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e644]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e645]:
+                          - link "󰜄 Add Mapping" [ref=e646] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=CFP2%2FQSFP28&description=Auto-suggested%3A+maps+LibreNMS+model+%27CFP2%2FQSFP28%27+described+as+%27CFP2%2FQSFP28%27+fitted+in+bay+%271%2Fc9%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e647]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e648] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=CFP2%2FQSFP28&part_number=CFP2%2FQSFP28&manufacturer=10&description=CFP2%2FQSFP28&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e649]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c10 3HE10550AAAA01 ALU IPU3BFUAAA LG217F931817 CFP2/QSFP28 󰈀 port └─ 1/c10 QSFP28-100G-LR4 Installed" [ref=e650]:
+                        - cell [ref=e651]:
+                          - checkbox [ref=e652]
+                        - cell "└─ 1/1/c10" [ref=e653]:
+                          - generic [ref=e655]:
+                            - text: └─
+                            - link "1/1/c10" [ref=e656] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3658/
+                        - cell "3HE10550AAAA01 ALU IPU3BFUAAA" [ref=e657]:
+                          - link "3HE10550AAAA01 ALU IPU3BFUAAA" [ref=e658] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "LG217F931817" [ref=e659]
+                        - cell "CFP2/QSFP28" [ref=e660]
+                        - cell "󰈀 port" [ref=e661]:
+                          - generic [ref=e662]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c10" [ref=e663]:
+                          - generic [ref=e664]:
+                            - text: └─
+                            - link "1/c10" [ref=e665] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2027/
+                        - cell "QSFP28-100G-LR4" [ref=e666]:
+                          - link "QSFP28-100G-LR4" [ref=e667] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "Installed" [ref=e668]:
+                          - generic [ref=e669]: Installed
+                        - cell [ref=e670]
+                      - row "└─ 1/1/c11 CFP2/QSFP28 T1A380823 CFP2/QSFP28 󰈀 port └─ 1/c11 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e671]:
+                        - cell [ref=e672]:
+                          - checkbox [ref=e673]
+                        - cell "└─ 1/1/c11" [ref=e674]:
+                          - generic [ref=e676]:
+                            - text: └─
+                            - link "1/1/c11" [ref=e677] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3621/
+                        - cell "CFP2/QSFP28" [ref=e678]
+                        - cell "T1A380823" [ref=e679]
+                        - cell "CFP2/QSFP28" [ref=e680]
+                        - cell "󰈀 port" [ref=e681]:
+                          - generic [ref=e682]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c11" [ref=e683]:
+                          - generic [ref=e684]:
+                            - text: └─
+                            - link "1/c11" [ref=e685] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2028/
+                        - cell "No matching type" [ref=e686]
+                        - cell "No Type 󰀪" [ref=e687]:
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e688]: No Type
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e689]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e690]:
+                          - link "󰜄 Add Mapping" [ref=e691] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=CFP2%2FQSFP28&description=Auto-suggested%3A+maps+LibreNMS+model+%27CFP2%2FQSFP28%27+described+as+%27CFP2%2FQSFP28%27+fitted+in+bay+%271%2Fc11%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e692]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e693] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=CFP2%2FQSFP28&part_number=CFP2%2FQSFP28&manufacturer=10&description=CFP2%2FQSFP28&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e694]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c12 3HE10550AARA01 NOK IPU3BFUEAA U4HANB9 CFP2/QSFP28 󰈀 port └─ 1/c12 QSFP28-100G-LR4 Installed" [ref=e695]:
+                        - cell [ref=e696]:
+                          - checkbox [ref=e697]
+                        - cell "└─ 1/1/c12" [ref=e698]:
+                          - generic [ref=e700]:
+                            - text: └─
+                            - link "1/1/c12" [ref=e701] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3591/
+                        - cell "3HE10550AARA01 NOK IPU3BFUEAA" [ref=e702]:
+                          - link "3HE10550AARA01 NOK IPU3BFUEAA" [ref=e703] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "U4HANB9" [ref=e704]
+                        - cell "CFP2/QSFP28" [ref=e705]
+                        - cell "󰈀 port" [ref=e706]:
+                          - generic [ref=e707]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c12" [ref=e708]:
+                          - generic [ref=e709]:
+                            - text: └─
+                            - link "1/c12" [ref=e710] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2029/
+                        - cell "QSFP28-100G-LR4" [ref=e711]:
+                          - link "QSFP28-100G-LR4" [ref=e712] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "Installed" [ref=e713]:
+                          - generic [ref=e714]: Installed
+                        - cell [ref=e715]
+                      - row "└─ 1/1/c14 3HE10550AAAA01 ALU IPU3BFUAAA LG217F931820 CFP2/QSFP28 󰈀 port └─ 1/c14 QSFP28-100G-LR4 Installed" [ref=e716]:
+                        - cell [ref=e717]:
+                          - checkbox [ref=e718]
+                        - cell "└─ 1/1/c14" [ref=e719]:
+                          - generic [ref=e721]:
+                            - text: └─
+                            - link "1/1/c14" [ref=e722] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3579/
+                        - cell "3HE10550AAAA01 ALU IPU3BFUAAA" [ref=e723]:
+                          - link "3HE10550AAAA01 ALU IPU3BFUAAA" [ref=e724] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "LG217F931820" [ref=e725]
+                        - cell "CFP2/QSFP28" [ref=e726]
+                        - cell "󰈀 port" [ref=e727]:
+                          - generic [ref=e728]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c14" [ref=e729]:
+                          - generic [ref=e730]:
+                            - text: └─
+                            - link "1/c14" [ref=e731] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2031/
+                        - cell "QSFP28-100G-LR4" [ref=e732]:
+                          - link "QSFP28-100G-LR4" [ref=e733] [cursor=pointer]:
+                            - /url: /dcim/module-types/88/
+                        - cell "Installed" [ref=e734]:
+                          - generic [ref=e735]: Installed
+                        - cell [ref=e736]
+                      - row "└─ 1/1/c15 CFP2/QSFP28 FNSRMYU27A5JJ CFP2/QSFP28 󰈀 port └─ 1/c15 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e737]:
+                        - cell [ref=e738]:
+                          - checkbox [ref=e739]
+                        - cell "└─ 1/1/c15" [ref=e740]:
+                          - generic [ref=e742]:
+                            - text: └─
+                            - link "1/1/c15" [ref=e743] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3643/
+                        - cell "CFP2/QSFP28" [ref=e744]
+                        - cell "FNSRMYU27A5JJ" [ref=e745]
+                        - cell "CFP2/QSFP28" [ref=e746]
+                        - cell "󰈀 port" [ref=e747]:
+                          - generic [ref=e748]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c15" [ref=e749]:
+                          - generic [ref=e750]:
+                            - text: └─
+                            - link "1/c15" [ref=e751] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2032/
+                        - cell "No matching type" [ref=e752]
+                        - cell "No Type 󰀪" [ref=e753]:
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e754]: No Type
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e755]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e756]:
+                          - link "󰜄 Add Mapping" [ref=e757] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=CFP2%2FQSFP28&description=Auto-suggested%3A+maps+LibreNMS+model+%27CFP2%2FQSFP28%27+described+as+%27CFP2%2FQSFP28%27+fitted+in+bay+%271%2Fc15%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e758]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e759] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=CFP2%2FQSFP28&part_number=CFP2%2FQSFP28&manufacturer=10&description=CFP2%2FQSFP28&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e760]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c16 CFP2/QSFP28 FNSRMYU27AD47 CFP2/QSFP28 󰈀 port └─ 1/c16 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e761]:
+                        - cell [ref=e762]:
+                          - checkbox [ref=e763]
+                        - cell "└─ 1/1/c16" [ref=e764]:
+                          - generic [ref=e766]:
+                            - text: └─
+                            - link "1/1/c16" [ref=e767] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3624/
+                        - cell "CFP2/QSFP28" [ref=e768]
+                        - cell "FNSRMYU27AD47" [ref=e769]
+                        - cell "CFP2/QSFP28" [ref=e770]
+                        - cell "󰈀 port" [ref=e771]:
+                          - generic [ref=e772]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c16" [ref=e773]:
+                          - generic [ref=e774]:
+                            - text: └─
+                            - link "1/c16" [ref=e775] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2033/
+                        - cell "No matching type" [ref=e776]
+                        - cell "No Type 󰀪" [ref=e777]:
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e778]: No Type
+                          - generic "No NetBox ModuleType matches 'CFP2/QSFP28'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e779]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e780]:
+                          - link "󰜄 Add Mapping" [ref=e781] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=CFP2%2FQSFP28&description=Auto-suggested%3A+maps+LibreNMS+model+%27CFP2%2FQSFP28%27+described+as+%27CFP2%2FQSFP28%27+fitted+in+bay+%271%2Fc16%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e782]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e783] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=CFP2%2FQSFP28&part_number=CFP2%2FQSFP28&manufacturer=10&description=CFP2%2FQSFP28&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e784]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c19 3HE18360AARA01 NOK INUIAYLGAA NK2319GM055 QSFP-DD 󰈀 port └─ 1/c19 QSFP-DD-400G-ZR+ Installed" [ref=e785]:
+                        - cell [ref=e786]:
+                          - checkbox [ref=e787]
+                        - cell "└─ 1/1/c19" [ref=e788]:
+                          - generic [ref=e790]:
+                            - text: └─
+                            - link "1/1/c19" [ref=e791] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3576/
+                        - cell "3HE18360AARA01 NOK INUIAYLGAA" [ref=e792]:
+                          - link "3HE18360AARA01 NOK INUIAYLGAA" [ref=e793] [cursor=pointer]:
+                            - /url: /dcim/module-types/89/
+                        - cell "NK2319GM055" [ref=e794]
+                        - cell "QSFP-DD" [ref=e795]
+                        - cell "󰈀 port" [ref=e796]:
+                          - generic [ref=e797]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c19" [ref=e798]:
+                          - generic [ref=e799]:
+                            - text: └─
+                            - link "1/c19" [ref=e800] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2036/
+                        - cell "QSFP-DD-400G-ZR+" [ref=e801]:
+                          - link "QSFP-DD-400G-ZR+" [ref=e802] [cursor=pointer]:
+                            - /url: /dcim/module-types/89/
+                        - cell "Installed" [ref=e803]:
+                          - generic [ref=e804]: Installed
+                        - cell [ref=e805]
+                      - row "└─ 1/1/c22 1A ACA280800AF QSFP-DD 󰈀 port └─ 1/c22 No matching type No Type 󰀪 󰜄 Add Mapping 󰐙 Add Module Type" [ref=e806]:
+                        - cell [ref=e807]:
+                          - checkbox [ref=e808]
+                        - cell "└─ 1/1/c22" [ref=e809]:
+                          - generic [ref=e811]:
+                            - text: └─
+                            - link "1/1/c22" [ref=e812] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3633/
+                        - cell "1A" [ref=e813]
+                        - cell "ACA280800AF" [ref=e814]
+                        - cell "QSFP-DD" [ref=e815]
+                        - cell "󰈀 port" [ref=e816]:
+                          - generic [ref=e817]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c22" [ref=e818]:
+                          - generic [ref=e819]:
+                            - text: └─
+                            - link "1/c22" [ref=e820] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2039/
+                        - cell "No matching type" [ref=e821]
+                        - cell "No Type 󰀪" [ref=e822]:
+                          - generic "No NetBox ModuleType matches '1A'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e823]: No Type
+                          - generic "No NetBox ModuleType matches '1A'. Create a ModuleType for this model (or add a ModuleTypeMapping) so the row becomes installable." [ref=e824]: 󰀪
+                        - cell "󰜄 Add Mapping 󰐙 Add Module Type" [ref=e825]:
+                          - link "󰜄 Add Mapping" [ref=e826] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-type-mappings/add/?librenms_model=1A&description=Auto-suggested%3A+maps+LibreNMS+model+%271A%27+described+as+%27QSFP-DD%27+fitted+in+bay+%271%2Fc22%27+to+a+NetBox+ModuleType.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e827]: 󰜄
+                            - text: Add Mapping
+                          - link "󰐙 Add Module Type" [ref=e828] [cursor=pointer]:
+                            - /url: /dcim/module-types/add/?model=1A&part_number=1A&manufacturer=10&description=QSFP-DD&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e829]: 󰐙
+                            - text: Add Module Type
+                      - row "└─ 1/1/c28 QSFP-DD Q00JC7L8 QSFP-DD 󰈀 port └─ 1/c28 QSFP-DD Installed" [ref=e830]:
+                        - cell [ref=e831]:
+                          - checkbox [ref=e832]
+                        - cell "└─ 1/1/c28" [ref=e833]:
+                          - generic [ref=e835]:
+                            - text: └─
+                            - link "1/1/c28" [ref=e836] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3628/
+                        - cell "QSFP-DD" [ref=e837]:
+                          - link "QSFP-DD" [ref=e838] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Q00JC7L8" [ref=e839]
+                        - cell "QSFP-DD" [ref=e840]
+                        - cell "󰈀 port" [ref=e841]:
+                          - generic [ref=e842]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c28" [ref=e843]:
+                          - generic [ref=e844]:
+                            - text: └─
+                            - link "1/c28" [ref=e845] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2045/
+                        - cell "QSFP-DD" [ref=e846]:
+                          - link "QSFP-DD" [ref=e847] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Installed" [ref=e848]:
+                          - generic [ref=e849]: Installed
+                        - cell [ref=e850]
+                      - row "└─ 1/1/c31 3HE11241AARB01 NOK INUIAC7HAA OPCPCN21210091 QSFP+ 󰈀 port └─ 1/c31 QSFP+-40G-LR4 Installed" [ref=e851]:
+                        - cell [ref=e852]:
+                          - checkbox [ref=e853]
+                        - cell "└─ 1/1/c31" [ref=e854]:
+                          - generic [ref=e856]:
+                            - text: └─
+                            - link "1/1/c31" [ref=e857] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3637/
+                        - cell "3HE11241AARB01 NOK INUIAC7HAA" [ref=e858]:
+                          - link "3HE11241AARB01 NOK INUIAC7HAA" [ref=e859] [cursor=pointer]:
+                            - /url: /dcim/module-types/90/
+                        - cell "OPCPCN21210091" [ref=e860]
+                        - cell "QSFP+" [ref=e861]
+                        - cell "󰈀 port" [ref=e862]:
+                          - generic [ref=e863]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c31" [ref=e864]:
+                          - generic [ref=e865]:
+                            - text: └─
+                            - link "1/c31" [ref=e866] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2048/
+                        - cell "QSFP+-40G-LR4" [ref=e867]:
+                          - link "QSFP+-40G-LR4" [ref=e868] [cursor=pointer]:
+                            - /url: /dcim/module-types/90/
+                        - cell "Installed" [ref=e869]:
+                          - generic [ref=e870]: Installed
+                        - cell [ref=e871]
+                      - row "└─ 1/1/c32 3HE11241AARB01 NOK INUIAC7HAA OPCPCN21161783 QSFP+ 󰈀 port └─ 1/c32 QSFP+-40G-LR4 Installed" [ref=e872]:
+                        - cell [ref=e873]:
+                          - checkbox [ref=e874]
+                        - cell "└─ 1/1/c32" [ref=e875]:
+                          - generic [ref=e877]:
+                            - text: └─
+                            - link "1/1/c32" [ref=e878] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3646/
+                        - cell "3HE11241AARB01 NOK INUIAC7HAA" [ref=e879]:
+                          - link "3HE11241AARB01 NOK INUIAC7HAA" [ref=e880] [cursor=pointer]:
+                            - /url: /dcim/module-types/90/
+                        - cell "OPCPCN21161783" [ref=e881]
+                        - cell "QSFP+" [ref=e882]
+                        - cell "󰈀 port" [ref=e883]:
+                          - generic [ref=e884]: 󰈀
+                          - text: port
+                        - cell "└─ 1/c32" [ref=e885]:
+                          - generic [ref=e886]:
+                            - text: └─
+                            - link "1/c32" [ref=e887] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2049/
+                        - cell "QSFP+-40G-LR4" [ref=e888]:
+                          - link "QSFP+-40G-LR4" [ref=e889] [cursor=pointer]:
+                            - /url: /dcim/module-types/90/
+                        - cell "Installed" [ref=e890]:
+                          - generic [ref=e891]: Installed
+                        - cell [ref=e892]
+                      - row "Slot 2 3HE16472AARB01 NS242462531 - 󰢮 ioModule Card 2 XCM2-7s Installed 󰙅 Install Branch" [ref=e893]:
+                        - cell [ref=e894]:
+                          - checkbox [ref=e895]
+                        - cell "Slot 2" [ref=e896]
+                        - cell "3HE16472AARB01" [ref=e897]:
+                          - link "3HE16472AARB01" [ref=e898] [cursor=pointer]:
+                            - /url: /dcim/module-types/72/
+                        - cell "NS242462531" [ref=e899]
+                        - cell "-" [ref=e900]
+                        - cell "󰢮 ioModule" [ref=e901]:
+                          - generic [ref=e902]: 󰢮
+                          - text: ioModule
+                        - cell "Card 2" [ref=e903]:
+                          - link "Card 2" [ref=e904] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1875/
+                        - cell "XCM2-7s" [ref=e905]:
+                          - link "XCM2-7s" [ref=e906] [cursor=pointer]:
+                            - /url: /dcim/module-types/72/
+                        - cell "Installed" [ref=e907]:
+                          - generic [ref=e908]: Installed
+                        - cell "󰙅 Install Branch" [ref=e909]:
+                          - button "󰙅 Install Branch" [ref=e911] [cursor=pointer]:
+                            - generic [ref=e912]: 󰙅
+                            - text: Install Branch
+                      - row "└─ XIOM 2/x1 3HE18883AARB01 NS241462069 - 󰢮 xioModule └─ 2/x1 XMA2-s Installed" [ref=e913]:
+                        - cell [ref=e914]:
+                          - checkbox [ref=e915]
+                        - cell "└─ XIOM 2/x1" [ref=e916]:
+                          - generic [ref=e917]: └─ XIOM 2/x1
+                        - cell "3HE18883AARB01" [ref=e918]:
+                          - link "3HE18883AARB01" [ref=e919] [cursor=pointer]:
+                            - /url: /dcim/module-types/1930/
+                        - cell "NS241462069" [ref=e920]
+                        - cell "-" [ref=e921]
+                        - cell "󰢮 xioModule" [ref=e922]:
+                          - generic [ref=e923]: 󰢮
+                          - text: xioModule
+                        - cell "└─ 2/x1" [ref=e924]:
+                          - generic [ref=e925]:
+                            - text: └─
+                            - link "2/x1" [ref=e926] [cursor=pointer]:
+                              - /url: /dcim/module-bays/1977/
+                        - cell "XMA2-s" [ref=e927]:
+                          - link "XMA2-s" [ref=e928] [cursor=pointer]:
+                            - /url: /dcim/module-types/1930/
+                        - cell "Installed" [ref=e929]:
+                          - generic [ref=e930]: Installed
+                        - cell [ref=e931]
+                      - row "└─ MDA 2/x1/1 3HE18883AARB01 NS241462069 - 󰢮 mdaModule └─ - No matching type Integrated in XIOM 2/x1" [ref=e932]:
+                        - cell [ref=e933]:
+                          - checkbox [ref=e934]
+                        - cell "└─ MDA 2/x1/1" [ref=e935]:
+                          - generic [ref=e936]: └─ MDA 2/x1/1
+                        - cell "3HE18883AARB01" [ref=e937]
+                        - cell "NS241462069" [ref=e938]
+                        - cell "-" [ref=e939]
+                        - cell "󰢮 mdaModule" [ref=e940]:
+                          - generic [ref=e941]: 󰢮
+                          - text: mdaModule
+                        - cell "└─ -" [ref=e942]
+                        - cell "No matching type" [ref=e943]
+                        - cell "Integrated in XIOM 2/x1" [ref=e944]:
+                          - generic "Duplicate SNMP entry for the same physical card as 'XIOM 2/x1' (matching entPhysicalSerialNum + entPhysicalModelName). No separate NetBox bay/type is needed — this row is informational." [ref=e945]: Integrated in XIOM 2/x1
+                        - cell [ref=e946]
+                      - row "└─ 2/x1/1/c2 3HE18360AARA01 ALU INUIAYLGAA PR21A6B70278 QSFP-DD 󰈀 port └─ 2/x1/1/c2 QSFP-DD-400G-ZR+ Installed 󰌹 Update Interface" [ref=e947]:
+                        - cell [ref=e948]:
+                          - checkbox [ref=e949]
+                        - cell "└─ 2/x1/1/c2" [ref=e950]:
+                          - generic [ref=e952]:
+                            - text: └─
+                            - link "2/x1/1/c2" [ref=e953] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3636/
+                        - cell "3HE18360AARA01 ALU INUIAYLGAA" [ref=e954]:
+                          - link "3HE18360AARA01 ALU INUIAYLGAA" [ref=e955] [cursor=pointer]:
+                            - /url: /dcim/module-types/89/
+                        - cell "PR21A6B70278" [ref=e956]
+                        - cell "QSFP-DD" [ref=e957]
+                        - cell "󰈀 port" [ref=e958]:
+                          - generic [ref=e959]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c2" [ref=e960]:
+                          - generic [ref=e961]:
+                            - text: └─
+                            - link "2/x1/1/c2" [ref=e962] [cursor=pointer]:
+                              - /url: /dcim/module-bays/1983/
+                        - cell "QSFP-DD-400G-ZR+" [ref=e963]:
+                          - link "QSFP-DD-400G-ZR+" [ref=e964] [cursor=pointer]:
+                            - /url: /dcim/module-types/89/
+                        - cell "Installed" [ref=e965]:
+                          - generic [ref=e966]: Installed
+                        - cell "󰌹 Update Interface" [ref=e967]:
+                          - button "󰌹 Update Interface" [ref=e969] [cursor=pointer]:
+                            - generic [ref=e970]: 󰌹
+                            - text: Update Interface
+                      - row "└─ 2/x1/1/c4/1 QSFP-DD Q00JFV3D QSFP-DD 󰈀 port └─ 2/x1/1/c4 QSFP-DD Installed" [ref=e971]:
+                        - cell [ref=e972]:
+                          - checkbox [ref=e973]
+                        - cell "└─ 2/x1/1/c4/1" [ref=e974]:
+                          - generic [ref=e976]:
+                            - text: └─
+                            - link "2/x1/1/c4/1" [ref=e977] [cursor=pointer]:
+                              - /url: /dcim/interfaces/1334/
+                        - cell "QSFP-DD" [ref=e978]:
+                          - link "QSFP-DD" [ref=e979] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Q00JFV3D" [ref=e980]
+                        - cell "QSFP-DD" [ref=e981]
+                        - cell "󰈀 port" [ref=e982]:
+                          - generic [ref=e983]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c4" [ref=e984]:
+                          - generic [ref=e985]:
+                            - text: └─
+                            - link "2/x1/1/c4" [ref=e986] [cursor=pointer]:
+                              - /url: /dcim/module-bays/1985/
+                        - cell "QSFP-DD" [ref=e987]:
+                          - link "QSFP-DD" [ref=e988] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Installed" [ref=e989]:
+                          - generic [ref=e990]: Installed
+                        - cell [ref=e991]
+                      - row "└─ 2/x1/1/c9 QSFP-DD T1Q001435 QSFP-DD 󰈀 port └─ 2/x1/1/c9 QSFP-DD Installed" [ref=e992]:
+                        - cell [ref=e993]:
+                          - checkbox [ref=e994]
+                        - cell "└─ 2/x1/1/c9" [ref=e995]:
+                          - generic [ref=e997]:
+                            - text: └─
+                            - link "2/x1/1/c9" [ref=e998] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3663/
+                        - cell "QSFP-DD" [ref=e999]:
+                          - link "QSFP-DD" [ref=e1000] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "T1Q001435" [ref=e1001]
+                        - cell "QSFP-DD" [ref=e1002]
+                        - cell "󰈀 port" [ref=e1003]:
+                          - generic [ref=e1004]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c9" [ref=e1005]:
+                          - generic [ref=e1006]:
+                            - text: └─
+                            - link "2/x1/1/c9" [ref=e1007] [cursor=pointer]:
+                              - /url: /dcim/module-bays/1990/
+                        - cell "QSFP-DD" [ref=e1008]:
+                          - link "QSFP-DD" [ref=e1009] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Installed" [ref=e1010]:
+                          - generic [ref=e1011]: Installed
+                        - cell [ref=e1012]
+                      - row "└─ 2/x1/1/c10 QSFP-DD T1Q001437 QSFP-DD 󰈀 port └─ 2/x1/1/c10 QSFP-DD Matched 󰇚 Install" [ref=e1013]:
+                        - cell [ref=e1014]:
+                          - checkbox [ref=e1015]
+                        - cell "└─ 2/x1/1/c10" [ref=e1016]:
+                          - generic [ref=e1018]:
+                            - text: └─
+                            - link "2/x1/1/c10" [ref=e1019] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3635/
+                        - cell "QSFP-DD" [ref=e1020]:
+                          - link "QSFP-DD" [ref=e1021] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "T1Q001437" [ref=e1022]
+                        - cell "QSFP-DD" [ref=e1023]
+                        - cell "󰈀 port" [ref=e1024]:
+                          - generic [ref=e1025]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c10" [ref=e1026]:
+                          - generic [ref=e1027]:
+                            - text: └─
+                            - link "2/x1/1/c10" [ref=e1028] [cursor=pointer]:
+                              - /url: /dcim/module-bays/1991/
+                        - cell "QSFP-DD" [ref=e1029]:
+                          - link "QSFP-DD" [ref=e1030] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Matched" [ref=e1031]:
+                          - generic [ref=e1032]: Matched
+                        - cell "󰇚 Install" [ref=e1033]:
+                          - button "󰇚 Install" [ref=e1035] [cursor=pointer]:
+                            - generic [ref=e1036]: 󰇚
+                            - text: Install
+                      - row "└─ 2/x1/1/c15 QSFP-DD T1Q001442 QSFP-DD 󰈀 port └─ 2/x1/1/c15 QSFP-DD Matched 󰇚 Install" [ref=e1037]:
+                        - cell [ref=e1038]:
+                          - checkbox [ref=e1039]
+                        - cell "└─ 2/x1/1/c15" [ref=e1040]:
+                          - generic [ref=e1042]:
+                            - text: └─
+                            - link "2/x1/1/c15" [ref=e1043] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3620/
+                        - cell "QSFP-DD" [ref=e1044]:
+                          - link "QSFP-DD" [ref=e1045] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "T1Q001442" [ref=e1046]
+                        - cell "QSFP-DD" [ref=e1047]
+                        - cell "󰈀 port" [ref=e1048]:
+                          - generic [ref=e1049]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c15" [ref=e1050]:
+                          - generic [ref=e1051]:
+                            - text: └─
+                            - link "2/x1/1/c15" [ref=e1052] [cursor=pointer]:
+                              - /url: /dcim/module-bays/1996/
+                        - cell "QSFP-DD" [ref=e1053]:
+                          - link "QSFP-DD" [ref=e1054] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Matched" [ref=e1055]:
+                          - generic [ref=e1056]: Matched
+                        - cell "󰇚 Install" [ref=e1057]:
+                          - button "󰇚 Install" [ref=e1059] [cursor=pointer]:
+                            - generic [ref=e1060]: 󰇚
+                            - text: Install
+                      - row "└─ 2/x1/1/c16 QSFP-DD T1Q001443 QSFP-DD 󰈀 port └─ 2/x1/1/c16 QSFP-DD Matched 󰇚 Install" [ref=e1061]:
+                        - cell [ref=e1062]:
+                          - checkbox [ref=e1063]
+                        - cell "└─ 2/x1/1/c16" [ref=e1064]:
+                          - generic [ref=e1066]:
+                            - text: └─
+                            - link "2/x1/1/c16" [ref=e1067] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3625/
+                        - cell "QSFP-DD" [ref=e1068]:
+                          - link "QSFP-DD" [ref=e1069] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "T1Q001443" [ref=e1070]
+                        - cell "QSFP-DD" [ref=e1071]
+                        - cell "󰈀 port" [ref=e1072]:
+                          - generic [ref=e1073]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c16" [ref=e1074]:
+                          - generic [ref=e1075]:
+                            - text: └─
+                            - link "2/x1/1/c16" [ref=e1076] [cursor=pointer]:
+                              - /url: /dcim/module-bays/1997/
+                        - cell "QSFP-DD" [ref=e1077]:
+                          - link "QSFP-DD" [ref=e1078] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Matched" [ref=e1079]:
+                          - generic [ref=e1080]: Matched
+                        - cell "󰇚 Install" [ref=e1081]:
+                          - button "󰇚 Install" [ref=e1083] [cursor=pointer]:
+                            - generic [ref=e1084]: 󰇚
+                            - text: Install
+                      - row "└─ 2/x1/1/c21 QSFP-DD T1Q001447 QSFP-DD 󰈀 port └─ 2/x1/1/c21 QSFP-DD Matched 󰇚 Install" [ref=e1085]:
+                        - cell [ref=e1086]:
+                          - checkbox [ref=e1087]
+                        - cell "└─ 2/x1/1/c21" [ref=e1088]:
+                          - generic [ref=e1090]:
+                            - text: └─
+                            - link "2/x1/1/c21" [ref=e1091] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3586/
+                        - cell "QSFP-DD" [ref=e1092]:
+                          - link "QSFP-DD" [ref=e1093] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "T1Q001447" [ref=e1094]
+                        - cell "QSFP-DD" [ref=e1095]
+                        - cell "󰈀 port" [ref=e1096]:
+                          - generic [ref=e1097]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c21" [ref=e1098]:
+                          - generic [ref=e1099]:
+                            - text: └─
+                            - link "2/x1/1/c21" [ref=e1100] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2002/
+                        - cell "QSFP-DD" [ref=e1101]:
+                          - link "QSFP-DD" [ref=e1102] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Matched" [ref=e1103]:
+                          - generic [ref=e1104]: Matched
+                        - cell "󰇚 Install" [ref=e1105]:
+                          - button "󰇚 Install" [ref=e1107] [cursor=pointer]:
+                            - generic [ref=e1108]: 󰇚
+                            - text: Install
+                      - row "└─ 2/x1/1/c22 QSFP-DD T1Q001434 QSFP-DD 󰈀 port └─ 2/x1/1/c22 QSFP-DD Installed 󰌹 Update Interface" [ref=e1109]:
+                        - cell [ref=e1110]:
+                          - checkbox [ref=e1111]
+                        - cell "└─ 2/x1/1/c22" [ref=e1112]:
+                          - generic [ref=e1114]:
+                            - text: └─
+                            - link "2/x1/1/c22" [ref=e1115] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3632/
+                        - cell "QSFP-DD" [ref=e1116]:
+                          - link "QSFP-DD" [ref=e1117] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "T1Q001434" [ref=e1118]
+                        - cell "QSFP-DD" [ref=e1119]
+                        - cell "󰈀 port" [ref=e1120]:
+                          - generic [ref=e1121]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c22" [ref=e1122]:
+                          - generic [ref=e1123]:
+                            - text: └─
+                            - link "2/x1/1/c22" [ref=e1124] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2003/
+                        - cell "QSFP-DD" [ref=e1125]:
+                          - link "QSFP-DD" [ref=e1126] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Installed" [ref=e1127]:
+                          - generic [ref=e1128]: Installed
+                        - cell "󰌹 Update Interface" [ref=e1129]:
+                          - button "󰌹 Update Interface" [ref=e1131] [cursor=pointer]:
+                            - generic [ref=e1132]: 󰌹
+                            - text: Update Interface
+                      - row "└─ 2/x1/1/c27 QSFP-DD T1Q001448 QSFP-DD 󰈀 port └─ 2/x1/1/c27 QSFP-DD Matched 󰇚 Install" [ref=e1133]:
+                        - cell [ref=e1134]:
+                          - checkbox [ref=e1135]
+                        - cell "└─ 2/x1/1/c27" [ref=e1136]:
+                          - generic [ref=e1138]:
+                            - text: └─
+                            - link "2/x1/1/c27" [ref=e1139] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3622/
+                        - cell "QSFP-DD" [ref=e1140]:
+                          - link "QSFP-DD" [ref=e1141] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "T1Q001448" [ref=e1142]
+                        - cell "QSFP-DD" [ref=e1143]
+                        - cell "󰈀 port" [ref=e1144]:
+                          - generic [ref=e1145]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c27" [ref=e1146]:
+                          - generic [ref=e1147]:
+                            - text: └─
+                            - link "2/x1/1/c27" [ref=e1148] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2008/
+                        - cell "QSFP-DD" [ref=e1149]:
+                          - link "QSFP-DD" [ref=e1150] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Matched" [ref=e1151]:
+                          - generic [ref=e1152]: Matched
+                        - cell "󰇚 Install" [ref=e1153]:
+                          - button "󰇚 Install" [ref=e1155] [cursor=pointer]:
+                            - generic [ref=e1156]: 󰇚
+                            - text: Install
+                      - row "└─ 2/x1/1/c28 QSFP-DD T1Q001436 QSFP-DD 󰈀 port └─ 2/x1/1/c28 QSFP-DD Matched 󰇚 Install" [ref=e1157]:
+                        - cell [ref=e1158]:
+                          - checkbox [ref=e1159]
+                        - cell "└─ 2/x1/1/c28" [ref=e1160]:
+                          - generic [ref=e1162]:
+                            - text: └─
+                            - link "2/x1/1/c28" [ref=e1163] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3610/
+                        - cell "QSFP-DD" [ref=e1164]:
+                          - link "QSFP-DD" [ref=e1165] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "T1Q001436" [ref=e1166]
+                        - cell "QSFP-DD" [ref=e1167]
+                        - cell "󰈀 port" [ref=e1168]:
+                          - generic [ref=e1169]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c28" [ref=e1170]:
+                          - generic [ref=e1171]:
+                            - text: └─
+                            - link "2/x1/1/c28" [ref=e1172] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2009/
+                        - cell "QSFP-DD" [ref=e1173]:
+                          - link "QSFP-DD" [ref=e1174] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Matched" [ref=e1175]:
+                          - generic [ref=e1176]: Matched
+                        - cell "󰇚 Install" [ref=e1177]:
+                          - button "󰇚 Install" [ref=e1179] [cursor=pointer]:
+                            - generic [ref=e1180]: 󰇚
+                            - text: Install
+                      - row "└─ 2/x1/1/c34 QSFP-DD Z11WP03X QSFP-DD 󰈀 port └─ 2/x1/1/c34 QSFP-DD Installed 󰌹 Update Interface" [ref=e1181]:
+                        - cell [ref=e1182]:
+                          - checkbox [ref=e1183]
+                        - cell "└─ 2/x1/1/c34" [ref=e1184]:
+                          - generic [ref=e1186]:
+                            - text: └─
+                            - link "2/x1/1/c34" [ref=e1187] [cursor=pointer]:
+                              - /url: /dcim/interfaces/3607/
+                        - cell "QSFP-DD" [ref=e1188]:
+                          - link "QSFP-DD" [ref=e1189] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Z11WP03X" [ref=e1190]
+                        - cell "QSFP-DD" [ref=e1191]
+                        - cell "󰈀 port" [ref=e1192]:
+                          - generic [ref=e1193]: 󰈀
+                          - text: port
+                        - cell "└─ 2/x1/1/c34" [ref=e1194]:
+                          - generic [ref=e1195]:
+                            - text: └─
+                            - link "2/x1/1/c34" [ref=e1196] [cursor=pointer]:
+                              - /url: /dcim/module-bays/2015/
+                        - cell "QSFP-DD" [ref=e1197]:
+                          - link "QSFP-DD" [ref=e1198] [cursor=pointer]:
+                            - /url: /dcim/module-types/1932/
+                        - cell "Installed" [ref=e1199]:
+                          - generic [ref=e1200]: Installed
+                        - cell "󰌹 Update Interface" [ref=e1201]:
+                          - button "󰌹 Update Interface" [ref=e1203] [cursor=pointer]:
+                            - generic [ref=e1204]: 󰌹
+                            - text: Update Interface
+                      - row "Slot A 3HE12559AARC01 NS204561870 - 󰢮 cpmModule CPM A CPM2-s Installed" [ref=e1205]:
+                        - cell [ref=e1206]:
+                          - checkbox [ref=e1207]
+                        - cell "Slot A" [ref=e1208]
+                        - cell "3HE12559AARC01" [ref=e1209]:
+                          - link "3HE12559AARC01" [ref=e1210] [cursor=pointer]:
+                            - /url: /dcim/module-types/63/
+                        - cell "NS204561870" [ref=e1211]
+                        - cell "-" [ref=e1212]
+                        - cell "󰢮 cpmModule" [ref=e1213]:
+                          - generic [ref=e1214]: 󰢮
+                          - text: cpmModule
+                        - cell "CPM A" [ref=e1215]:
+                          - link "CPM A" [ref=e1216] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1980/
+                        - cell "CPM2-s" [ref=e1217]:
+                          - link "CPM2-s" [ref=e1218] [cursor=pointer]:
+                            - /url: /dcim/module-types/63/
+                        - cell "Installed" [ref=e1219]:
+                          - generic [ref=e1220]: Installed
+                        - cell [ref=e1221]
+                      - row "Slot B 3HE12559AARC01 NS204561850 - 󰢮 cpmModule CPM B CPM2-s Installed" [ref=e1222]:
+                        - cell [ref=e1223]:
+                          - checkbox [ref=e1224]
+                        - cell "Slot B" [ref=e1225]
+                        - cell "3HE12559AARC01" [ref=e1226]:
+                          - link "3HE12559AARC01" [ref=e1227] [cursor=pointer]:
+                            - /url: /dcim/module-types/63/
+                        - cell "NS204561850" [ref=e1228]
+                        - cell "-" [ref=e1229]
+                        - cell "󰢮 cpmModule" [ref=e1230]:
+                          - generic [ref=e1231]: 󰢮
+                          - text: cpmModule
+                        - cell "CPM B" [ref=e1232]:
+                          - link "CPM B" [ref=e1233] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1981/
+                        - cell "CPM2-s" [ref=e1234]:
+                          - link "CPM2-s" [ref=e1235] [cursor=pointer]:
+                            - /url: /dcim/module-types/63/
+                        - cell "Installed" [ref=e1236]:
+                          - generic [ref=e1237]: Installed
+                        - cell [ref=e1238]
+                      - row "Sfm 1 3HE16471AARG01 NK242147061 - 󰢮 fabricModule SFM 1 SFM2-s Installed" [ref=e1239]:
+                        - cell [ref=e1240]:
+                          - checkbox [ref=e1241]
+                        - cell "Sfm 1" [ref=e1242]
+                        - cell "3HE16471AARG01" [ref=e1243]:
+                          - link "3HE16471AARG01" [ref=e1244] [cursor=pointer]:
+                            - /url: /dcim/module-types/71/
+                        - cell "NK242147061" [ref=e1245]
+                        - cell "-" [ref=e1246]
+                        - cell "󰢮 fabricModule" [ref=e1247]:
+                          - generic [ref=e1248]: 󰢮
+                          - text: fabricModule
+                        - cell "SFM 1" [ref=e1249]:
+                          - link "SFM 1" [ref=e1250] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1896/
+                        - cell "SFM2-s" [ref=e1251]:
+                          - link "SFM2-s" [ref=e1252] [cursor=pointer]:
+                            - /url: /dcim/module-types/71/
+                        - cell "Installed" [ref=e1253]:
+                          - generic [ref=e1254]: Installed
+                        - cell [ref=e1255]
+                      - row "Sfm 2 3HE16471AARG01 NK242147058 - 󰢮 fabricModule SFM 2 SFM2-s Installed" [ref=e1256]:
+                        - cell [ref=e1257]:
+                          - checkbox [ref=e1258]
+                        - cell "Sfm 2" [ref=e1259]
+                        - cell "3HE16471AARG01" [ref=e1260]:
+                          - link "3HE16471AARG01" [ref=e1261] [cursor=pointer]:
+                            - /url: /dcim/module-types/71/
+                        - cell "NK242147058" [ref=e1262]
+                        - cell "-" [ref=e1263]
+                        - cell "󰢮 fabricModule" [ref=e1264]:
+                          - generic [ref=e1265]: 󰢮
+                          - text: fabricModule
+                        - cell "SFM 2" [ref=e1266]:
+                          - link "SFM 2" [ref=e1267] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1897/
+                        - cell "SFM2-s" [ref=e1268]:
+                          - link "SFM2-s" [ref=e1269] [cursor=pointer]:
+                            - /url: /dcim/module-types/71/
+                        - cell "Installed" [ref=e1270]:
+                          - generic [ref=e1271]: Installed
+                        - cell [ref=e1272]
+                      - row "Sfm 3 3HE16471AARG01 NK242147060 - 󰢮 fabricModule SFM 3 SFM2-s Installed" [ref=e1273]:
+                        - cell [ref=e1274]:
+                          - checkbox [ref=e1275]
+                        - cell "Sfm 3" [ref=e1276]
+                        - cell "3HE16471AARG01" [ref=e1277]:
+                          - link "3HE16471AARG01" [ref=e1278] [cursor=pointer]:
+                            - /url: /dcim/module-types/71/
+                        - cell "NK242147060" [ref=e1279]
+                        - cell "-" [ref=e1280]
+                        - cell "󰢮 fabricModule" [ref=e1281]:
+                          - generic [ref=e1282]: 󰢮
+                          - text: fabricModule
+                        - cell "SFM 3" [ref=e1283]:
+                          - link "SFM 3" [ref=e1284] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1898/
+                        - cell "SFM2-s" [ref=e1285]:
+                          - link "SFM2-s" [ref=e1286] [cursor=pointer]:
+                            - /url: /dcim/module-types/71/
+                        - cell "Installed" [ref=e1287]:
+                          - generic [ref=e1288]: Installed
+                        - cell [ref=e1289]
+                      - row "Sfm 4 3HE16471AARG01 NK242147065 - 󰢮 fabricModule SFM 4 SFM2-s Installed" [ref=e1290]:
+                        - cell [ref=e1291]:
+                          - checkbox [ref=e1292]
+                        - cell "Sfm 4" [ref=e1293]
+                        - cell "3HE16471AARG01" [ref=e1294]:
+                          - link "3HE16471AARG01" [ref=e1295] [cursor=pointer]:
+                            - /url: /dcim/module-types/71/
+                        - cell "NK242147065" [ref=e1296]
+                        - cell "-" [ref=e1297]
+                        - cell "󰢮 fabricModule" [ref=e1298]:
+                          - generic [ref=e1299]: 󰢮
+                          - text: fabricModule
+                        - cell "SFM 4" [ref=e1300]:
+                          - link "SFM 4" [ref=e1301] [cursor=pointer]:
+                            - /url: /dcim/module-bays/1899/
+                        - cell "SFM2-s" [ref=e1302]:
+                          - link "SFM2-s" [ref=e1303] [cursor=pointer]:
+                            - /url: /dcim/module-types/71/
+                        - cell "Installed" [ref=e1304]:
+                          - generic [ref=e1305]: Installed
+                        - cell [ref=e1306]
+                      - row "Chassis 1 Fan 1 3HE11312AARB01 NS204563643 - 󰈐 fan No matching bay FAN-7750-SR-S No Bay 󰀪 󰜄 Add Mapping" [ref=e1307]:
+                        - cell [ref=e1308]:
+                          - checkbox [ref=e1309]
+                        - cell "Chassis 1 Fan 1" [ref=e1310]
+                        - cell "3HE11312AARB01" [ref=e1311]:
+                          - link "3HE11312AARB01" [ref=e1312] [cursor=pointer]:
+                            - /url: /dcim/module-types/65/
+                        - cell "NS204563643" [ref=e1313]
+                        - cell "-" [ref=e1314]
+                        - cell "󰈐 fan" [ref=e1315]:
+                          - generic [ref=e1316]: 󰈐
+                          - text: fan
+                        - cell "No matching bay" [ref=e1317]
+                        - cell "FAN-7750-SR-S" [ref=e1318]:
+                          - link "FAN-7750-SR-S" [ref=e1319] [cursor=pointer]:
+                            - /url: /dcim/module-types/65/
+                        - cell "No Bay 󰀪" [ref=e1320]:
+                          - 'generic "No bay defined for class=fan; add Fan Tray N or Fan N bay templates on the NetBox device or parent module type. If the names differ, add a ModuleBayMapping. Suggested mapping: librenms_name=''^Chassis\\ 1\\ Fan\\ (\\d+)$'' (regex), librenms_class=''fan'', netbox_bay_name=''FAN \\1'' — would map ''Chassis 1 Fan 1'' to ''FAN 1'' and any sibling with the same trailing-number pattern." [ref=e1321]': No Bay
+                          - 'generic "No bay defined for class=fan; add Fan Tray N or Fan N bay templates on the NetBox device or parent module type. If the names differ, add a ModuleBayMapping. Suggested mapping: librenms_name=''^Chassis\\ 1\\ Fan\\ (\\d+)$'' (regex), librenms_class=''fan'', netbox_bay_name=''FAN \\1'' — would map ''Chassis 1 Fan 1'' to ''FAN 1'' and any sibling with the same trailing-number pattern." [ref=e1322]': 󰀪
+                        - cell "󰜄 Add Mapping" [ref=e1323]:
+                          - link "󰜄 Add Mapping" [ref=e1324] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-bay-mappings/add/?librenms_name=%5EChassis%5C+1%5C+Fan%5C+%28%5Cd%2B%29%24&librenms_class=fan&netbox_bay_name=FAN+%5C1&is_regex=true&description=Auto-suggested+from+device+modules+tab%3A+maps+LibreNMS+%27Chassis+1+Fan+1%27+and+similar+names+sharing+the+same+prefix+to+NetBox+bay+%27FAN+1%27.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e1325]: 󰜄
+                            - text: Add Mapping
+                      - row "Chassis 1 Fan 2 3HE11312AARB01 NS204662781 - 󰈐 fan No matching bay FAN-7750-SR-S No Bay 󰀪 󰜄 Add Mapping" [ref=e1326]:
+                        - cell [ref=e1327]:
+                          - checkbox [ref=e1328]
+                        - cell "Chassis 1 Fan 2" [ref=e1329]
+                        - cell "3HE11312AARB01" [ref=e1330]:
+                          - link "3HE11312AARB01" [ref=e1331] [cursor=pointer]:
+                            - /url: /dcim/module-types/65/
+                        - cell "NS204662781" [ref=e1332]
+                        - cell "-" [ref=e1333]
+                        - cell "󰈐 fan" [ref=e1334]:
+                          - generic [ref=e1335]: 󰈐
+                          - text: fan
+                        - cell "No matching bay" [ref=e1336]
+                        - cell "FAN-7750-SR-S" [ref=e1337]:
+                          - link "FAN-7750-SR-S" [ref=e1338] [cursor=pointer]:
+                            - /url: /dcim/module-types/65/
+                        - cell "No Bay 󰀪" [ref=e1339]:
+                          - 'generic "No bay defined for class=fan; add Fan Tray N or Fan N bay templates on the NetBox device or parent module type. If the names differ, add a ModuleBayMapping. Suggested mapping: librenms_name=''^Chassis\\ 1\\ Fan\\ (\\d+)$'' (regex), librenms_class=''fan'', netbox_bay_name=''FAN \\1'' — would map ''Chassis 1 Fan 2'' to ''FAN 2'' and any sibling with the same trailing-number pattern." [ref=e1340]': No Bay
+                          - 'generic "No bay defined for class=fan; add Fan Tray N or Fan N bay templates on the NetBox device or parent module type. If the names differ, add a ModuleBayMapping. Suggested mapping: librenms_name=''^Chassis\\ 1\\ Fan\\ (\\d+)$'' (regex), librenms_class=''fan'', netbox_bay_name=''FAN \\1'' — would map ''Chassis 1 Fan 2'' to ''FAN 2'' and any sibling with the same trailing-number pattern." [ref=e1341]': 󰀪
+                        - cell "󰜄 Add Mapping" [ref=e1342]:
+                          - link "󰜄 Add Mapping" [ref=e1343] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-bay-mappings/add/?librenms_name=%5EChassis%5C+1%5C+Fan%5C+%28%5Cd%2B%29%24&librenms_class=fan&netbox_bay_name=FAN+%5C1&is_regex=true&description=Auto-suggested+from+device+modules+tab%3A+maps+LibreNMS+%27Chassis+1+Fan+2%27+and+similar+names+sharing+the+same+prefix+to+NetBox+bay+%27FAN+2%27.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e1344]: 󰜄
+                            - text: Add Mapping
+                      - row "Chassis 1 Fan 3 3HE11312AARB01 NS204563606 - 󰈐 fan No matching bay FAN-7750-SR-S No Bay 󰀪 󰜄 Add Mapping" [ref=e1345]:
+                        - cell [ref=e1346]:
+                          - checkbox [ref=e1347]
+                        - cell "Chassis 1 Fan 3" [ref=e1348]
+                        - cell "3HE11312AARB01" [ref=e1349]:
+                          - link "3HE11312AARB01" [ref=e1350] [cursor=pointer]:
+                            - /url: /dcim/module-types/65/
+                        - cell "NS204563606" [ref=e1351]
+                        - cell "-" [ref=e1352]
+                        - cell "󰈐 fan" [ref=e1353]:
+                          - generic [ref=e1354]: 󰈐
+                          - text: fan
+                        - cell "No matching bay" [ref=e1355]
+                        - cell "FAN-7750-SR-S" [ref=e1356]:
+                          - link "FAN-7750-SR-S" [ref=e1357] [cursor=pointer]:
+                            - /url: /dcim/module-types/65/
+                        - cell "No Bay 󰀪" [ref=e1358]:
+                          - 'generic "No bay defined for class=fan; add Fan Tray N or Fan N bay templates on the NetBox device or parent module type. If the names differ, add a ModuleBayMapping. Suggested mapping: librenms_name=''^Chassis\\ 1\\ Fan\\ (\\d+)$'' (regex), librenms_class=''fan'', netbox_bay_name=''FAN \\1'' — would map ''Chassis 1 Fan 3'' to ''FAN 3'' and any sibling with the same trailing-number pattern." [ref=e1359]': No Bay
+                          - 'generic "No bay defined for class=fan; add Fan Tray N or Fan N bay templates on the NetBox device or parent module type. If the names differ, add a ModuleBayMapping. Suggested mapping: librenms_name=''^Chassis\\ 1\\ Fan\\ (\\d+)$'' (regex), librenms_class=''fan'', netbox_bay_name=''FAN \\1'' — would map ''Chassis 1 Fan 3'' to ''FAN 3'' and any sibling with the same trailing-number pattern." [ref=e1360]': 󰀪
+                        - cell "󰜄 Add Mapping" [ref=e1361]:
+                          - link "󰜄 Add Mapping" [ref=e1362] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-bay-mappings/add/?librenms_name=%5EChassis%5C+1%5C+Fan%5C+%28%5Cd%2B%29%24&librenms_class=fan&netbox_bay_name=FAN+%5C1&is_regex=true&description=Auto-suggested+from+device+modules+tab%3A+maps+LibreNMS+%27Chassis+1+Fan+3%27+and+similar+names+sharing+the+same+prefix+to+NetBox+bay+%27FAN+3%27.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e1363]: 󰜄
+                            - text: Add Mapping
+                      - row "Chassis 1 Fan 4 3HE11312AARB01 NS204662786 - 󰈐 fan No matching bay FAN-7750-SR-S No Bay 󰀪 󰜄 Add Mapping" [ref=e1364]:
+                        - cell [ref=e1365]:
+                          - checkbox [ref=e1366]
+                        - cell "Chassis 1 Fan 4" [ref=e1367]
+                        - cell "3HE11312AARB01" [ref=e1368]:
+                          - link "3HE11312AARB01" [ref=e1369] [cursor=pointer]:
+                            - /url: /dcim/module-types/65/
+                        - cell "NS204662786" [ref=e1370]
+                        - cell "-" [ref=e1371]
+                        - cell "󰈐 fan" [ref=e1372]:
+                          - generic [ref=e1373]: 󰈐
+                          - text: fan
+                        - cell "No matching bay" [ref=e1374]
+                        - cell "FAN-7750-SR-S" [ref=e1375]:
+                          - link "FAN-7750-SR-S" [ref=e1376] [cursor=pointer]:
+                            - /url: /dcim/module-types/65/
+                        - cell "No Bay 󰀪" [ref=e1377]:
+                          - 'generic "No bay defined for class=fan; add Fan Tray N or Fan N bay templates on the NetBox device or parent module type. If the names differ, add a ModuleBayMapping. Suggested mapping: librenms_name=''^Chassis\\ 1\\ Fan\\ (\\d+)$'' (regex), librenms_class=''fan'', netbox_bay_name=''FAN \\1'' — would map ''Chassis 1 Fan 4'' to ''FAN 4'' and any sibling with the same trailing-number pattern." [ref=e1378]': No Bay
+                          - 'generic "No bay defined for class=fan; add Fan Tray N or Fan N bay templates on the NetBox device or parent module type. If the names differ, add a ModuleBayMapping. Suggested mapping: librenms_name=''^Chassis\\ 1\\ Fan\\ (\\d+)$'' (regex), librenms_class=''fan'', netbox_bay_name=''FAN \\1'' — would map ''Chassis 1 Fan 4'' to ''FAN 4'' and any sibling with the same trailing-number pattern." [ref=e1379]': 󰀪
+                        - cell "󰜄 Add Mapping" [ref=e1380]:
+                          - link "󰜄 Add Mapping" [ref=e1381] [cursor=pointer]:
+                            - /url: /plugins/librenms_plugin/module-bay-mappings/add/?librenms_name=%5EChassis%5C+1%5C+Fan%5C+%28%5Cd%2B%29%24&librenms_class=fan&netbox_bay_name=FAN+%5C1&is_regex=true&description=Auto-suggested+from+device+modules+tab%3A+maps+LibreNMS+%27Chassis+1+Fan+4%27+and+similar+names+sharing+the+same+prefix+to+NetBox+bay+%27FAN+4%27.&manufacturer=10&return_url=%2Fplugins%2Flibrenms_plugin%2Fdevice%2F55%2Flibrenms-sync%2F%3Ftab%3Dmodules
+                            - generic [ref=e1382]: 󰜄
+                            - text: Add Mapping
+                  - generic [ref=e1383]:
+                    - generic [ref=e1384]: Showing 1-49 of 49
+                    - navigation "Pagination options" [ref=e1385]:
+                      - button "Per Page 󰅀" [ref=e1387] [cursor=pointer]
+            - text: 󰗠 󰓨
+          - text: 󰝲 󰅙 󰅙 󰅙 󰅙 󰅙 󰅙 󰅙 󰅙 󰅙
+        - generic [ref=e1388]: NetBox Interface Name Rules Plugin Dev Container
+      - contentinfo [ref=e1389]:
+        - generic [ref=e1390]:
+          - list [ref=e1391]:
+            - listitem [ref=e1392]:
+              - link "Docs" [ref=e1393] [cursor=pointer]:
+                - /url: /static/docs/
+                - generic "Docs" [ref=e1394]: 󱓷
+            - listitem [ref=e1395]:
+              - link "REST API" [ref=e1396] [cursor=pointer]:
+                - /url: /api/
+                - generic "REST API" [ref=e1397]: 󰞵
+            - listitem [ref=e1398]:
+              - link "REST API documentation" [ref=e1399] [cursor=pointer]:
+                - /url: /api/schema/swagger-ui/
+                - generic "REST API documentation" [ref=e1400]: 󰂺
+            - listitem [ref=e1401]:
+              - link "GraphQL API" [ref=e1402] [cursor=pointer]:
+                - /url: /graphql/
+                - generic "GraphQL API" [ref=e1403]: 󰡷
+            - listitem [ref=e1404]:
+              - link "Source Code" [ref=e1405] [cursor=pointer]:
+                - /url: https://github.com/netbox-community/netbox
+                - generic "Source Code" [ref=e1406]: 󰊤
+            - listitem [ref=e1407]:
+              - link "Community" [ref=e1408] [cursor=pointer]:
+                - /url: https://netdev.chat
+                - generic "Community" [ref=e1409]: 󰒱
+          - list [ref=e1410]:
+            - listitem [ref=e1411]: 2026-06-11 17:15:24 UTC
+            - listitem [ref=e1412]: · b887fe7759d0
+  - alert [ref=e1413]:
+    - generic [ref=e1414]:
+      - generic [ref=e1415]: 󰗠
+      - button "Close" [ref=e1416] [cursor=pointer]
+    - generic [ref=e1417]: Updated interface 2/x1/1/c2 for QSFP-DD-400G-ZR+ in 2/x1/1/c2.

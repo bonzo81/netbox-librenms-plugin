@@ -689,74 +689,43 @@ class TestMoveIPAddressToWinnerView:
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
 
+    @pytest.mark.django_db
     def test_happy_path_reassigns_ip_to_winner_interface(self):
-        from dcim.models import Device, Interface
-        from ipam.models import IPAddress as IPAddressModel
-
+        """Real DB end-to-end: the IP on the donor's interface is reassigned to the winner's
+        same-named interface. Because the move is driven against real rows, the donor re-lock
+        ``filter(pk=..., device=donor)`` and the winner lookup ``filter(device=winner,
+        name=...)`` must use the correct device/name — a wrong lookup would leave the IP off
+        the winner's interface and the reload assertion would fail (no mock-call inspection
+        needed to pin the exact kwargs)."""
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_ip
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
         from netbox_librenms_plugin.views.sync.migrate import MoveIPAddressToWinnerView
 
         view = MoveIPAddressToWinnerView()
         view.require_all_permissions = MagicMock(return_value=None)
 
+        donor = make_device("donor-device")
+        winner = make_device("winner-device")
+        # Mark the donor migrated into the winner so the real _resolve_winner_for_donor()
+        # (which reads the _migrated_to cf marker) resolves the winner for real.
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
+        donor_iface = make_interface(donor, "Eth0")
+        winner_iface = make_interface(winner, "Eth0")  # same name on the winner
+        ip = make_ip("10.0.0.1/24", assigned_object=donor_iface)
+
         req = _hx_request({"server_key": "default"})
+        resp = view.post(req, pk=ip.pk)
 
-        donor = MagicMock(pk=10, name="donor-device")
-        winner = MagicMock(pk=20, name="winner-device")
-        donor_iface = MagicMock(spec=Interface)
-        donor_iface.name = "Eth0"
-        donor_iface.device = donor
-        donor_iface.device_id = 10
-        winner_iface = MagicMock(spec=Interface, name="Eth0")
-        winner_iface.name = "Eth0"
-
-        ip = MagicMock(pk=7, address="10.0.0.1/24")
-        ip.assigned_object = donor_iface
-
-        locked_donor = MagicMock(pk=10, name="donor-device")
-        locked_winner = MagicMock(pk=20, name="winner-device")
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=ip),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch.object(Interface, "objects") as mock_iface_objects,
-            patch.object(Device, "objects") as mock_device_objects,
-            patch.object(IPAddressModel, "objects") as mock_ip_objects,
-            patch("netbox_librenms_plugin.views.sync.migrate.transaction") as mock_tx,
-        ):
-            mock_iface_objects.filter.return_value.exists.return_value = True
-
-            # Distinguish the donor re-lock (filter(pk=..., device=donor)) from the
-            # winner lookup (filter(device=winner, name=...)) so the test fails if the
-            # donor-side re-lock is dropped — both previously returned winner_iface.
-            def iface_sfu_filter(*args, **kwargs):
-                qs = MagicMock()
-                qs.first.return_value = winner_iface if "name" in kwargs else donor_iface
-                return qs
-
-            mock_iface_objects.select_for_update.return_value.filter.side_effect = iface_sfu_filter
-
-            locked_list = [locked_donor, locked_winner]
-            mock_device_objects.select_for_update.return_value.filter.return_value.order_by.return_value = locked_list
-
-            locked_ip = MagicMock(pk=7, address="10.0.0.1/24")
-            locked_ip.assigned_object = donor_iface
-            mock_ip_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_ip
-
-            mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-
-            resp = view.post(req, pk=7)
-
-        assert locked_ip.assigned_object is winner_iface
-        locked_ip.save.assert_called_once_with(update_fields=["assigned_object_type", "assigned_object_id"])
         assert resp.status_code == 200
-        # Both the donor re-lock and the winner lookup must have run under the lock.
-        sfu_filter_calls = mock_iface_objects.select_for_update.return_value.filter.call_args_list
-        assert any("pk" in c.kwargs for c in sfu_filter_calls)  # donor re-lock
-        assert any("name" in c.kwargs for c in sfu_filter_calls)  # winner lookup
+        ip.refresh_from_db()
+        # The IP moved onto the winner's same-named interface — proving both the donor re-lock
+        # and the winner lookup resolved the correct rows.
+        assert ip.assigned_object == winner_iface
+        assert ip.assigned_object.device_id == winner.pk
+        # The donor interface no longer holds the IP.
+        assert ip.assigned_object != donor_iface
 
 
 # ── non-HTMX redirect fallback (preserve tab + server_key) ────────────────────
@@ -834,7 +803,10 @@ class TestReconcileDonorDeviceIpFks:
             notes = _reconcile_donor_device_ip_fks(donor, winner)
 
         winner.refresh_from_db()
+        donor.refresh_from_db()
         assert winner.primary_ip4_id is None  # interface not on winner → not transferred
+        # The skip path must not clear the donor's IP either — it still points at the address.
+        assert donor.primary_ip4_id == ip.pk
         assert notes == []
 
 

@@ -1160,6 +1160,30 @@ class TestPrepareContextInterfaceNameFieldNone:
         mock_enrich.assert_not_called()  # never enrich a malformed payload
         mock_cache.set.assert_not_called()  # never cache the empty snapshot as complete
 
+    def test_fetch_fresh_dict_row_missing_ip_fields_returns_none(self):
+        """A dict row that passes the container-shape check but lacks the address/prefix and
+        port_id fields _create_base_ip_entry() reads would KeyError mid-enrichment and 500 the
+        fresh-refresh path. The per-row schema guard must reject it → return None before the
+        live mgmt-ip lookup and enrichment ever run."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            # Well-formed list of dicts, but the single row is missing the IP/prefix fields.
+            patch.object(view, "get_ip_addresses", return_value=(True, [{"port_id": 7}])),
+            patch.object(view, "_resolve_management_ip", return_value="") as mock_mgmt,
+            patch.object(view, "enrich_ip_data") as mock_enrich,
+        ):
+            result = view._prepare_context(request, obj, "ifName", fetch_fresh=True)
+
+        assert result is None
+        mock_mgmt.assert_not_called()  # bail before the live mgmt-ip lookup
+        mock_enrich.assert_not_called()  # never enrich a row that would KeyError downstream
+        mock_cache.set.assert_not_called()
+
     def test_cached_render_reuses_cached_ports_without_live_calls(self):
         """A warm-cache render must enrich from the cached ports_by_id map and never call
         get_port_by_id(), so the IP tab keeps working when LibreNMS is unavailable."""

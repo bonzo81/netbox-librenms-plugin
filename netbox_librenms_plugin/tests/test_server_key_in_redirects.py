@@ -33,6 +33,7 @@ def test_every_tab_url_propagates_server_key():
     so a small forward window covers the real patterns without masking a genuine omission.
     """
     offenders = []
+    views_root = Path(views_pkg.__file__).parent
     for path in _scoped_python_files():
         lines = path.read_text().splitlines()
         for idx, line in enumerate(lines):
@@ -40,7 +41,14 @@ def test_every_tab_url_propagates_server_key():
                 continue
             window = "\n".join(lines[idx : idx + 4])
             if "server_key" not in window:
-                offenders.append(f"{path.name}:{idx + 1}: {line.strip()}")
+                # Emit a path relative to the views package, not the bare basename, so the
+                # offender is unambiguous when two scoped files share a name (e.g. several
+                # subpackages each define interfaces.py).
+                try:
+                    where = path.relative_to(views_root)
+                except ValueError:
+                    where = path.name
+                offenders.append(f"{where}:{idx + 1}: {line.strip()}")
 
     assert not offenders, (
         "These server-scoped '?tab=' URLs don't propagate server_key (the redirect would land "

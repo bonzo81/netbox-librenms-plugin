@@ -301,12 +301,26 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
         if fetch_fresh:
             success, ip_data = self.get_ip_addresses(obj)
+
             # Bail out on a failed *or malformed* fetch instead of enriching an error payload
             # and rendering an empty table under a success banner. A success flag with a
             # non-list payload (dict/string) or a list with non-dict entries makes
             # enrich_ip_data() silently drop every row and caches that empty snapshot as
             # complete, so treat it as a fetch failure.
-            if not success or not isinstance(ip_data, list) or any(not isinstance(item, dict) for item in ip_data):
+            def _valid_ip_row(item):
+                # Validate the per-row schema, not just the container shape: a dict row
+                # missing port_id or any supported address/prefix pair would KeyError inside
+                # _create_base_ip_entry() mid-enrichment and 500 the fresh-refresh path.
+                # Reject it here so a malformed LibreNMS payload fails closed.
+                if not isinstance(item, dict) or "port_id" not in item:
+                    return False
+                return (
+                    {"ip_address", "prefix_length"} <= item.keys()
+                    or {"ipv6_compressed", "ipv6_prefixlen"} <= item.keys()
+                    or {"ipv4_address", "ipv4_prefixlen"} <= item.keys()
+                )
+
+            if not success or not isinstance(ip_data, list) or any(not _valid_ip_row(item) for item in ip_data):
                 return None
             # Resolve the management IP once here (live LibreNMS call) and cache it
             # below so cached renders don't re-hit the API.
