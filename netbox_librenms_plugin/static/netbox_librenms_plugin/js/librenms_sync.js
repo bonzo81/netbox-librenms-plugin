@@ -1239,7 +1239,17 @@ function handleInterfaceChange(select, value) {
     // selection (which would let a retry post the previous member's stale lag/parent port_id).
     const rollbackToLastVerified = () => {
         if (select._lastVerifiedMember != null) {
-            select.value = select._lastVerifiedMember;
+            // The member control is TomSelect-enhanced, so assigning select.value alone
+            // leaves the visible dropdown showing the rejected member while the backing
+            // value rolls back — the next sync click would then post a different member
+            // than the user sees. Sync through the widget (mirrors initializeVCMemberSelect
+            // at the vcMemberSelect.tomselect.setValue call); pass silent=true so this
+            // programmatic reset doesn't re-fire the change handler.
+            if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+                select.tomselect.setValue(select._lastVerifiedMember, true);
+            } else {
+                select.value = select._lastVerifiedMember;
+            }
             reenableRelationshipButtons();
         }
     };
