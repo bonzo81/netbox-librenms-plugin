@@ -480,9 +480,12 @@ def validate_device_for_import(
                     result["name_sync_available"] = True
                     result["suggested_name"] = hostname
 
-                # Check for serial drift on the linked device
+                # Check for serial drift on the linked device. Skip when the match was via the
+                # OOB sub-key (existing_match_type == "librenms_oob"): the incoming payload is the
+                # OOB controller's, so comparing it against the host record's serial would surface
+                # bogus replacement/conflict warnings on a row that is already correctly linked.
                 incoming_serial = libre_device.get("serial") or ""
-                if incoming_serial and incoming_serial != "-":
+                if result["existing_match_type"] != "librenms_oob" and incoming_serial and incoming_serial != "-":
                     if existing_device.serial and existing_device.serial == incoming_serial:
                         result["serial_confirmed"] = True
                     elif existing_device.serial and existing_device.serial != incoming_serial:
@@ -882,6 +885,17 @@ def validate_device_for_import(
         # (missing cluster["available_clusters"], running device-only validation/VC detection).
         import_as_vm = result["import_as_vm"]
 
+        # An ambiguous librenms_id (matches >1 NetBox record) is the terminal blocker for this
+        # row — the user must resolve the duplicate id. Don't run the new-import site/device_type/
+        # role/cluster validation below: with existing_device fail-closed to None, it would pile
+        # unrelated "must select ..." blockers onto a row whose real problem is the ambiguous id
+        # (mirrors bulk_import.py treating ambiguity as the terminal state). existing_match_type
+        # is already "ambiguous_librenms_id" (set by _flag_ambiguous_librenms_id).
+        if result["ambiguous_librenms_id"]:
+            result["can_import"] = False
+            result["is_ready"] = False
+            return result
+
         # Validate based on import type (Device or VM)
         if import_as_vm:
             # Always populate available clusters for all VMs (new or existing) so
@@ -1064,8 +1078,15 @@ def validate_device_for_import(
                 result["device_role"]["found"] = True
                 result["device_role"]["role"] = existing.role
 
-            # Check for device type mismatch between existing device and LibreNMS
-            if hasattr(existing, "device_type") and existing.device_type:
+            # Check for device type mismatch between existing device and LibreNMS. Skip for an
+            # OOB-sub-key match (existing_match_type == "librenms_oob"): the LibreNMS payload is
+            # the OOB controller's, so a host-vs-OOB device-type compare is a bogus "wrong device"
+            # warning on a correctly-linked row.
+            if (
+                result.get("existing_match_type") != "librenms_oob"
+                and hasattr(existing, "device_type")
+                and existing.device_type
+            ):
                 librenms_dt = result["device_type"].get("device_type")
                 if librenms_dt and existing.device_type.pk != librenms_dt.pk:
                     result["device_type_mismatch"] = True

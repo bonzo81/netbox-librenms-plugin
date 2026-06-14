@@ -297,6 +297,34 @@ class TestValidateDeviceStateMachine:
         assert result["existing_match_type"] == "ambiguous_librenms_id"
         assert any("matches more than one" in w for w in result["warnings"])
 
+    def test_ambiguous_librenms_id_is_terminal_no_new_import_blockers(self):
+        """An ambiguous librenms_id is the terminal blocker — validation must NOT fall through
+        into the new-import site/device_type/role/cluster checks and pile unrelated 'must
+        select ...' issues onto the row (mirrors bulk_import's terminal ambiguity handling)."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError
+
+        # find_matching_site returns found=False in the harness; pre-fix the new-import block ran
+        # and appended "No matching site found ..." — this asserts that no longer happens.
+        result = self._run_validate(
+            self._base_device(),
+            patches_overrides=[
+                patch(
+                    "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                    side_effect=AmbiguousLibreNMSIdError("dup host pk=1, pk=2"),
+                ),
+            ],
+        )
+        assert result["ambiguous_librenms_id"] is True
+        assert result["can_import"] is False
+        assert result["is_ready"] is False
+        # None of the new-import blockers may be present — the duplicate id is the only blocker.
+        joined = " ".join(result["issues"]).lower()
+        assert "site" not in joined
+        assert "role" not in joined
+        assert "cluster" not in joined
+
     def test_flag_ambiguous_is_a_durable_blocker(self):
         """The ambiguity must land in issues (not only warnings) so the readiness step's
         `can_import = len(issues) == 0` recompute cannot silently re-enable the import."""
@@ -2620,6 +2648,61 @@ class TestOOBDetection:
 
         assert result["existing_match_type"] == "librenms_oob"
         assert result["existing_device"] is existing
+
+    def test_librenms_oob_match_skips_host_serial_drift(self):
+        """When the match is via the OOB sub-key (existing_match_type='librenms_oob'), the host
+        serial-drift comparison must be skipped: the incoming payload is the OOB controller's, so
+        comparing it against the host record's serial surfaces a bogus replacement warning on a
+        correctly-linked row."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 17,
+            "hostname": "idrac-server01",
+            "sysName": "idrac-server01",
+            "hardware": "iDRAC9",
+            "serial": "INCOMING-SERIAL",  # differs from the host serial below
+            "os": "idrac",
+            "ip": "10.0.0.5",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "server01"
+        existing.serial = "HOST-SERIAL"  # would trigger serial-drift if the gate were missing
+        existing.virtual_chassis = None
+        existing_oob = {"id": 17, "type": "idrac"}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.return_value = None
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+        find_by_id_mock = MagicMock(side_effect=[None, existing])
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                new=find_by_id_mock,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.get_librenms_oob",
+                return_value=existing_oob,
+            ),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["existing_match_type"] == "librenms_oob"
+        # Pre-fix the host serial-drift block ran and set serial_action + a "differs" warning.
+        assert result.get("serial_action") is None
+        assert not any("Serial number differs" in w for w in result["warnings"])
 
 
 @pytest.mark.django_db
