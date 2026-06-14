@@ -216,6 +216,11 @@ class TestMoveInterfaceToWinnerView:
 
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
 
     def test_rejects_on_name_collision(self):
         view = self._setup_view()
@@ -240,6 +245,11 @@ class TestMoveInterfaceToWinnerView:
         mock_iface_cls.objects.filter.assert_called_with(device=winner, name=interface.name)
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
         # Prove the collision reject moved/persisted nothing before the toast: a regression
         # that reassigned the interface to the winner (then errored) would still 200 here.
         assert interface.device is donor
@@ -436,6 +446,11 @@ class TestMoveInterfaceToWinnerView:
 
         # Aborts with a conflict toast; the move query is never issued.
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
         mock_iface_cls.objects.select_for_update.assert_not_called()
 
     def test_perm_gate_short_circuits(self):
@@ -467,6 +482,11 @@ class TestTransferDeviceIPView:
         resp = view.post(req, pk=10, ip_kind="bogus")
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
 
     def test_rejects_when_winner_already_has_field(self):
         view = self._setup_view()
@@ -487,6 +507,11 @@ class TestTransferDeviceIPView:
 
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
         # Prove the reject left the donor's IP field intact and persisted neither device:
         # a regression that cleared/moved primary_ip4 before the toast would still 200 here.
         assert donor.primary_ip4 is donor_ip
@@ -593,6 +618,11 @@ class TestTransferDeviceIPView:
 
         # Refused (409 surfaced via toast); neither side mutated/saved.
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
         assert locked_winner.oob_ip is None
         locked_winner.save.assert_not_called()
         locked_donor.save.assert_not_called()
@@ -634,6 +664,11 @@ class TestTransferDeviceIPView:
 
         # Refused; the Interface manager was never queried (re-lock skipped), nothing saved.
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
         mock_iface_objects.select_for_update.assert_not_called()
         locked_winner.save.assert_not_called()
         locked_donor.save.assert_not_called()
@@ -662,6 +697,11 @@ class TestMoveIPAddressToWinnerView:
 
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
 
     def test_rejects_when_winner_lacks_same_name_interface(self):
         from dcim.models import Interface
@@ -698,6 +738,11 @@ class TestMoveIPAddressToWinnerView:
         mock_objects.filter.assert_called_with(device=winner, name="Eth0")
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
+        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
+        # (refreshing as if the move/transfer succeeded) would be caught here.
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
         # Prove the IP stayed on the donor interface and was never persisted: a regression
         # that reassigned ip.assigned_object before the missing-interface check would still
         # 200 here.

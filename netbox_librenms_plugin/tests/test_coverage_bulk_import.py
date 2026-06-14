@@ -1229,7 +1229,11 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation)  # must not raise
 
         mock_logger.error.assert_called_once()
-        assert "99" in mock_logger.error.call_args[0][0]
+        # Don't pin the pk to the format string only: a switch to parameterized logging
+        # (logger.error("... %s", pk)) would move "99" into a later positional arg while
+        # still logging correctly. Check every positional arg instead.
+        args = mock_logger.error.call_args.args
+        assert any("99" in str(arg) for arg in args)
 
     def test_exception_during_new_device_lookup_logs_error(self):
         """An exception in the newly-imported-device check is caught and logged (forced)."""

@@ -609,10 +609,11 @@ class TestAttachMessagesOob:
 
         response = HttpResponse(b"<tr>row html</tr>")
         original = response.content
+        storage = self._storage(["a message"])
         with (
             patch(
                 "netbox_librenms_plugin.views.imports.actions.messages.get_messages",
-                return_value=self._storage(["a message"]),
+                return_value=storage,
             ),
             patch(
                 "netbox_librenms_plugin.views.imports.actions.render_to_string",
@@ -622,6 +623,10 @@ class TestAttachMessagesOob:
             result = _attach_messages_oob(response, MagicMock())
 
         assert result.content == original
+        # Peeking at the storage marks it consumed; the function restores used=False before the
+        # render. A render error must not leave the storage consumed, or the page's own renderer
+        # (and the next OOB attach) would silently drop the queued messages.
+        assert storage.used is False
 
 
 class TestDeviceValidationDetailsView:
