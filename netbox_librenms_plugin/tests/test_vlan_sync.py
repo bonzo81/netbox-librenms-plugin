@@ -10,6 +10,8 @@ Tests cover:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Import the autouse fixture from helpers
 pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
@@ -600,3 +602,56 @@ class TestVLANErrorContextServerKey:
         view = self._view()
         ctx = view._get_error_context(MagicMock(), "err", server_key="prod")
         assert ctx["server_key"] == "prod"
+
+
+@pytest.mark.django_db
+class TestVlanSyncContentTemplateMigratedMode:
+    """Render the real _vlan_sync_content.html template both ways.
+
+    In migrated mode the form is replaced by a plain <div> (a migrated donor must not be able
+    to POST a VLAN sync). The CSRF token and POST-only hidden inputs (server_key, action) must
+    travel with the <form>, never the <div> — rendering them inside the inert div is dead markup.
+    """
+
+    def _render(self, *, migrated):
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        from django.contrib.auth.models import AnonymousUser
+
+        device = make_device("vlan-tmpl-dev")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()  # NetBox context processors read request.user
+        # One real row so {% if not vlan_sync.vlan_table.rows %} is False and the form branch renders.
+        table = LibreNMSVLANTable([{"vlan_id": 10, "name": "v10", "type": "tagged", "state": "active"}])
+        RequestConfig(request).configure(table)
+        vlan_sync = {
+            "object": device,
+            "vlan_table": table,
+            "server_key": "default",
+            "error_message": None,
+            "cache_expiry": None,
+        }
+        return render_to_string(
+            "netbox_librenms_plugin/_vlan_sync_content.html",
+            {"vlan_sync": vlan_sync, "migrated_to_marker": migrated},
+            request=request,
+        )
+
+    def test_migrated_mode_emits_no_form_csrf_or_hidden_inputs(self):
+        html = self._render(migrated=True)
+        assert "<form" not in html
+        assert "csrfmiddlewaretoken" not in html
+        assert 'name="action"' not in html
+        assert 'name="server_key"' not in html
+
+    def test_normal_mode_emits_form_with_csrf_and_hidden_inputs(self):
+        html = self._render(migrated=False)
+        assert "<form" in html
+        assert "csrfmiddlewaretoken" in html
+        assert 'name="action"' in html
+        assert 'name="server_key"' in html
