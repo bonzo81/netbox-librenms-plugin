@@ -225,6 +225,74 @@ class TestBaseCableTableViewGetLinksData:
 
         assert result is not None
 
+    def test_get_links_data_malformed_port_rows_skipped(self):
+        """Non-dict rows in the ports payload (e.g. strings/None from a corrupt cache or
+        LibreNMS response) must be skipped, not dereferenced — otherwise port.get() raises
+        AttributeError and the cables refresh 500s. The valid dict row still resolves."""
+        view = self._make_view()
+
+        links_data = {"links": [{"local_port_id": 10, "remote_hostname": "sw", "remote_port": "Gi0/1"}]}
+        view._librenms_api.get_device_links.return_value = (True, links_data)
+
+        ports = {
+            "ports": [
+                "not-a-dict",  # malformed row — must be skipped, not .get()'d
+                None,  # malformed row
+                {"port_id": 10, "ifName": "Gi0/0"},  # valid row resolves
+            ]
+        }
+        obj = _mock_obj()
+
+        with (
+            patch.object(view, "get_ports_data", return_value=ports),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+        ):
+            result = view.get_links_data(obj)
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["local_port"] == "Gi0/0"
+
+    def test_get_links_data_oob_malformed_port_rows_skipped(self):
+        """The OOB ports loop must also skip non-dict rows so a malformed OOB ports payload
+        cannot 500 the refresh; the valid OOB port still maps to its name."""
+        view = self._make_view()
+
+        main_links = {"links": []}
+        oob_links = {
+            "links": [
+                {
+                    "local_port_id": 99,
+                    "local_port": "eth0",
+                    "remote_hostname": "peer-b",
+                    "remote_port": "Gi0/2",
+                    "remote_port_id": 21,
+                    "remote_device_id": 6,
+                }
+            ]
+        }
+        view._librenms_api.get_device_links.side_effect = [(True, main_links), (True, oob_links)]
+        # OOB ports payload carries malformed rows alongside the valid one.
+        view._librenms_api.get_ports.return_value = (
+            True,
+            {"ports": ["bogus", None, {"port_id": 99, "ifName": "Management0"}]},
+        )
+
+        main_ports = {"ports": [{"port_id": 10, "ifName": "Gi0/0"}]}
+        obj = _mock_obj()
+
+        with (
+            patch.object(view, "get_ports_data", return_value=main_ports),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value={"id": 7}),
+        ):
+            result = view.get_links_data(obj)
+
+        assert result is not None
+        oob_entry = next(r for r in result if r["_source"] == "oob")
+        assert oob_entry["local_port"] == "Management0"
+
     def test_get_links_data_oob_uses_interface_name_field(self):
         """OOB links resolve local port name via interface_name_field, not raw LLDP name."""
 

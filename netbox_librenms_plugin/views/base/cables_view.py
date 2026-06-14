@@ -132,7 +132,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         interface_name_field = get_interface_name_field(getattr(self, "request", None))
         ports_data = self.get_ports_data(lookup_device, server_key=server_key)
         local_ports_map = {}
-        for port in ports_data.get("ports", []):
+        ports = ports_data.get("ports", []) if isinstance(ports_data, dict) else []
+        for port in ports if isinstance(ports, list) else []:
+            # A malformed LibreNMS/cache payload can carry non-dict rows (strings/nulls);
+            # dereferencing .get() on those would 500 the refresh, so skip them.
+            if not isinstance(port, dict):
+                continue
             raw_port_id = port.get("port_id")
             if raw_port_id is None:
                 continue
@@ -190,6 +195,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 if oob_ports_success and isinstance(oob_ports_data, dict):
                     oob_ports = oob_ports_data.get("ports")
                     for port in oob_ports if isinstance(oob_ports, list) else []:
+                        # Skip non-dict rows (see the main-branch guard above) so a
+                        # malformed OOB ports payload can't 500 the refresh.
+                        if not isinstance(port, dict):
+                            continue
                         raw_port_id = port.get("port_id")
                         if raw_port_id is None:
                             continue
