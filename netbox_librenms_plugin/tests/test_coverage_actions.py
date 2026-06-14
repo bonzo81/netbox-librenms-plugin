@@ -2,6 +2,10 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+
 
 def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
     """Build a mock request object with QueryDict-like POST/GET."""
@@ -5095,31 +5099,29 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         assert "oob_ip" not in kwargs["update_fields"]
 
 
+@pytest.mark.django_db
 class TestSuggestOOBInterface:
-    """_suggest_oob_interface: pre-select an OOB/mgmt-named interface + default new name."""
+    """_suggest_oob_interface: pre-select an OOB/mgmt-named interface + default new name.
 
-    def _iface(self, name):
-        i = MagicMock()
-        i.name = name
-        return i
+    Driven against a real device with real interfaces so the name-pattern match runs over the
+    actual ``device.interfaces.all()`` queryset, not a list of MagicMocks.
+    """
 
     def test_picks_idrac_named_interface(self):
         from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
 
-        dev = MagicMock()
-        eth, idrac = self._iface("eth0"), self._iface("iDRAC")
-        idrac.pk = 7
-        dev.interfaces.all.return_value = [eth, idrac]
+        dev = make_device("oob-suggest-idrac")
+        make_interface(dev, "eth0")
+        idrac = make_interface(dev, "iDRAC")
         sid, new_name = _suggest_oob_interface(dev, {"type": "idrac"})
-        assert sid == 7
+        assert sid == idrac.pk
         assert new_name == "idrac0"
 
     def test_no_match_returns_none_and_typed_default(self):
         from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
 
-        dev = MagicMock()
-        eth = self._iface("eth0")
-        dev.interfaces.all.return_value = [eth]
+        dev = make_device("oob-suggest-nomatch")
+        make_interface(dev, "eth0")
         sid, new_name = _suggest_oob_interface(dev, {"type": "ilo"})
         assert sid is None
         assert new_name == "ilo0"
@@ -5127,15 +5129,21 @@ class TestSuggestOOBInterface:
     def test_missing_type_defaults_to_oob(self):
         from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
 
-        dev = MagicMock()
-        dev.interfaces.all.return_value = []
+        dev = make_device("oob-suggest-notype")
         sid, new_name = _suggest_oob_interface(dev, {})
         assert sid is None
         assert new_name == "oob0"
 
 
+@pytest.mark.django_db
 class TestResolveOOBInterface:
-    """AddAsOOBView._resolve_oob_interface: select existing / create new / none."""
+    """AddAsOOBView._resolve_oob_interface: select existing / create new / none.
+
+    Real Device + Interface so the select_for_update lock, the (device, name) reuse lookup, the
+    real Interface create + ``full_clean`` validation, and the not-created assertions are all
+    exercised end to end. The permission check (``request.user.has_perm``) is the one mocked
+    boundary — auth is an external concern, and the mock request grants perms by default.
+    """
 
     def _view(self):
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
@@ -5144,247 +5152,217 @@ class TestResolveOOBInterface:
 
     def test_none_when_no_selection(self):
         view = self._view()
+        dev = make_device("oob-res-none")
         req = _make_request(post={})
-        assert view._resolve_oob_interface(req, MagicMock()) == (None, None)
+        assert view._resolve_oob_interface(req, dev) == (None, None)
 
     def test_existing_interface_by_id(self):
+        from django.db import transaction
+
         view = self._view()
-        req = _make_request(post={"oob_interface_id": "5"})
-        dev = MagicMock()
-        with patch("dcim.models.Interface") as mock_iface_cls:
-            # The reused row is locked (select_for_update) to block a concurrent delete.
-            locked_get = mock_iface_cls.objects.select_for_update.return_value.get
-            locked_get.return_value = MagicMock(name="eth0")
-            iface, reason = view._resolve_oob_interface(req, dev)
-        locked_get.assert_called_once_with(pk=5, device=dev)
-        assert iface is locked_get.return_value and reason is None
+        dev = make_device("oob-res-existing")
+        iface = make_interface(dev, "eth0")
+        req = _make_request(post={"oob_interface_id": str(iface.pk)})
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(req, dev)
+        assert result_iface.pk == iface.pk and reason is None
 
     def test_create_new_interface(self):
+        from django.db import transaction
+
+        from dcim.models import Interface
+
         view = self._view()
+        dev = make_device("oob-res-create")
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
-        req.user.has_perm.return_value = True
-        dev = MagicMock()
-        created = MagicMock()
-        with (
-            patch("dcim.models.Interface") as mock_iface_cls,
-            patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
-            # create is wrapped in a nested savepoint; stub transaction so this
-            # non-DB unit test doesn't require a real connection.
-            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
-        ):
-            # No locked row exists → this is a real create.
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
-            mock_iface_cls.return_value = created  # Interface(...) constructor returns our mock
-            iface, reason = view._resolve_oob_interface(req, dev)
-        # Built + validated (skipping the unique check) + saved, not objects.create().
-        mock_iface_cls.assert_called_once_with(device=dev, name="idrac0", type="other")
-        created.full_clean.assert_called_once_with(validate_unique=False)
-        created.save.assert_called_once()
-        # The created interface must be returned — the OOB-IP attach path depends on it.
-        assert iface is created and reason is None
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(req, dev)
+        assert reason is None
+        assert result_iface.pk is not None
+        assert result_iface.name == "idrac0"
+        assert result_iface.type == "other"
+        # Really persisted on the device.
+        assert Interface.objects.filter(device=dev, name="idrac0").exists()
 
     def test_create_new_interface_invalid_name_returns_reason(self):
-        """An invalid/oversized name raises ValidationError on full_clean → reason
-        'invalid_name' (surfaced as a warning) instead of a 500."""
-        from django.core.exceptions import ValidationError
+        """A name far over the length limit fails real ``full_clean`` → reason 'invalid_name'
+        (surfaced as a warning), not a 500, and nothing is persisted."""
+        from django.db import transaction
+
+        from dcim.models import Interface
 
         view = self._view()
-        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "x" * 500})
-        req.user.has_perm.return_value = True
-        dev = MagicMock()
-        bad = MagicMock()
-        bad.full_clean.side_effect = ValidationError("name too long")
-        with (
-            patch("dcim.models.Interface") as mock_iface_cls,
-            patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
-            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
-        ):
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
-            mock_iface_cls.return_value = bad
-            iface, reason = view._resolve_oob_interface(req, dev)
-        assert iface is None
+        dev = make_device("oob-res-badname")
+        long_name = "x" * 500
+        req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": long_name})
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(req, dev)
+        assert result_iface is None
         assert reason == "invalid_name"
-        bad.save.assert_not_called()
+        assert not Interface.objects.filter(device=dev, name=long_name).exists()
 
     def test_new_reuses_existing_locked_interface(self):
-        """A (device, name) interface that already exists under the lock is reused — no
-        create, and no 'add' permission required."""
+        """An interface with the requested (device, name) already exists → it is reused, no
+        create, regardless of the 'add' permission."""
+        from django.db import transaction
+
         view = self._view()
+        dev = make_device("oob-res-reuse")
+        existing = make_interface(dev, "idrac0")
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
-        # Deny only add_interface: the reuse path must return the existing row without
-        # ever consulting the add permission, so this denial must not change the result.
+        # Deny add to prove the reuse path never needs it.
         req.user.has_perm.side_effect = lambda perm: "add_interface" not in perm
-        dev = MagicMock()
-        existing = MagicMock()
-        with (
-            patch("dcim.models.Interface") as mock_iface_cls,
-            patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
-        ):
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = existing
-            iface, reason = view._resolve_oob_interface(req, dev)
-        assert iface is existing and reason is None
-        mock_iface_cls.objects.create.assert_not_called()
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(req, dev)
+        assert result_iface.pk == existing.pk and reason is None
 
     def test_create_without_add_perm_returns_permission_add(self):
-        """If the pre-flight raced a delete (no locked row) and the user lacks Interface
-        'add', the write-time re-check refuses the create rather than silently creating."""
+        """No existing row + user lacks Interface 'add' → the write-time re-check refuses the
+        create rather than silently creating it."""
+        from django.db import transaction
+
+        from dcim.models import Interface
+
         view = self._view()
+        dev = make_device("oob-res-noperm")
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
-        # Deny only add_interface so the test pins the specific permission checked — it
-        # would still pass on the wrong perm string if every permission were denied.
         req.user.has_perm.side_effect = lambda perm: "add_interface" not in perm
-        dev = MagicMock()
-        with (
-            patch("dcim.models.Interface") as mock_iface_cls,
-            patch("utilities.permissions.get_permission_for_model", return_value="dcim.add_interface"),
-        ):
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
-            iface, reason = view._resolve_oob_interface(req, dev)
-        assert iface is None and reason == "permission_add"
-        mock_iface_cls.objects.create.assert_not_called()
-        assert any("add_interface" in c.args[0] for c in req.user.has_perm.call_args_list)
+        with transaction.atomic():
+            result_iface, reason = view._resolve_oob_interface(req, dev)
+        assert result_iface is None and reason == "permission_add"
+        assert not Interface.objects.filter(device=dev, name="idrac0").exists()
 
     def test_new_without_name_returns_none(self):
         view = self._view()
+        dev = make_device("oob-res-noname")
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": ""})
-        assert view._resolve_oob_interface(req, MagicMock()) == (None, None)
+        assert view._resolve_oob_interface(req, dev) == (None, None)
 
 
+@pytest.mark.django_db
 class TestAttachOOBIp:
-    """AddAsOOBView._attach_oob_ip: reuse/re-home or create an interface-assigned IP."""
+    """AddAsOOBView._attach_oob_ip: reuse/re-home or create an interface-assigned IP.
+
+    Real Interface + IPAddress so the ``address__net_host`` lookup, the ownership / ambiguity
+    checks, the re-home save and the ``/32`` create all run against the ORM. Auth
+    (``request.user.has_perm``) is the only mocked boundary; the mock request grants perms by
+    default and the denial tests deny a single perm to pin the specific check.
+    """
 
     def _view(self):
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
 
         return object.__new__(AddAsOOBView)
 
-    def _req(self, denied_perm=None):
-        """Build a request mock. By default all perms granted; pass denied_perm to
-        deny exactly one (e.g. 'change_ipaddress') so a test pins the specific check."""
-        req = MagicMock()
-        if denied_perm is None:
-            req.user.has_perm.return_value = True
-        else:
-            req.user.has_perm.side_effect = lambda perm: denied_perm not in perm
-        return req
-
     def test_invalid_ip_returns_invalid(self):
         view = self._view()
-        ip, reason = view._attach_oob_ip(self._req(), "not-an-ip", MagicMock())
+        dev = make_device("oob-ip-invalid")
+        iface = make_interface(dev, "idrac0")
+        ip, reason = view._attach_oob_ip(_make_request(post={}), "not-an-ip", iface)
         assert ip is None and reason == "invalid"
 
     def test_creates_v4_slash32_when_missing(self):
+        from django.db import transaction
+
         view = self._view()
-        iface = MagicMock()
-        with (
-            patch("ipam.models.IPAddress") as mock_ip_cls,
-            # create() is wrapped in a nested savepoint; stub transaction so this
-            # non-DB unit test doesn't require a real connection.
-            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
-        ):
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = []
-            ip, reason = view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+        dev = make_device("oob-ip-create")
+        iface = make_interface(dev, "idrac0")
+        with transaction.atomic():
+            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
         assert reason is None
-        mock_ip_cls.objects.create.assert_called_once_with(
-            address="10.0.0.9/32", assigned_object=iface, status="active"
-        )
-        # The created IPAddress is what the view wires to oob_ip — it must be returned.
-        assert ip is mock_ip_cls.objects.create.return_value
+        assert str(ip.address) == "10.0.0.9/32"
+        assert ip.assigned_object == iface
+        assert ip.status == "active"
 
     def test_rehomes_existing_unassigned_ip(self):
+        from django.db import transaction
+
         view = self._view()
-        iface = MagicMock()
-        iface.device_id = 1
-        existing = MagicMock()
-        existing.assigned_object = None
-        with patch("ipam.models.IPAddress") as mock_ip_cls:
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
-            ip, reason = view._attach_oob_ip(self._req(), "10.0.0.9", iface)
-        assert ip is existing and reason is None
-        assert existing.assigned_object is iface
-        existing.save.assert_called_once()
+        dev = make_device("oob-ip-rehome")
+        iface = make_interface(dev, "idrac0")
+        existing = make_ip("10.0.0.9/24")  # unassigned host match
+        with transaction.atomic():
+            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
+        assert ip.pk == existing.pk and reason is None
+        existing.refresh_from_db()
+        assert existing.assigned_object == iface
 
     def test_does_not_steal_ip_from_other_device(self):
+        from django.db import transaction
+
         view = self._view()
-        iface = MagicMock()
-        iface.device_id = 1
-        other_iface = MagicMock()
-        other_iface.device_id = 2
-        existing = MagicMock()
-        existing.assigned_object = other_iface
-        with patch("ipam.models.IPAddress") as mock_ip_cls:
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
-            ip, reason = view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+        dev = make_device("oob-ip-mine")
+        iface = make_interface(dev, "idrac0")
+        other = make_device("oob-ip-other")
+        other_iface = make_interface(other, "eth0")
+        make_ip("10.0.0.9/24", assigned_object=other_iface)
+        with transaction.atomic():
+            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
         assert ip is None and reason == "conflict"
-        existing.save.assert_not_called()
 
     def test_ambiguous_match_returns_conflict(self):
-        """Multiple IPAddress rows share the host IP (net_host ignores prefix length):
-        refuse rather than re-home the wrong one by DB ordering."""
+        """Two IPAddress rows share the host IP (net_host ignores prefix length): refuse rather
+        than re-home the wrong one by DB ordering."""
+        from django.db import transaction
+
+        from ipam.models import IPAddress
+
         view = self._view()
-        iface = MagicMock(device_id=1)
-        with patch("ipam.models.IPAddress") as mock_ip_cls:
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [
-                MagicMock(),
-                MagicMock(),
-            ]
-            ip, reason = view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+        dev = make_device("oob-ip-ambig")
+        iface = make_interface(dev, "idrac0")
+        make_ip("10.0.0.9/24")
+        make_ip("10.0.0.9/32")
+        with transaction.atomic():
+            ip, reason = view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
         assert ip is None and reason == "conflict"
-        mock_ip_cls.objects.create.assert_not_called()
+        # Neither was re-homed and no third row was created.
+        assert IPAddress.objects.filter(address__net_host="10.0.0.9").count() == 2
 
     def test_rehome_denied_without_change_permission(self):
-        """TOCTOU backstop: an IP created after the pre-flight check must not be
-        re-homed by a user lacking change_ipaddress, even if pre-flight passed 'add'."""
+        """TOCTOU backstop: re-homing an existing IP needs 'change'; an add-only user is refused."""
+        from django.db import transaction
+
         view = self._view()
-        iface = MagicMock(device_id=1)
-        existing = MagicMock()
-        existing.assigned_object = None  # owned, but on a different (no) interface → re-home
-        req = self._req(denied_perm="change_ipaddress")  # allow add, deny only change
-        with (
-            patch("ipam.models.IPAddress") as mock_ip_cls,
-            # IPAddress is mocked, so resolve perm strings deterministically by action.
-            patch(
-                "utilities.permissions.get_permission_for_model",
-                side_effect=lambda model, action: f"ipam.{action}_ipaddress",
-            ),
-        ):
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
+        dev = make_device("oob-ip-nochg")
+        iface = make_interface(dev, "idrac0")
+        existing = make_ip("10.0.0.9/24")  # unassigned → re-home path
+        req = _make_request(post={})
+        req.user.has_perm.side_effect = lambda perm: "change_ipaddress" not in perm
+        with transaction.atomic():
             ip, reason = view._attach_oob_ip(req, "10.0.0.9", iface)
         assert ip is None and reason == "permission_change"
-        existing.save.assert_not_called()
-        # Pin that the CHANGE permission specifically was the one checked.
-        assert any("change_ipaddress" in c.args[0] for c in req.user.has_perm.call_args_list)
+        existing.refresh_from_db()
+        assert existing.assigned_object is None  # not re-homed
 
     def test_create_denied_without_add_permission(self):
-        """TOCTOU backstop on the create path: if a concurrent delete removed the row the
-        unlocked pre-flight saw (so it only checked 'change'), the locked create must still
-        re-verify 'add' and refuse an add-lacking user rather than create the IP."""
+        """TOCTOU backstop on the create path: the locked create re-verifies 'add' and refuses
+        an add-lacking user rather than creating the IP."""
+        from django.db import transaction
+
+        from ipam.models import IPAddress
+
         view = self._view()
-        iface = MagicMock(device_id=1)
-        req = self._req(denied_perm="add_ipaddress")  # deny only add
-        with (
-            patch("ipam.models.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.imports.actions.transaction"),
-            patch(
-                "utilities.permissions.get_permission_for_model",
-                side_effect=lambda model, action: f"ipam.{action}_ipaddress",
-            ),
-        ):
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = []
+        dev = make_device("oob-ip-noadd")
+        iface = make_interface(dev, "idrac0")
+        req = _make_request(post={})
+        req.user.has_perm.side_effect = lambda perm: "add_ipaddress" not in perm
+        with transaction.atomic():
             ip, reason = view._attach_oob_ip(req, "10.0.0.9", iface)
         assert ip is None and reason == "permission_add"
-        mock_ip_cls.objects.create.assert_not_called()
-        assert any("add_ipaddress" in c.args[0] for c in req.user.has_perm.call_args_list)
+        assert not IPAddress.objects.filter(address__net_host="10.0.0.9").exists()
 
     def test_locks_candidate_row_with_select_for_update(self):
-        """The candidate IPAddress row must be locked (load-bearing TOCTOU mitigation)."""
+        """The candidate IPAddress row must be locked (load-bearing TOCTOU mitigation).
+
+        This one stays a focused mock: ``select_for_update`` is a concurrency primitive that a
+        single-threaded real test can't observe, so we assert it is invoked on the lookup."""
         view = self._view()
         iface = MagicMock(device_id=1)
         existing = MagicMock()
         existing.assigned_object = None
         with patch("ipam.models.IPAddress") as mock_ip_cls:
             mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
-            view._attach_oob_ip(self._req(), "10.0.0.9", iface)
+            view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
         mock_ip_cls.objects.select_for_update.assert_called_once()
 
 

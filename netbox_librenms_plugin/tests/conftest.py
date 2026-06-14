@@ -79,13 +79,24 @@ def cable_together(term_a, term_b):
     return cable
 
 
-def ip_on(device, address, ifname, *, iface_type="1000base-t"):
-    """Create an Interface on *device* and assign a real IPAddress to it."""
+def make_interface(device, name, *, iface_type="other"):
+    """Create a real Interface on *device*."""
     from dcim.models import Interface
+
+    return Interface.objects.create(device=device, name=name, type=iface_type)
+
+
+def make_ip(address, *, assigned_object=None, status="active"):
+    """Create a real IPAddress, optionally assigned to an interface/object."""
     from ipam.models import IPAddress
 
-    iface = Interface.objects.create(device=device, name=ifname, type=iface_type)
-    return IPAddress.objects.create(address=address, assigned_object=iface)
+    return IPAddress.objects.create(address=address, assigned_object=assigned_object, status=status)
+
+
+def ip_on(device, address, ifname, *, iface_type="1000base-t"):
+    """Create an Interface on *device* and assign a real IPAddress to it."""
+    iface = make_interface(device, ifname, iface_type=iface_type)
+    return make_ip(address, assigned_object=iface)
 
 
 def delete_keeping_pk(obj):
