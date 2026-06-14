@@ -240,6 +240,11 @@ class TestMoveInterfaceToWinnerView:
         mock_iface_cls.objects.filter.assert_called_with(device=winner, name=interface.name)
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Prove the collision reject moved/persisted nothing before the toast: a regression
+        # that reassigned the interface to the winner (then errored) would still 200 here.
+        assert interface.device is donor
+        interface.save.assert_not_called()
+        winner.save.assert_not_called()
 
     def test_happy_path_reassigns_device_and_returns_hx_refresh(self):
         view = self._setup_view()
@@ -482,6 +487,11 @@ class TestTransferDeviceIPView:
 
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Prove the reject left the donor's IP field intact and persisted neither device:
+        # a regression that cleared/moved primary_ip4 before the toast would still 200 here.
+        assert donor.primary_ip4 is donor_ip
+        donor.save.assert_not_called()
+        winner.save.assert_not_called()
 
     def test_happy_path_transfers_oob_ip(self):
         view = self._setup_view()
@@ -688,6 +698,11 @@ class TestMoveIPAddressToWinnerView:
         mock_objects.filter.assert_called_with(device=winner, name="Eth0")
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
+        # Prove the IP stayed on the donor interface and was never persisted: a regression
+        # that reassigned ip.assigned_object before the missing-interface check would still
+        # 200 here.
+        assert ip.assigned_object is donor_iface
+        ip.save.assert_not_called()
 
     @pytest.mark.django_db
     def test_happy_path_reassigns_ip_to_winner_interface(self):
