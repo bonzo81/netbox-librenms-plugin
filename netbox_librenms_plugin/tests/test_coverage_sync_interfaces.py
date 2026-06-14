@@ -330,36 +330,58 @@ class TestSyncInterfacesViewGetCachedPortsData:
         view.get_cache_key.assert_called_once_with(mock_obj, "ports", "mykey")
 
 
+@pytest.mark.django_db
 class TestInterfaceContextOOBRows:
-    """get_context_data must not let OOB-controller rows hide / falsely-match main-device interfaces in the netbox-only reconciliation set."""
+    """get_context_data must not let OOB-controller rows hide / falsely-match
+    main-device interfaces in the netbox-only reconciliation set.
 
-    def _make_view(self, cached_ports):
-        from dcim.models import Device
+    Driven against a real Device whose real ``idrac0`` Interface flows through the real
+    ``_build_interface_lookup_maps`` and the netbox-only reconciliation, so the dedup reads
+    genuine interface attributes (id / name / type / enabled / url) rather than a MagicMock
+    that would synthesize any field the production branch happens to read. Only the VLAN
+    helpers, table construction, and cache (orchestration / external boundaries unrelated to
+    the OOB-dedup logic under test) stay mocked."""
 
-        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+    def _make_view(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        view = object.__new__(BaseInterfaceTableView)
-        # get_context_data resolves select_related via self.model.__name__, so a
-        # well-formed view under test must set it (a Device here, matching obj below).
-        view.model = Device
-        # Main device has an "idrac0" interface that LibreNMS only reports on the
-        # OOB-controller side (same name) — it must still surface as netbox-only.
-        iface = MagicMock(id=10, enabled=True, description="")
-        iface.name = "idrac0"  # `name` is reserved in the MagicMock constructor
-        iface.get_absolute_url.return_value = "/iface/10/"
-        view._build_interface_lookup_maps = MagicMock(return_value={"by_name": {"idrac0": iface}, "by_librenms_id": {}})
+        # Concrete device view: its real get_interfaces()/get_select_related_field() drive the
+        # real _build_interface_lookup_maps over obj.interfaces, and the real
+        # get_stored_librenms_id (a local custom-field/cache read — NOT an HTTP call) resolves
+        # idrac0's stored id to None for real. A real LibreNMSAPI is built under a config patch;
+        # __init__ only reads config, so no network is touched.
+        view = object.__new__(DeviceInterfaceTableView)
+        servers = {
+            "default": {
+                "librenms_url": "https://librenms.example.com",
+                "api_token": "test-token",
+                "cache_timeout": 300,
+                "verify_ssl": True,
+            }
+        }
+        with patch("netbox_librenms_plugin.librenms_api.get_plugin_config", return_value=servers):
+            view._librenms_api = LibreNMSAPI(server_key="default")
         view.get_vlan_groups_for_device = MagicMock(return_value=[])
         view._build_vlan_lookup_maps = MagicMock(return_value={})
         view._add_vlan_group_selection = MagicMock()
         view._add_missing_vlans_info = MagicMock()
-        table = MagicMock()
-        view.get_table = MagicMock(return_value=table)
+        view.get_table = MagicMock(return_value=MagicMock())
         view.get_cache_key = MagicMock(return_value="ports-key")
         view.get_last_fetched_key = MagicMock(return_value="lf-key")
         view.get_vlan_overrides_key = MagicMock(return_value="ov-key")
-        return view, cached_ports
+        return view
 
-    @pytest.mark.django_db
+    @staticmethod
+    def _host_with_idrac():
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("host1")
+        # Main device has an "idrac0" interface that LibreNMS only reports on the
+        # OOB-controller side (same name) — it must still surface as netbox-only.
+        make_interface(device, "idrac0")
+        return device
+
     def test_oob_row_does_not_match_or_hide_host_interface(self):
         """An OOB row sharing a host interface name renders unmatched (not bound to the host interface) and still doesn't suppress that host interface from the netbox-only set."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
@@ -370,7 +392,7 @@ class TestInterfaceContextOOBRows:
 
         # Real DeviceInterfaceTableView so the real get_interfaces + _build_interface_lookup_maps
         # + per-port reconciliation run; only peripheral plumbing (vlan helpers, table build,
-        # cache-key derivation) is stubbed.
+        # cache-key derivation) is stubbed. A captured get_table lets us assert the OOB row's fields.
         view = object.__new__(DeviceInterfaceTableView)
         # Stub only the LibreNMS client boundary; these interfaces genuinely carry no stored id.
         view._librenms_api = MagicMock()
@@ -403,11 +425,31 @@ class TestInterfaceContextOOBRows:
         # ...and the host's own idrac0 still surfaces as netbox-only (the OOB row doesn't suppress it).
         assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
 
+    def test_oob_row_does_not_hide_netbox_only_interface(self):
+        view = self._make_view()
+        obj = self._host_with_idrac()
+        cached = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
+        req = _make_request()
+
+        def cache_get(key):
+            return cached if key == "ports-key" else ({} if key == "ov-key" else None)
+
+        with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
+            mock_cache.get.side_effect = cache_get
+            mock_cache.ttl.return_value = None
+            ctx = view.get_context_data(req, obj, "ifName", "default")
+
+        names = {i["name"] for i in ctx["netbox_only_interfaces"]}
+        assert "idrac0" in names  # OOB row must not suppress the main-device interface
+
     def test_fresh_data_renders_without_reading_cache(self):
-        """On the OOB-ports-fetch-failure path the (partial) cache is deleted, so get_context_data must render from the in-memory fresh_data snapshot instead of reading the now-empty cache — otherwise the table renders empty under a "showing host interfaces" banner."""
-        view, fresh = self._make_view({"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]})
-        obj = MagicMock(id=1, name="host1")
-        obj.virtual_chassis = None
+        """On the OOB-ports-fetch-failure path the (partial) cache is deleted, so
+        get_context_data must render from the in-memory fresh_data snapshot instead of
+        reading the now-empty cache — otherwise the table renders empty under a
+        "showing host interfaces" banner."""
+        view = self._make_view()
+        obj = self._host_with_idrac()
+        fresh = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
         req = _make_request()
 
         with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
@@ -426,9 +468,8 @@ class TestInterfaceContextOOBRows:
 
     def test_malformed_cached_port_snapshot_fails_closed(self):
         """A stale/corrupt cached ports snapshot (non-dict, or ports not a list of dicts) must be dropped and re-rendered empty, not 500 the sync tab — and the bad entry purged so a later render re-fetches."""
-        view, _ = self._make_view({"ports": []})
-        obj = MagicMock(id=1, name="host1")
-        obj.virtual_chassis = None
+        view = self._make_view()
+        obj = self._host_with_idrac()
         req = _make_request()
 
         for bad in ("garbage-string", {"ports": "not-a-list"}, {"ports": [42]}):

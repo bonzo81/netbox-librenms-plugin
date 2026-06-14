@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
+    build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
