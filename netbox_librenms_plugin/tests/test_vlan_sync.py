@@ -575,6 +575,56 @@ class TestVLANPostServerKeyScoping:
         mock_api.get_device_vlans.assert_not_called()
 
 
+class TestVlanRefreshFailureClearsCache:
+    """A failed VLAN refresh must evict the server-scoped snapshot. Otherwise a refresh that
+    fails after a previous success (mapping removed / fetch error) leaves the prior VLAN table
+    cached, and the next GET renders stale comparison data the user can act on."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        view.get_object = MagicMock(return_value=MagicMock(pk=1))
+        view._get_error_context = MagicMock(return_value={})
+        view.get_cache_key = MagicMock(return_value="ck")
+        view.get_last_fetched_key = MagicMock(return_value="lfk")
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=30)
+        return view
+
+    def _run(self, *, librenms_id, vlans_result):
+        from unittest.mock import patch
+
+        view = self._view()
+        rebound_api = MagicMock(server_key="prod", cache_timeout=30)
+        rebound_api.get_librenms_id.return_value = librenms_id
+        rebound_api.get_device_vlans.return_value = vlans_result
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "prod"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+        ):
+            view.post(req, pk=1)
+        return view, mock_cache
+
+    def test_missing_librenms_id_evicts_scoped_cache(self):
+        view, mock_cache = self._run(librenms_id=None, vlans_result=(True, []))
+        view.get_cache_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
+        view.get_last_fetched_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
+        mock_cache.delete.assert_any_call("ck")
+        mock_cache.delete.assert_any_call("lfk")
+
+    def test_fetch_failure_evicts_scoped_cache(self):
+        view, mock_cache = self._run(librenms_id=10, vlans_result=(False, "boom"))
+        mock_cache.delete.assert_any_call("ck")
+        mock_cache.delete.assert_any_call("lfk")
+
+
 class TestVLANErrorContextServerKey:
     """_get_error_context must preserve an explicit server_key=None (stale-server branch)
     rather than falling back to the session server — otherwise the fragment re-renders on

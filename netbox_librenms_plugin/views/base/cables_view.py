@@ -114,20 +114,24 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         lookup_device = get_librenms_sync_device(obj, server_key=server_key) or obj
         self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
         success, data = self.librenms_api.get_device_links(self.librenms_id)
-        if not success:
-            self._links_fetch_error = data.get("error") if isinstance(data, dict) else str(data)
-            return None
+        # A failed/garbled host LLDP call (including an OOB-only device whose host
+        # librenms_id is None) must not abort the whole fetch: fall through (don't return
+        # None) so the OOB merge below still runs and OOB-only devices render their rows.
         # get_device_links returns the raw JSON body, so a 200 can still carry an
-        # application-level error ({"status": "error", "message": ...}) — or a non-object
-        # payload (list/null/scalar) from an upstream bug. Treat both as fetch failures,
-        # otherwise the POST path falsely reports "No links found" or data.get("links")
-        # below raises a 500 on a non-dict.
-        if not isinstance(data, dict):
-            self._links_fetch_error = "Unexpected response from LibreNMS (expected an object)."
-            return None
-        if data.get("status") == "error" or "error" in data:
-            self._links_fetch_error = data.get("message") or data.get("error") or "Unexpected response from LibreNMS"
-            return None
+        # application-level error ({"status": "error", ...}) or a non-object payload
+        # (list/null/scalar) — treat all of those as not-ok.
+        lldp_ok = success and isinstance(data, dict) and "error" not in data and data.get("status") != "error"
+        if not lldp_ok:
+            # Capture the real fetch failure so that when there's ultimately nothing to show,
+            # post() can surface the actual LibreNMS error instead of a generic "No links found".
+            if not success:
+                self._links_fetch_error = data.get("error") if isinstance(data, dict) else str(data)
+            elif isinstance(data, dict):
+                self._links_fetch_error = (
+                    data.get("message") or data.get("error") or "Unexpected response from LibreNMS"
+                )
+            else:
+                self._links_fetch_error = "Unexpected response from LibreNMS (expected an object)."
 
         interface_name_field = get_interface_name_field(getattr(self, "request", None))
         ports_data = self.get_ports_data(lookup_device, server_key=server_key)
@@ -147,12 +151,15 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 continue
             local_ports_map[port_id] = port_name
 
-        # A dict-shaped body can still carry a malformed "links" (null / object); guard
-        # before iterating so a bad LibreNMS response is a clean fetch failure, not a 500.
-        links = data.get("links")
+        # Only consume links when the LLDP fetch was OK. A dict-shaped body can still carry a
+        # malformed "links" (null/object); treat that as no links (and record the error)
+        # rather than crashing or returning early — the OOB merge below must still run.
+        links = data.get("links") if lldp_ok else []
         if not isinstance(links, list):
-            self._links_fetch_error = "Unexpected response from LibreNMS (links must be a list)."
-            return None
+            self._links_fetch_error = (
+                self._links_fetch_error or "Unexpected response from LibreNMS (links must be a list)."
+            )
+            links = []
         links_data = []
         for link in links:
             if not isinstance(link, dict):
@@ -249,7 +256,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                     oob_data.get("message") if isinstance(oob_data, dict) else oob_data,
                 )
 
-        return links_data
+        # Return None only when there is truly nothing to show (no host LLDP and no OOB rows);
+        # an OOB-only device (host librenms_id is None) still surfaces its OOB cable rows here.
+        return links_data if links_data else None
 
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None):
         """Try to find device in NetBox first by librenms_id custom field, then by name"""

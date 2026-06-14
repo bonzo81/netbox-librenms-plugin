@@ -192,7 +192,15 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         oob_ports_failed = False
         if oob and oob.get("id"):
             oob_success, oob_raw = self.librenms_api.get_ports(oob["id"])
-            if oob_success:
+            # Treat a malformed-but-truthy OOB payload the same as oob_success=False so the
+            # host-only warning path runs instead of 500-ing on .get()/_enrich below. get_ports
+            # is an external boundary: success does not guarantee a dict with a list of dict rows.
+            if (
+                oob_success
+                and isinstance(oob_raw, dict)
+                and isinstance(oob_raw.get("ports"), list)
+                and all(isinstance(port, dict) for port in oob_raw["ports"])
+            ):
                 oob_ports = oob_raw.get("ports", [])
                 oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
                 for port in oob_enriched:
@@ -446,7 +454,10 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
-        cache_ttl = cache.ttl(self.get_cache_key(cache_device, "ports", server_key))
+        # ``ttl()`` is Redis-specific; the Django cache API doesn't guarantee it. Guard with
+        # getattr so non-Redis backends return None instead of raising AttributeError at render
+        # (mirrors ip_addresses_view / modules_view).
+        cache_ttl = getattr(cache, "ttl", lambda k: None)(self.get_cache_key(cache_device, "ports", server_key))
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )

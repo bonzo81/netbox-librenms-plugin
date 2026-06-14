@@ -202,6 +202,50 @@ class TestBaseCableTableViewGetLinksData:
         assert result[0]["local_port"] == "Gi0/0"
         assert result[0]["remote_device"] == "switch-b"
 
+    def test_get_links_data_oob_only_device_still_renders_oob_rows(self):
+        """An OOB-only sync device has no host LibreNMS id (get_librenms_id -> None), so the host
+        links fetch fails. That must NOT abort the method (return None) before the OOB merge —
+        otherwise OOB-only devices render zero cable rows. The OOB rows must still come back."""
+        view = self._make_view()
+        obj = _mock_obj()
+
+        # Host has no LibreNMS id; only the OOB controller is mapped.
+        view._librenms_api.get_librenms_id.return_value = None
+        view._librenms_api.get_device_links.side_effect = [
+            (False, {"error": "device not found in librenms"}),  # host (id=None) fetch fails
+            (
+                True,
+                {
+                    "links": [
+                        {
+                            "local_port_id": 5,
+                            "remote_port": "eth1",
+                            "remote_hostname": "peer-sw",
+                            "remote_port_id": 7,
+                            "remote_device_id": 88,
+                        }
+                    ]
+                },
+            ),  # OOB controller (id=99) fetch succeeds
+        ]
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 5, "ifName": "console0"}]})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value={"id": 99}),
+        ):
+            result = view.get_links_data(obj)
+
+        # Pre-fix this returned None (hard return on the failed host fetch); now the OOB merge
+        # runs and surfaces the OOB-side cable row.
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["_source"] == "oob"
+        assert result[0]["remote_device"] == "peer-sw"
+        assert result[0]["local_port"] == "console0"
+
     def test_get_links_data_port_without_id_skipped(self):
         """Ports missing port_id are skipped when building local port map."""
         view = self._make_view()
@@ -1472,6 +1516,48 @@ class TestBaseInterfaceTableViewPost:
         # The OOB-fetch failure is surfaced to the user.
         mock_messages.warning.assert_called()
 
+    def test_post_oob_malformed_but_successful_payload_treated_as_incomplete(self):
+        """get_ports is an external boundary: oob_success=True does not guarantee a dict with a
+        list of dict rows. A malformed-but-truthy OOB payload must follow the host-only warning
+        path (oob_incomplete), not 500 on .get()/the _source loop."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host ports OK; OOB controller returns success but a malformed payload (non-dict row).
+        view._librenms_api.get_ports.side_effect = [
+            (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]}),
+            (True, {"ports": [42]}),
+        ]
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            # create=True: downstream branches add a _has_lag_signals() port_stack probe (DB-backed
+            # PortStackLagPattern). Short-circuit it so this non-DB test stays isolated; harmless
+            # where the method doesn't exist yet.
+            patch.object(view, "_has_lag_signals", return_value=False, create=True),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)  # must not raise
+
+        ports_set_calls = [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "cache-key"]
+        assert len(ports_set_calls) == 1
+        assert ports_set_calls[0].args[1]["oob_incomplete"] is True
+        mock_messages.warning.assert_called()
+
     def test_post_success_caches_and_renders(self):
         """Successful fetch caches data and renders template."""
         view = self._make_view()
@@ -1586,6 +1672,46 @@ class TestBaseInterfaceTableViewGetContextData:
         assert ctx["table"] is mock_table
         # A complete snapshot is not flagged incomplete.
         assert ctx["oob_incomplete"] is False
+
+    def test_get_context_data_survives_cache_backend_without_ttl(self):
+        """cache.ttl() is Redis-specific and not part of the Django cache API. On a backend that
+        lacks it (DB/file/locmem), get_context_data must fall back to no expiry, not raise
+        AttributeError mid-render."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.virtual_chassis = None
+        request = _mock_request()
+
+        cached_data = {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifAdminStatus": "up", "ifDescr": "Gi0/0"}]}
+
+        mock_iface = MagicMock()
+        mock_iface.name = "Gi0/0"
+        mock_ifaces_qs = MagicMock()
+        mock_ifaces_qs.select_related.return_value = [mock_iface]
+        mock_table = MagicMock()
+
+        # spec without "ttl" → getattr(cache, "ttl", ...) must take the fallback; a direct
+        # cache.ttl() call (the pre-fix code) would raise AttributeError here.
+        mock_cache = MagicMock(spec=["get", "set", "delete"])
+        mock_cache.get.side_effect = lambda key: cached_data if key == "key" else None
+
+        with (
+            patch.object(view, "get_cache_key", return_value="key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch.object(view, "get_vlan_overrides_key", return_value="overrides-key"),
+            patch.object(view, "get_vlan_groups_for_device", return_value=[]),
+            patch.object(view, "_build_vlan_lookup_maps", return_value={"vid_to_groups": {}, "vid_to_vlans": {}}),
+            patch.object(view, "get_interfaces", return_value=mock_ifaces_qs),
+            patch.object(view, "_add_vlan_group_selection"),
+            patch.object(view, "_add_missing_vlans_info"),
+            patch.object(view, "get_table", return_value=mock_table),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache", mock_cache),
+        ):
+            ctx = view.get_context_data(request, obj, "ifName")  # must not raise
+
+        assert ctx["table"] is mock_table
+        assert ctx["cache_expiry"] is None
 
     def test_oob_incomplete_flag_surfaced_from_cache(self):
         """A cached snapshot tagged oob_incomplete surfaces the flag in context so the

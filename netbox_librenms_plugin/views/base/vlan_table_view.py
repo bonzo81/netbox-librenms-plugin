@@ -61,6 +61,11 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
 
         if not self.librenms_id:
+            # Drop any prior snapshot for this server: a failed refresh on a previously-synced
+            # device must not leave a stale VLAN table the next GET can render and act on. The
+            # cache is scoped by server_key, so evict the same scoped keys.
+            cache.delete(self.get_cache_key(obj, "vlans", server_key))
+            cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
             messages.error(request, "Device not found in LibreNMS.")
             context = {
                 "vlan_sync": self._get_error_context(obj, "Device not found in LibreNMS", server_key=server_key),
@@ -71,6 +76,8 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         # Fetch VLAN data from LibreNMS
         success, error_msg = self._fetch_and_cache_vlan_data(obj, server_key)
         if not success:
+            cache.delete(self.get_cache_key(obj, "vlans", server_key))
+            cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
             messages.error(request, error_msg)
             context = {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key), **migrated}
             return render(request, self.partial_template_name, context)
@@ -135,8 +142,9 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             vlan_table = LibreNMSVLANTable(compared_vlans, vlan_groups=vlan_groups)
             vlan_table.configure(request)
 
-        # Calculate cache TTL
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans", server_key))
+        # Calculate cache TTL. ``ttl()`` is Redis-specific and not part of the Django cache
+        # API; guard with getattr so non-Redis backends return None instead of raising.
+        cache_ttl = getattr(cache, "ttl", lambda k: None)(self.get_cache_key(obj, "vlans", server_key))
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl and cache_ttl > 0 else None
 
         return {
