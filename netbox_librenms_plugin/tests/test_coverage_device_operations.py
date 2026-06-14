@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestTryChassisDeviceTypeMatch:
     """Tests for _try_chassis_device_type_match (lines 45-65)."""
@@ -2402,8 +2404,9 @@ class TestOOBDetection:
         mock_device_cls = MagicMock()
         # filter().first() — hostname lookup → host_named
         mock_device_cls.objects.filter.return_value.first.return_value = host_named
-        # filter().exclude().first() — used by my merge-detect branch to find the serial-twin
-        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = oob_named
+        # filter().exclude()[:2] — merge-detect now fetches up to two serial peers and pairs
+        # only on a unique one, so return a single-element list (one twin → merge proceeds).
+        mock_device_cls.objects.filter.return_value.exclude.return_value.__getitem__.return_value = [oob_named]
         # isinstance(existing_device, Device) check — make it accept MagicMock objects.
 
         patches = self._base_patches(mock_device_cls) + [
@@ -2585,3 +2588,80 @@ class TestOOBDetection:
 
         assert result["existing_match_type"] == "librenms_oob"
         assert result["existing_device"] is existing
+
+
+@pytest.mark.django_db
+class TestMergeCandidateNonUniqueSerialPeer:
+    """The merge-candidate serial-peer lookup must require a UNIQUE peer. Serial is not unique
+    in NetBox, so a bare .first() could pair the hostname-matched device with an arbitrary
+    same-serial row and surface the wrong merge target. With >1 peer, skip the suggestion and
+    warn. Real DB so the Device.objects.filter(serial=...) query exercises the actual rows."""
+
+    def _validate(self, libre_device):
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        api = MagicMock(server_key="default", cache_timeout=300)
+        # Patch only the external/heavy boundaries; Device + VirtualMachine stay real so the
+        # serial-peer query runs against the DB rows created below.
+        patches = [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+                return_value={"found": False, "site": None, "match_type": None, "suggestions": []},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+                return_value={"matched": False, "device_type": None, "match_type": None},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+                return_value={"found": False, "platform": None, "match_type": None},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
+            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            return validate_device_for_import(libre_device, api=api, include_vc_detection=False)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+    def _libre(self, serial):
+        return {
+            "device_id": 1,
+            "hostname": "host1",
+            "sysName": "host1",
+            "hardware": "-",
+            "serial": serial,
+            "os": "-",
+            "location": "-",
+        }
+
+    def test_multiple_serial_peers_skip_merge_suggestion(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        make_device("host1")  # hostname match (no serial)
+        make_device("dup-b", serial="SHARED")  # two NetBox devices share this serial
+        make_device("dup-c", serial="SHARED")
+
+        result = self._validate(self._libre("SHARED"))
+
+        # The guard warns and skips the suggestion instead of pairing an arbitrary peer.
+        assert any("Multiple NetBox devices share serial 'SHARED'" in w for w in result["warnings"])
+        assert not result.get("merge_candidates")
+
+    def test_single_serial_peer_still_considered(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        make_device("host1")  # hostname match
+        make_device("dup-b", serial="SHARED")  # exactly one same-serial peer
+
+        result = self._validate(self._libre("SHARED"))
+
+        # A unique peer must NOT trip the multi-peer guard.
+        assert not any("Multiple NetBox devices share serial" in w for w in result["warnings"])

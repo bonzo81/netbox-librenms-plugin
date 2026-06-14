@@ -749,15 +749,31 @@ def validate_device_for_import(
                         result["existing_device"] if result.get("existing_match_type") == "hostname" else None
                     )
                     _serial_match = result["existing_device"] if result.get("existing_match_type") == "serial" else None
-                    # Whichever path landed first, look the other one up too.
+                    # Whichever path landed first, look the other one up too. Require a UNIQUE
+                    # peer: serial isn't unique in NetBox (and names are only unique per site),
+                    # so a bare .first() could pair the matched device with an arbitrary row and
+                    # surface the wrong merge target. Fetch up to 2; only pair on exactly one,
+                    # otherwise skip the suggestion and warn.
                     if _hostname_match and not _serial_match:
-                        _serial_match = (
-                            Device.objects.filter(serial=_serial_for_pair).exclude(pk=_hostname_match.pk).first()
+                        _serial_peers = list(
+                            Device.objects.filter(serial=_serial_for_pair).exclude(pk=_hostname_match.pk)[:2]
                         )
+                        if len(_serial_peers) == 1:
+                            _serial_match = _serial_peers[0]
+                        elif len(_serial_peers) > 1:
+                            result["warnings"].append(
+                                f"Multiple NetBox devices share serial '{_serial_for_pair}'; merge suggestion skipped."
+                            )
                     elif _serial_match and not _hostname_match and hostname:
-                        _hostname_match = (
-                            Device.objects.filter(name__iexact=hostname).exclude(pk=_serial_match.pk).first()
+                        _hostname_peers = list(
+                            Device.objects.filter(name__iexact=hostname).exclude(pk=_serial_match.pk)[:2]
                         )
+                        if len(_hostname_peers) == 1:
+                            _hostname_match = _hostname_peers[0]
+                        elif len(_hostname_peers) > 1:
+                            result["warnings"].append(
+                                f"Multiple NetBox devices share hostname '{hostname}'; merge suggestion skipped."
+                            )
 
                     if _hostname_match and _serial_match and _hostname_match.pk != _serial_match.pk:
                         host_link = _describe_existing_librenms_link(_hostname_match, server_key)
