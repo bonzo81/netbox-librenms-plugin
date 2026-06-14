@@ -2651,3 +2651,25 @@ class TestSyncRedirectServerKeyValidation:
             CreateAndAssignPlatformView._sync_redirect(req, 1, "prod")
         url = mock_redirect.call_args[0][0]
         assert "server_key=prod" in url
+
+    def test_valid_server_key_is_dropped_when_redirect_url_fails_validation(self):
+        """Even an allowlisted server_key must be dropped if the resulting redirect URL fails
+        url_has_allowed_host_and_scheme — mirrors the _sync_url guard (open-redirect barrier),
+        so a regression that reflected a known key into a rejected URL is caught here too."""
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        req = _make_request(post_data={"server_key": "prod"})
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.url_has_allowed_host_and_scheme",
+                return_value=False,
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        ):
+            CreateAndAssignPlatformView._sync_redirect(req, 1)
+        url = mock_redirect.call_args[0][0]
+        assert "server_key" not in url
