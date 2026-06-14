@@ -448,7 +448,10 @@ class LibreNMSInterfaceTable(tables.Table):
         }
         badge_css, badge_label = status_map.get(sync_status, ("bg-secondary", sync_status))
 
-        display_name = escape(lnms_name or "")
+        # format_html() below escapes its args, so it's the single escape point for the name.
+        # (A manual escape() here was redundant — it returns a SafeString that format_html's
+        # conditional_escape passes through, so it didn't double-encode, just obscured intent.)
+        display_name = lnms_name or ""
         status_badge = format_html('<span class="badge {}">{}</span>', badge_css, badge_label)
         name_badge = (
             format_html(' <span class="badge border text-body-secondary fw-normal">{}</span>', display_name)

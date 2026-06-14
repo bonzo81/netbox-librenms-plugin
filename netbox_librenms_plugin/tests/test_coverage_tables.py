@@ -1938,6 +1938,38 @@ class TestMigratedModeSuppressesRelationshipButton:
         assert "Not in NetBox" in html
 
 
+class TestRelationshipColumnNameEscaping:
+    """Contract: the related interface name in the Parent/LAG badge is escaped exactly once
+    for a name containing & < >. (The prior `escape()` call was redundant rather than a
+    double-escape bug — `escape()` returns a SafeString that `format_html`'s conditional_escape
+    passes through — but the renderer now relies on format_html alone, so guard the contract.)"""
+
+    def _render(self, lnms_name):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(
+                data=[], device=MagicMock(pk=3, virtual_chassis=None), interface_name_field="ifName"
+            )
+        record = {"port_id": 5, "ifName": "eth0", "netbox_interface": None}
+        return str(
+            table._render_relationship_column(
+                lnms_name=lnms_name,
+                lnms_port_id=10,
+                sync_status="match",  # renders the name badge, no sync button
+                record=record,
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
+            )
+        )
+
+    def test_special_chars_escaped_once(self):
+        html = self._render("a&b<c>")
+        assert "a&amp;b&lt;c&gt;" in html  # escaped exactly once
+        assert "&amp;amp;" not in html  # not double-encoded
+        assert "&amp;lt;" not in html
+
+
 # ===========================================================================
 # LibreNMSInterfaceTable._parse_group_id tests
 # ===========================================================================
