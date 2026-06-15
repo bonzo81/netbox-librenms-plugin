@@ -563,6 +563,11 @@ class TestTransferDeviceIPView:
             mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
             # The owning interface is re-locked; return a row owned by the winner (device_id=20).
             mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
+            # device oob_ip/primary_ip FKs are UNIQUE per address — the donor must release the FK
+            # before the winner claims it. Capture save() order to pin that ordering.
+            save_order = MagicMock()
+            save_order.attach_mock(locked_donor.save, "donor_save")
+            save_order.attach_mock(locked_winner.save, "winner_save")
             resp = view.post(req, pk=10, ip_kind="oob")
         # The locked rows are the ones mutated and saved.
         assert locked_donor.oob_ip is None
@@ -571,6 +576,10 @@ class TestTransferDeviceIPView:
         # full_clean() and reject the merge over pre-existing device inconsistencies.
         locked_winner.save.assert_called_once_with(update_fields=["oob_ip"])
         locked_donor.save.assert_called_once_with(update_fields=["oob_ip"])
+        # Donor save MUST precede winner save (unique-per-address FK); the reverse order would
+        # trip the unique constraint with the donor still holding the address.
+        _save_names = [c[0] for c in save_order.mock_calls]
+        assert _save_names.index("donor_save") < _save_names.index("winner_save")
         # Stale pre-lock instances must be left untouched.
         donor.save.assert_not_called()
         winner.save.assert_not_called()

@@ -607,8 +607,12 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             # Save only the touched FK column to avoid full_clean() rejecting
             # the merge over pre-existing inconsistencies on either device
             # (e.g. ``face`` set without ``rack``).
-            winner.save(update_fields=[field])
+            # device.primary_ip4/6 / oob_ip are UNIQUE per address, so the donor must release
+            # the FK *before* the winner claims it — saving the winner first while the donor
+            # still holds the same address violates the unique constraint (mirrors
+            # _reconcile_donor_device_ip_fks above).
             donor.save(update_fields=[field])
+            winner.save(update_fields=[field])
 
         return _hx_response(
             request,
