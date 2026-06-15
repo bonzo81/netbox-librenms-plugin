@@ -6,9 +6,19 @@
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% if migrated_to_marker %}
 <div>
+    {% comment %}
+    No POST form in migrated mode, but the cable table still renders interactive controls whose
+    verify-cable fetch (handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value
+    and input[name="server_key"]. Emit standalone hidden inputs so those JS-driven requests don't hit a
+    null CSRF token (TypeError/403) or fall back to the default server on a non-default deployment. A bare
+    hidden input never auto-submits, so it doesn't reintroduce the live-form problem migrated mode avoids.
+    Mirrors _interface_sync_content.html.
+    {% endcomment %}
+    <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+    {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
 {% else %}
 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}">
-    {# Form-specific markup belongs only inside the <form>; in migrated mode the wrapper is a bare <div> and a CSRF token / hidden inputs there are dead, misleading markup. #}
+    {# The sync POST's own inputs (token + selected_port) live inside the <form> branch only. #}
     {% csrf_token %}
     {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
     <input type="hidden" id="selected_port" name="select" value="">

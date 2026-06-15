@@ -14,7 +14,7 @@ import pytest
 
 @pytest.mark.django_db
 class TestInterfaceSyncContentTemplateMigratedMode:
-    def _render(self, *, migrated):
+    def _render(self, *, migrated, netbox_only=()):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -32,7 +32,10 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             "object": device,
             "table": table,
             "server_key": "default",
-            "netbox_only_interfaces": [],
+            # Caller-controlled: an item makes the NetBox-only modal (and its trigger link, whose
+            # title we assert) render. Kept empty by default so form-presence tests aren't perturbed
+            # by the modal's own <form>.
+            "netbox_only_interfaces": list(netbox_only),
             "virtual_chassis_members": [],
             "cache_expiry": None,
             "oob_incomplete": False,
@@ -59,3 +62,18 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "<form" in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
+
+    def test_netbox_only_link_title_is_move_in_migrated_mode(self):
+        # Migrated mode is transfer-only, so the NetBox-only modal trigger must advertise "move",
+        # not "delete" (the modal has no delete action for a donor).
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+        )
+        assert "Click to view and move NetBox-only interfaces" in html
+        assert "Click to view and delete NetBox-only interfaces" not in html
+
+    def test_netbox_only_link_title_is_delete_in_normal_mode(self):
+        html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
+        assert "Click to view and delete NetBox-only interfaces" in html
+        assert "Click to view and move NetBox-only interfaces" not in html

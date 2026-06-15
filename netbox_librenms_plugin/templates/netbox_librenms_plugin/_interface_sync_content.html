@@ -101,7 +101,7 @@
                     {% if interface_sync.netbox_only_interfaces %}
                     <a href="#" class="ms-2 text-warning text-decoration-none netbox-only-link" data-bs-toggle="modal"
                         data-bs-target="#netboxOnlyInterfacesModal"
-                        title="Click to view and delete NetBox-only interfaces">
+                        title="{% if migrated_to_marker %}Click to view and move NetBox-only interfaces{% else %}Click to view and delete NetBox-only interfaces{% endif %}">
                         <i class="mdi mdi-alert-circle-outline me-1"></i>
                         {{interface_sync.netbox_only_interfaces|length}} NetBox only interfaces
                     </a>
