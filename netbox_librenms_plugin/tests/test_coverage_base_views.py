@@ -2068,7 +2068,7 @@ class TestBaseInterfaceTableViewPost:
 
         captured_ports = {}
 
-        def _capture_has_lag_signals(ports):
+        def _capture_has_lag_signals(ports, field="ifName"):
             captured_ports["value"] = ports
             return False  # short-circuit the real port_stack fetch (DB-backed)
 
@@ -2085,11 +2085,22 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.cache"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)
+
+        # Prove the OOB path actually ran end-to-end first — otherwise the assertions below
+        # would also pass if OOB ports were never fetched or merged (the whole point of the
+        # filter being that there *was* an OOB LAG row to exclude).
+        view._librenms_api.get_ports.assert_any_call(99)  # OOB controller ports fetched
+        cached_snapshot = next(
+            call.args[1] for call in mock_cache.set.call_args_list if call.args and call.args[0] == "cache-key"
+        )
+        assert any(p.get("_source") == "oob" for p in cached_snapshot["ports"]), (
+            "OOB row was never merged into the snapshot — the test would pass vacuously"
+        )
 
         # _has_lag_signals saw host-only ports: the OOB-sourced LAG row was filtered out.
         assert "value" in captured_ports

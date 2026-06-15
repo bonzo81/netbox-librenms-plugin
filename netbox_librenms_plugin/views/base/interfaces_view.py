@@ -340,7 +340,7 @@ class BaseInterfaceTableView(
         # otherwise trigger a host port_stack fetch (and the "may be incomplete" warning) even
         # when the main device has no such relationships.
         host_ports_final = [p for p in librenms_data.get("ports", []) if p.get("_source") != "oob"]
-        if self._has_lag_signals(host_ports_final):
+        if self._has_lag_signals(host_ports_final, interface_name_field):
             ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
             if ps_success:
                 # Scope LAG name-pattern matching to this device's OS so a vendor-specific
@@ -813,7 +813,7 @@ class BaseInterfaceTableView(
 
         port["missing_vlans"] = missing_vlans
 
-    def _has_lag_signals(self, ports: list) -> bool:
+    def _has_lag_signals(self, ports: list, interface_name_field: str = "ifName") -> bool:
         """Return True if any port appears to be a LAG interface or sub-interface.
 
         Triggers lazy port_stack API fetch only when needed. Checks:
@@ -822,6 +822,12 @@ class BaseInterfaceTableView(
           - Name matches any PortStackLagPattern regex
           - Any port name ends with '.<digits>' AND the base name also exists
             (sub-interface detection, e.g. ge-0/0/0.100 with ge-0/0/0 present)
+
+        Name-based checks scan the user-selected ``interface_name_field`` as well as
+        ifName/ifDescr: on an ifDescr-driven device the LAG/sub-interface name (which
+        later enrichment renders and matches against) lives in ifDescr, so keying the
+        signal off ifName alone would silently skip the port_stack fetch and leave the
+        Parent/LAG column empty.
         """
         import re as _re
 
@@ -834,20 +840,26 @@ class BaseInterfaceTableView(
             except _re.error:
                 pass
 
-        port_names = {p.get("ifName", "") for p in ports if p.get("ifName")}
+        name_fields = {"ifName", "ifDescr", interface_name_field}
+
+        def _names(port: dict) -> list:
+            return [name for field in name_fields if (name := port.get(field))]
+
+        port_names = {name for p in ports for name in _names(p)}
         sub_iface_re = _re.compile(r"^(.+)\.\d+$")
 
         for port in ports:
             if_type = port.get("ifType", "")
             if if_type in ("ieee8023adLag", "propVirtual"):
                 return True
-            name = port.get("ifName", "")
-            if any(pat.search(name) for pat in lag_patterns):
+            names = _names(port)
+            if any(pat.search(name) for pat in lag_patterns for name in names):
                 return True
-            # Sub-interface: name ends with '.<digits>' and parent name also present
-            m = sub_iface_re.match(name)
-            if m and m.group(1) in port_names:
-                return True
+            # Sub-interface: a name ends with '.<digits>' and the parent name also present
+            for name in names:
+                m = sub_iface_re.match(name)
+                if m and m.group(1) in port_names:
+                    return True
         return False
 
     @staticmethod
