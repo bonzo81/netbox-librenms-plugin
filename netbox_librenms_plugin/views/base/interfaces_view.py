@@ -174,6 +174,18 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             messages.error(request, librenms_data)
             return self._failure_redirect(request, obj, _server_key)
 
+        # get_ports is an external boundary: a truthy success doesn't guarantee a dict with a list
+        # of dict port rows (the OOB branch below guards the same way). The old cache was already
+        # deleted, so a malformed 200 must fail closed with a warning rather than 500 on .get()/
+        # enrichment below.
+        if not (
+            isinstance(librenms_data, dict)
+            and isinstance(librenms_data.get("ports"), list)
+            and all(isinstance(port, dict) for port in librenms_data["ports"])
+        ):
+            messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
+            return self._failure_redirect(request, obj, _server_key)
+
         # Enrich ports with VLAN data for trunk ports
         ports = librenms_data.get("ports", [])
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)

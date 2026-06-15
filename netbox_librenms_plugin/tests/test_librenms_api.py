@@ -64,8 +64,11 @@ class TestLibreNMSAPIInit:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
+        # Use the default key so this exercises the missing URL/token ValueError path. (A
+        # non-default key now fails closed with KeyError first in legacy mode — see
+        # test_init_legacy_mode_rejects_non_default_server_key.)
         with pytest.raises(ValueError):
-            LibreNMSAPI(server_key="nonexistent")
+            LibreNMSAPI(server_key="default")
 
     def test_init_nonexistent_server_key_raises_keyerror(self, mock_librenms_config):
         """Verify KeyError raised when specific server_key doesn't exist."""
@@ -73,6 +76,29 @@ class TestLibreNMSAPIInit:
 
         with pytest.raises(KeyError, match="nonexistent"):
             LibreNMSAPI(server_key="nonexistent")
+
+    def test_init_legacy_mode_rejects_non_default_server_key(self, mock_librenms_config):
+        """Legacy single-server mode has only the implicit 'default' server. A non-default key
+        must fail closed (KeyError) instead of silently using the default URL/token while scoping
+        cache/custom-field lookups under the bogus key (which is what build_librenms_api relies on
+        to fall back)."""
+        mock_config = mock_librenms_config["mock_config"]
+
+        def config_side_effect(plugin, key, default=None):
+            if key == "servers":
+                return None  # legacy single-server mode (no multi-server dict)
+            legacy = {"librenms_url": "https://legacy.example.com", "api_token": "legacy-token"}
+            return legacy.get(key, default)
+
+        mock_config.side_effect = config_side_effect
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(KeyError, match="legacy single-server"):
+            LibreNMSAPI(server_key="stale")
+
+        # The default key must still work in legacy mode.
+        assert LibreNMSAPI(server_key="default").librenms_url == "https://legacy.example.com"
 
     def test_init_default_falls_back_to_first_server(self, mock_librenms_config):
         """Verify 'default' key falls back to first configured server."""

@@ -9,7 +9,7 @@ from django.utils.safestring import mark_safe
 from django_tables2 import Column
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.utils import get_librenms_sync_device
+from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_sync_device
 
 
 class DeviceStatusTable(DeviceTable):
@@ -481,10 +481,10 @@ class DeviceImportTable(tables.Table):
             paired_oob_type = existing_link.get("oob_type") or "OOB"
 
             def _coerce_pair_id(value):
-                try:
-                    return int(value)
-                except (TypeError, ValueError):
-                    return None
+                # Strict coercion (rejects booleans and floats, unlike int()) so malformed
+                # custom-field data can't make the host/OOB pair comparison hide or mislabel a
+                # pair. Matches the coercion used by the refresh path / find_by_librenms_id.
+                return coerce_librenms_id(value)
 
             if is_oob_candidate:
                 btn_class = "btn-outline-purple"

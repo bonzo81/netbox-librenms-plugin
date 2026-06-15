@@ -392,6 +392,46 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         # The failure flag was set by the OOB branch, which is what disqualifies the exemption.
         assert view._oob_links_fetch_failed is True
 
+    def test_oob_only_malformed_links_payload_returns_none(self):
+        """OOB fetch SUCCEEDS but returns a malformed links payload (links not a list). This used
+        to early-return links_data ([]) from inside the OOB block, bypassing the final failure
+        classification — so an OOB-only device cleared its cached rows on a degraded payload. The
+        malformed branch must now fall through so the final guard returns None (failure)."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False
+
+        view._librenms_api.get_librenms_id.return_value = None
+
+        def _links(dev_id):
+            if dev_id is None:  # host fetch — no host mapping
+                return (False, {"error": "Device not found in LibreNMS"})
+            return (True, {"links": None})  # OOB fetch OK, but links payload is malformed (not a list)
+
+        view._librenms_api.get_device_links.side_effect = _links
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=obj,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_oob",
+                return_value={"id": 99},
+            ),
+        ):
+            result = view.get_links_data(obj)
+
+        # Malformed OOB links ⇒ None (not []), so the cache isn't cleared by a degraded refresh.
+        assert result is None
+        assert view._oob_links_fetch_failed is True
+
 
 # =============================================================================
 # TestGetDeviceByIdOrNameEdgeCases  — MultipleObjectsReturned, FQDN fallback

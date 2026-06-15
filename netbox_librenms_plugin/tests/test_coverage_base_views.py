@@ -1443,6 +1443,38 @@ class TestBaseInterfaceTableViewPost:
         mock_cache.delete.assert_any_call("last-key")
         mock_cache.set.assert_not_called()
 
+    def test_post_malformed_main_ports_payload_treated_as_failure(self):
+        """A truthy success with a malformed MAIN ports payload (ports not a list of dicts) must
+        fail closed — warn + failure-redirect, no degraded snapshot cached — mirroring the OOB
+        branch. The old cache was already deleted up front, so this can't 500 on .get()/enrichment."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        view._librenms_api.get_ports.return_value = (True, {"ports": "not-a-list"})
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "rebind_api_for_server", return_value="prod"),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+        ):
+            mock_redirect.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        mock_messages.error.assert_called_once_with(
+            request, "Unexpected response from LibreNMS (malformed ports payload)."
+        )
+        mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
+        mock_cache.set.assert_not_called()
+
     def test_failure_redirect_gated_by_open_redirect_barrier(self):
         """The appended server_key is POST-derived, so the failure redirect MUST gate the
         candidate URL through url_has_allowed_host_and_scheme (the CodeQL py/url-redirection

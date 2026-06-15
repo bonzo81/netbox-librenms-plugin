@@ -124,6 +124,14 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory == seed
         assert error and "malformed transceiver payload" in error
 
+        # empty NON-list payload ({}) is also malformed — it must NOT be treated as a successful
+        # "no transceivers" response (which would cache a degraded snapshot). Regression for the
+        # emptiness check running before the type check: {} is falsy, so the old order mislabeled it.
+        view._librenms_api.get_device_transceivers.return_value = (True, {})
+        inventory, error = view._merge_transceiver_data(list(seed))
+        assert inventory == seed
+        assert error and "malformed transceiver payload" in error
+
     def test_synthetic_item_includes_port_identity_metadata(self):
         view = _make_view()
         view.librenms_id = 100

@@ -226,25 +226,29 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                         oob["id"],
                         oob_data,
                     )
-                    return links_data
-                for link in oob_links:
-                    if not isinstance(link, dict):
-                        continue
-                    oob_port_id = link.get("local_port_id")
-                    oob_local_port = oob_local_ports_map.get(str(oob_port_id)) if oob_port_id else None
-                    if oob_local_port is None:
-                        oob_local_port = link.get("local_port")
-                    links_data.append(
-                        {
-                            "local_port": oob_local_port,
-                            "local_port_id": oob_port_id,
-                            "remote_port": link.get("remote_port"),
-                            "remote_device": link.get("remote_hostname"),
-                            "remote_port_id": link.get("remote_port_id"),
-                            "remote_device_id": link.get("remote_device_id"),
-                            "_source": "oob",
-                        }
-                    )
+                    # Don't early-return: fall through to the final failure classification below.
+                    # An early `return links_data` on an OOB-only device (empty links_data) would
+                    # be read as a *successful* empty refresh and clear cached rows. The final guard
+                    # returns None when _oob_links_fetch_failed, preserving the cache.
+                else:
+                    for link in oob_links:
+                        if not isinstance(link, dict):
+                            continue
+                        oob_port_id = link.get("local_port_id")
+                        oob_local_port = oob_local_ports_map.get(str(oob_port_id)) if oob_port_id else None
+                        if oob_local_port is None:
+                            oob_local_port = link.get("local_port")
+                        links_data.append(
+                            {
+                                "local_port": oob_local_port,
+                                "local_port_id": oob_port_id,
+                                "remote_port": link.get("remote_port"),
+                                "remote_device": link.get("remote_hostname"),
+                                "remote_port_id": link.get("remote_port_id"),
+                                "remote_device_id": link.get("remote_device_id"),
+                                "_source": "oob",
+                            }
+                        )
             else:
                 # Don't silently drop OOB cable rows on a fetch failure — flag it so
                 # post() can warn the user (this method has no request to message on).

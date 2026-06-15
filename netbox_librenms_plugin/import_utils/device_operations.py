@@ -17,6 +17,7 @@ from ..utils import (
     find_by_librenms_id,
     find_matching_platform,
     find_matching_site,
+    get_librenms_device_id,
     get_librenms_oob,
     match_librenms_hardware_to_device_type,
     set_librenms_device_id,
@@ -56,31 +57,26 @@ def _describe_existing_librenms_link(obj, server_key):
     plain status object.  Tolerates legacy bare-int and dict-form custom field values.
     """
     info = {"host_id": None, "oob_id": None, "oob_type": None}
-    cf_value = obj.cf.get("librenms_id") if hasattr(obj, "cf") else None
-    # Legacy bare-int OR string-digit (pre-JSON format).
-    if not isinstance(cf_value, dict):
-        info["host_id"] = coerce_librenms_id(cf_value)
-        return info
-    entry = cf_value.get(server_key)
-    # Per-server simple form: legacy bare-int or string-digit under the server key.
-    if not isinstance(entry, dict):
-        info["host_id"] = coerce_librenms_id(entry)
-        return info
-    # New dict-form: {"id": <int|str>, "oob": {"id": <int|str>, "type": <str>, ...}}.
-    # Use coerce_librenms_id so string-digit values (e.g. "42") stored by older
-    # plugin versions are still recognized, matching the behaviour of
-    # find_by_librenms_id() and get_librenms_device_id().
-    host_id = coerce_librenms_id(entry.get("id"))
+    # Host ID via the single canonical accessor (per coding guidelines) rather than touching the
+    # custom field directly. auto_save=False: this is a read-only describe/badge path and must not
+    # mutate custom_field_data. get_librenms_device_id handles legacy bare-int / string-digit and
+    # the per-server dict's "id" key, mirroring find_by_librenms_id's coercion.
+    host_id = get_librenms_device_id(obj, server_key, auto_save=False)
     if host_id is not None and host_id > 0:
         info["host_id"] = host_id
-    oob = entry.get("oob")
-    if isinstance(oob, dict):
-        oob_id = coerce_librenms_id(oob.get("id"))
-        if oob_id is not None and oob_id > 0:
-            info["oob_id"] = oob_id
-        oob_type = oob.get("type")
-        if isinstance(oob_type, str) and oob_type:
-            info["oob_type"] = oob_type
+    # The OOB sub-object isn't covered by the accessor, so parse it locally from the dict form:
+    # {"<server_key>": {"id": ..., "oob": {"id": <int|str>, "type": <str>}}}.
+    cf_value = obj.cf.get("librenms_id") if hasattr(obj, "cf") else None
+    entry = cf_value.get(server_key) if isinstance(cf_value, dict) else None
+    if isinstance(entry, dict):
+        oob = entry.get("oob")
+        if isinstance(oob, dict):
+            oob_id = coerce_librenms_id(oob.get("id"))
+            if oob_id is not None and oob_id > 0:
+                info["oob_id"] = oob_id
+            oob_type = oob.get("type")
+            if isinstance(oob_type, str) and oob_type:
+                info["oob_type"] = oob_type
     return info
 
 

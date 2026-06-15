@@ -1,7 +1,8 @@
 """
 Coverage tests for views/sync/ (cables, devices, interfaces, ip_addresses, locations, vlans).
 
-All DB interactions are mocked via MagicMock.  No @pytest.mark.django_db.
+Most DB interactions are mocked via MagicMock, but some tests are DB-backed
+(``@pytest.mark.django_db``) where exercising the real ORM is clearer than mocking it.
 """
 
 from unittest.mock import MagicMock, patch

@@ -40,6 +40,11 @@ class LibreNMSAPI:
         Args:
             server_key: Key for specific server configuration. If None, uses selected server or default.
         """
+        # Whether the caller passed an explicit key (e.g. build_librenms_api(POST server_key)) vs.
+        # the auto-default/selected-server path. Only an explicit non-default key is treated as a
+        # tampering candidate to reject in legacy mode below.
+        explicit_server_key = bool(server_key)
+
         # If no server_key is provided, try to get the selected server from settings
         if not server_key:
             try:
@@ -75,6 +80,20 @@ class LibreNMSAPI:
                     first_key,
                 )
                 server_key = first_key
+        elif (
+            explicit_server_key
+            and not (servers_config and isinstance(servers_config, dict))
+            and server_key != "default"
+        ):
+            # Legacy single-server mode has exactly one implicit server ("default"). An explicitly
+            # requested non-default key here would otherwise use the default URL/token while scoping
+            # cache/custom-field lookups under a bogus key. Fail closed (build_librenms_api() catches
+            # this and falls back to None), mirroring the multi-server unknown-key raise above. The
+            # auto-default / selected-server path is config-driven, not tampered, so it's exempt.
+            raise KeyError(
+                f"Server '{server_key}' not found: LibreNMS plugin is in legacy single-server mode "
+                "(only the 'default' server is available)."
+            )
 
         self.server_key = server_key
 

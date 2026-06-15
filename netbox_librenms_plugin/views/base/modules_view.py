@@ -1201,13 +1201,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         success, transceivers = self.librenms_api.get_device_transceivers(self.librenms_id)
         if not success:
             return inventory_data, str(transceivers) if transceivers else "unknown error"
-        if not transceivers:
-            return inventory_data, None
         # A truthy success flag with a malformed payload (a dict, or a list carrying non-dict
         # entries) would 500 on the txr.get(...) access below. Treat it as a fetch error so the
         # caller skips the snapshot cache and warns, matching the inventory/ports/OOB guards.
+        # This must precede the emptiness check: an empty non-list like {} is falsy, so checking
+        # `not transceivers` first would mislabel it as a successful "no transceivers" response
+        # and cache a degraded snapshot.
         if not isinstance(transceivers, list) or any(not isinstance(txr, dict) for txr in transceivers):
             return inventory_data, f"malformed transceiver payload (got {type(transceivers).__name__})"
+        if not transceivers:
+            return inventory_data, None
 
         # Build lookup of existing inventory items by index and serial
         inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
