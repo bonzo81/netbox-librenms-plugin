@@ -3,8 +3,8 @@
 In migrated mode the POST form is replaced by a plain <div> (a migrated donor must not be
 able to POST an interface sync). The CSRF token AND the server_key hidden input must still be
 emitted in migrated mode — not because of the (absent) form, but because the interface table
-still renders interactive relationship/VC-member dropdowns whose verify-interface POSTs read
-document.querySelector('[name=csrfmiddlewaretoken]').value and
+still renders interactive relationship/VC-member dropdowns whose verify-interface / LAG-sync
+POSTs read document.querySelector('[name=csrfmiddlewaretoken]').value and
 document.querySelector('input[name="server_key"]').value. Dropping either breaks those
 JS-driven requests: a null token → TypeError/403, a null server_key → the wrong LibreNMS
 server/cache on non-default servers. A bare hidden input never auto-submits, so emitting them
@@ -69,7 +69,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         # The live POST form must be gone in migrated mode (a donor must not POST a sync).
         assert "<form" not in html
         # ...but BOTH the CSRF token and the server_key input must remain so JS-driven
-        # verify-interface POSTs still target the right server.
+        # verify-interface / LAG-sync POSTs still target the right server.
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
         assert 'value="prod"' in html

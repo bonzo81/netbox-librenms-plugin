@@ -21,6 +21,9 @@
     document.querySelector('[name=csrfmiddlewaretoken]'). Emit a standalone token so those
     JS-driven requests don't hit a null token (TypeError/403). A bare hidden input never
     auto-submits, so it doesn't reintroduce the live-form problem flagged above.
+    The same JS handlers read input[name="server_key"] to scope verify/sync POSTs to the
+    right LibreNMS server; without it, migrated-mode requests on a non-default server fall
+    back to null and hit the wrong server/cache. Emit it here too (still no auto-submit).
     {% endcomment %}
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
     {% comment %}
