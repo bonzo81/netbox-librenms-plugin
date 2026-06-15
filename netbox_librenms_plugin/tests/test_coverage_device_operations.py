@@ -2460,8 +2460,11 @@ class TestOOBDetection:
         mock_device_cls = MagicMock()
         # filter().first() — hostname lookup → host_named
         mock_device_cls.objects.filter.return_value.first.return_value = host_named
-        # filter().exclude()[:2] — merge-detect now fetches up to two serial peers and pairs
-        # only on a unique one, so return a single-element list (one twin → merge proceeds).
+        # Current-side uniqueness guard: filter(name__iexact=hostname)[:2] must yield exactly one
+        # peer so the hostname-matched current side is accepted (not skipped as ambiguous).
+        mock_device_cls.objects.filter.return_value.__getitem__.return_value = [host_named]
+        # filter().exclude()[:2] — merge-detect fetches up to two serial peers and pairs only on a
+        # unique one, so return a single-element list (one twin → merge proceeds).
         mock_device_cls.objects.filter.return_value.exclude.return_value.__getitem__.return_value = [oob_named]
         # isinstance(existing_device, Device) check — make it accept MagicMock objects.
 
@@ -2787,3 +2790,36 @@ class TestMergeCandidateNonUniqueSerialPeer:
         # pass with merge detection fully disabled — this pins the real behavior.)
         assert result["serial_action"] == "merge_netbox_devices"
         assert result.get("merge_candidates")
+
+    def test_current_hostname_side_nonunique_skips_merge(self):
+        """The CURRENT merge side (existing_match_type='hostname') is itself taken from a
+        .first() match, so duplicate device names make it an arbitrary row. With >1 same-name
+        device, the suggestion must be skipped + warned rather than pairing that arbitrary
+        hostname device with the (unique) serial peer. Without the current-side [:2] guard the
+        merge would still fire — this pins that it no longer does."""
+        from dcim.models import Device, Site
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        d1 = make_device("dup-host")  # site A
+        site_b = Site.objects.create(name="merge-site-b", slug="merge-site-b")
+        # Second device sharing the name in a different site (names are unique only per-site),
+        # so Device.objects.filter(name__iexact="dup-host").first() is arbitrary.
+        Device.objects.create(name="dup-host", device_type=d1.device_type, role=d1.role, site=site_b, status="active")
+        # Unique serial peer carrying a LibreNMS link so the "at least one side linked" guard
+        # would otherwise let the merge fire.
+        make_device("serial-peer", serial="SER1", librenms_cf={"default": {"id": 99}})
+
+        libre = {
+            "device_id": 1,
+            "hostname": "dup-host",
+            "sysName": "dup-host",
+            "hardware": "-",
+            "serial": "SER1",
+            "os": "-",
+            "location": "-",
+        }
+        result = self._validate(libre)
+
+        assert any("Multiple NetBox devices share hostname 'dup-host'" in w for w in result["warnings"])
+        assert not result.get("merge_candidates")

@@ -14,7 +14,15 @@ def _qs_returning(rows):
     test double must support slice indexing rather than ``.first()``.
     """
     qs = MagicMock()
-    qs.__getitem__.return_value = rows
+
+    def _getitem(key):
+        # find_by_librenms_id must slice exactly [:2] — assert the contract so a regression
+        # to [:1] (or any other slice) fails loudly instead of silently passing the
+        # duplicate-match tests this helper is meant to protect.
+        assert key == slice(None, 2), f"expected [:2] slice, got {key!r}"
+        return rows
+
+    qs.__getitem__.side_effect = _getitem
     return qs
 
 

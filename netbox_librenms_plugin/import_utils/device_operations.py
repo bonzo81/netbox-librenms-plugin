@@ -752,10 +752,30 @@ def validate_device_for_import(
                     and result.get("existing_device") is not None
                     and result.get("existing_match_type") in ("hostname", "serial")
                 ):
-                    _hostname_match = (
-                        result["existing_device"] if result.get("existing_match_type") == "hostname" else None
-                    )
-                    _serial_match = result["existing_device"] if result.get("existing_match_type") == "serial" else None
+                    # The CURRENT side comes from result["existing_device"], which an earlier
+                    # hostname/serial match set via .first() — so with duplicate NetBox names or
+                    # serials it could be an arbitrary row, pairing the user with the wrong merge
+                    # target. Re-validate the current side with the same UNIQUE [:2] guard used for
+                    # the peer below: keep it as a candidate only when exactly one row matches,
+                    # otherwise skip the merge suggestion and warn.
+                    _hostname_match = None
+                    _serial_match = None
+                    if result.get("existing_match_type") == "hostname" and hostname:
+                        _hostname_peers = list(Device.objects.filter(name__iexact=hostname)[:2])
+                        if len(_hostname_peers) == 1:
+                            _hostname_match = _hostname_peers[0]
+                        elif len(_hostname_peers) > 1:
+                            result["warnings"].append(
+                                f"Multiple NetBox devices share hostname '{hostname}'; merge suggestion skipped."
+                            )
+                    elif result.get("existing_match_type") == "serial":
+                        _serial_peers = list(Device.objects.filter(serial=_serial_for_pair)[:2])
+                        if len(_serial_peers) == 1:
+                            _serial_match = _serial_peers[0]
+                        elif len(_serial_peers) > 1:
+                            result["warnings"].append(
+                                f"Multiple NetBox devices share serial '{_serial_for_pair}'; merge suggestion skipped."
+                            )
                     # Whichever path landed first, look the other one up too. Require a UNIQUE
                     # peer: serial isn't unique in NetBox (and names are only unique per site),
                     # so a bare .first() could pair the matched device with an arbitrary row and

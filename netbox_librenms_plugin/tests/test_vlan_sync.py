@@ -586,8 +586,11 @@ class TestVlanRefreshFailureClearsCache:
         view = object.__new__(BaseVLANTableView)
         view.get_object = MagicMock(return_value=MagicMock(pk=1))
         view._get_error_context = MagicMock(return_value={})
-        view.get_cache_key = MagicMock(return_value="ck")
-        view.get_last_fetched_key = MagicMock(return_value="lfk")
+        # Encode server_key into the mock keys so the delete-assertions actually prove the
+        # POSTed "prod" scope was used — a constant return ("ck"/"lfk") would pass even if the
+        # view evicted the wrong server's ("default") key.
+        view.get_cache_key = MagicMock(side_effect=lambda _obj, kind, server_key: f"{server_key}:{kind}")
+        view.get_last_fetched_key = MagicMock(side_effect=lambda _obj, kind, server_key: f"{server_key}:{kind}:last")
         view._librenms_api = MagicMock(server_key="default", cache_timeout=30)
         return view
 
@@ -616,13 +619,15 @@ class TestVlanRefreshFailureClearsCache:
         view, mock_cache = self._run(librenms_id=None, vlans_result=(True, []))
         view.get_cache_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
         view.get_last_fetched_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
-        mock_cache.delete.assert_any_call("ck")
-        mock_cache.delete.assert_any_call("lfk")
+        mock_cache.delete.assert_any_call("prod:vlans")
+        mock_cache.delete.assert_any_call("prod:vlans:last")
 
     def test_fetch_failure_evicts_scoped_cache(self):
         view, mock_cache = self._run(librenms_id=10, vlans_result=(False, "boom"))
-        mock_cache.delete.assert_any_call("ck")
-        mock_cache.delete.assert_any_call("lfk")
+        view.get_cache_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
+        view.get_last_fetched_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
+        mock_cache.delete.assert_any_call("prod:vlans")
+        mock_cache.delete.assert_any_call("prod:vlans:last")
 
 
 class TestVLANErrorContextServerKey:
