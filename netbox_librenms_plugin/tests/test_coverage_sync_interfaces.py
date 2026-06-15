@@ -296,6 +296,28 @@ class TestSyncInterfacesViewPost:
         mock_msgs.error.assert_called_once()
         mock_redirect.assert_called_once()
 
+    def test_sync_selected_interfaces_skips_oob_rows(self):
+        """OOB-controller rows are merged into the host list only for context and are never
+        routed to a real device. A main+OOB interface-name collision (both 'eth0') must sync
+        only the main row, or the OOB row would overwrite the host interface with its port_id."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        synced = []
+        view.sync_interface = lambda obj, port, ex, field: synced.append(port)
+        ports_data = [
+            {"ifName": "eth0", "port_id": 1, "_source": "main"},
+            {"ifName": "eth0", "port_id": 99, "_source": "oob"},
+        ]
+        with patch("netbox_librenms_plugin.views.sync.interfaces.transaction"):
+            view.sync_selected_interfaces(MagicMock(), ["eth0"], ports_data, [], "ifName")
+
+        # Pre-fix both same-named rows matched the selection and synced (the OOB row overwrote
+        # the host interface); now only the main row syncs.
+        assert len(synced) == 1
+        assert synced[0]["port_id"] == 1
+        assert synced[0]["_source"] == "main"
+
     def test_cache_miss_redirects(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 

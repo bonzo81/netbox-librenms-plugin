@@ -158,6 +158,13 @@ class SyncInterfacesView(
         """Create or update NetBox interfaces from LibreNMS port data."""
         with transaction.atomic():
             for port in ports_data:
+                # OOB-controller rows are merged into the host's interface list only for context
+                # (shared-LOM detection) and are never routed to a real target device by
+                # sync_interface(). They must not sync onto the host — and skipping them prevents
+                # a main/OOB interface-name collision (both "eth0") from double-processing one
+                # selection and overwriting the host interface with the OOB row's port_id/attrs.
+                if port.get("_source") == "oob":
+                    continue
                 port_name = port.get(interface_name_field)
 
                 if port_name in selected_interfaces:
