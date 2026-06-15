@@ -590,6 +590,26 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     return dev, "sysname"
             return None, None
 
+        # Fail closed on a CROSS-MODEL librenms_id collision before selecting a match — i.e.
+        # the same (server_key, librenms_id) bound to BOTH a Device and a VirtualMachine. A
+        # LibreNMS device_id is unique within a server, so this never happens in a clean state;
+        # it's a NetBox-side data-integrity hazard (custom fields have no cross-model uniqueness)
+        # from a stale/duplicate binding — e.g. a thing imported as a VM then re-imported as a
+        # Device without clearing the old VM link, or a manual CF edit. validate_device_for_import()
+        # already detects and blocks exactly this (see device_operations.py "Cross-model collision"),
+        # but _lookup_in_model(Model) here returns on the first preferred-model id hit and never
+        # consults CrossModel — so without this guard the refresh re-check would silently bind to
+        # one model and disagree with the validation path that originally blocked the row. Check
+        # both models and raise the existing ambiguous-id blocker when both resolve (single-model
+        # duplicates are already raised inside find_by_librenms_id).
+        if librenms_id is not None:
+            model_id_match = find_by_librenms_id(Model, librenms_id, server_key)
+            cross_id_match = find_by_librenms_id(CrossModel, librenms_id, server_key)
+            if model_id_match and cross_id_match:
+                raise AmbiguousLibreNMSIdError(
+                    f"LibreNMS ID {librenms_id} matches both {Model.__name__} and {CrossModel.__name__}"
+                )
+
         new_device, match_type = _lookup_in_model(Model)
 
         if not new_device:

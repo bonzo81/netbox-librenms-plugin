@@ -268,8 +268,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # call always records _links_fetch_error even though no host fetch was meaningfully
         # attempted. If the OOB controller validly returns no links, that's a *successful* empty
         # refresh — return [] so _prepare_context() overwrites the cache with the empty snapshot
-        # (otherwise stale OOB rows linger after a genuine empty refresh).
-        host_mapping_absent_but_oob_scoped = self.librenms_id is None and bool(oob and oob.get("id"))
+        # (otherwise stale OOB rows linger after a genuine empty refresh). But this exemption
+        # only holds when the OOB fetch itself SUCCEEDED: a failed/malformed OOB fetch
+        # (_oob_links_fetch_failed) on an OOB-only mapping collects zero rows too, and treating
+        # that as a successful empty refresh would overwrite the cache with [] and drop the
+        # very rows we couldn't re-fetch. So fall back to None (failure) in that case.
+        host_mapping_absent_but_oob_scoped = (
+            self.librenms_id is None and bool(oob and oob.get("id")) and not self._oob_links_fetch_failed
+        )
         if not links_data and self._links_fetch_error and not host_mapping_absent_but_oob_scoped:
             return None
         return links_data

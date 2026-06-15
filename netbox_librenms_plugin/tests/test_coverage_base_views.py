@@ -1460,6 +1460,11 @@ class TestBaseInterfaceTableViewPost:
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
             patch.object(view, "rebind_api_for_server", return_value="prod"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            # Pin the VC sync-device resolution to obj so lookup_device is deterministic
+            # (mirrors every sibling post() test); without it line 161 runs the real
+            # get_librenms_sync_device against a bare MagicMock and lookup_device becomes a
+            # fabricated mock rather than obj — the test would then pass only by accident.
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
             patch(
                 "netbox_librenms_plugin.views.base.interfaces_view.url_has_allowed_host_and_scheme",

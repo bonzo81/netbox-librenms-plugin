@@ -350,6 +350,48 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         assert view._links_fetch_error is not None
         assert view.librenms_id is None
 
+    def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):
+        """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded. If the OOB
+        controller fetch itself fails, the refresh collects zero rows too — but treating that
+        as a successful empty refresh would overwrite the cache with [] and drop the very OOB
+        rows we couldn't re-fetch. So a failed OOB fetch on an OOB-only mapping must return
+        None (failure), letting _prepare_context() keep the prior snapshot."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False
+
+        view._librenms_api.get_librenms_id.return_value = None
+
+        def _links(dev_id):
+            if dev_id is None:  # host fetch — no host mapping
+                return (False, {"error": "Device not found in LibreNMS"})
+            return (False, {"error": "OOB controller unreachable"})  # OOB fetch FAILS
+
+        view._librenms_api.get_device_links.side_effect = _links
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=obj,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_oob",
+                return_value={"id": 99},
+            ),
+        ):
+            result = view.get_links_data(obj)
+
+        # Failed OOB fetch ⇒ None (not []), so the stale cache snapshot survives.
+        assert result is None
+        # The failure flag was set by the OOB branch, which is what disqualifies the exemption.
+        assert view._oob_links_fetch_failed is True
+
 
 # =============================================================================
 # TestGetDeviceByIdOrNameEdgeCases  — MultipleObjectsReturned, FQDN fallback

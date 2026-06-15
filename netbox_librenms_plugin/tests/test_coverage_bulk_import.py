@@ -1112,6 +1112,39 @@ class TestRefreshExistingDevice:
         # An existing match is never import-ready.
         assert validation["can_import"] is False
 
+    def test_cross_model_librenms_id_collision_blocks_import(self):
+        """The same librenms_id assigned to BOTH a Device and a VirtualMachine is ambiguous:
+        validate_device_for_import() blocks it as a duplicate, so the refresh re-check must agree.
+        Without the cross-model collision guard, _lookup_in_model(Model) returns on the first
+        (preferred-model) id hit and never consults the other model — the row would silently bind
+        to the Device and could flip back to importable. With the guard, the refresh raises
+        AmbiguousLibreNMSIdError and the row is force-blocked with the ambiguous-id marker.
+
+        Driven against real Device + VM rows so find_by_librenms_id's JSON-containment query runs
+        on both models end-to-end (a mock pair would never surface a real cross-model collision)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            _AMBIGUOUS_LIBRENMS_ID_MARKER,
+            _refresh_existing_device,
+        )
+
+        make_device("collide-dev", librenms_cf={"default": {"id": 77}})
+        vm = make_vm("collide-vm")
+        vm.custom_field_data["librenms_id"] = {"default": {"id": 77}}
+        vm.save()
+
+        # Device path (import_as_vm=False) → Model=Device, CrossModel=VirtualMachine. The id 77
+        # resolves in BOTH, so the lookup must fail closed rather than bind to the Device.
+        validation = self._device_validation(resolved_name="collide-dev")
+        libre_device = {"device_id": 77, "hostname": "collide-dev", "sysName": "collide-dev"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["ambiguous_librenms_id"] is True
+        assert validation["existing_match_type"] == "ambiguous_librenms_id"
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+        assert any(_AMBIGUOUS_LIBRENMS_ID_MARKER in issue for issue in validation["issues"])
+
     def test_fresh_lookup_matches_by_primary_ip_blocks_import(self):
         """As above, but the existing NetBox device is reachable only via its management IP —
         the refresh must catch it (interface-assigned IP → device) and block the import."""
