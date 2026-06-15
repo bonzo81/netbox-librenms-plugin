@@ -293,6 +293,64 @@ class TestGetLinksDataPortNameNone:
         assert result[0]["local_port"] is None
 
 
+class TestGetLinksDataOobOnlyEmptyRefresh:
+    """OOB-only mapping (no host librenms_id) with a valid empty OOB result must return []
+    — not None — so _prepare_context() can overwrite the cache with the empty snapshot
+    rather than skip it and leave stale OOB rows behind after a genuine empty refresh."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        view.request = _mock_request()
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        return view
+
+    def test_oob_only_valid_empty_returns_empty_list_not_none(self):
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False  # no serial CSP rows to append
+
+        # OOB-only: no host librenms_id, so the host get_device_links() call fails and records
+        # _links_fetch_error even though no host fetch was meaningfully attempted; the OOB
+        # controller (id 99) validly returns no links.
+        view._librenms_api.get_librenms_id.return_value = None
+
+        def _links(dev_id):
+            if dev_id is None:  # host fetch — there is no host mapping
+                return (False, {"error": "Device not found in LibreNMS"})
+            return (True, {"links": []})  # OOB controller: valid, empty
+
+        view._librenms_api.get_device_links.side_effect = _links
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=obj,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_oob",
+                return_value={"id": 99},
+            ),
+        ):
+            result = view.get_links_data(obj)
+
+        # A successful empty OOB-only refresh yields [] (cacheable), not None (a mislabeled
+        # "fetch failure" that _prepare_context would refuse to cache).
+        assert result == []
+        # The host-fetch error WAS recorded (no host mapping) — proving the guard's None branch
+        # would have fired without the OOB-scoped exception.
+        assert view._links_fetch_error is not None
+        assert view.librenms_id is None
+
+
 # =============================================================================
 # TestGetDeviceByIdOrNameEdgeCases  — MultipleObjectsReturned, FQDN fallback
 # =============================================================================

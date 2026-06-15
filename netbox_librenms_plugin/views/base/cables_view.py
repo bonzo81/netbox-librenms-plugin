@@ -263,7 +263,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # malformed payload). An empty-but-valid host result, or OOB-failure with a host success,
         # records no host error and must return [] so the warning isn't dropped. Any collected
         # rows (host / OOB / serial) always come back.
-        if not links_data and self._links_fetch_error:
+        #
+        # Exception: an OOB-only mapping has no host librenms_id, so the host get_device_links()
+        # call always records _links_fetch_error even though no host fetch was meaningfully
+        # attempted. If the OOB controller validly returns no links, that's a *successful* empty
+        # refresh — return [] so _prepare_context() overwrites the cache with the empty snapshot
+        # (otherwise stale OOB rows linger after a genuine empty refresh).
+        host_mapping_absent_but_oob_scoped = self.librenms_id is None and bool(oob and oob.get("id"))
+        if not links_data and self._links_fetch_error and not host_mapping_absent_but_oob_scoped:
             return None
         return links_data
 
