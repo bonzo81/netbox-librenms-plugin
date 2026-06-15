@@ -1290,7 +1290,12 @@
                 // A nested dialog (e.g. the promote-to-host modal rendered inside
                 // #htmx-modal-content) owns Escape while it is open — let Bootstrap close
                 // the topmost child, don't tear down the whole validation modal underneath it.
-                if (document.querySelector('#htmx-modal-content .modal.show')) {
+                // Also gate on where the Escape originated: Bootstrap may strip `.show` from the
+                // nested modal before this listener runs (the `.modal.show` query would then miss
+                // and wrongly close the outer modal), but the event's origin is unaffected by that
+                // timing — so a keypress inside a nested modal still suppresses the outer close.
+                const eventStartedInNestedModal = event.target.closest('#htmx-modal-content .modal');
+                if (eventStartedInNestedModal || document.querySelector('#htmx-modal-content .modal.show')) {
                     return;
                 }
                 if (modalElement?.classList.contains('show')) {
