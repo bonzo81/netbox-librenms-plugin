@@ -1368,7 +1368,9 @@ class TestDeviceImportTableRenderActions:
                 "device_type_mismatch": False,
                 "name_sync_available": False,
                 "librenms_id_needs_migration": False,
-                "existing_librenms_link": {"host_id": 42, "oob_id": 99, "oob_type": "idrac"},
+                # oob_type comes from a user-editable custom field — use a value that REQUIRES
+                # escaping so the assertion below actually proves render_actions() escapes it.
+                "existing_librenms_link": {"host_id": 42, "oob_id": 99, "oob_type": "<idrac>"},
                 "virtual_chassis": None,
             },
         }
@@ -1381,7 +1383,9 @@ class TestDeviceImportTableRenderActions:
 
         assert "btn-outline-info" in result
         assert "mdi-server-network" in result
-        assert "Linked as host (paired OOB: LibreNMS #99, idrac)" in result
+        # The oob_type must be HTML-escaped in the title; the raw value must not leak through.
+        assert "Linked as host (paired OOB: LibreNMS #99, &lt;idrac&gt;)" in result
+        assert "<idrac>" not in result
 
 
 # ===========================================================================
