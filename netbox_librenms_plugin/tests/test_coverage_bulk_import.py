@@ -1086,6 +1086,32 @@ class TestRefreshExistingDevice:
         # The stale role-blocker issue must have been removed.
         assert all("role" not in issue.lower() for issue in validation["issues"])
 
+    def test_fresh_lookup_vm_clears_stale_cluster_blocker(self):
+        """A VM row resolves to an existing VM via a fresh name match (actual_is_vm=True). The
+        cached "Cluster must be manually selected" create-time blocker must be cleared — it only
+        applied while the row was an unmatched new import. The VM path previously cleared neither
+        the role nor the cluster blocker (both branches were gated on `not actual_is_vm`), so the
+        stale message lingered in the UI on every refresh."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        vm = make_vm("ref-vm-cluster-clear")
+        validation = self._vm_validation(
+            issues=["Cluster must be manually selected before importing as VM"],
+        )
+        # No librenms_id CF match; the VM is found by resolved_name → Model=VirtualMachine,
+        # found_as_cross_model=False → actual_is_vm=True (the branch that cleared nothing).
+        validation["resolved_name"] = vm.name
+        libre_device = {"device_id": 60, "hostname": "no-match", "sysName": "no-match"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == vm.pk
+        assert validation["import_as_vm"] is True
+        # The stale cluster-blocker issue must have been removed.
+        assert all("cluster" not in issue.lower() for issue in validation["issues"])
+        # An existing match is never import-ready.
+        assert validation["can_import"] is False
+
     def test_fresh_lookup_matches_by_primary_ip_blocks_import(self):
         """As above, but the existing NetBox device is reachable only via its management IP —
         the refresh must catch it (interface-assigned IP → device) and block the import."""

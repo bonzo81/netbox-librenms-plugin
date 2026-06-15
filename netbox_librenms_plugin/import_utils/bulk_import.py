@@ -638,6 +638,15 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # Determine actual model from the found object, not from import_as_vm flag
             actual_is_vm = found_as_cross_model != import_as_vm  # XOR: cross flips the flag
             validation["import_as_vm"] = actual_is_vm  # Update so future refreshes query correct model
+            # A row that was previously unmatched can carry create-time blockers — "Device role
+            # must be manually selected" and/or "Cluster must be manually selected" — that
+            # validate_device_for_import() only adds when there's no existing_device. Now that
+            # the row resolves to an existing object, none of those apply (and a cross-model
+            # match can carry the *other* model's blocker). Drop both before recalculating so a
+            # stale message doesn't linger in the UI; the row stays force-blocked as an existing
+            # match regardless. The VM path previously cleared neither.
+            remove_validation_issue(validation, "role")
+            remove_validation_issue(validation, "cluster")
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
                 apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:
@@ -646,10 +655,6 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     "role": None,
                     "available_roles": validation.get("device_role", {}).get("available_roles", []),
                 }
-                # A previously-unmatched row may still carry the "Device role must be manually
-                # selected before import" blocker; clear it now that the row resolves to an
-                # existing object, so the stale message doesn't linger in the UI.
-                remove_validation_issue(validation, "role")
             recalculate_validation_status(validation, is_vm=actual_is_vm)
             # Re-assert non-importable: recalculate sets can_import from issues list,
             # but a late-found existing match must never be import-ready.

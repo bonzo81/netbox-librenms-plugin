@@ -19,7 +19,7 @@ OOB linkage is recorded in the `librenms_id` [custom field](custom_field.md) alo
 
 - `id` — the LibreNMS device ID of the **host**.
 - `oob.id` — the LibreNMS device ID of the **OOB controller**.
-- `oob.type` — a short label for the controller (`drac`, `ilo`, `bmc`, `ipmi`, `cimc`, …), or the generic `oob` when the specific type can't be determined.
+- `oob.type` — a short label for the controller (`idrac`, `drac`, `ilo`, `bmc`, `ipmi`, `cimc`, …), or the generic `oob` when the specific type can't be determined.
 
 Only these identity essentials are stored. The controller's IP and firmware version are intentionally **not** persisted here — the IP's source of truth is the host Device's interface-assigned `oob_ip`, and the version lives in LibreNMS and can be read back any time from `oob.id`.
 
