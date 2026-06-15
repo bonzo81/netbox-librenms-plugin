@@ -1199,7 +1199,10 @@ function handleInterfaceChange(select, value) {
     // relationship metadata still belong to the previous member. Seed once from the originally
     // rendered <option selected> (the current NetBox assignment, which is verified).
     if (typeof select._lastVerifiedMember === 'undefined') {
-        select._lastVerifiedMember = select.querySelector('option[selected]')?.value ?? null;
+        // Fall back to select.value: a hydrated control can have a valid current value without a
+        // rendered option[selected] attribute. Without the fallback the baseline stays null and
+        // rollbackToLastVerified() leaves the row's LAG/parent buttons locked after a verify failure.
+        select._lastVerifiedMember = select.querySelector('option[selected]')?.value || select.value || null;
     }
 
     // Disable this row's LAG/parent sync buttons while the verify is in flight. A click landing
