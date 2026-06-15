@@ -43,17 +43,30 @@ def test_netbox_only_modal_hides_bulk_select_in_migrated_mode():
     on ``not migrated_to_marker``; this guards the rest of the conversion against regressing."""
     src = (TEMPLATES_DIR / "netbox_librenms_plugin" / "_interface_sync_content.html").read_text(encoding="utf-8")
 
-    def _guard_precedes(needle):
-        """The nearest ``{% if ... %}`` before *needle* must be the migrated guard."""
-        idx = src.index(needle)
-        before = src[:idx]
-        last_if = before.rfind("{% if ")
-        assert last_if != -1, f"no enclosing {{% if %}} before {needle!r}"
-        return "{% if not migrated_to_marker %}" in before[last_if:]
+    def _guard_precedes_all(needle):
+        """EVERY occurrence of *needle* must be immediately guarded by the migrated guard.
 
-    # Both bulk-select inputs must sit inside a `not migrated_to_marker` guard.
-    assert _guard_precedes('id="select-all-netbox-interfaces"')
-    assert _guard_precedes('name="interface_ids"')
+        Checking only the first match (``src.index``) would let a later unguarded duplicate
+        slip through — exactly the regression this test exists to catch — so iterate all of them.
+        ``last_if > last_endif`` ensures the nearest ``{% if %}`` is still open (not already
+        closed by an intervening ``{% endif %}``) before the needle.
+        """
+        idx = src.find(needle)
+        assert idx != -1, f"{needle!r} not found"
+        while idx != -1:
+            before = src[:idx]
+            last_if = before.rfind("{% if ")
+            last_endif = before.rfind("{% endif %}")
+            assert last_if > last_endif, f"no open {{% if %}} before {needle!r}"
+            assert "{% if not migrated_to_marker %}" in before[last_if:idx], (
+                f"{needle!r} occurrence at {idx} not guarded by `not migrated_to_marker`"
+            )
+            idx = src.find(needle, idx + len(needle))
+        return True
+
+    # Both bulk-select inputs must sit inside a `not migrated_to_marker` guard — every occurrence.
+    assert _guard_precedes_all('id="select-all-netbox-interfaces"')
+    assert _guard_precedes_all('name="interface_ids"')
     # Transfer-oriented copy must be present for migrated mode.
     assert "Migrated device:" in src
     assert "Use <em>Move</em>" in src

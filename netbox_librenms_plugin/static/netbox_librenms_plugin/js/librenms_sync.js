@@ -2387,9 +2387,9 @@ document.addEventListener('click', function (e) {
     const url = `/plugins/librenms_plugin/${objectType}/${objectId}/${urlSuffix}/`;
 
     const csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');
-    if (!csrfInput) {
-        // Fail fast: POSTing with an empty X-CSRFToken just yields a 403. Surface the cause
-        // instead of firing a state-changing request that can't succeed.
+    if (!csrfInput || !csrfInput.value) {
+        // Fail fast: a missing input OR an empty value both POST X-CSRFToken: "" → a guaranteed
+        // 403. Surface the cause instead of firing a state-changing request that can't succeed.
         btn.title = 'CSRF token not found. Please refresh the page and try again.';
         return;
     }
