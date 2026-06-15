@@ -1822,10 +1822,16 @@ class LibreNMSAPI:
                 all_sensors = result.get("sensors") or result.get("resources", [])
                 if not isinstance(all_sensors, list):
                     return False, result.get("message") or "Unexpected response format: missing sensor list"
+                # get_serial_port_sensors is an external boundary: a list payload doesn't
+                # guarantee every item is a dict. Skip non-dict rows so one malformed entry can't
+                # raise AttributeError on s.get() and escape as an unhandled exception instead of
+                # the usual (success, data) contract.
                 device_sensors = [
                     s
                     for s in all_sensors
-                    if str(s.get("device_id")) == str(device_id) and s.get("sensor_type") in AVOCENT_SENSOR_TYPES
+                    if isinstance(s, dict)
+                    and str(s.get("device_id")) == str(device_id)
+                    and s.get("sensor_type") in AVOCENT_SENSOR_TYPES
                 ]
                 return True, device_sensors
             if isinstance(result, dict):

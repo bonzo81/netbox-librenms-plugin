@@ -31,7 +31,7 @@ AVOCENT_SENSOR_TYPES = frozenset({"acsSerialPortTable"})
 _INDEX_SUFFIX_RE = re.compile(r"\.(\d+)$")
 
 
-def parse_port_number(sensor_index: str) -> int | None:
+def parse_port_number(sensor_index: str | None) -> int | None:
     """
     Extract the trailing integer from a sensor_index string.
 
@@ -40,8 +40,11 @@ def parse_port_number(sensor_index: str) -> int | None:
         "acsSerialPortTableStatus.7"  -> 7
         "acsSerialPortTableStatus.49" -> 49
         "invalid"                     -> None
+
+    A non-string ``sensor_index`` (``None`` or e.g. an int from a malformed payload)
+    is coerced to ``str`` so the regex search can't raise ``TypeError``.
     """
-    m = _INDEX_SUFFIX_RE.search(sensor_index or "")
+    m = _INDEX_SUFFIX_RE.search(str(sensor_index or ""))
     return int(m.group(1)) if m else None
 
 
@@ -83,7 +86,16 @@ def map_sensors_to_serial_links(
     links = []
 
     for sensor in sensors:
+        # Harden against malformed LibreNMS rows so one bad record can't crash mapping and
+        # drop ALL serial rows: skip non-dicts, rows missing sensor_id, unparseable indices,
+        # and coerce a non-string sensor_descr before stripping its suffix.
+        if not isinstance(sensor, dict):
+            continue
         if sensor.get("sensor_type") not in AVOCENT_SENSOR_TYPES:
+            continue
+
+        sensor_id = sensor.get("sensor_id")
+        if sensor_id is None:
             continue
 
         port_num = parse_port_number(sensor.get("sensor_index", ""))
@@ -91,18 +103,19 @@ def map_sensors_to_serial_links(
             continue
 
         local_port = port_name_pattern.replace("{N}", str(port_num))
-        label = strip_status_suffix(sensor.get("sensor_descr", ""))
+        raw_descr = sensor.get("sensor_descr")
+        label = strip_status_suffix(raw_descr if isinstance(raw_descr, str) else "")
 
         links.append(
             {
                 "local_port": local_port,
-                "local_port_id": f"serial:{sensor['sensor_id']}",
+                "local_port_id": f"serial:{sensor_id}",
                 "remote_device": label,
                 "remote_port": None,
                 "remote_device_id": None,
                 "is_configured": label != local_port,
                 "_source": "serial",
-                "sensor_id": sensor["sensor_id"],
+                "sensor_id": sensor_id,
                 "sensor_index_int": port_num,
             }
         )

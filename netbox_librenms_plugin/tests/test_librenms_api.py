@@ -3167,6 +3167,20 @@ class TestGetSerialPortSensors:
         assert all(s["device_id"] == 12 for s in data)
         assert all(s["sensor_type"] == "acsSerialPortTable" for s in data)
 
+    def test_non_dict_sensor_item_does_not_crash(self, mock_librenms_api, mock_response_factory):
+        """A list payload doesn't guarantee dict items. A non-dict entry must be skipped, not
+        raise AttributeError on s.get() and escape the (success, data) contract."""
+        import unittest.mock as mock
+
+        sensors = ["bad-string", None, self._make_sensor(12, port_num=7)]
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+        with mock.patch("requests.get", return_value=mock_resp):
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert len(data) == 1
+        assert data[0]["device_id"] == 12
+
     def test_empty_sensor_list_returns_empty(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock
 

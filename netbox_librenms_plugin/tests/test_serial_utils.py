@@ -182,6 +182,54 @@ class TestMapSensorsToSerialLinks:
         assert map_sensors_to_serial_links([]) == []
 
 
+class TestMapSensorsMalformedRows:
+    """A single malformed LibreNMS sensor row must not crash mapping and drop ALL serial rows.
+    Each bad-row shape is skipped; the valid row in the same batch still maps."""
+
+    def _valid(self, port=7, sid=7007):
+        return {
+            "sensor_id": sid,
+            "device_id": 12,
+            "sensor_type": "acsSerialPortTable",
+            "sensor_index": f"acsSerialPortTableStatus.{port}",
+            "sensor_descr": f"box-{port} Status",
+            "sensor_current": 2,
+            "group": "Serial Ports",
+        }
+
+    def test_non_dict_row_skipped(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        links = map_sensors_to_serial_links(["not-a-dict", None, self._valid()])
+        assert [r["sensor_id"] for r in links] == [7007]
+
+    def test_missing_sensor_id_skipped(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        bad = self._valid()
+        del bad["sensor_id"]
+        links = map_sensors_to_serial_links([bad, self._valid(port=8, sid=7008)])
+        assert [r["sensor_id"] for r in links] == [7008]
+
+    def test_non_string_sensor_descr_does_not_crash(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        bad = self._valid(port=9, sid=7009)
+        bad["sensor_descr"] = None  # malformed: not a string
+        links = map_sensors_to_serial_links([bad])
+        assert len(links) == 1
+        # Falls back to an empty label (so it reads as the default-named, unconfigured port).
+        assert links[0]["remote_device"] == ""
+
+    def test_non_string_sensor_index_does_not_crash(self):
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        bad = self._valid(port=10, sid=7010)
+        bad["sensor_index"] = 5  # malformed: int, not "….N" string → unparseable, skipped
+        links = map_sensors_to_serial_links([bad, self._valid(port=11, sid=7011)])
+        assert [r["sensor_id"] for r in links] == [7011]
+
+
 class TestMapSensorsWithFixture:
     """Integration-style tests using the captured device-12 (ACS6048) fixture."""
 
