@@ -633,6 +633,51 @@ class TestProcessRemoteDevice:
         assert result["can_create_cable"] is False
 
 
+class TestCablePostHostFetchWarning:
+    """post() must warn when the host LLDP fetch failed but OOB/serial rows still made the
+    refresh look successful — otherwise host cables are silently omitted under a success banner.
+    A host failure is expected (and not warned) for an OOB-only device (librenms_id is None)."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        view.partial_template_name = "x.html"
+        view._librenms_api = MagicMock(server_key="default")
+        view.get_object = MagicMock(return_value=MagicMock(pk=1))
+        view.rebind_api_for_server = MagicMock(return_value="default")
+        return view
+
+    def _run(self, *, links_fetch_error, librenms_id):
+        view = self._make_view()
+        request = MagicMock()
+        request.POST.get.return_value = "default"
+
+        def _prep(*a, **k):
+            # Mirror get_links_data recording a host failure while other rows kept it "successful".
+            view._links_fetch_error = links_fetch_error
+            view.librenms_id = librenms_id
+            return {"object": MagicMock(), "table": MagicMock(), "server_key": "default"}
+
+        view._prepare_context = MagicMock(side_effect=_prep)
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_msgs,
+            patch("netbox_librenms_plugin.views.base.cables_view.render"),
+            patch("netbox_librenms_plugin.views.base.cables_view.build_migrated_context", return_value={}),
+        ):
+            view.post(request, pk=1)
+        return [c.args[1] for c in mock_msgs.warning.call_args_list]
+
+    def test_warns_on_host_fetch_failure_with_rows(self):
+        warn_texts = self._run(links_fetch_error="auth failed", librenms_id=42)
+        assert any("host links fetch failed" in t for t in warn_texts)
+
+    def test_no_host_warning_for_oob_only_device(self):
+        # librenms_id is None → a host fetch "failure" is expected, not surfaced as a warning.
+        warn_texts = self._run(links_fetch_error="device not found", librenms_id=None)
+        assert not any("host links fetch failed" in t for t in warn_texts)
+
+
 # =============================================================================
 # TestGetTableOverride  — BaseCableTableView.get_table (lines 302-305)
 # =============================================================================

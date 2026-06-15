@@ -590,6 +590,21 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             )
 
         messages.success(request, "Cable data refreshed successfully.")
+        # A host LLDP failure no longer aborts the refresh (OOB/serial rows can still surface it
+        # as "successful"), so warn when the host fetch failed but we had a host id to query —
+        # otherwise host-side cables are silently omitted under a success banner. Skip for an
+        # OOB-only device (librenms_id is None), where a host fetch failure is expected.
+        if getattr(self, "_links_fetch_error", None) and getattr(self, "librenms_id", None) is not None:
+            logger.warning(
+                "Host links fetch failed for device %s: %s",
+                self.librenms_id,
+                self._links_fetch_error,
+            )
+            messages.warning(
+                request,
+                "Cables refreshed, but host links fetch failed; showing available cable rows only. "
+                "See server logs for details.",
+            )
         if getattr(self, "_oob_links_fetch_failed", False):
             messages.warning(
                 request,
