@@ -801,6 +801,9 @@ class TestCreateAndAssignPlatformView:
         # The mapping must point the posted OS at the reused existing platform — pin both so a
         # regression that maps to the wrong platform (or swaps the args) is caught.
         mock_mapping_cls.assert_called_once_with(librenms_os="ios", netbox_platform=existing_platform)
+        # Validate-before-save, same as the new-platform path: a regression that persists an
+        # unvalidated mapping must be caught.
+        mock_mapping_instance.full_clean.assert_called_once()
         mock_mapping_instance.save.assert_called_once()
         # The locked device must be assigned the existing platform (not left untouched).
         assert mock_locked.platform is existing_platform
@@ -1107,6 +1110,10 @@ class TestCreateAndAssignPlatformView:
         # no error/rollback. The save() assertion guards against a regression that wires
         # up the FK but skips persistence.
         mock_msg.error.assert_not_called()
+        # Nested atomic() boundaries isolate the Platform.save() that may raise IntegrityError so
+        # the outer transaction stays usable for the re-query. The mock makes atomic() a no-op, so
+        # a single-atomic regression would otherwise still pass — pin the nesting explicitly.
+        assert mock_txn.atomic.call_count >= 2
         mock_txn.set_rollback.assert_not_called()
         assert mock_locked.platform is reused_platform
         mock_locked.save.assert_called_once()
@@ -1230,6 +1237,9 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
 
+        # Prove the write-site permission check actually ran (so the skip is due to the TOCTOU
+        # re-check, not some unrelated path), then that no mapping was created and the user warned.
+        req.user.has_perm.assert_any_call(mapping_add_perm)
         # No mapping created without permission, and the user is told why.
         mock_mapping_cls.assert_not_called()
         assert any("not created" in c.args[1] for c in mock_msg.warning.call_args_list)

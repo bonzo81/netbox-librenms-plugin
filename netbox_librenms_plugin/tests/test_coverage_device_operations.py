@@ -867,6 +867,30 @@ class TestImportSingleDevice:
         assert result["success"] is False
         assert "role" in result["error"].lower()
 
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
+    def test_ambiguous_librenms_id_blocks_create_even_with_manual_mappings(self, MockAPI):
+        """An ambiguous librenms_id (validate sets existing_device=None + ambiguous_librenms_id=True)
+        must NOT create a device, even when manual_mappings supply site/type/role — the create path
+        had only an existing_device guard, so a manual import could bypass the fail-closed state.
+        Real-DB: assert the Device table is untouched (the guard returns before any create)."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        before = Device.objects.count()
+        result = import_single_device(
+            1,
+            server_key="default",
+            validation={"ambiguous_librenms_id": True, "existing_device": None},
+            manual_mappings={"site_id": 1, "device_type_id": 1, "device_role_id": 1},
+            libre_device=self._make_libre_device(),
+        )
+        assert result["success"] is False
+        assert result["device"] is None
+        assert "ambiguous" in result["error"].lower()
+        assert Device.objects.count() == before
+
 
 class TestValidateDeviceForImportEdgeCases:
     """Additional edge case tests to cover missing lines."""

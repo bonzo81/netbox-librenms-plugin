@@ -1224,6 +1224,19 @@ def import_single_device(
                 "synced": {},
             }
 
+        # Hard fail-closed guard: an ambiguous librenms_id (matches >1 NetBox record) is the
+        # terminal blocker — validate_device_for_import() sets existing_device=None for it, so the
+        # check above doesn't catch it, and a manual_mappings import would otherwise create a
+        # duplicate Device under the ambiguous id. Block the create outright.
+        if validation.get("ambiguous_librenms_id"):
+            return {
+                "success": False,
+                "device": None,
+                "message": "",
+                "error": "Import blocked: ambiguous LibreNMS ID matches multiple NetBox records.",
+                "synced": {},
+            }
+
         # Use validation-derived matches, allow manual mappings to override specific fields
         site = validation["site"].get("site")
         device_type = validation["device_type"].get("device_type")
