@@ -557,6 +557,23 @@ class TestApplyMergeCandidates:
         )
         assert result["can_import"] is False
 
+    def test_sets_is_ready_false(self):
+        """Merge mode blocks import, so a stale is_ready=True (e.g. left over from hostname-first
+        row processing) must be cleared in lockstep with can_import — otherwise the row carries
+        contradictory state (is_ready=True while merge blocks import)."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["is_ready"] = True
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge needed",
+        )
+        assert result["is_ready"] is False
+        assert result["can_import"] is False
+
     def test_resets_stale_warnings_to_merge_warning(self):
         from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
 

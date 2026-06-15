@@ -960,8 +960,13 @@ class TestRefreshExistingDevice:
         assert validation["existing_device"] is None
         assert validation["existing_match_type"] is None
         assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
-        assert validation["can_import"] is True  # no issues
-        assert validation["is_ready"] is False  # device_role.found is now False
+        # The dropped match is back in the "new import" path with no role selected, so the
+        # create-time role blocker is re-asserted (matching the fresh-lookup path) — can_import
+        # is False, not just is_ready. (Pre-fix this branch left it importable when libre_device
+        # was None, inconsistent with the same scenario when libre_device is present.)
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+        assert any("role" in issue.lower() for issue in validation["issues"])
 
     def test_deleted_device_clears_stale_match_derived_actions(self):
         """When the matched device is deleted, serial/OOB/merge/promote actions derived from it
@@ -1022,8 +1027,9 @@ class TestRefreshExistingDevice:
         assert validation["is_ready"] is False
 
     def test_deleted_vm_recomputes_readiness_from_cluster(self):
-        """VM deleted → the match-derived cluster is reset (found=False); with no blocking
-        issues the row is importable but not ready until a fresh cluster is chosen."""
+        """VM deleted → the match-derived cluster is reset (found=False) and the row is back in
+        the new-import path. The create-time cluster blocker is re-asserted (matching the
+        fresh-lookup path), so can_import is False until a fresh cluster is chosen."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         vm = make_vm("ref-vm-recompute")
@@ -1033,8 +1039,9 @@ class TestRefreshExistingDevice:
         _refresh_existing_device(validation)
 
         assert validation["existing_device"] is None
-        assert validation["can_import"] is True  # no blocking issues
+        assert validation["can_import"] is False  # cluster blocker re-asserted
         assert validation["is_ready"] is False  # not ready until a fresh cluster is selected
+        assert any("cluster" in issue.lower() for issue in validation["issues"])
 
     def test_deleted_vm_not_ready_when_no_cluster(self):
         """Deleted VM with a blocking issue → can_import False and is_ready False."""
@@ -1144,6 +1151,24 @@ class TestRefreshExistingDevice:
         assert validation["can_import"] is False
         assert validation["is_ready"] is False
         assert any(_AMBIGUOUS_LIBRENMS_ID_MARKER in issue for issue in validation["issues"])
+
+    def test_vanished_link_with_no_libre_device_stays_blocked(self):
+        """Fail-closed: a cached librenms_id match whose link vanished in NetBox, refreshed with
+        libre_device=None, drops the match and recomputes readiness — then the fresh lookup
+        early-returns (no libre_device). The create-time role blocker must be re-asserted in the
+        drop branch so the row can't flip to importable with no role selected. Real-DB: the device
+        has no librenms_id CF, so _refresh_librenms_linkage clears the (stale) librenms_id match."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("vanished-link-dev")  # no librenms_id CF → linkage re-derive finds no link
+        validation = self._device_validation(existing_device=dev, existing_match_type="librenms_id")
+
+        _refresh_existing_device(validation, libre_device=None, server_key="default")
+
+        # Match dropped (link gone) + no role selected ⇒ must stay blocked, with the role blocker
+        # present (recomputed readiness alone, without the re-assert, would let it go importable).
+        assert validation["can_import"] is False
+        assert any("role" in issue.lower() for issue in validation["issues"])
 
     def test_fresh_lookup_matches_by_primary_ip_blocks_import(self):
         """As above, but the existing NetBox device is reachable only via its management IP —

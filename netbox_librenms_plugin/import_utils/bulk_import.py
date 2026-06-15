@@ -476,6 +476,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                             "cluster": None,
                             "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
                         }
+                    # Fail-closed: this branch drops the vanished-link match and recomputes
+                    # readiness, then falls through to the fresh lookup that would normally re-add
+                    # the create-time role/cluster blocker. But the fresh lookup early-returns when
+                    # libre_device is None (and its broad except can swallow), so re-assert here too
+                    # — otherwise the row can stay importable with no role/cluster selected.
+                    _reassert_new_import_blockers(validation)
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                 else:
                     if hasattr(refreshed, "role") and refreshed.role:
@@ -521,6 +527,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                         "cluster": None,
                         "available_clusters": validation.get("cluster", {}).get("available_clusters", []),
                     }
+                # Same fail-closed reasoning as the vanished-link branch above: re-assert the
+                # create-time blocker before recompute so a deleted-match row can't stay importable
+                # if the fresh lookup early-returns (libre_device None) or its except swallows.
+                _reassert_new_import_blockers(validation)
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"

@@ -1453,12 +1453,16 @@ class TestBaseInterfaceTableViewPost:
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
+        # Seed the POSTed server_key so the test proves post() actually reads the submitted key:
+        # without it, request.POST is empty and rebind returns "prod" for any input, so a
+        # regression that stopped reading the key would still pass.
+        request.POST = {"server_key": "prod"}
         view._librenms_api.get_librenms_id.return_value = None
 
         with (
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "get_redirect_url", return_value="/device/1/"),
-            patch.object(view, "rebind_api_for_server", return_value="prod"),
+            patch.object(view, "rebind_api_for_server", return_value="prod") as mock_rebind,
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             # Pin the VC sync-device resolution to obj so lookup_device is deterministic
             # (mirrors every sibling post() test); without it line 161 runs the real
@@ -1475,7 +1479,9 @@ class TestBaseInterfaceTableViewPost:
             mock_redirect.return_value = MagicMock()
             view.post(request, pk=1)
 
-        # The barrier must be consulted, and on rejection the tainted server_key is dropped.
+        # post() must read the POSTed server_key (proving the redirect candidate really is
+        # POST-derived), then the barrier must be consulted and the tainted key dropped on reject.
+        mock_rebind.assert_called_once_with("prod")
         mock_barrier.assert_called_once()
         mock_redirect.assert_called_once_with("/device/1/")
 

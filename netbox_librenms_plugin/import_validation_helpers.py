@@ -212,6 +212,10 @@ def apply_merge_candidates(
         "oob_named": oob_named,
     }
     result["can_import"] = False
+    # Keep readiness in lockstep with can_import: an earlier path (e.g. hostname-first row
+    # processing) may have set is_ready=True, which would otherwise leave contradictory state
+    # (is_ready=True while merge mode blocks import).
+    result["is_ready"] = False
     result["oob_candidate"] = None
     # Clear earlier serial-conflict state so the merge path is the single source of truth:
     # a hostname-first row may have already set serial_duplicate / serial_confirmed, which
