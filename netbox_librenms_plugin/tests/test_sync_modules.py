@@ -5662,3 +5662,41 @@ class TestModuleInterfaceUpdateMessage:
     def test_zero_adopted_count_treated_as_bind_only(self):
         msg = self._msg({"status": "bound", "interface": "Et1/1", "adopted_count": 0})
         assert msg == "Updated interface Et1/1 for QSFP-100G in Bay 1."
+
+
+class TestReplaceModuleRedirectServerKey:
+    """ReplaceModuleView computes `server_key = POST or self.librenms_api.server_key`, so its
+    redirects must pass that computed key — otherwise the helper falls back to POST/GET only and
+    drops the active-server context when the POST field is absent, landing on a blank/default
+    modules tab and reading/mutating a different cache namespace."""
+
+    def _run_missing_module_id(self):
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        view = object.__new__(ReplaceModuleView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        mock_api = MagicMock(server_key="prod")
+
+        request = MagicMock()
+        # POST carries no server_key and no module_id → fallback to api.server_key, then the
+        # int(module_id) parse fails and we hit the early "Missing or invalid" redirect.
+        request.POST.get.return_value = None
+        request.headers.get.return_value = "true"  # HX-Request → HX-Redirect header
+
+        with (
+            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=MagicMock(pk=1)),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules._resolve_target_device_with_validation",
+                return_value=(MagicMock(), False),
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/url/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+        ):
+            return view.post(request, pk=1)
+
+    def test_missing_module_id_redirect_preserves_fallback_server_key(self):
+        resp = self._run_missing_module_id()
+        # Pre-fix the redirect dropped the computed fallback (POST had no server_key); now it
+        # carries server_key=prod so the action stays on the active server's modules tab.
+        assert "server_key=prod" in resp["HX-Redirect"]

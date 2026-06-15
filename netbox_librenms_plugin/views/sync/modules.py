@@ -1273,13 +1273,13 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             skipped.append(f"{result['name']}: {bind_result['reason']}")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Install failed: {e}")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         if invalid_selection_seen:
             _warn_invalid_selected_device(request)
 
         _report_install_results(request, installed, skipped, failed)
-        return _modules_redirect_response(request, sync_url)
+        return _modules_redirect_response(request, sync_url, server_key)
 
 
 class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -1649,7 +1649,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             ent_index_int = int(request.POST.get("ent_index"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module_id/ent_index.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         installed_module = get_object_or_404(
             Module.objects.select_related("module_type", "module_bay"),
@@ -1662,7 +1662,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         librenms_item = next(
             (item for item in cached_data if item.get("entPhysicalIndex") == ent_index_int),
@@ -1670,7 +1670,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         )
         if not librenms_item:
             messages.error(request, "Inventory item not found in cache.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         model_name = (librenms_item.get("entPhysicalModelName") or "").strip()
         serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
@@ -1685,7 +1685,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         if not matched_type:
             messages.error(request, f"No matching module type found for '{model_name}'.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         try:
             conflict_removed_msg = None
@@ -1702,7 +1702,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
                 if not installed_module:
                     messages.error(request, "Module no longer exists.")
-                    return _modules_redirect_response(request, sync_url)
+                    return _modules_redirect_response(request, sync_url, server_key)
 
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
@@ -1812,7 +1812,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
             messages.error(request, f"Replace failed: {error_msg}")
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_redirect_response(request, sync_url, server_key)
 
 
 class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
