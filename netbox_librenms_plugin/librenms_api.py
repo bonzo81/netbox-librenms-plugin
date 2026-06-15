@@ -681,8 +681,11 @@ class LibreNMSAPI:
         for pattern_str in lag_patterns.values():
             try:
                 compiled_patterns.append(_re.compile(pattern_str))
-            except _re.error:
-                pass
+            except _re.error as exc:
+                # A configured PortStackLagPattern with a typo'd regex is skipped rather than
+                # crashing relationship resolution — but log it so the user can tell why LAG
+                # detection silently isn't working for that OS.
+                logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
         lag_members: dict = {}
         sub_interfaces: dict = {}

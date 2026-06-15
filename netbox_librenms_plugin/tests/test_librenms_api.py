@@ -2457,3 +2457,22 @@ class TestResolvePortRelationships:
 
         result = mock_librenms_api.resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1])
         assert result["lag_members"] == {301: 302}
+
+    def test_invalid_lag_pattern_is_skipped_and_logged(self, mock_librenms_api, caplog):
+        """A configured LAG pattern that isn't valid regex is skipped (it must not crash
+        relationship resolution) AND logged at WARNING — otherwise a user with a typo in their
+        PortStackLagPattern has no way to tell why LAG detection silently isn't working for that
+        OS. Driven through the real method with an explicit invalid pattern (no DB needed)."""
+        import logging
+
+        bad = "([unterminated"  # invalid regex → re.error on compile
+        with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.librenms_api"):
+            result = mock_librenms_api.resolve_port_relationships(
+                NOKIA_PORTS, NOKIA_PORT_STACK[:1], lag_patterns={"junos": bad}
+            )
+        # Resolution still completes: the LAG is matched structurally (ieee8023adLag ifType),
+        # independent of the broken name pattern.
+        assert result["lag_members"] == {101: 102}
+        # The invalid pattern was reported at WARNING, naming the offending pattern string.
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(bad in r.getMessage() for r in warnings)
