@@ -113,7 +113,10 @@ def map_sensors_to_serial_links(
                 "remote_device": label,
                 "remote_port": None,
                 "remote_device_id": None,
-                "is_configured": label != local_port,
+                # An empty label (missing/non-string sensor_descr, normalized to "") is NOT a
+                # customised name — guard with bool(label) so malformed rows aren't marked
+                # configured just because "" != the default port name.
+                "is_configured": bool(label) and label != local_port,
                 "_source": "serial",
                 "sensor_id": sensor_id,
                 "sensor_index_int": port_num,

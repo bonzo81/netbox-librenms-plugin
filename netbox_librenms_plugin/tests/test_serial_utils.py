@@ -220,6 +220,9 @@ class TestMapSensorsMalformedRows:
         assert len(links) == 1
         # Falls back to an empty label (so it reads as the default-named, unconfigured port).
         assert links[0]["remote_device"] == ""
+        # An empty label must NOT count as configured ("" != local_port is True, so the
+        # is_configured flag must guard on bool(label)).
+        assert links[0]["is_configured"] is False
 
     def test_non_string_sensor_index_does_not_crash(self):
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
@@ -233,8 +236,12 @@ class TestMapSensorsMalformedRows:
 class TestMapSensorsWithFixture:
     """Integration-style tests using the captured device-12 (ACS6048) fixture."""
 
+    # @staticmethod (not an instance method): a class-scoped fixture defined as a plain method
+    # is deprecated (PytestRemovedIn10Warning) because pytest runs it on a different instance
+    # than the tests. It uses neither self nor cls, so staticmethod is the correct form.
     @pytest.fixture(scope="class")
-    def fixture_sensors(self):
+    @staticmethod
+    def fixture_sensors():
         return _load_fixture()
 
     def test_fixture_loads_49_sensors(self, fixture_sensors):
