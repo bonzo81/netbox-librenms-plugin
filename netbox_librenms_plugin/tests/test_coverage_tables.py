@@ -1902,6 +1902,57 @@ class TestRelationshipSyncObjectType:
         assert 'data-object-type="virtualmachine"' in html
 
 
+class TestParentColumnContainsLagButton:
+    """Regression guard for the 'refresh the LAG cell after VC-member verification' review note.
+
+    There is NO separate ``data-col="lag"`` cell: ``render_parent`` renders BOTH the LAG button
+    (``lag-sync-btn`` carrying ``data-lag-port-id``) and the Parent button into the single combined
+    ``data-col="parent"`` column. The verify-interface response enriches the row then returns
+    ``formatted_row["parent"]`` (re-rendered via render_parent), and librenms_sync.js repaints the
+    whole ``td[data-col="parent"]`` innerHTML — so the LAG button (and its data-lag-port-id) is
+    already refreshed for the newly selected VC member. A ``formatted_row.lag`` / ``td[data-col=
+    "lag"]`` refresh would be a dead no-op (no such key/cell exist)."""
+
+    def _table(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(
+                data=[], device=MagicMock(pk=3, virtual_chassis=None), interface_name_field="ifName"
+            )
+        table.migrated_to_marker = False  # inline sync buttons active
+        return table
+
+    def test_render_parent_emits_lag_button_with_port_id_in_same_cell(self):
+        table = self._table()
+        record = {
+            "port_id": 5,
+            "ifName": "eth0",
+            "netbox_interface": None,
+            "selected_object_id": 3,
+            "selected_object_type": "device",
+            # Both relationship halves present and unsynced → both buttons render.
+            "lag_sync_status": "missing_nb",
+            "librenms_lag_name": "ae0",
+            "librenms_lag_port_id": 111,
+            "parent_sync_status": "missing_nb",
+            "librenms_parent_name": "eth-parent",
+            "librenms_parent_port_id": 222,
+        }
+        html = str(table.render_parent(None, record))
+        # Both buttons live in the single combined column render_parent produces.
+        assert "lag-sync-btn" in html
+        assert 'data-lag-port-id="111"' in html
+        assert "parent-sync-btn" in html
+        assert 'data-parent-port-id="222"' in html
+
+    def test_no_standalone_lag_column_exists(self):
+        table = self._table()
+        col_names = [c.name for c in table.columns]
+        assert "parent" in col_names  # the combined Parent/LAG column
+        assert "lag" not in col_names  # there is no separate LAG cell for JS to target
+
+
 class TestMigratedModeSuppressesRelationshipButton:
     """On a migrated donor page the per-row LAG/parent sync button must be suppressed: it
     POSTs directly via librenms_sync.js, so a live button would let a migrated donor mutate
