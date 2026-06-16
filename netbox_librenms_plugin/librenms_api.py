@@ -1819,7 +1819,16 @@ class LibreNMSAPI:
 
             result = response.json()
             if isinstance(result, dict) and result.get("status") == "ok":
-                all_sensors = result.get("sensors") or result.get("resources", [])
+                # Select by key presence first, then validate the selected value. The old
+                # `result.get("sensors") or result.get("resources", [])` turned a missing list
+                # ({"status": "ok"}) or a falsy-but-present one ({"sensors": ""}) into [], so a
+                # malformed response was reported as a successful zero-sensor result.
+                if "sensors" in result:
+                    all_sensors = result["sensors"]
+                elif "resources" in result:
+                    all_sensors = result["resources"]
+                else:
+                    return False, result.get("message") or "Unexpected response format: missing sensor list"
                 if not isinstance(all_sensors, list):
                     return False, result.get("message") or "Unexpected response format: missing sensor list"
                 # get_serial_port_sensors is an external boundary: a list payload doesn't

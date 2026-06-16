@@ -3191,16 +3191,30 @@ class TestGetSerialPortSensors:
         assert success is True
         assert data == []
 
-    def test_missing_sensors_key_returns_empty(self, mock_librenms_api, mock_response_factory):
-        """When 'sensors' key is absent but status=ok, fall back to empty list (not an error)."""
+    def test_missing_sensors_key_returns_failure(self, mock_librenms_api, mock_response_factory):
+        """status=ok but neither 'sensors' nor 'resources' present is a malformed response, not a
+        successful zero-sensor result. The old `get('sensors') or get('resources', [])` collapsed
+        it to [] (silent success); now it must return (False, message)."""
         import unittest.mock as mock
 
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "message": "no sensors key"})
         with mock.patch("requests.get", return_value=mock_resp):
-            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
-        assert success is True
-        assert data == []
+        assert success is False
+        assert "no sensors key" in msg
+
+    def test_falsy_present_sensors_value_returns_failure(self, mock_librenms_api, mock_response_factory):
+        """A present-but-non-list 'sensors' (e.g. "") must fail, not be coerced to an empty
+        success — the old `get(...) or get(...)` treated "" as falsy and fell through to []."""
+        import unittest.mock as mock
+
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": ""})
+        with mock.patch("requests.get", return_value=mock_resp):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "missing sensor list" in msg.lower()
 
     def test_non_ok_status_returns_error(self, mock_librenms_api, mock_response_factory):
         import unittest.mock as mock
