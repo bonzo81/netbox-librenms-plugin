@@ -2202,6 +2202,24 @@ class TestGetPortStack:
         assert success is False
         assert "Invalid JSON" in data
 
+    def test_json_decode_error_reports_invalid_json_not_connection_error(self, mock_librenms_api):
+        """requests.exceptions.JSONDecodeError subclasses BOTH ValueError and RequestException, so
+        the ValueError handler must precede the RequestException handler — otherwise a JSON decode
+        failure is swallowed by the broad handler and mislabeled 'Error connecting to LibreNMS'."""
+        from unittest.mock import MagicMock, patch
+
+        import requests as _requests
+
+        fake_response = MagicMock()
+        fake_response.raise_for_status = MagicMock()
+        fake_response.json.side_effect = _requests.exceptions.JSONDecodeError("Expecting value", "", 0)
+        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+            success, data = mock_librenms_api.get_port_stack(5)
+
+        assert success is False
+        assert "Invalid JSON" in data
+        assert "Error connecting" not in data
+
     def test_malformed_mappings_fails_not_empty(self, mock_librenms_api):
         """A non-list (or list-of-non-dicts) `mappings` is malformed, not 'no relationships'.
         It must fail the call so sync doesn't silently skip valid updates."""

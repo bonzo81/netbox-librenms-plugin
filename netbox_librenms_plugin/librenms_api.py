@@ -599,12 +599,14 @@ class LibreNMSAPI:
             if e.response.status_code == 404:
                 return False, "Device not found in LibreNMS"
             return False, f"HTTP error: {str(e)}"
+        except ValueError as e:
+            # response.json() raises ValueError (older requests) / JSONDecodeError on a non-JSON
+            # body. requests.exceptions.JSONDecodeError subclasses BOTH ValueError and
+            # RequestException, so this must precede the RequestException handler — otherwise the
+            # broad handler swallows JSON decode failures and reports "Error connecting" instead.
+            return False, f"Invalid JSON from LibreNMS: {str(e)}"
         except requests.exceptions.RequestException as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
-        except ValueError as e:
-            # response.json() raises ValueError (older requests) / JSONDecodeError on a
-            # non-JSON body; return the usual (False, error) tuple instead of escaping.
-            return False, f"Invalid JSON from LibreNMS: {str(e)}"
 
     def resolve_port_relationships(
         self,
