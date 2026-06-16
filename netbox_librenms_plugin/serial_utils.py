@@ -66,6 +66,7 @@ def strip_status_suffix(descr: str) -> str:
 def map_sensors_to_serial_links(
     sensors: list[dict],
     port_name_pattern: str = "ttyS{N}",
+    device_id=None,
 ) -> list[dict]:
     """
     Convert a list of LibreNMS sensor records to serial cable-sync link rows.
@@ -79,6 +80,10 @@ def map_sensors_to_serial_links(
             ``LibreNMSAPI.get_serial_port_sensors()``.
         port_name_pattern: Template for the local ConsoleServerPort name.
             ``{N}`` is replaced with the port number.  Default ``"ttyS{N}"``.
+        device_id: NetBox device id for the host these serial ports belong to.
+            Included in each row so the row is self-sufficient for
+            ``LibreNMSCableTable.Meta.row_attrs`` (which reads ``record["device_id"]``)
+            even before ``enrich_links_data`` runs, avoiding a render-time KeyError.
 
     Returns:
         List of link-row dicts sorted by port number (ascending).
@@ -110,6 +115,7 @@ def map_sensors_to_serial_links(
             {
                 "local_port": local_port,
                 "local_port_id": f"serial:{sensor_id}",
+                "device_id": device_id,
                 "remote_device": label,
                 "remote_port": None,
                 "remote_device_id": None,

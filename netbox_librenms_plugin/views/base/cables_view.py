@@ -500,7 +500,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
             serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(self.librenms_id)
             if serial_success and serial_sensors:
-                links_data.extend(map_sensors_to_serial_links(serial_sensors))
+                links_data.extend(map_sensors_to_serial_links(serial_sensors, device_id=obj.id))
 
         # Distinguish a *successful* zero-row refresh ([] — flows through to the success path in
         # _prepare_context(), where an OOB-fetch warning can still be surfaced) from a genuine

@@ -88,6 +88,59 @@ class TestMapSensorsToSerialLinks:
         assert row["_source"] == "serial"
         assert row["sensor_id"] == 1975
         assert row["sensor_index_int"] == 11
+        # device_id defaults to None when the caller doesn't supply it.
+        assert row["device_id"] is None
+
+    def test_device_id_threaded_into_rows(self):
+        """The caller's NetBox device_id is carried on each row so the cable table's row_attrs
+        (record["device_id"]) is satisfied even before enrich_links_data runs."""
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        sensors = [
+            {
+                "sensor_id": 7007,
+                "device_id": 12,
+                "sensor_type": "acsSerialPortTable",
+                "sensor_index": "acsSerialPortTableStatus.7",
+                "sensor_descr": "host-7 Status",
+                "sensor_current": 2,
+                "group": "Serial Ports",
+            }
+        ]
+        links = map_sensors_to_serial_links(sensors, device_id=55)
+        assert links[0]["device_id"] == 55
+
+    @pytest.mark.django_db
+    def test_serial_row_renders_in_cable_table_without_keyerror(self):
+        """End-to-end: a serial row must render in LibreNMSCableTable. row_attrs reads
+        record["device_id"] per row at render time — without it the table raises KeyError."""
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        dev = make_device("serial-tbl-dev")
+        rows = map_sensors_to_serial_links(
+            [
+                {
+                    "sensor_id": 7007,
+                    "device_id": 12,
+                    "sensor_type": "acsSerialPortTable",
+                    "sensor_index": "acsSerialPortTableStatus.7",
+                    "sensor_descr": "host-7 Status",
+                    "sensor_current": 2,
+                    "group": "Serial Ports",
+                }
+            ],
+            device_id=dev.id,
+        )
+        table = LibreNMSCableTable(rows, device=dev)
+        request = RequestFactory().get("/")
+        RequestConfig(request).configure(table)
+        html = table.as_html(request)  # evaluates row_attrs (record["device_id"]) per row
+        assert f'data-device="{dev.id}"' in html
 
     def test_default_named_port_is_not_configured(self):
         """A port whose label still equals the default name (ttyS49) is unconfigured."""
