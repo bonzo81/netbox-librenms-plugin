@@ -391,6 +391,26 @@ class TestMergeTransceiverDataPortIdentity:
         mock_cache.delete.assert_called_once_with("test_cache_key")
         view._librenms_api.get_ports.assert_not_called()  # bad inventory short-circuits before ports fetch
 
+    def test_get_context_data_rejects_malformed_cached_inventory(self):
+        """post() now fails closed on malformed inventory before caching, but a stale pre-fix
+        cache entry like {"inventory": [None]} can still be read. get_context_data() must mirror
+        the list-of-dicts guard: drop the stale entry and return a no-table context rather than
+        passing [None] to _build_context(), which crashes on item.get(...)."""
+        view = _make_view()
+        obj = MagicMock()
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._build_context = MagicMock()  # must NOT be reached for a malformed payload
+        request = MagicMock()
+
+        with patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache:
+            mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
+            result = view.get_context_data(request, obj)
+
+        view._build_context.assert_not_called()
+        mock_cache.delete.assert_called_once_with("test_cache_key")
+        assert result["table"] is None
+        assert result["object"] is obj
+
     def test_post_warns_when_ports_fetch_fails(self):
         view = _make_view()
         view.model = MagicMock()

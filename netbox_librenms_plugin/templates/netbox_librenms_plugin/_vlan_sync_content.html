@@ -25,10 +25,12 @@
       action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}">
 {% endwith %}
 {% endif %}
-    {# CSRF + server_key must render in BOTH modes: the VLAN verify JS (librenms_sync.js
-       verify-vlan-group / verify-vlan-sync-group) reads document.querySelector('[name=csrfmiddlewaretoken]')
-       and posts server_key, and the VLAN table is interactive in migrated mode too. Only the
-       form-submit action input is form-only, so it stays gated. #}
+    {% comment %}
+    CSRF + server_key must render in BOTH modes: the VLAN verify JS (librenms_sync.js
+    verify-vlan-group / verify-vlan-sync-group) reads document.querySelector('[name=csrfmiddlewaretoken]')
+    and posts server_key, and the VLAN table is interactive in migrated mode too. Only the
+    form-submit action input is form-only, so it stays gated.
+    {% endcomment %}
     {% csrf_token %}
     {% if vlan_sync.server_key %}<input type="hidden" name="server_key" value="{{ vlan_sync.server_key }}">{% endif %}
     {% if not migrated_to_marker %}

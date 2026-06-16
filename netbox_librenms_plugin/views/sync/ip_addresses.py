@@ -76,7 +76,23 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
         else:
             url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
-        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        # Resolve the server_key to scope the redirect back to a working tab. Prefer the
+        # POST-resolved key, then the already-bound _librenms_api (avoids reconstructing a
+        # client). Only when nothing is bound — the failed-rebind path, where rebind returned
+        # None — fall back to the librenms_api property to resolve the active/default server, but
+        # swallow a construction failure (a misconfigured default) so we still redirect
+        # gracefully instead of raising. The redirect must carry the resolved server_key (see
+        # test_unknown_server_key_errors_without_500), so a bare _librenms_api read isn't enough.
+        server_key = getattr(self, "_post_server_key", None)
+        if not server_key:
+            bound = getattr(self, "_librenms_api", None)
+            if bound is not None:
+                server_key = getattr(bound, "server_key", None)
+            else:
+                try:
+                    server_key = self.librenms_api.server_key
+                except Exception:  # a redirect helper must degrade, never 500 (misconfigured default)
+                    server_key = None
         url = f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
         if server_key:
             url += f"&server_key={quote_plus(server_key)}"

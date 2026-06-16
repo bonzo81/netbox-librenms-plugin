@@ -1669,6 +1669,31 @@ class TestSyncIPAddressesViewGetIpTabUrl:
             url = view.get_ip_tab_url(mock_obj)
         assert "myserver" in url
 
+    def test_unbound_api_misconfigured_default_degrades_without_500(self):
+        """On the failed-rebind redirect path _librenms_api is unbound, so get_ip_tab_url resolves
+        the active/default server via the librenms_api property (the redirect must carry the
+        resolved server_key — see test_unknown_server_key_errors_without_500). But if even the
+        default is misconfigured and the property raises, the helper must degrade to a bare tab URL
+        rather than 500."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        view = _make_view(SyncIPAddressesView)
+        view._librenms_api = None  # failed rebind left it unbound
+        # _post_server_key intentionally unset — the redirect happens before it's assigned.
+        mock_obj = MagicMock()
+        mock_obj.__class__ = Device
+        mock_obj.pk = 7
+        with (
+            # The property constructs the default client → a misconfigured default raises.
+            patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI", side_effect=KeyError("ghost")),
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/fake/"),
+        ):
+            url = view.get_ip_tab_url(mock_obj)  # must not raise
+        assert "tab=ipaddresses" in url
+        assert "server_key" not in url
+
 
 class TestSyncIPAddressesViewPost:
     def test_permission_denied_returns_early(self):

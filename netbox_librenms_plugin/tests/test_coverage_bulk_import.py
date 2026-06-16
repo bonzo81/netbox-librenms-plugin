@@ -943,6 +943,34 @@ class TestRefreshExistingDevice:
         assert any("role" in issue.lower() for issue in validation["issues"])
         assert validation["can_import"] is False
 
+    def test_missing_scanned_id_preserves_live_librenms_link(self):
+        """A missing scanned device_id is NOT proof the link disappeared. When the current scan
+        payload omits/malforms ``device_id`` (so ``scanned_id`` is None) but the DB still carries
+        the librenms_id host link, the cached ``librenms_id`` match must be preserved — not
+        cleared to None. Pre-fix the else-branch wiped a still-valid match whenever the scan row
+        lacked a device_id."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
+
+        dev = make_device("ref-live-link", librenms_cf={"default": {"id": 50}})
+        validation = self._device_validation(existing_device=dev, existing_match_type="librenms_id")
+
+        # libre_device with no usable device_id → scanned_id is None.
+        _refresh_librenms_linkage(validation, dev, {"hostname": "h"}, "default")
+
+        assert validation["existing_match_type"] == "librenms_id"
+
+    def test_missing_scanned_id_with_gone_link_clears_match(self):
+        """The companion case: when scanned_id is None AND the DB linkage is genuinely gone
+        (no host_id, no oob_id), the stale librenms badge IS dropped."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
+
+        dev = make_device("ref-gone-link")  # no librenms_id CF → host_id/oob_id both None
+        validation = self._device_validation(existing_device=dev, existing_match_type="librenms_id")
+
+        _refresh_librenms_linkage(validation, dev, {"hostname": "h"}, "default")
+
+        assert validation["existing_match_type"] is None
+
     # ------------------------------------------------------------------
     # Deleted match → readiness recompute
     # ------------------------------------------------------------------
@@ -1092,6 +1120,30 @@ class TestRefreshExistingDevice:
         assert validation["existing_device"].pk == dev.pk
         # The stale role-blocker issue must have been removed.
         assert all("role" not in issue.lower() for issue in validation["issues"])
+
+    def test_fresh_lookup_clears_stale_site_and_device_type_blockers(self):
+        """A previously-unmatched row can carry create-time "No matching site…" / "No matching
+        device type…" blockers (device_operations.py). When a fresh lookup resolves it to an
+        existing device, those blockers no longer apply and must be cleared too — not just
+        role/cluster — or the validation detail stays inconsistent with the resolved match."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-serial-site-dt", serial="ABC125")
+        validation = self._device_validation(
+            issues=[
+                "No matching site found for location: 'BasementX'",
+                "No matching device type found for hardware: 'WidgetX'",
+            ],
+        )
+        libre_device = {"device_id": 52, "hostname": "h", "sysName": "h", "serial": "ABC125"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        # Both stale create-time blockers cleared.
+        assert all("site" not in issue.lower() for issue in validation["issues"])
+        assert all("device type" not in issue.lower() for issue in validation["issues"])
+        assert validation["can_import"] is False
 
     def test_fresh_lookup_vm_clears_stale_cluster_blocker(self):
         """A VM row resolves to an existing VM via a fresh name match (actual_is_vm=True). The

@@ -364,6 +364,14 @@ def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, serv
     # match types untouched.
     if validation.get("existing_match_type") in ("librenms_id", "librenms_oob"):
         scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
+        if scanned_id is None:
+            # The current scan didn't return a usable device_id (libre_device omitted or
+            # malformed). A missing scanned id is NOT proof the link disappeared — only drop
+            # the cached match when the DB linkage itself is gone; otherwise leave the prior
+            # match type until there's a real id to compare against.
+            if link["host_id"] is None and link["oob_id"] is None:
+                validation["existing_match_type"] = None
+            return
         oob = get_librenms_oob(device, server_key=server_key)
         oob_id = coerce_librenms_id(oob.get("id")) if oob else None
         if scanned_id is not None and oob_id is not None and oob_id == scanned_id:
@@ -677,6 +685,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # match regardless. The VM path previously cleared neither.
             remove_validation_issue(validation, "role")
             remove_validation_issue(validation, "cluster")
+            # A cached new-import row can also carry "No matching site found…" / "No matching
+            # device type found…" create-time blockers (device_operations.py). They don't apply
+            # to a now-resolved existing match either, so clear them too or the validation detail
+            # stays inconsistent with the resolved match.
+            remove_validation_issue(validation, "site")
+            remove_validation_issue(validation, "device type")
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
                 apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:

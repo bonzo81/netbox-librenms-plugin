@@ -802,8 +802,19 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             requested = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
         if not requested:
             # Form omitted server_key — fall back to the active API server the action ran
-            # against, so a non-default-server user isn't dropped onto the default tab.
-            requested = (getattr(self.librenms_api, "server_key", "") or "").strip()
+            # against, so a non-default-server user isn't dropped onto the default tab. Prefer the
+            # already-bound _librenms_api; only when nothing is bound (e.g. after a failed rebind
+            # that returned None) fall back to the property to resolve the default server, but
+            # swallow a construction failure (misconfigured default) so the redirect degrades
+            # gracefully instead of re-raising.
+            bound = getattr(self, "_librenms_api", None)
+            if bound is not None:
+                requested = (getattr(bound, "server_key", "") or "").strip()
+            else:
+                try:
+                    requested = (getattr(self.librenms_api, "server_key", "") or "").strip()
+                except Exception:  # a redirect helper must degrade, never 500 (misconfigured default)
+                    requested = ""
         # Re-source the matched key from the trusted config rather than echoing the raw
         # request value, then gate the redirect on url_has_allowed_host_and_scheme.
         server_key = (

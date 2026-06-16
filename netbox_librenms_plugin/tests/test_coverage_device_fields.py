@@ -2059,6 +2059,25 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         assert "evil.com" not in url
         assert "server_key" not in url
 
+    def test_sync_url_unbound_api_misconfigured_default_degrades_without_500(self):
+        """On a redirect after a failed rebind, _librenms_api is unbound (None) and the request
+        carries no server_key. The fallback resolves the default server via the librenms_api
+        property, but if even the default is misconfigured (property construction raises) the
+        helper must degrade to a bare URL rather than 500."""
+        view = self._view()
+        view._librenms_api = None
+        view.request = MagicMock()
+        view.request.POST = {}
+        view.request.GET = {}
+        with (
+            # Property constructs the default client → misconfigured default raises.
+            patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI", side_effect=KeyError("ghost")),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)  # must not raise
+        (url,), _ = mock_redir.call_args
+        assert "server_key" not in url
+
     def test_sync_url_drops_server_key_when_url_validation_fails(self):
         """Even for an allowlisted server_key, if url_has_allowed_host_and_scheme rejects the
         candidate (the CodeQL open-redirect barrier), fall back to the bare URL. Mocking the

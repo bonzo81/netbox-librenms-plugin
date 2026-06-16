@@ -489,6 +489,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
+        # post() fails closed on malformed inventory before caching, but a stale pre-fix cache
+        # entry (e.g. {"inventory": [None]}) can still reach _build_context() and crash on
+        # item.get(...). Mirror the list-of-dicts guard on the read path too.
+        cached_inventory = cached_payload.get("inventory")
+        if not isinstance(cached_inventory, list) or any(not isinstance(item, dict) for item in cached_inventory):
+            cache.delete(cache_key)
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
         current_librenms_id = self.librenms_api.get_librenms_id(sync_device)

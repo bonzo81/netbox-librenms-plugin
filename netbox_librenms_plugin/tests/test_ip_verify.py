@@ -191,3 +191,23 @@ class TestNumericIDValidation:
         payload = json.loads(response.content)
         assert payload["status"] == "error"
         assert payload["message"] == "Invalid VRF ID"
+
+    def test_float_object_id_rejected_as_invalid(self):
+        # A JSON float device_id=1.9 would otherwise int()-truncate to 1 and bind device #1.
+        # The explicit float guard must reject it with a clean 400 instead.
+        view = _make_view()
+        request = _make_request({"device_id": 1.9, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"
+
+    def test_float_vrf_id_rejected_as_invalid(self):
+        # vrf_id=2.5 would otherwise int()-truncate to 2 and validate as VRF #2.
+        view = _make_view()
+        request = _make_request({"device_id": 5, "vrf_id": 2.5, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        assert payload["message"] == "Invalid VRF ID"

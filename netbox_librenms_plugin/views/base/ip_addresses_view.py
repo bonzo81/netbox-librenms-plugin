@@ -564,6 +564,10 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             # and object_id=False would be misreported as "No object ID provided".
             if isinstance(object_id, bool):
                 return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
+            # Reject JSON floats too: int(1.9) silently truncates to 1, so a fractional id
+            # would coerce to a different object instead of returning a clean 400.
+            if isinstance(object_id, float):
+                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
 
             if not object_id:
                 return JsonResponse({"status": "error", "message": "No object ID provided"}, status=400)
@@ -577,6 +581,8 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             if vrf_id in (None, ""):
                 vrf_id = None
             elif isinstance(vrf_id, bool):
+                return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
+            elif isinstance(vrf_id, float):
                 return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
             else:
                 try:

@@ -29,6 +29,15 @@
         </button>
     </div>
 </form>
+{% elif migrated_to_marker %}
+{% comment %}
+Install form is dropped in migrated mode, but module VC-member changes still POST
+/verify-module/ via handleModuleChange(), which reads csrfmiddlewaretoken + server_key.
+Emit them as standalone hidden inputs so the verify fetch keeps working — mirrors the
+interface/IP/VLAN fragments.
+{% endcomment %}
+<input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+<input type="hidden" name="server_key" value="{{ module_sync.server_key|default:'' }}">
 {% endif %}
 <div class="card">
     {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}

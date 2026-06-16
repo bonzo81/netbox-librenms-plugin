@@ -58,8 +58,10 @@
             <code>{{ migrated_to_marker.server_key }}</code>.
         </div>
         {% if migrated_to_winner and has_write_permission and object|meta:"model_name" == "device" %}
-        {# device_transfer_ip resolves a Device by pk; this template also serves VMs, so gate the
-           transfer buttons to Device pages or a same-pk Device could be mutated by mistake. #}
+        {% comment %}
+        device_transfer_ip resolves a Device by pk; this template also serves VMs, so gate the
+        transfer buttons to Device pages or a same-pk Device could be mutated by mistake.
+        {% endcomment %}
         <div class="mt-2 d-flex gap-2 flex-wrap">
             {% if object.primary_ip4 %}
             <button type="button" class="btn btn-sm btn-outline-warning"
