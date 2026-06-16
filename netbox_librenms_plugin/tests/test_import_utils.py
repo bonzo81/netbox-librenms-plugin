@@ -6067,7 +6067,10 @@ class TestDeviceValidationDetailsTemplate:
         return get_template("netbox_librenms_plugin/htmx/device_validation_details.html").template.source
 
     def test_full_sync_link_includes_active_server_key(self):
+        import re
+
         src = self._source()
         assert "Full Sync Page" in src
-        # The href must conditionally append the active, url-encoded server_key.
-        assert "server_key={{ server_key|urlencode }}" in src
+        # The href must conditionally append the active, url-encoded server_key. Match
+        # whitespace-tolerantly so harmless template formatting changes don't fail this.
+        assert re.search(r"server_key=\{\{\s*server_key\s*\|\s*urlencode\s*\}\}", src)

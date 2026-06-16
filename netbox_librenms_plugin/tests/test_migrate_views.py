@@ -185,6 +185,7 @@ def _hx_request(post=None):
     req.POST = MagicMock()
     req.POST.get = lambda k, d=None: post.get(k, d)
     req.headers = {"HX-Request": "true"}
+    req.htmx = True  # pin branch intent: implementations may check `if request.htmx`
     req.META = {"HTTP_REFERER": "/back"}
     req.user = MagicMock(is_superuser=True)
     return req
@@ -807,6 +808,7 @@ def _nonhtmx_request(post=None, referer=None):
     req.POST = MagicMock()
     req.POST.get = lambda k, d=None: post.get(k, d)
     req.headers = {}  # no HX-Request -> the degraded redirect path
+    req.htmx = False  # pin branch intent: a bare MagicMock.htmx is truthy and would mis-route
     req.META = {"HTTP_REFERER": referer} if referer else {}
     req.get_host = lambda: "testserver"
     req.is_secure = lambda: False

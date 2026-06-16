@@ -496,15 +496,12 @@ class DeviceImportTable(tables.Table):
                 btn_class = "btn-outline-info"
                 btn_icon = "mdi-chip"
                 btn_label = " OOB"
-                if paired_host_id is not None:
-                    try:
-                        paired_host_id_int = int(paired_host_id)
-                    except (TypeError, ValueError):
-                        paired_host_id_int = None
-                    if paired_host_id_int is not None:
-                        btn_title = f"Linked as OOB controller (paired host: LibreNMS #{paired_host_id_int})"
-                    else:
-                        btn_title = "Linked as OOB controller"
+                # Use the same strict coercion as the host-half branch (rejects bool/float) so the
+                # OOB-linked and host-half titles share one ID contract — a malformed paired id
+                # isn't shown as a bogus "LibreNMS #1".
+                paired_host_id_int = _coerce_pair_id(paired_host_id) if paired_host_id is not None else None
+                if paired_host_id_int is not None:
+                    btn_title = f"Linked as OOB controller (paired host: LibreNMS #{paired_host_id_int})"
                 else:
                     btn_title = "Linked as OOB controller"
             elif has_mismatch:
