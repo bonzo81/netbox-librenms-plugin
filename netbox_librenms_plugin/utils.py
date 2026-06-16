@@ -91,6 +91,23 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
         return device
 
 
+def get_virtual_chassis_members(device: Device) -> list:
+    """Return all member Devices of *device*'s virtual chassis (including *device* itself),
+    or ``[device]`` when it isn't in a virtual chassis.
+
+    Centralizes VC member expansion so callers don't hand-roll
+    ``device.virtual_chassis.members.values_list(...)`` and can't drift on which members are
+    considered. LibreNMS treats a virtual chassis as one logical device, so member-spanning
+    lookups (e.g. resolving an interface/IP that may live on another member) must always
+    consider the full member set this returns.
+    """
+    vc = getattr(device, "virtual_chassis", None)
+    members = getattr(vc, "members", None) if vc is not None else None
+    if members is None or not hasattr(members, "all"):
+        return [device]
+    return list(members.all())
+
+
 def get_vc_member_positions(device: Device) -> set[int]:
     """Return known VC member positions for a device, including the device itself."""
     positions = set()

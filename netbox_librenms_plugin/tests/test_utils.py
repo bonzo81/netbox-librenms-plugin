@@ -8,6 +8,8 @@ platform matching, and conversion helper functions.
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # =============================================================================
 # TestDeviceTypeMatching - 5 tests
 # =============================================================================
@@ -386,6 +388,33 @@ class TestVirtualChassisHelpers:
         result = get_virtual_chassis_member(mock_netbox_device, "Ethernet1")
 
         assert result == mock_netbox_device
+
+    @pytest.mark.django_db
+    def test_get_virtual_chassis_members_real_vc(self):
+        """get_virtual_chassis_members returns every member Device for a VC device (from either
+        member's perspective) and just [device] for a standalone one."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import get_virtual_chassis_members
+
+        solo = make_device("vcm-solo")
+        assert get_virtual_chassis_members(solo) == [solo]
+
+        vc = VirtualChassis.objects.create(name="vcm-vc")
+        m1 = make_device("vcm-1")
+        m1.virtual_chassis = vc
+        m1.vc_position = 1
+        m1.save()
+        m2 = make_device("vcm-2")
+        m2.virtual_chassis = vc
+        m2.vc_position = 2
+        m2.save()
+        vc.master = m1
+        vc.save()
+
+        assert {d.pk for d in get_virtual_chassis_members(m1)} == {m1.pk, m2.pk}
+        assert {d.pk for d in get_virtual_chassis_members(m2)} == {m1.pk, m2.pk}
 
     def test_get_virtual_chassis_member_with_vc(self):
         """Device with VC returns correct member."""

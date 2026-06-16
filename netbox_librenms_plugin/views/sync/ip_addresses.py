@@ -14,6 +14,7 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
+    get_virtual_chassis_members,
     resolve_set_primary_ip,
     same_host,
 )
@@ -152,9 +153,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         duplicate port ids are, so a same-named interface on another member can't silently rebind
         the address to the wrong interface.
         """
-        if isinstance(obj, Device) and getattr(obj, "virtual_chassis", None):
-            member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
-            interfaces = list(Interface.objects.filter(device__in=member_ids))
+        if isinstance(obj, Device):
+            # Route member expansion through the shared helper (returns [obj] when not in a VC)
+            # so this can't drift from the VC member set used by the interface-sync path.
+            member_devices = get_virtual_chassis_members(obj)
+            interfaces = list(Interface.objects.filter(device__in=member_devices))
         else:
             interfaces = list(obj.interfaces.all())
         by_librenms_id = {}

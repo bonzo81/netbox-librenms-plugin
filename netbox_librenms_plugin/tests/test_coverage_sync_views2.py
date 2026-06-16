@@ -1451,6 +1451,73 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert results["created"] == ["10.0.0.1"]
         assert results["primary_no_interface"] == []
 
+    # --- Virtual-chassis member resolution (characterization: behavior must NOT drift when the
+    #     manual member expansion is routed through the shared helper) ---------------------------
+
+    @staticmethod
+    def _make_vc(name, positions):
+        """Build a real VirtualChassis with one member Device per position. Returns (vc, {pos: dev})."""
+        from dcim.models import VirtualChassis
+
+        vc = VirtualChassis.objects.create(name=name)
+        members = {}
+        for pos in positions:
+            dev = make_device(f"{name}-m{pos}")
+            dev.virtual_chassis = vc
+            dev.vc_position = pos
+            dev.save()
+            members[pos] = dev
+        vc.master = members[positions[0]]
+        vc.save()
+        return vc, members
+
+    def test_build_interface_maps_indexes_all_vc_members(self):
+        """LibreNMS treats a VC as one logical device, so a member's IP can resolve to an
+        interface on ANOTHER member: _build_interface_maps(viewed_member) must index every
+        member's interfaces, keyed by their stored LibreNMS port id."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        _vc, members = self._make_vc("ipres-vc", [1, 2])
+        m1, m2 = members[1], members[2]
+        i1 = make_interface(m1, "Ethernet1")
+        i2 = make_interface(m2, "Ethernet2")
+        set_librenms_device_id(i1, 101, "default")
+        set_librenms_device_id(i2, 202, "default")
+        i1.save()
+        i2.save()
+
+        # Build the maps from the viewed member m1 — m2's interface must still be present.
+        by_id, by_name = self._view()._build_interface_maps(m1, "default")
+
+        assert by_id["101"].pk == i1.pk
+        assert by_id["202"].pk == i2.pk  # cross-member: resolved from a different member
+        assert by_name["Ethernet1"].pk == i1.pk
+        assert by_name["Ethernet2"].pk == i2.pk
+
+    def test_build_interface_maps_marks_cross_member_duplicate_name_ambiguous(self):
+        """A name shared by interfaces on two VC members can't silently rebind the address —
+        mark it ambiguous (None), the same fail-safe as a duplicate port id."""
+        _vc, members = self._make_vc("ipres-vcdup", [1, 2])
+        make_interface(members[1], "Ethernet1")
+        make_interface(members[2], "Ethernet1")  # same name on another member
+
+        _by_id, by_name = self._view()._build_interface_maps(members[1], "default")
+
+        assert by_name["Ethernet1"] is None  # ambiguous across members → fail safe
+
+    def test_build_interface_maps_non_vc_device_only_its_own_interfaces(self):
+        """A standalone (non-VC) device must index only its own interfaces — not another
+        device's same-named interface."""
+        dev = make_device("ipres-standalone")
+        other = make_device("ipres-other")
+        own = make_interface(dev, "Ethernet1")
+        make_interface(other, "Ethernet1")  # unrelated device, must NOT appear
+
+        _by_id, by_name = self._view()._build_interface_maps(dev, "default")
+
+        assert set(by_name) == {"Ethernet1"}
+        assert by_name["Ethernet1"].pk == own.pk
+
 
 # ===========================================================================
 # views/sync/vlans.py — SyncVLANsView
