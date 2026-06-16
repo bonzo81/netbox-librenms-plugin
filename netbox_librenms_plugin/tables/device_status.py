@@ -475,7 +475,10 @@ class DeviceImportTable(tables.Table):
             has_name_sync = validation.get("name_sync_available", False)
             has_sync_needed = match_type == "librenms_id" and serial_action in ("update_serial", "conflict")
 
-            existing_link = validation.get("existing_librenms_link") or {}
+            existing_link = validation.get("existing_librenms_link")
+            if not isinstance(existing_link, dict):
+                # Malformed payload must not break the actions-column render for the page.
+                existing_link = {}
             paired_oob_id = existing_link.get("oob_id")
             paired_host_id = existing_link.get("host_id")
             paired_oob_type = existing_link.get("oob_type") or "OOB"

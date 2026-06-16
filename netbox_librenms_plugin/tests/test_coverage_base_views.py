@@ -207,6 +207,10 @@ class TestBaseCableTableViewGetLinksData:
         links fetch fails. That must NOT abort the method (return None) before the OOB merge —
         otherwise OOB-only devices render zero cable rows. The OOB rows must still come back."""
         view = self._make_view()
+        # Clear the seeded host id so the fixture unambiguously represents the OOB-only
+        # scenario (get_links_data reassigns self.librenms_id from get_librenms_id() at use,
+        # but pinning it None here guards against any future read of the stale view attribute).
+        view.librenms_id = None
         obj = _mock_obj()
 
         # Host has no LibreNMS id; only the OOB controller is mapped.
@@ -1453,6 +1457,39 @@ class TestBaseInterfaceTableViewPost:
 
         view._librenms_api.get_librenms_id.return_value = 42
         view._librenms_api.get_ports.return_value = (True, {"ports": "not-a-list"})
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "rebind_api_for_server", return_value="prod"),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+        ):
+            mock_redirect.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        mock_messages.error.assert_called_once_with(
+            request, "Unexpected response from LibreNMS (malformed ports payload)."
+        )
+        mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
+        mock_cache.set.assert_not_called()
+
+    def test_post_malformed_main_ports_non_dict_row_treated_as_failure(self):
+        """The docstring sibling above only covers a non-list ports payload. A list that *contains*
+        a non-dict row ({"ports": [42]}) is the other malformed shape — it must also fail closed
+        (warn + failure-redirect, no degraded snapshot cached), matching the OOB-branch coverage
+        and the `all(isinstance(port, dict) ...)` guard in interfaces_view.post()."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        view._librenms_api.get_ports.return_value = (True, {"ports": [42]})
 
         with (
             patch.object(view, "get_object", return_value=obj),

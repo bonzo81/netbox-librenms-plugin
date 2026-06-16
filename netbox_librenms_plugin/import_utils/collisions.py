@@ -116,7 +116,13 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
     by_nb_pk: dict[tuple[str, int], dict] = {}
 
     for entry in devices or []:
-        validation = entry.get("validation") or {}
+        # A single malformed row (non-dict entry, or a non-dict validation payload)
+        # must be skipped, not crash the whole bulk-confirm flow on .get().
+        if not isinstance(entry, dict):
+            continue
+        validation = entry.get("validation")
+        if not isinstance(validation, dict):
+            validation = {}
         try:
             libre_id = int(entry.get("device_id"))
         except (TypeError, ValueError):

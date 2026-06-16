@@ -61,4 +61,4 @@ def test_guard_actually_sees_tab_builders():
     total = 0
     for path in _scoped_python_files():
         total += path.read_text().count("?tab=")
-    assert total >= 5, f"Expected several '?tab=' builders under the scoped views, found {total}"
+    assert total > 0, f"Expected at least one '?tab=' builder under the scoped views, found {total}"

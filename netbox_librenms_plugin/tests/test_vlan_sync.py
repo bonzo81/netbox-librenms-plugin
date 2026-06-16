@@ -663,12 +663,15 @@ class TestVLANErrorContextServerKey:
 class TestVlanSyncContentTemplateMigratedMode:
     """Render the real _vlan_sync_content.html template both ways.
 
-    In migrated mode the form is replaced by a plain <div> (a migrated donor must not be able
-    to POST a VLAN sync). The CSRF token and POST-only hidden inputs (server_key, action) must
-    travel with the <form>, never the <div> — rendering them inside the inert div is dead markup.
+    In migrated mode the form is replaced by a plain <div> (a migrated donor must not be able to
+    POST a VLAN sync). But the VLAN table stays interactive in migrated mode, and its verify JS
+    (librenms_sync.js verify-vlan-group / verify-vlan-sync-group) reads
+    document.querySelector('[name=csrfmiddlewaretoken]').value and posts server_key — so CSRF +
+    server_key must render in BOTH modes (matching the cable-sync template). Only the form-submit
+    ``action`` input is form-only and stays gated to the <form> branch.
     """
 
-    def _render(self, *, migrated):
+    def _render(self, *, migrated, server_key="default"):
         from django.template.loader import render_to_string
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
@@ -687,7 +690,7 @@ class TestVlanSyncContentTemplateMigratedMode:
         vlan_sync = {
             "object": device,
             "vlan_table": table,
-            "server_key": "default",
+            "server_key": server_key,
             "error_message": None,
             "cache_expiry": None,
         }
@@ -697,12 +700,18 @@ class TestVlanSyncContentTemplateMigratedMode:
             request=request,
         )
 
-    def test_migrated_mode_emits_no_form_csrf_or_hidden_inputs(self):
-        html = self._render(migrated=True)
+    def test_migrated_mode_drops_form_but_keeps_csrf_and_server_key(self):
+        # Non-default server so the assertion proves the actual value is emitted.
+        html = self._render(migrated={"server_key": "prod", "device_id": 1, "at": "now"}, server_key="prod")
+        # The live POST form is gone (a donor must not POST a sync)...
         assert "<form" not in html
-        assert "csrfmiddlewaretoken" not in html
+        # ...but CSRF + server_key remain so the JS verify-vlan-group fetch targets the right
+        # server with a usable token.
+        assert "csrfmiddlewaretoken" in html
+        assert 'name="server_key"' in html
+        assert 'value="prod"' in html
+        # The form-submit action input is form-only and must NOT render in migrated mode.
         assert 'name="action"' not in html
-        assert 'name="server_key"' not in html
 
     def test_normal_mode_emits_form_with_csrf_and_hidden_inputs(self):
         html = self._render(migrated=False)

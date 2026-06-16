@@ -1384,6 +1384,45 @@ class TestDeviceImportTableRenderActions:
         # The malformed id must NOT surface as a paired host number.
         assert "paired host: LibreNMS #" not in result
 
+    def test_existing_librenms_link_non_dict_does_not_crash_render(self):
+        """A malformed ``existing_librenms_link`` that isn't a dict (e.g. a string) must not crash
+        the actions-column render for the whole page. It should be treated as no link — the plain
+        'Linked as OOB controller' title, no paired-host number. Pre-fix this raised AttributeError
+        on ``.get('oob_id')``."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_oob",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": "garbage-not-a-dict",  # malformed payload
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "Linked as OOB controller" in result
+        assert "paired host: LibreNMS #" not in result
+
     def test_existing_paired_host_shows_host_button(self):
         """A librenms_id match whose link carries an oob_id distinct from the host id renders
         the info "Host" button (the host half of a host/OOB pair), escaping the oob type."""

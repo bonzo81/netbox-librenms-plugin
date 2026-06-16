@@ -192,6 +192,24 @@ def test_row_roles_are_joined_when_same_libre_row_targets_pk_via_multiple_paths(
     assert rows[901] == "host"
 
 
+def test_malformed_rows_are_skipped_not_crashed():
+    """A single malformed entry (non-dict row, or a non-dict ``validation`` payload) must be
+    skipped rather than crashing the whole bulk-confirm flow on ``.get()``. Valid colliding
+    rows in the same batch must still be detected. Pre-fix this raised AttributeError."""
+    shared = Device(pk=55, name="shared")
+    devices = [
+        42,  # non-dict row
+        None,  # non-dict row
+        {"device_id": 700, "device_name": "bad-validation", "validation": "not-a-dict"},  # non-dict validation
+        _row(800, "host", {"existing_device": shared}),
+        _row(801, "neighbour", {"existing_device": shared}),
+    ]
+    groups = detect_bulk_collisions(devices)
+    assert len(groups) == 1
+    assert groups[0]["nb_device_pk"] == 55
+    assert {r["device_id"] for r in groups[0]["librenms_rows"]} == {800, 801}
+
+
 def test_device_and_vm_with_same_pk_do_not_collide():
     """Device and VirtualMachine sharing a pk must NOT be reported as a collision
     because detect_bulk_collisions keys buckets on (model_name, pk)."""

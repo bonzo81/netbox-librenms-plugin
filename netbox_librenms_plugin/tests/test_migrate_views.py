@@ -974,3 +974,34 @@ class TestNonHtmxFallbackRedirect:
         expected = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[10])
         assert resp.status_code in (301, 302)
         assert resp.url == f"{expected}?tab=interfaces&server_key=siteB"
+
+
+@pytest.mark.django_db
+class TestMigratedTransferIpDeviceOnlyGate:
+    """librenms_sync_base.html serves both Devices and VMs, but the migrated-donor transfer-IP
+    buttons all POST to ``device_transfer_ip`` with ``pk=object.pk`` (a Device lookup). The gate
+    ``object|meta:"model_name" == "device"`` keeps those buttons off VM pages so a VM can't drive
+    a mutation against a same-pk Device. build_migrated_context() doesn't itself gate on Device,
+    so a VM with a stale ``_migrated_to`` marker would otherwise reach the buttons.
+
+    The full template extends generic/object.html (not cheaply renderable in isolation), so this
+    exercises the exact gate predicate from the template via the real ``meta`` filter and real
+    ORM objects.
+    """
+
+    GATE = "{% load helpers %}{% if object|meta:'model_name' == 'device' %}TRANSFER{% endif %}"
+
+    def _render(self, obj):
+        from django.template import engines
+
+        return engines["django"].from_string(self.GATE).render({"object": obj})
+
+    def test_device_page_renders_transfer_block(self):
+        device = make_device("transfer-gate-dev")
+        assert self._render(device) == "TRANSFER"
+
+    def test_vm_page_omits_transfer_block(self):
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        vm = make_vm("transfer-gate-vm")
+        assert self._render(vm) == ""
