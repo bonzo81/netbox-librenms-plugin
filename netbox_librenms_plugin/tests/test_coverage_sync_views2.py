@@ -1494,6 +1494,50 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_name["Ethernet1"].pk == i1.pk
         assert by_name["Ethernet2"].pk == i2.pk
 
+    def test_primary_ip_not_set_from_sibling_vc_member_interface(self):
+        """Because _build_interface_maps indexes every VC member, a synced IP can resolve to a
+        SIBLING member's interface. The primary-IP auto-match must NOT point obj.primary_ip at an
+        address on another device's interface — save() skips full_clean, so it would persist an
+        invalid primary. The row is recorded as primary_no_interface instead."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        _vc, members = self._make_vc("ipres-vc-prim", [1, 2])
+        m1, m2 = members[1], members[2]
+        # The matching interface lives on the SIBLING member m2, carrying port id 5.
+        sibling_iface = make_interface(m2, "eth5")
+        set_librenms_device_id(sibling_iface, 5, "default")
+        sibling_iface.save()
+
+        view = self._view()
+        view._post_server_key = "default"
+        # The synced address is LibreNMS's management IP → the set-primary path is taken.
+        view.get_management_ip = MagicMock(return_value="10.0.0.1")
+
+        ip_data = {
+            "ip_address": "10.0.0.1",
+            "ip_with_mask": "10.0.0.1/24",
+            "interface_url": None,
+            "port_id": 5,
+            "interface_name": "eth5",
+        }
+        request = _make_request(post_data={"select": ["10.0.0.1"]})
+        with patch(
+            "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
+            return_value=True,
+        ):
+            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], m1, "device")
+
+        # The IP is created and bound to the sibling's interface (the maps include all members)...
+        created = IPAddress.objects.get(address="10.0.0.1/24")
+        assert created.assigned_object == sibling_iface
+        # ...but m1's primary IP must NOT be set from an address on m2's interface.
+        m1.refresh_from_db()
+        assert m1.primary_ip4_id is None
+        assert results["primary_set"] == []
+        assert results["primary_no_interface"] == ["10.0.0.1"]
+
     def test_build_interface_maps_marks_cross_member_duplicate_name_ambiguous(self):
         """A name shared by interfaces on two VC members can't silently rebind the address —
         mark it ambiguous (None), the same fail-safe as a duplicate port id."""

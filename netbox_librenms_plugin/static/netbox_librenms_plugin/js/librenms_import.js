@@ -1304,7 +1304,10 @@
                 // nested modal before this listener runs (the `.modal.show` query would then miss
                 // and wrongly close the outer modal), but the event's origin is unaffected by that
                 // timing — so a keypress inside a nested modal still suppresses the outer close.
-                const eventStartedInNestedModal = event.target.closest('#htmx-modal-content .modal');
+                // event.target can be the Document (keydown with nothing focused), which has no
+                // .closest() — guard with instanceof Element so this never throws a TypeError.
+                const eventStartedInNestedModal =
+                    event.target instanceof Element && event.target.closest('#htmx-modal-content .modal');
                 if (eventStartedInNestedModal || document.querySelector('#htmx-modal-content .modal.show')) {
                     return;
                 }

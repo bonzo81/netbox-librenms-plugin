@@ -800,26 +800,33 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         requested = ""
         if request is not None:
             requested = (request.POST.get("server_key") or request.GET.get("server_key") or "").strip()
-        if not requested:
-            # Form omitted server_key — fall back to the active API server the action ran
-            # against, so a non-default-server user isn't dropped onto the default tab. Prefer the
-            # already-bound _librenms_api; only when nothing is bound (e.g. after a failed rebind
-            # that returned None) fall back to the property to resolve the default server, but
-            # swallow a construction failure (misconfigured default) so the redirect degrades
-            # gracefully instead of re-raising.
-            bound = getattr(self, "_librenms_api", None)
-            if bound is not None:
-                requested = (getattr(bound, "server_key", "") or "").strip()
-            else:
-                try:
-                    requested = (getattr(self.librenms_api, "server_key", "") or "").strip()
-                except Exception:  # a redirect helper must degrade, never 500 (misconfigured default)
-                    requested = ""
-        # Re-source the matched key from the trusted config rather than echoing the raw
-        # request value, then gate the redirect on url_has_allowed_host_and_scheme.
+        # Re-source the matched key from the trusted config rather than echoing the raw request
+        # value. A stale/unconfigured POST key (server removed since the page loaded, or tampered)
+        # resolves to None here — so it must NOT short-circuit the fallback below.
         server_key = (
             next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None) if requested else None
         )
+        if not server_key:
+            # POST omitted server_key OR sent an unconfigured one — fall back to the active API
+            # server the action ran against so a non-default-server user isn't dropped onto the
+            # default tab. Prefer the already-bound _librenms_api; only when nothing is bound (e.g.
+            # after a failed rebind that returned None) fall back to the property to resolve the
+            # default server, but swallow a construction failure (misconfigured default) so the
+            # redirect degrades gracefully instead of re-raising. Re-source the fallback through
+            # the same allowlist so the redirect stays open-redirect safe.
+            bound = getattr(self, "_librenms_api", None)
+            if bound is not None:
+                fallback = (getattr(bound, "server_key", "") or "").strip()
+            else:
+                try:
+                    fallback = (getattr(self.librenms_api, "server_key", "") or "").strip()
+                except Exception:  # a redirect helper must degrade, never 500 (misconfigured default)
+                    fallback = ""
+            server_key = (
+                next((key for key in LibreNMSAPI.get_available_servers() if key == fallback), None)
+                if fallback
+                else None
+            )
         if request is not None and server_key:
             candidate = f"{url}?server_key={quote_plus(server_key)}"
             if url_has_allowed_host_and_scheme(

@@ -311,7 +311,17 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     # handled above (the row was skipped before any write), so here the IP is
                     # guaranteed interface-assigned and can satisfy NetBox's primary constraint.
                     if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
-                        if self._set_primary_ip(obj, ip_obj):
+                        # _build_interface_maps indexes ALL VC member interfaces, so `interface`
+                        # can belong to a sibling member. Setting obj.primary_ip to an address on
+                        # another device's interface would persist an invalid primary (save() skips
+                        # full_clean), so only set it when the interface is obj's own.
+                        if (
+                            isinstance(obj, Device)
+                            and isinstance(interface, Interface)
+                            and interface.device_id != obj.pk
+                        ):
+                            results["primary_no_interface"].append(ip_address)
+                        elif self._set_primary_ip(obj, ip_obj):
                             results["primary_set"].append(ip_address)
 
             except Exception as exc:

@@ -2040,6 +2040,27 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         (url,), _ = mock_redir.call_args
         assert "server_key=prod" in url
 
+    def test_sync_url_stale_post_key_falls_back_to_active_server(self):
+        """A POST server_key that is no longer configured (stale page / removed server) must not
+        drop the server context: it doesn't match the allowlist, so the redirect falls back to the
+        active/default server the action ran against (here the bound _librenms_api='default'),
+        re-validated through the allowlist — instead of emitting a bare URL."""
+        view = self._view()  # _view() binds _librenms_api = MagicMock(server_key="default")
+        view.request = MagicMock()
+        view.request.POST = {"server_key": "ghost"}  # unconfigured / stale
+        view.request.GET = {}
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"default": "Default LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)
+        (url,), _ = mock_redir.call_args
+        assert "server_key=default" in url
+        assert "ghost" not in url
+
     def test_sync_url_drops_unknown_server_key(self):
         """An unconfigured/spoofed server_key is not reflected into the redirect URL
         (allowlist guard — open-redirect safe)."""

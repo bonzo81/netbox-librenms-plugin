@@ -399,10 +399,17 @@ class TestMergeTransceiverDataPortIdentity:
         view = _make_view()
         obj = MagicMock()
         view._get_sync_device = MagicMock(return_value=obj)
+        # Pin the librenms_id + OOB fingerprint so they MATCH the cached payload and don't trigger
+        # an earlier cache invalidation — otherwise the test would pass for the wrong reason (the
+        # id/oob mismatch deleting the cache before the malformed-inventory guard is even reached).
+        view._librenms_api.get_librenms_id.return_value = 1
         view._build_context = MagicMock()  # must NOT be reached for a malformed payload
         request = MagicMock()
 
-        with patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache:
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
             mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
             result = view.get_context_data(request, obj)
 

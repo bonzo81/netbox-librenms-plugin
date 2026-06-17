@@ -64,9 +64,8 @@ class TestLibreNMSAPIInit:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        # Use the default key so this exercises the missing URL/token ValueError path. (A
-        # non-default key now fails closed with KeyError first in legacy mode — see
-        # test_init_legacy_mode_rejects_non_default_server_key.)
+        # Use the default key so this exercises the missing URL/token ValueError path in legacy
+        # mode (no configured 'servers' dict, no librenms_url/api_token).
         with pytest.raises(ValueError):
             LibreNMSAPI(server_key="default")
 
@@ -77,11 +76,12 @@ class TestLibreNMSAPIInit:
         with pytest.raises(KeyError, match="nonexistent"):
             LibreNMSAPI(server_key="nonexistent")
 
-    def test_init_legacy_mode_rejects_non_default_server_key(self, mock_librenms_config):
-        """Legacy single-server mode has only the implicit 'default' server. A non-default key
-        must fail closed (KeyError) instead of silently using the default URL/token while scoping
-        cache/custom-field lookups under the bogus key (which is what build_librenms_api relies on
-        to fall back)."""
+    def test_init_legacy_mode_binds_single_server_for_non_default_key(self, mock_librenms_config):
+        """Legacy single-server mode has only the implicit 'default' server, bound to the single
+        configured URL/token. An explicit non-default key must NOT raise here: the stricter
+        unknown-key contract is multi-server-only (a configured ``servers`` dict). In legacy mode
+        the one server is bound and view-layer validation handles cache/CF scoping. Regression
+        guard for the removed legacy-mode KeyError."""
         mock_config = mock_librenms_config["mock_config"]
 
         def config_side_effect(plugin, key, default=None):
@@ -94,8 +94,8 @@ class TestLibreNMSAPIInit:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        with pytest.raises(KeyError, match="legacy single-server"):
-            LibreNMSAPI(server_key="stale")
+        api = LibreNMSAPI(server_key="stale")  # must not raise in legacy mode
+        assert api.librenms_url == "https://legacy.example.com"
 
         # The default key must still work in legacy mode.
         assert LibreNMSAPI(server_key="default").librenms_url == "https://legacy.example.com"
