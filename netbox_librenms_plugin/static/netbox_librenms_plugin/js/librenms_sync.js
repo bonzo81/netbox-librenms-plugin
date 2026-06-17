@@ -484,6 +484,24 @@ document.addEventListener('change', function (e) {
     }
 });
 
+// When #autoSelectLagMembers is turned OFF, clear any cross-page parents injected while it was
+// on. The child checkbox stays checked, so the per-row deselect cleanup above never fires — the
+// stale hidden select_port_id would otherwise still be submitted even though auto-select is off
+// (and its notice may have already auto-dismissed).
+document.addEventListener('change', function (e) {
+    const toggle = e.target;
+    if (!toggle.matches('#autoSelectLagMembers') || toggle.checked) return;
+
+    document.querySelectorAll('input[name="select_port_id"][id^="auto-parent-"]').forEach(function (hidden) {
+        hidden.remove();
+    });
+
+    const noticeContainer = document.getElementById('parent-cross-page-notices');
+    if (noticeContainer) {
+        noticeContainer.remove();
+    }
+});
+
 /**
  * Show a brief inline notice when a sub-interface's parent is auto-included
  * from a different page (cross-page parent selection).
