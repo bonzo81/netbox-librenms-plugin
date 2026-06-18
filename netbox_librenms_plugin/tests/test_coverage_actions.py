@@ -5113,12 +5113,12 @@ class TestAddAsOOBViewGenericSentinel:
         assert obj.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 42
 
 
-class TestPromoteToHostViewGenericSentinel:
-    """PromoteToHostView must not return HTTP 400 when existing_oob_type == "oob".
+class TestSetLibreNMSOOBGenericSentinel:
+    """set_librenms_oob must accept the generic "oob" sentinel oob_type.
 
-    Regression for the same sentinel bug: when the existing device's name has no
-    OOB keyword, promote_to_host["existing_oob_type"] = "oob" (device_operations.py
-    line ~574), which was rejected by set_librenms_oob.
+    Regression for the sentinel bug surfaced via the promote path: when the existing
+    device's name has no OOB keyword, the resolved oob_type falls back to the generic
+    "oob" (device_operations.py ~line 574), which set_librenms_oob previously rejected.
     """
 
     def test_promote_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
