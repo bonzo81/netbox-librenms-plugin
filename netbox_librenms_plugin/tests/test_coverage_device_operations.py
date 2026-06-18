@@ -694,8 +694,16 @@ class TestValidateDeviceForImport:
         assert result["existing_match_type"] == "librenms_id"
 
 
+@pytest.mark.django_db
 class TestImportSingleDevice:
-    """Tests for import_single_device (lines 689-910)."""
+    """import_single_device against real NetBox rows.
+
+    The success path now creates a REAL Device (full_clean + save) from real
+    Site/DeviceType/DeviceRole, and the prerequisite guards run against the real create
+    path — so the device that gets persisted (name, FKs, serial, status, librenms_id CF) is
+    actually verified by reloading it from the DB, rather than every model being a MagicMock.
+    Only LibreNMSAPI (the HTTP boundary; here just its server_key is read) is mocked.
+    """
 
     def _make_libre_device(self):
         return {
@@ -712,79 +720,103 @@ class TestImportSingleDevice:
     @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_missing_site_returns_error(self, MockAPI):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
 
-        libre_device = self._make_libre_device()
-
+        MockAPI.return_value.server_key = "default"
+        _, dtype, role = _shared_infra()
         validation = {
             "existing_device": None,
             "site": {"found": False, "site": None},
-            "device_type": {"matched": True, "device_type": MagicMock()},
-            "device_role": {"found": True, "role": MagicMock()},
+            "device_type": {"matched": True, "device_type": dtype},
+            "device_role": {"found": True, "role": role},
             "platform": {"found": False, "platform": None},
             "rack": {"rack": None},
         }
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Rack"),
-        ):
-            result = import_single_device(1, server_key="default", validation=validation, libre_device=libre_device)
+        result = import_single_device(
+            1, server_key="default", validation=validation, libre_device=self._make_libre_device()
+        )
         assert result["success"] is False
         assert "Site" in result["error"]
 
     @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_missing_device_type_returns_error(self, MockAPI):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
 
-        libre_device = self._make_libre_device()
-
+        MockAPI.return_value.server_key = "default"
+        site, _, role = _shared_infra()
         validation = {
             "existing_device": None,
-            "site": {"found": True, "site": MagicMock()},
+            "site": {"found": True, "site": site},
             "device_type": {"matched": False, "device_type": None},
-            "device_role": {"found": True, "role": MagicMock()},
+            "device_role": {"found": True, "role": role},
             "platform": {"found": False, "platform": None},
             "rack": {"rack": None},
         }
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Rack"),
-        ):
-            result = import_single_device(1, server_key="default", validation=validation, libre_device=libre_device)
+        result = import_single_device(
+            1, server_key="default", validation=validation, libre_device=self._make_libre_device()
+        )
         assert result["success"] is False
         assert "device type" in result["error"].lower()
 
     @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_missing_device_role_returns_error(self, MockAPI):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
 
-        libre_device = self._make_libre_device()
-
+        MockAPI.return_value.server_key = "default"
+        site, dtype, _ = _shared_infra()
         validation = {
             "existing_device": None,
-            "site": {"found": True, "site": MagicMock()},
-            "device_type": {"matched": True, "device_type": MagicMock()},
+            "site": {"found": True, "site": site},
+            "device_type": {"matched": True, "device_type": dtype},
             "device_role": {"found": False, "role": None},
             "platform": {"found": False, "platform": None},
             "rack": {"rack": None},
         }
-
-        with (
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Rack"),
-        ):
-            result = import_single_device(1, server_key="default", validation=validation, libre_device=libre_device)
+        result = import_single_device(
+            1, server_key="default", validation=validation, libre_device=self._make_libre_device()
+        )
         assert result["success"] is False
         assert "role" in result["error"].lower()
 
-    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
+    def test_creates_real_device_and_persists_link(self, MockAPI):
+        """The success path creates a real Device (full_clean + save) with the resolved name,
+        the matched FKs, the LibreNMS serial/status, and the librenms_id custom field."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
+
+        MockAPI.return_value.server_key = "default"
+        site, dtype, role = _shared_infra()
+        validation = {
+            "existing_device": None,
+            "resolved_name": "router01-created",
+            "site": {"found": True, "site": site},
+            "device_type": {"matched": True, "device_type": dtype},
+            "device_role": {"found": True, "role": role},
+            "platform": {"found": False, "platform": None},
+            "rack": {"rack": None},
+        }
+        result = import_single_device(
+            1, server_key="default", validation=validation, libre_device=self._make_libre_device()
+        )
+
+        assert result["success"] is True
+        assert result["error"] is None
+        dev = result["device"]
+        # Reload from the DB to prove it really committed through full_clean + save.
+        reloaded = Device.objects.get(pk=dev.pk)
+        assert reloaded.name == "router01-created"
+        assert reloaded.site_id == site.pk
+        assert reloaded.device_type_id == dtype.pk
+        assert reloaded.role_id == role.pk
+        assert reloaded.serial == "SN001"
+        assert reloaded.status == "active"  # libre status == 1
+        assert reloaded.custom_field_data["librenms_id"]["default"] == 1
+
     @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_ambiguous_librenms_id_blocks_create_even_with_manual_mappings(self, MockAPI):
         """An ambiguous librenms_id (validate sets existing_device=None + ambiguous_librenms_id=True)
@@ -795,6 +827,7 @@ class TestImportSingleDevice:
 
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
+        MockAPI.return_value.server_key = "default"
         before = Device.objects.count()
         result = import_single_device(
             1,
@@ -1161,18 +1194,17 @@ class TestValidateDeviceMoreEdgeCases:
         assert "detection_error" in result.get("virtual_chassis", {})
 
 
+@pytest.mark.django_db
 class TestImportSingleDeviceEdgeCases:
-    """Tests for import_single_device edge cases (lines 737-739, 777-789)."""
+    """import_single_device edge cases against real rows."""
 
     @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_no_libre_device_api_failure(self, MockAPI):
-        """Lines 737-739: libre_device=None and API fails → returns error dict."""
+        """libre_device=None and the API reports failure → error dict (no device created)."""
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        mock_api.get_device_info.return_value = (False, None)
-        MockAPI.return_value = mock_api
+        MockAPI.return_value.server_key = "default"
+        MockAPI.return_value.get_device_info.return_value = (False, None)  # the HTTP boundary
 
         result = import_single_device(device_id=1, libre_device=None, server_key="default")
         assert result["success"] is False
@@ -1180,228 +1212,123 @@ class TestImportSingleDeviceEdgeCases:
 
     @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
     def test_manual_mappings_are_applied(self, MockAPI):
-        """Lines 777-789: manual_mappings override site/device_type/device_role."""
+        """manual_mappings resolve real Site/DeviceType/DeviceRole rows and the created device
+        is persisted with those FKs (validation supplies none, so the manual ids must win)."""
+        from dcim.models import Device
+
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
 
-        mock_api = MagicMock()
-        mock_api.server_key = "default"
-        MockAPI.return_value = mock_api
-
+        MockAPI.return_value.server_key = "default"
+        site, dtype, role = _shared_infra()
         libre_device = {
             "device_id": 1,
-            "hostname": "router01",
+            "hostname": "router01-mm",
+            "sysName": "router01-mm",
             "hardware": "Cisco",
             "serial": "SN001",
             "os": "ios",
+            "status": 1,
             "location": "",
         }
         validation = {
-            "is_ready": True,
-            "can_import": True,
             "existing_device": None,
-            "import_as_vm": False,
+            "resolved_name": "router01-mm",
             "site": {"found": True, "site": None},
             "device_type": {"found": True, "device_type": None},
             "device_role": {"found": False, "role": None},
             "platform": {"found": False, "platform": None},
             "rack": {"rack": None},
-            "issues": [],
+        }
+        manual_mappings = {"site_id": site.pk, "device_type_id": dtype.pk, "device_role_id": role.pk}
+
+        result = import_single_device(
+            device_id=1,
+            libre_device=libre_device,
+            validation=validation,
+            manual_mappings=manual_mappings,
+            server_key="default",
+        )
+
+        assert result["success"] is True
+        reloaded = Device.objects.get(pk=result["device"].pk)
+        assert reloaded.site_id == site.pk
+        assert reloaded.device_type_id == dtype.pk
+        assert reloaded.role_id == role.pk
+
+
+@pytest.mark.django_db
+class TestImportSingleDeviceMoreEdgeCases:
+    """import_single_device manual platform/rack mappings against real rows."""
+
+    def _libre(self, name):
+        return {
+            "device_id": 1,
+            "hostname": name,
+            "sysName": name,
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",
+            "location": "",
+            "status": 1,
         }
 
-        mock_site = MagicMock()
-        mock_site.pk = 1
-        mock_dt = MagicMock()
-        mock_dt.pk = 1
-        mock_role = MagicMock()
-        mock_role.pk = 1
-
-        manual_mappings = {"site_id": 1, "device_type_id": 1, "device_role_id": 1}
-
-        mock_tx = MagicMock()
-        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-
-        with patch("netbox_librenms_plugin.import_utils.device_operations.transaction", mock_tx):
-            with patch("netbox_librenms_plugin.import_utils.device_operations.Site") as mock_site_cls:
-                mock_site_cls.objects.filter.return_value.first.return_value = mock_site
-                with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType") as mock_dt_cls:
-                    mock_dt_cls.objects.filter.return_value.first.return_value = mock_dt
-                    with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole") as mock_role_cls:
-                        mock_role_cls.objects.filter.return_value.first.return_value = mock_role
-                        with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as mock_rack_cls:
-                            mock_rack_cls.objects.select_related.return_value.filter.return_value.first.return_value = (
-                                None
-                            )
-                            with patch(
-                                "netbox_librenms_plugin.import_utils.device_operations.Device"
-                            ) as mock_device_cls:
-                                mock_device_cls.objects.filter.return_value.first.return_value = None
-                                mock_new_device = MagicMock()
-                                mock_device_cls.return_value = mock_new_device
-                                mock_new_device.full_clean.return_value = None
-                                mock_new_device.save.return_value = None
-                                mock_new_device.pk = 99
-                                with patch(
-                                    "netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"
-                                ) as mock_set_id:
-                                    with patch(
-                                        "netbox_librenms_plugin.import_utils.device_operations.validate_device_for_import",
-                                        return_value=validation,
-                                    ):
-                                        with patch(
-                                            "netbox_librenms_plugin.import_utils.device_operations.timezone"
-                                        ) as mock_tz:
-                                            mock_tz.now.return_value.strftime.return_value = "2024-01-01 00:00:00 UTC"
-                                            result = import_single_device(
-                                                device_id=1,
-                                                libre_device=libre_device,
-                                                validation=validation,
-                                                manual_mappings=manual_mappings,
-                                                server_key="default",
-                                            )
-        # Should have succeeded
-        assert result.get("success") is True
-        mock_new_device.full_clean.assert_called_once()
-        mock_new_device.save.assert_called_once()
-        mock_set_id.assert_called_once()
-        # Verify Device was constructed with the resolved site, device_type, and role
-        mock_device_cls.assert_called_once()
-        call_kwargs = mock_device_cls.call_args[1]
-        assert call_kwargs["site"] is mock_site
-        assert call_kwargs["device_type"] is mock_dt
-        assert call_kwargs["role"] is mock_role
-
-
-class TestImportSingleDeviceMoreEdgeCases:
-    """Tests for device_operations additional coverage (lines 539, 783-785, 789)."""
-
-    def _make_api(self):
-        api = MagicMock()
-        api.server_key = "default"
-        api.cache_timeout = 300
-        return api
-
-    def _base_validation(self):
+    def _validation(self, name, site, dtype, role):
         return {
-            "is_ready": True,
-            "can_import": True,
             "existing_device": None,
-            "import_as_vm": False,
-            "site": {"found": True, "site": MagicMock()},
-            "device_type": {"found": True, "device_type": MagicMock()},
-            "device_role": {"found": True, "role": MagicMock()},
+            "resolved_name": name,
+            "site": {"found": True, "site": site},
+            "device_type": {"found": True, "device_type": dtype},
+            "device_role": {"found": True, "role": role},
             "platform": {"found": False, "platform": None},
             "rack": {"rack": None},
-            "issues": [],
         }
 
-    def _mock_tx(self):
-        mock_tx = MagicMock()
-        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-        return mock_tx
+    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
+    def test_platform_manual_mapping(self, MockAPI):
+        """manual_mappings platform_id resolves a real Platform and is persisted on the device."""
+        from dcim.models import Device, Platform
 
-    def test_platform_manual_mapping(self):
-        """Lines 783-785: manual_mappings with platform_id applied."""
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
 
-        libre_device = {"device_id": 1, "hostname": "r01", "serial": "-", "hardware": "-", "os": "-", "location": ""}
-        validation = self._base_validation()
-        manual_mappings = {"platform_id": 3}
+        MockAPI.return_value.server_key = "default"
+        site, dtype, role = _shared_infra()
+        platform = Platform.objects.create(name="TestPlat", slug="test-plat")
 
-        mock_platform = MagicMock()
-        mock_new_device = MagicMock()
-        mock_new_device.full_clean.return_value = None
-        mock_new_device.save.return_value = None
-        mock_new_device.pk = 10
+        result = import_single_device(
+            device_id=1,
+            libre_device=self._libre("r01-plat"),
+            validation=self._validation("r01-plat", site, dtype, role),
+            manual_mappings={"platform_id": platform.pk},
+            server_key="default",
+        )
 
-        with patch("netbox_librenms_plugin.import_utils.device_operations.transaction", self._mock_tx()):
-            with patch("netbox_librenms_plugin.import_utils.device_operations.Site") as MockSite:
-                MockSite.objects.filter.return_value.first.return_value = MagicMock()
-                with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType") as MockDT:
-                    MockDT.objects.filter.return_value.first.return_value = MagicMock()
-                    with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole") as MockRole:
-                        MockRole.objects.filter.return_value.first.return_value = MagicMock()
-                        with patch("netbox_librenms_plugin.import_utils.device_operations.Device") as MockDevice:
-                            MockDevice.objects.filter.return_value.first.return_value = None
-                            MockDevice.return_value = mock_new_device
-                            with patch("dcim.models.Platform") as MockPlatform:
-                                MockPlatform.objects.filter.return_value.first.return_value = mock_platform
-                                with patch(
-                                    "netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"
-                                ):
-                                    with patch(
-                                        "netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"
-                                    ) as MockAPI:
-                                        MockAPI.return_value = self._make_api()
-                                        with patch(
-                                            "netbox_librenms_plugin.import_utils.device_operations.timezone"
-                                        ) as mock_tz:
-                                            mock_tz.now.return_value.strftime.return_value = "2024-01-01"
-                                            result = import_single_device(
-                                                device_id=1,
-                                                libre_device=libre_device,
-                                                validation=validation,
-                                                manual_mappings=manual_mappings,
-                                                server_key="default",
-                                            )
+        assert result["success"] is True
+        assert Device.objects.get(pk=result["device"].pk).platform_id == platform.pk
 
-        assert result.get("success") is True
-        # Verify that the platform was looked up with the correct ID and passed to Device()
-        MockPlatform.objects.filter.assert_called_with(id=manual_mappings["platform_id"])
-        assert MockDevice.call_args.kwargs.get("platform") is mock_platform
+    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
+    def test_rack_manual_mapping(self, MockAPI):
+        """manual_mappings rack_id resolves a real Rack (in the device's site) and is persisted."""
+        from dcim.models import Device, Rack
 
-    def test_rack_manual_mapping(self):
-        """Line 789: manual_mappings with rack_id applied."""
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
 
-        libre_device = {"device_id": 1, "hostname": "r01", "serial": "-", "hardware": "-", "os": "-", "location": ""}
-        validation = self._base_validation()
-        manual_mappings = {"rack_id": 5}
+        MockAPI.return_value.server_key = "default"
+        site, dtype, role = _shared_infra()
+        rack = Rack.objects.create(name="R1-mm", site=site)
 
-        mock_rack = MagicMock()
-        mock_new_device = MagicMock()
-        mock_new_device.full_clean.return_value = None
-        mock_new_device.save.return_value = None
-        mock_new_device.pk = 10
+        result = import_single_device(
+            device_id=1,
+            libre_device=self._libre("r01-rack"),
+            validation=self._validation("r01-rack", site, dtype, role),
+            manual_mappings={"rack_id": rack.pk},
+            server_key="default",
+        )
 
-        with patch("netbox_librenms_plugin.import_utils.device_operations.transaction", self._mock_tx()):
-            with patch("netbox_librenms_plugin.import_utils.device_operations.Site") as MockSite:
-                MockSite.objects.filter.return_value.first.return_value = MagicMock()
-                with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType") as MockDT:
-                    MockDT.objects.filter.return_value.first.return_value = MagicMock()
-                    with patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole") as MockRole:
-                        MockRole.objects.filter.return_value.first.return_value = MagicMock()
-                        with patch("netbox_librenms_plugin.import_utils.device_operations.Device") as MockDevice:
-                            MockDevice.objects.filter.return_value.first.return_value = None
-                            MockDevice.return_value = mock_new_device
-                            with patch("netbox_librenms_plugin.import_utils.device_operations.Rack") as MockRack:
-                                MockRack.objects.select_related.return_value.filter.return_value.first.return_value = (
-                                    mock_rack
-                                )
-                                with patch(
-                                    "netbox_librenms_plugin.import_utils.device_operations.set_librenms_device_id"
-                                ):
-                                    with patch(
-                                        "netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI"
-                                    ) as MockAPI:
-                                        MockAPI.return_value = self._make_api()
-                                        with patch(
-                                            "netbox_librenms_plugin.import_utils.device_operations.timezone"
-                                        ) as mock_tz:
-                                            mock_tz.now.return_value.strftime.return_value = "2024-01-01"
-                                            result = import_single_device(
-                                                device_id=1,
-                                                libre_device=libre_device,
-                                                validation=validation,
-                                                manual_mappings=manual_mappings,
-                                                server_key="default",
-                                            )
-
-        assert result.get("success") is True
-        # Verify that the rack was looked up with the correct ID and passed to Device()
-        MockRack.objects.select_related.return_value.filter.assert_called_with(id=manual_mappings["rack_id"])
-        assert MockDevice.call_args.kwargs.get("rack") is mock_rack
+        assert result["success"] is True
+        assert Device.objects.get(pk=result["device"].pk).rack_id == rack.pk
 
 
 class TestValidateDeviceExistingVMGuard:
