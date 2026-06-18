@@ -732,6 +732,7 @@ class TestUpdateDevicePlatformView:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestCreateAndAssignPlatformView:
     def _view(self):
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
@@ -760,79 +761,54 @@ class TestCreateAndAssignPlatformView:
         assert "required" in mock_msg.error.call_args[0][1].lower()
 
     def test_platform_already_exists_is_reused_and_assigned(self):
-        """Existing platform is reused (not re-created) and assigned to the device;
-        its manufacturer/vendor scoping is left untouched."""
+        """Existing platform is reused (not re-created) and assigned to the device.
+
+        Real Platform + Device through the real select_for_update / full_clean / save path;
+        reloaded from the DB. No duplicate Platform row is created."""
+        from dcim.models import Device, Platform
+
         view = self._view()
+        existing = Platform.objects.create(name="ios", slug="ios")
+        dev = make_device("plat-reuse")
         req = _make_request({"platform_name": "ios", "manufacturer": "", "create_mapping": ""})
 
-        existing_platform = MagicMock()
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.first.return_value = existing_platform
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=dev),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(req, pk=1)
-        # Reused, not constructed anew
-        mock_platform_cls.assert_not_called()
-        # Existing platform assigned to the locked device and saved
-        assert mock_locked.platform is existing_platform
-        mock_locked.save.assert_called_once()
-        # Existing platform itself is never saved/modified (vendor scoping preserved)
-        existing_platform.save.assert_not_called()
+            view.post(req, pk=dev.pk)
+        # Reused — not duplicated.
+        assert Platform.objects.filter(name__iexact="ios").count() == 1
+        assert Device.objects.get(pk=dev.pk).platform_id == existing.pk
         mock_msg.success.assert_called_once()
         assert "already existed" in mock_msg.success.call_args[0][1].lower()
 
     def test_platform_already_exists_creates_missing_mapping(self):
-        """When the platform exists and create_mapping is on, the missing mapping is added."""
+        """When the platform exists and create_mapping is on, the missing mapping is added (real)."""
+        from dcim.models import Device, Platform
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
         view = self._view()
+        existing = Platform.objects.create(name="ios", slug="ios")
+        dev = make_device("plat-reuse-map")
         req = _make_request({"platform_name": "ios", "manufacturer": "", "librenms_os": "ios", "create_mapping": "1"})
-
-        existing_platform = MagicMock()
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.first.return_value = existing_platform
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_mapping_cls = MagicMock()
-        mock_mapping_cls.objects.filter.return_value.first.return_value = None
-        mock_mapping_instance = MagicMock()
-        mock_mapping_cls.return_value = mock_mapping_instance
+        # The view re-checks PlatformMapping 'add' permission at the write site.
+        view.request = req
+        req.user.has_perm = MagicMock(return_value=True)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=dev),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(req, pk=1)
-        mock_platform_cls.assert_not_called()
-        # The mapping must point the posted OS at the reused existing platform — pin both so a
-        # regression that maps to the wrong platform (or swaps the args) is caught.
-        mock_mapping_cls.assert_called_once_with(librenms_os="ios", netbox_platform=existing_platform)
-        # Validate-before-save, same as the new-platform path: a regression that persists an
-        # unvalidated mapping must be caught.
-        mock_mapping_instance.full_clean.assert_called_once()
-        mock_mapping_instance.save.assert_called_once()
-        # The locked device must be assigned the existing platform (not left untouched).
-        assert mock_locked.platform is existing_platform
-        mock_locked.save.assert_called_once()
+            view.post(req, pk=dev.pk)
+        assert Platform.objects.filter(name__iexact="ios").count() == 1  # reused
+        # A real mapping now points the posted OS at the reused platform.
+        mapping = PlatformMapping.objects.get(librenms_os__iexact="ios")
+        assert mapping.netbox_platform_id == existing.pk
+        assert Device.objects.get(pk=dev.pk).platform_id == existing.pk
         mock_msg.success.assert_called_once()
 
     def test_mapping_existing_points_to_different_platform_warns(self):
@@ -910,65 +886,43 @@ class TestCreateAndAssignPlatformView:
         mock_locked.save.assert_called_once()
 
     def test_success_no_manufacturer(self):
+        """A new platform (no manufacturer) is created and assigned to the device (real)."""
+        from dcim.models import Device, Platform
+
         view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
-
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.first.return_value = None
-        mock_platform_instance = MagicMock()
-        mock_platform_cls.return_value = mock_platform_instance
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+        dev = make_device("plat-create")
+        req = _make_request({"platform_name": "ios-new", "manufacturer": ""})
 
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=dev),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(req, pk=1)
+            view.post(req, pk=dev.pk)
         mock_msg.success.assert_called_once()
-        assert mock_locked.platform == mock_platform_instance
-        mock_locked.save.assert_called_once()
+        platform = Platform.objects.get(name="ios-new")
+        assert platform.manufacturer_id is None
+        assert Device.objects.get(pk=dev.pk).platform_id == platform.pk
 
     def test_platform_constructor_includes_slug(self):
-        """Platform must be constructed with slug=slugify(name) — regression for #279."""
+        """The created platform's slug is slugify(name) — regression for #279 (verified on the DB row)."""
         from django.utils.text import slugify
+
+        from dcim.models import Platform
 
         view = self._view()
         platform_name = "Cisco IOS-XE 17.x"
+        dev = make_device("plat-slug")
         req = _make_request({"platform_name": platform_name, "manufacturer": ""})
 
-        mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.first.return_value = None
-        mock_platform_instance = MagicMock()
-        mock_platform_cls.return_value = mock_platform_instance
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=dev),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(req, pk=1)
+            view.post(req, pk=dev.pk)
 
-        mock_platform_cls.assert_called_once_with(
-            name=platform_name,
-            slug=slugify(platform_name),
-            manufacturer=None,
-        )
+        assert Platform.objects.get(name=platform_name).slug == slugify(platform_name)
 
     def test_platform_validation_error(self):
         from django.core.exceptions import ValidationError
@@ -1381,6 +1335,31 @@ class TestAssignVCSerialView:
 
         return _make_view(AssignVCSerialView)
 
+    @pytest.mark.django_db
+    def test_member_save_success_persists_serial(self):
+        """A serial is assigned to a real VC member and persisted (verified via DB reload)."""
+        from dcim.models import Device, VirtualChassis
+
+        view = self._view()
+        vc = VirtualChassis.objects.create(name="vc-serial")
+        host = make_device("vc-host")
+        host.virtual_chassis = vc
+        host.vc_position = 1
+        host.save()
+        member = make_device("vc-member", serial="OLD")
+        member.virtual_chassis = vc
+        member.vc_position = 2
+        member.save()
+
+        req = _make_request({"serial_1": "SN100", "member_id_1": str(member.pk)})
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=host.pk)
+        mock_msg.success.assert_called_once()
+        assert Device.objects.get(pk=member.pk).serial == "SN100"  # real save committed
+
     def test_permission_denied(self):
         view = self._view()
         err = MagicMock()
@@ -1503,35 +1482,6 @@ class TestAssignVCSerialView:
         ):
             view.post(req, pk=1)
         mock_msg.error.assert_called()
-
-    def test_member_save_success(self):
-        view = self._view()
-        vc = MagicMock(pk=10)
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = vc
-
-        member = MagicMock()
-        member.name = "sw-member"
-        member.virtual_chassis = vc
-        member.serial = "OLD"
-        member.save = MagicMock()
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.get.return_value = member
-
-        req = _make_request({"serial_1": "SN100", "member_id_1": "5"})
-        with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-        ):
-            view.post(req, pk=1)
-        mock_msg.success.assert_called_once()
-        assert member.serial == "SN100"
-        member.save.assert_called_once()
 
     def test_assignments_and_errors_both_reported(self):
         """One success + one error → both messages emitted."""
