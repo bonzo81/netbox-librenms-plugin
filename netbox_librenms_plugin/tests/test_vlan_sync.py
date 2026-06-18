@@ -10,6 +10,8 @@ Tests cover:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Import the autouse fixture from helpers
 pytest_plugins = ["netbox_librenms_plugin.tests.test_librenms_api_helpers"]
 
@@ -481,3 +483,201 @@ class TestVlanEntryDictGuardInSync:
         result = api.parse_port_vlan_data(port_data)
         assert result["untagged_vlan"] == 10
         assert result["tagged_vlans"] == [20]
+
+
+class TestVLANPostServerKeyScoping:
+    """The refresh POST must scope migrated context (and cache) to the POSTed
+    server_key, not the session-active server, in multi-server setups."""
+
+    def test_post_scopes_cache_keys_to_post_server_key(self):
+        """Drive the request past the short-circuit into cache-key construction: a
+        regression that namespaced the cache under the session server (not the POSTed
+        one) must fail here. The previous test bails before any fetch/cache work."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        view.get_vlan_context = MagicMock(return_value={})
+        view.get_cache_key = MagicMock(return_value="ck")
+        view.get_last_fetched_key = MagicMock(return_value="lfk")
+        # Seed the session client and use the REAL librenms_api property so the rebind swaps
+        # the client; the fetch returns live on the REBOUND client (what post() should query).
+        mock_api = MagicMock(server_key="default", cache_timeout=30)
+        view._librenms_api = mock_api
+        rebound_api = MagicMock(server_key="prod", cache_timeout=30)
+        rebound_api.get_librenms_id.return_value = 10  # truthy → reach fetch + cache
+        rebound_api.get_device_vlans.return_value = (True, [{"vlan_vlan": 10}])
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "prod"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.cache"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+        ):
+            view.post(req, pk=1)
+
+        # The VLAN cache must be namespaced to the POSTed server, not the session one —
+        # and must NOT also be built under "default" (the regression this guards against).
+        from unittest.mock import call
+
+        view.get_cache_key.assert_any_call(obj, "vlans", "prod")
+        assert call(obj, "vlans", "default") not in view.get_cache_key.call_args_list
+        # The last-fetched metadata key must be scoped to the POSTed server too, or
+        # multi-server cache timestamps bleed across servers under "default".
+        view.get_last_fetched_key.assert_any_call(obj, "vlans", "prod")
+        assert call(obj, "vlans", "default") not in view.get_last_fetched_key.call_args_list
+        view.get_vlan_context.assert_called_once_with(req, obj, "prod")
+        # The VLAN fetch ran on the REBOUND client, never the session one.
+        rebound_api.get_device_vlans.assert_called_once()
+        mock_api.get_device_vlans.assert_not_called()
+
+
+class TestVlanRefreshFailureClearsCache:
+    """A failed VLAN refresh must evict the server-scoped snapshot. Otherwise a refresh that
+    fails after a previous success (mapping removed / fetch error) leaves the prior VLAN table
+    cached, and the next GET renders stale comparison data the user can act on."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        view.get_object = MagicMock(return_value=MagicMock(pk=1))
+        view._get_error_context = MagicMock(return_value={})
+        # Encode server_key into the mock keys so the delete-assertions actually prove the
+        # POSTed "prod" scope was used — a constant return ("ck"/"lfk") would pass even if the
+        # view evicted the wrong server's ("default") key.
+        view.get_cache_key = MagicMock(side_effect=lambda _obj, kind, server_key: f"{server_key}:{kind}")
+        view.get_last_fetched_key = MagicMock(side_effect=lambda _obj, kind, server_key: f"{server_key}:{kind}:last")
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=30)
+        return view
+
+    def _run(self, *, librenms_id, vlans_result):
+        from unittest.mock import patch
+
+        view = self._view()
+        rebound_api = MagicMock(server_key="prod", cache_timeout=30)
+        rebound_api.get_librenms_id.return_value = librenms_id
+        rebound_api.get_device_vlans.return_value = vlans_result
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "prod"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+        ):
+            view.post(req, pk=1)
+        return view, mock_cache
+
+    def test_missing_librenms_id_evicts_scoped_cache(self):
+        view, mock_cache = self._run(librenms_id=None, vlans_result=(True, []))
+        view.get_cache_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
+        view.get_last_fetched_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
+        mock_cache.delete.assert_any_call("prod:vlans")
+        mock_cache.delete.assert_any_call("prod:vlans:last")
+
+    def test_fetch_failure_evicts_scoped_cache(self):
+        view, mock_cache = self._run(librenms_id=10, vlans_result=(False, "boom"))
+        view.get_cache_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
+        view.get_last_fetched_key.assert_any_call(view.get_object.return_value, "vlans", "prod")
+        mock_cache.delete.assert_any_call("prod:vlans")
+        mock_cache.delete.assert_any_call("prod:vlans:last")
+
+
+class TestVLANErrorContextServerKey:
+    """_get_error_context must preserve an explicit server_key=None (stale-server branch)
+    rather than falling back to the session server — otherwise the fragment re-renders on
+    a different, still-configured server and a retry syncs against the wrong instance."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        view._librenms_api = MagicMock(server_key="default")
+        view.get_vlan_groups_for_device = MagicMock(return_value=[])
+        return view
+
+    def test_explicit_none_is_preserved(self):
+        view = self._view()
+        ctx = view._get_error_context(MagicMock(), "err", server_key=None)
+        assert ctx["server_key"] is None
+
+    def test_omitted_falls_back_to_session(self):
+        view = self._view()
+        ctx = view._get_error_context(MagicMock(), "err")
+        assert ctx["server_key"] == "default"
+
+    def test_explicit_key_is_used(self):
+        view = self._view()
+        ctx = view._get_error_context(MagicMock(), "err", server_key="prod")
+        assert ctx["server_key"] == "prod"
+
+
+@pytest.mark.django_db
+class TestVlanSyncContentTemplateMigratedMode:
+    """Render the real _vlan_sync_content.html template both ways.
+
+    In migrated mode the form is replaced by a plain <div> (a migrated donor must not be able to
+    POST a VLAN sync). But the VLAN table stays interactive in migrated mode, and its verify JS
+    (librenms_sync.js verify-vlan-group / verify-vlan-sync-group) reads
+    document.querySelector('[name=csrfmiddlewaretoken]').value and posts server_key — so CSRF +
+    server_key must render in BOTH modes (matching the cable-sync template). Only the form-submit
+    ``action`` input is form-only and stays gated to the <form> branch.
+    """
+
+    def _render(self, *, migrated, server_key="default"):
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+        from django_tables2 import RequestConfig
+
+        from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        from django.contrib.auth.models import AnonymousUser
+
+        device = make_device("vlan-tmpl-dev")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()  # NetBox context processors read request.user
+        # One real row so {% if not vlan_sync.vlan_table.rows %} is False and the form branch renders.
+        table = LibreNMSVLANTable([{"vlan_id": 10, "name": "v10", "type": "tagged", "state": "active"}])
+        RequestConfig(request).configure(table)
+        vlan_sync = {
+            "object": device,
+            "vlan_table": table,
+            "server_key": server_key,
+            "error_message": None,
+            "cache_expiry": None,
+        }
+        return render_to_string(
+            "netbox_librenms_plugin/_vlan_sync_content.html",
+            {"vlan_sync": vlan_sync, "migrated_to_marker": migrated},
+            request=request,
+        )
+
+    def test_migrated_mode_drops_form_but_keeps_csrf_and_server_key(self):
+        # Non-default server so the assertion proves the actual value is emitted.
+        html = self._render(migrated={"server_key": "prod", "device_id": 1, "at": "now"}, server_key="prod")
+        # The live POST form is gone (a donor must not POST a sync)...
+        assert "<form" not in html
+        # ...but CSRF + server_key remain so the JS verify-vlan-group fetch targets the right
+        # server with a usable token.
+        assert "csrfmiddlewaretoken" in html
+        assert 'name="server_key"' in html
+        assert 'value="prod"' in html
+        # The form-submit action input is form-only and must NOT render in migrated mode.
+        assert 'name="action"' not in html
+
+    def test_normal_mode_emits_form_with_csrf_and_hidden_inputs(self):
+        html = self._render(migrated=False)
+        assert "<form" in html
+        assert "csrfmiddlewaretoken" in html
+        assert 'name="action"' in html
+        assert 'name="server_key"' in html

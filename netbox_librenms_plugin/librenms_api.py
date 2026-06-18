@@ -18,6 +18,22 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 logger = logging.getLogger(__name__)
 
 
+def build_librenms_api(server_key):
+    """Return a :class:`LibreNMSAPI` for *server_key*, or ``None`` when the key is
+    unknown or the server is misconfigured.
+
+    ``LibreNMSAPI(server_key=...)`` raises ``KeyError`` for an unknown non-default
+    key and ``ValueError`` when the URL/token is missing. Views take ``server_key``
+    from request POST, where a stale page or tampered request can carry a key that
+    no longer exists — returning ``None`` lets the caller surface a user-facing
+    error instead of an unhandled 500.
+    """
+    try:
+        return LibreNMSAPI(server_key=server_key)
+    except (KeyError, ValueError):
+        return None
+
+
 class LibreNMSAPI:
     """
     Client to interact with the LibreNMS API and retrieve interface data for devices.
@@ -214,7 +230,10 @@ class LibreNMSAPI:
                 # would pass the redirect/rebind membership check that keys off this map and then
                 # blow up LibreNMSAPI(server_key="bad"). A server that can't be constructed must not
                 # be selectable — exposing it 500s a sync POST instead of degrading to the active one.
-                if not isinstance(config, dict) or not config.get("librenms_url") or not config.get("api_token"):
+                if not isinstance(config, dict):
+                    logger.warning("Skipping malformed LibreNMS server config %r (expected a mapping).", key)
+                    continue
+                if not config.get("librenms_url") or not config.get("api_token"):
                     continue
                 result[key] = config.get("display_name", key)
             return result
@@ -281,7 +300,7 @@ class LibreNMSAPI:
         primary_ip_address = getattr(primary_ip, "address", None)
         ip_address = getattr(primary_ip_address, "ip", None) if primary_ip else None
         dns_name = getattr(primary_ip, "dns_name", None) if primary_ip else None
-        hostname = getattr(obj, "name", None) or None
+        hostname = getattr(obj, "name", None)
 
         # Try IP address
         if ip_address:
@@ -310,15 +329,12 @@ class LibreNMSAPI:
     def _normalize_librenms_id(value):
         """Coerce a raw LibreNMS ID value to int or None.
 
-        Booleans are rejected because bool is a subclass of int in Python,
-        so int(True) silently becomes 1 — a valid-looking device ID.
+        Thin wrapper around :func:`netbox_librenms_plugin.utils.coerce_librenms_id`
+        kept for back-compat with internal callers in this module.
         """
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            return int(value)
-        except (ValueError, TypeError):
-            return None
+        from netbox_librenms_plugin.utils import coerce_librenms_id
+
+        return coerce_librenms_id(value)
 
     def _get_cache_key(self, obj):
         """

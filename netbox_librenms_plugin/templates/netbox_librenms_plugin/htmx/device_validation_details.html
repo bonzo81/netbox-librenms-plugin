@@ -6,7 +6,7 @@
     {% if validation.existing_device %}
       {% if validation.device_type_mismatch %}
         <i class="mdi mdi-alert-circle text-danger"></i>
-      {% elif validation.existing_match_type == 'librenms_id' %}
+      {% elif validation.existing_match_type == 'librenms_id' or validation.existing_match_type == 'librenms_oob' %}
         <i class="mdi mdi-check-decagram text-info"></i>
       {% else %}
         <i class="mdi mdi-alert text-warning"></i>
@@ -342,8 +342,8 @@
                     {% endif %}
                     {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% endif %}
-                  </td>
-                  <td>{{ libre_device.os|default:"—" }}</td>
+                </td>
+                <td>{{ libre_device.os|default:"—" }}</td>
               </tr>
 
               {% if validation.import_as_vm and not validation.existing_device or validation.existing_device and existing_device_model_name == "virtualmachine" %}
@@ -403,7 +403,17 @@
 
   {# Status & Actions #}
   {% if validation.existing_device %}
-    {% if validation.existing_match_type == 'librenms_id' %}
+    {% if validation.serial_action == 'merge_netbox_devices' %}
+      {# Stage 2: two NetBox devices appear to represent the same physical box. #}
+      <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-warning me-1"><i class="mdi mdi-merge"></i> Two NetBox devices</span>
+        <span class="text-muted ms-1">
+          — A hostname match and a chassis-serial match resolved to two different NetBox
+          devices. Pick which one to keep; the other will be marked as merged.
+        </span>
+      </div>
+
+    {% elif validation.existing_match_type == 'librenms_id' %}
       <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         {% if existing_id_servers %}
           {% for srv in existing_id_servers %}
@@ -527,21 +537,108 @@
 
     {% elif validation.existing_match_type == 'serial' %}
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
-        <span class="badge bg-warning-lt me-1"><i class="mdi mdi-barcode"></i> Serial match</span>
+        {% if validation.serial_action == 'oob_candidate' %}
+          <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
+        {% elif validation.serial_action == 'promote_to_host' %}
+          <span class="badge bg-info-lt me-1"><i class="mdi mdi-server"></i> Host Detected</span>
+        {% else %}
+          <span class="badge bg-warning-lt me-1"><i class="mdi mdi-barcode"></i> Serial match</span>
+        {% endif %}
         {% if validation.serial_action == 'hostname_differs' %}
           <span class="badge bg-warning-lt me-1"><i class="mdi mdi-alert"></i> Name differs</span>
         {% elif validation.serial_action == 'link' %}
           <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Name match</span>
         {% endif %}
-        {% if validation.device_type_mismatch %}
+        {% if validation.device_type_mismatch and validation.serial_action != 'oob_candidate' and validation.serial_action != 'promote_to_host' %}
           <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Type mismatch</span>
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
-          not linked to LibreNMS.
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% if validation.existing_librenms_link.host_id %},
+          currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% else %},
+          not linked to LibreNMS.{% endif %}
         </span>
       </div>
+      {% if validation.serial_role_choice_available %}
+        <div class="mb-2 small d-flex flex-wrap align-items-center gap-2">
+          <span class="text-muted">This LibreNMS device is the:</span>
+          <div class="btn-group btn-group-sm" role="group" aria-label="LibreNMS device role">
+            <input type="radio" class="btn-check serial-role-radio"
+                   name="serial-role-{{ libre_device.device_id }}"
+                   id="serial-role-host-{{ libre_device.device_id }}-radio"
+                   data-target="serial-role-host-{{ libre_device.device_id }}"
+                   autocomplete="off"
+                   {% if validation.serial_action == 'promote_to_host' %}checked{% endif %}>
+            <label class="btn btn-outline-info" for="serial-role-host-{{ libre_device.device_id }}-radio">
+              <i class="mdi mdi-server"></i> Host
+            </label>
+            <input type="radio" class="btn-check serial-role-radio"
+                   name="serial-role-{{ libre_device.device_id }}"
+                   id="serial-role-oob-{{ libre_device.device_id }}-radio"
+                   data-target="serial-role-oob-{{ libre_device.device_id }}"
+                   autocomplete="off"
+                   {% if validation.serial_action == 'oob_candidate' %}checked{% endif %}>
+            <label class="btn btn-outline-purple" for="serial-role-oob-{{ libre_device.device_id }}-radio">
+              <i class="mdi mdi-chip"></i> OOB controller
+            </label>
+          </div>
+          <span class="text-muted small">(heuristic guess pre-selected -- flip if wrong)</span>
+        </div>
+      {% endif %}
+      {% if validation.oob_candidate %}
+      <div id="serial-role-oob-{{ libre_device.device_id }}"
+           {% if validation.serial_role_choice_available and validation.serial_action != 'oob_candidate' %}style="display:none"{% endif %}>
+        <div class="alert alert-info py-2 mb-3 small">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <i class="mdi mdi-swap-horizontal"></i>
+            <strong>OOB attach effect on
+              <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+            </strong>
+          </div>
+          <table class="table table-sm table-borderless mb-1" style="width:auto;">
+            <thead>
+              <tr class="text-muted">
+                <th class="py-0 pe-3 fw-normal">Slot</th>
+                <th class="py-0 pe-3 fw-normal">Before</th>
+                <th class="py-0 pe-3 fw-normal"></th>
+                <th class="py-0 fw-normal">After</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
+                <td class="py-0 pe-3 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }}{% else %}--{% endif %}</td>
+                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                <td class="py-0 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
+              </tr>
+              <tr>
+                <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
+                <td class="py-0 pe-3 text-muted">--</td>
+                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                <td class="py-0">#{{ libre_device.device_id }} <span class="text-muted">({{ validation.oob_candidate.type }}{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="text-muted">
+            <i class="mdi mdi-information-outline"></i>
+            Existing device is updated in place -- no new NetBox device is created.
+          </div>
+        </div>
+        <div class="mb-3">
+          <form hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
+                hx-swap="none">
+            {% csrf_token %}
+            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+            <input type="hidden" name="server_key" value="{{ server_key }}">
+            {% include "netbox_librenms_plugin/htmx/_oob_interface_select.html" %}
+            <button type="submit" class="btn btn-sm btn-primary">
+              <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
+            </button>
+          </form>
+        </div>
+      </div>
+      {% endif %}
+      {% if validation.serial_action == 'link' or validation.serial_action == 'hostname_differs' %}
       <div class="mb-3">
         <form style="display:inline"
               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
@@ -557,7 +654,7 @@
               <input class="form-check-input" type="checkbox" name="force" id="force-serial-{{ libre_device.device_id }}"
                      onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
               <label class="form-check-label text-danger" for="force-serial-{{ libre_device.device_id }}">
-                <i class="mdi mdi-alert-circle"></i> Device type mismatch — check to force
+                <i class="mdi mdi-alert-circle"></i> Device type mismatch -- check to force
               </label>
             </div>
           {% endif %}
@@ -573,14 +670,55 @@
           {% endif %}
         </form>
       </div>
+      {% endif %}
 
     {% elif validation.existing_match_type == 'primary_ip' %}
+      {# device_add_as_oob sets device.oob_ip (VMs lack it) — only offer OOB attach for real devices; a VM IP-match falls through to the info message below. #}
+      {% if validation.serial_action == 'oob_candidate' and existing_device_model_name != "virtualmachine" %}
+        <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+          <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
+          <span class="text-muted ms-1">
+            — Exists as
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+            (matched via IP {{ libre_device.ip }}).
+          </span>
+        </div>
+        <div class="alert alert-info py-2 mb-3">
+          <i class="mdi mdi-information-outline"></i>
+          LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
+          appears to be an OOB management controller
+          (<strong>{{ validation.oob_candidate.type }}</strong>
+          {% if validation.oob_candidate.ip %}— {{ validation.oob_candidate.ip }}{% endif %}).
+        </div>
+        <div class="mb-3">
+          <form hx-post="{% url 'plugins:netbox_librenms_plugin:device_add_as_oob' device_id=libre_device.device_id %}"
+                hx-swap="none">
+            {% csrf_token %}
+            <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+            <input type="hidden" name="server_key" value="{{ server_key }}">
+            {% include "netbox_librenms_plugin/htmx/_oob_interface_select.html" %}
+            <button type="submit" class="btn btn-sm btn-primary">
+              <i class="mdi mdi-chip"></i> Add as OOB to {{ validation.existing_device.name }}
+            </button>
+          </form>
+        </div>
+      {% else %}
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         <span class="badge bg-warning-lt me-1"><i class="mdi mdi-ip-network"></i> IP match</span>
         <span class="text-muted ms-1">
           — Device with IP {{ libre_device.ip }} exists as
           <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
           Consider adding LibreNMS ID manually.
+        </span>
+      </div>
+      {% endif %}
+
+    {% elif validation.existing_match_type == 'librenms_oob' %}
+      <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB linked</span>
+        <span class="text-muted ms-1">
+          — LibreNMS ID {{ libre_device.device_id }} is already linked as the OOB controller for
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
         </span>
       </div>
 
@@ -639,8 +777,10 @@
          class="btn btn-primary btn-sm" target="_blank" rel="noopener noreferrer">
         <i class="mdi mdi-open-in-new"></i> View in NetBox
       </a>
-      {% if validation.existing_match_type == 'librenms_id' %}
-        <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}"
+      {% if validation.existing_match_type == 'librenms_id' or validation.existing_match_type == 'librenms_oob' %}
+        {# Carry the active server_key so the Full Sync page opens on the same LibreNMS #}
+        {# instance the user is validating against, not the session/default server. #}
+        <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}{% if server_key %}?server_key={{ server_key|urlencode }}{% endif %}"
            class="btn btn-outline-primary btn-sm" target="_blank" rel="noopener noreferrer">
           <i class="mdi mdi-sync"></i> Full Sync Page
         </a>
@@ -651,3 +791,64 @@
     <i class="mdi mdi-close"></i> Close
   </button>
 </div>
+
+<script>
+  (function () {
+    document.querySelectorAll(".serial-role-radio").forEach(function (radio) {
+      if (radio.dataset.serialRoleBound) return;
+      radio.dataset.serialRoleBound = "1";
+      radio.addEventListener("change", function () {
+        var name = radio.name;
+        document.querySelectorAll('input.serial-role-radio[name="' + name + '"]').forEach(function (r) {
+          var target = document.getElementById(r.dataset.target);
+          if (target) target.style.display = r.checked ? "" : "none";
+        });
+      });
+    });
+
+    // Open the nested Promote-options modal manually. We bypass
+    // data-bs-toggle="modal" here because NetBox's bundled JS hooks
+    // the data-api click listener and crashes ("Cannot read properties
+    // of null (reading 'hide')") when triggered from inside our HTMX
+    // modal, which isn't owned by a Bootstrap Modal instance.
+    document.querySelectorAll(".promote-modal-trigger").forEach(function (btn) {
+      if (btn.dataset.promoteModalBound) return;
+      btn.dataset.promoteModalBound = "1";
+      btn.addEventListener("click", function (event) {
+        event.preventDefault();
+        var targetId = btn.dataset.modalTarget;
+        var modalEl = targetId && document.getElementById(targetId);
+        if (!modalEl) return;
+        if (typeof bootstrap !== "undefined" && bootstrap.Modal) {
+          bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        } else if (typeof window.bootstrap !== "undefined" && window.bootstrap.Modal) {
+          window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        } else {
+          modalEl.classList.add("show");
+          modalEl.style.display = "block";
+          modalEl.removeAttribute("aria-hidden");
+          modalEl.setAttribute("aria-modal", "true");
+          // Bind fallback dismiss handlers for the promote modal's close/cancel buttons.
+          modalEl.querySelectorAll("[data-bs-dismiss='modal']").forEach(function (closeBtn) {
+            if (closeBtn.dataset.fallbackDismissBound) return;
+            closeBtn.dataset.fallbackDismissBound = "1";
+            closeBtn.addEventListener("click", function () {
+              modalEl.classList.remove("show");
+              modalEl.style.display = "none";
+              modalEl.setAttribute("aria-hidden", "true");
+              modalEl.removeAttribute("aria-modal");
+              // The promote modal is nested inside the still-open HTMX validation modal;
+              // only tear down the shared body lock/backdrop if no other modal remains open,
+              // otherwise we'd strip the parent modal's backdrop and let the page be clicked.
+              if (document.querySelectorAll(".modal.show").length === 0) {
+                document.body.classList.remove("modal-open");
+                var backdrop = document.querySelector(".modal-backdrop");
+                if (backdrop) backdrop.remove();
+              }
+            });
+          });
+        }
+      });
+    });
+  })();
+</script>

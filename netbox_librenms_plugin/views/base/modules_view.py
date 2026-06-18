@@ -10,6 +10,7 @@ from django.views import View
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     get_librenms_device_id,
+    get_librenms_oob,
     get_librenms_sync_device,
     get_module_template_interface_names,
     normalize_librenms_port_id,
@@ -51,6 +52,19 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 
 # Physical classes filtered out when counting hardware siblings under a parent bay.
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
+
+
+def _try_int(v: object) -> int | None:
+    """Return int(v), or None if v is not coercible to int.
+
+    LibreNMS API responses may return numeric SNMP indices as strings.
+    This helper lets callers safely coerce without crashing on unexpected
+    non-numeric values such as empty strings or "N/A".
+    """
+    try:
+        return int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _check_ignore_rules(
@@ -172,9 +186,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """Returns the table class. Subclasses should override."""
         raise NotImplementedError("Subclasses must implement get_table()")
 
-    def _get_sync_device(self, obj):
-        """Resolve the LibreNMS sync device for cache reads/writes in VC contexts."""
-        sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
+    def _get_sync_device(self, obj, server_key=None):
+        """Resolve the LibreNMS sync device for cache reads/writes in VC contexts.
+
+        Scoped to the POST-resolved server when provided (fallback: session server)
+        so a VC member synced from a non-default server resolves the right sync device.
+        """
+        server_key = server_key or self.librenms_api.server_key
+        sync_device = get_librenms_sync_device(obj, server_key=server_key)
         return sync_device or obj
 
     @staticmethod
@@ -283,11 +302,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def post(self, request, pk):
         """Fetch inventory from LibreNMS, cache it, and render the module sync table."""
         obj = self.get_object(pk)
-        sync_device = self._get_sync_device(obj)
+        # Rebind the API to the POSTed server BEFORE resolving the sync device / librenms_id
+        # so the inventory fetch + cache scope all target the same server in a multi-server
+        # tab refresh. Resolve before _get_sync_device so VC resolution uses the same key.
+        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return render(
+                request,
+                self.partial_template_name,
+                {
+                    "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
+                    "has_write_permission": self.has_write_permission(),
+                },
+            )
+        sync_device = self._get_sync_device(obj, server_key=server_key)
 
         self.librenms_id = self.librenms_api.get_librenms_id(sync_device)
         if not self.librenms_id:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key))
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             messages.error(request, "Device not found in LibreNMS.")
             return render(
                 request,
@@ -297,7 +330,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         "object": obj,
                         "table": None,
                         "cache_expiry": None,
-                        "server_key": self.librenms_api.server_key,
+                        "server_key": server_key,
                     },
                     "has_write_permission": self.has_write_permission(),
                 },
@@ -305,8 +338,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
 
-        if not success:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key))
+        # get_device_inventory() is an external API boundary: a success flag with a
+        # non-list payload (dict/string/None on a malformed response) — or a list that
+        # carries non-dict entries (e.g. [None], ["bad"]) — must be treated as a fetch
+        # failure, otherwise the iterate/mutate below turns a refresh into a 500.
+        if (
+            not success
+            or not isinstance(inventory_data, list)
+            or any(not isinstance(item, dict) for item in inventory_data)
+        ):
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
             messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
             return render(
@@ -317,33 +358,106 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         "object": obj,
                         "table": None,
                         "cache_expiry": None,
-                        "server_key": self.librenms_api.server_key,
+                        "server_key": server_key,
                     },
                     "has_write_permission": self.has_write_permission(),
                 },
             )
 
+        for item in inventory_data:
+            item["_source"] = "main"
+
         # Fetch ports once and reuse in subsequent enrichment steps.
         ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
         ports_error = None
-        if not ports_success or not isinstance(ports_data, dict):
+        # A success flag is not enough: a dict whose "ports" is missing/None or carries
+        # non-dict entries makes _enrich_inventory_port_identity()/_merge_transceiver_data()
+        # silently no-op, leaving port-id enrichment incomplete. Treat that as a fetch
+        # failure so the snapshot below is NOT cached as complete (and the user is warned),
+        # instead of silently serving a degraded module list until TTL/manual refresh.
+        ports_payload_ok = (
+            ports_success
+            and isinstance(ports_data, dict)
+            and isinstance(ports_data.get("ports"), list)
+            and all(isinstance(port, dict) for port in ports_data["ports"])
+        )
+        if not ports_payload_ok:
             ports_error = str(ports_data) if ports_data else "unknown error"
             ports_data = {}
 
-        # Fetch transceiver data and merge with inventory
+        # Merge main-device transceiver data BEFORE computing the OOB offset so
+        # that synthetic transceiver rows (whose entity_physical_index values come
+        # from the transceiver API and may exceed the ENTITY-MIB high-water mark)
+        # are counted in main_max_idx.  Vendors like Nokia expose SFPs in the
+        # transceiver API with indices that are absent from ENTITY-MIB; without
+        # this reordering those high indices could fall inside the OOB namespace.
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
+        for item in inventory_data:
+            item.setdefault("_source", "main")
         # Enrich port rows with stable LibreNMS port_id using ports data so
         # interface matching works even when transceiver metadata is absent.
         self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
 
-        # Cache the merged inventory data, namespaced by server and librenms_id to detect remapping
-        cache.set(
-            self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key),
-            {"inventory": inventory_data, "librenms_id": self.librenms_id},
-            timeout=self.librenms_api.cache_timeout,
-        )
+        # If an OOB controller is linked, fetch its inventory and merge.
+        # Offset OOB entPhysicalIndex values by a dynamic amount to prevent
+        # collisions with the main device's real entPhysicalIndex values.
+        # RFC 2737 does not cap entPhysicalIndex, so a static 1_000_000 offset
+        # is not safe for high-density chassis. Instead we compute an offset
+        # that is always above the main device's highest observed index,
+        # including any synthetic transceiver rows added above.
+        _server_key = server_key
+        oob = get_librenms_oob(sync_device, server_key=_server_key)
+        oob_id = oob.get("id") if isinstance(oob, dict) else None
+        oob_failed = False
+        if oob_id:
+            oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
+            # Same element-shape guard as the main inventory above: a list with non-dict
+            # entries would crash the index-offset/merge loop below, so fail closed.
+            if (
+                oob_success
+                and isinstance(oob_inventory, list)
+                and all(isinstance(item, dict) for item in oob_inventory)
+            ):
+                main_max_idx = max(
+                    (cast for item in inventory_data if (cast := _try_int(item.get("entPhysicalIndex"))) is not None),
+                    default=0,
+                )
+                # Round up to the next 1000-boundary for a clean namespace.
+                _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
+                for item in oob_inventory:
+                    item["_source"] = "oob"
+                    if (idx := _try_int(item.get("entPhysicalIndex"))) is not None:
+                        item["entPhysicalIndex"] = idx + _OOB_OFFSET
+                    if (parent := _try_int(item.get("entPhysicalContainedIn"))) is not None and parent != 0:
+                        item["entPhysicalContainedIn"] = parent + _OOB_OFFSET
+                inventory_data = inventory_data + oob_inventory
+            else:
+                oob_failed = True
+                logger.warning(
+                    "OOB inventory fetch failed for device %s (OOB id %s): %s",
+                    self.librenms_id,
+                    oob_id,
+                    oob_inventory,
+                )
 
-        context = self._build_context(request, obj, inventory_data)
+        # Cache the merged inventory, fingerprinted by main + OOB librenms_id so a
+        # re-link to a different controller invalidates the stale merged inventory.
+        # Skip caching on any partial fetch — an OOB failure (main-only snapshot), a
+        # transceiver-enrichment failure (synthetic transceiver rows dropped), or a ports
+        # failure (port-id enrichment missing, so interface matching is degraded).
+        # Persisting any of these would let get_context_data() accept the incomplete
+        # snapshot as complete (it only fingerprints librenms_id/oob_librenms_id), silently
+        # serving a degraded module list and hiding the warning until TTL/manual refresh.
+        if oob_failed or txr_error or ports_error:
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+        else:
+            cache.set(
+                self.get_cache_key(sync_device, "inventory", server_key=server_key),
+                {"inventory": inventory_data, "librenms_id": self.librenms_id, "oob_librenms_id": oob_id},
+                timeout=self.librenms_api.cache_timeout,
+            )
+
+        context = self._build_context(request, obj, inventory_data, server_key=server_key)
         if ports_error:
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(
@@ -354,12 +468,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if txr_error:
             logger.warning("Transceiver fetch failed for device %s: %s", self.librenms_id, txr_error)
             messages.warning(request, "Inventory refreshed, but transceiver fetch failed; see server logs for details.")
-        elif not ports_error:
+        if oob_failed:
+            # Keep the toast generic — the device/OOB ids are already in the logger.warning
+            # above (line ~418); surfacing internal LibreNMS ids in the UI is needless leakage
+            # and inconsistent with the ports/transceiver toasts.
+            messages.warning(
+                request,
+                "Inventory refreshed, but OOB controller inventory fetch failed; see server logs for details.",
+            )
+        if not txr_error and not oob_failed and not ports_error:
             messages.success(request, "Inventory data refreshed successfully.")
         return render(
             request,
             self.partial_template_name,
-            {"module_sync": context, "has_write_permission": self.has_write_permission()},
+            {
+                "module_sync": context,
+                "has_write_permission": self.has_write_permission(),
+            },
         )
 
     def get_context_data(self, request, obj):
@@ -379,16 +504,36 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
+        # post() fails closed on malformed inventory before caching, but a stale pre-fix cache
+        # entry (e.g. {"inventory": [None]}) can still reach _build_context() and crash on
+        # item.get(...). Mirror the list-of-dicts guard on the read path too.
+        cached_inventory = cached_payload.get("inventory")
+        if not isinstance(cached_inventory, list) or any(not isinstance(item, dict) for item in cached_inventory):
+            cache.delete(cache_key)
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
         current_librenms_id = self.librenms_api.get_librenms_id(sync_device)
         if cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
+        # Same for the linked OOB controller: a re-link (or unlink) to a different
+        # controller must drop merged inventory built for the old one. Symmetric on
+        # None so had-OOB→none and none→has-OOB both invalidate.
+        current_oob = get_librenms_oob(sync_device, server_key=server_key)
+        current_oob_id = current_oob.get("id") if isinstance(current_oob, dict) else None
+        if cached_payload.get("oob_librenms_id") != current_oob_id:
+            cache.delete(cache_key)
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
         return self._build_context(request, obj, cached_payload["inventory"])
 
-    def _build_context(self, request, obj, inventory_data):
+    def _build_context(self, request, obj, inventory_data, server_key=None):
         """Build context with matched inventory items and table."""
+        # Scope cache reads + per-row interface binding to the POST-resolved server when
+        # provided (fallback: session server). Stored on self so _build_member_contexts
+        # (reached via the row builders) uses the same key without threading it through
+        # every intermediate signature.
+        self._active_server_key = server_key or self.librenms_api.server_key
         # Build a lookup of all inventory items by index for parent resolution
         # Skip items with missing entPhysicalIndex to avoid KeyError on malformed data.
         index_map = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
@@ -467,9 +612,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         table = self.get_table(table_data, obj)
         table.configure(request)
 
-        sync_device = self._get_sync_device(obj)
+        sync_device = self._get_sync_device(obj, server_key=self._active_server_key)
         cache_ttl = cache_remaining_ttl(
-            cache, self.get_cache_key(sync_device, "inventory", server_key=self.librenms_api.server_key)
+            cache, self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key)
         )
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
@@ -479,7 +624,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "table": table,
             "object": obj,
             "cache_expiry": cache_expiry,
-            "server_key": self.librenms_api.server_key,
+            "server_key": self._active_server_key,
         }
 
     @staticmethod
@@ -694,7 +839,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
                 "interfaces_by_port_id": interfaces_by_port_id,
                 "interfaces_by_name": interfaces_by_name,
-                "server_key": self.librenms_api.server_key,
+                "server_key": getattr(self, "_active_server_key", None) or self.librenms_api.server_key,
             }
         return member_contexts
 
@@ -749,6 +894,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     @staticmethod
     def _attach_interface_match(row, target_context):
         """Attach matched NetBox interface metadata to a table row when available."""
+        # OOB controller inventory rows are merged into the same list, but only
+        # the main device's interfaces are indexed in target_context. Matching an
+        # OOB row by name would bind it to an unrelated main-device interface, so
+        # skip interface matching entirely for OOB-sourced rows.
+        if row.get("_source") == "oob":
+            return
         try:
             port_id = int(row.get("librenms_port_id") or 0)
         except (TypeError, ValueError):
@@ -1062,6 +1213,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         success, transceivers = self.librenms_api.get_device_transceivers(self.librenms_id)
         if not success:
             return inventory_data, str(transceivers) if transceivers else "unknown error"
+        # A truthy success flag with a malformed payload (a dict, or a list carrying non-dict
+        # entries) would 500 on the txr.get(...) access below. Treat it as a fetch error so the
+        # caller skips the snapshot cache and warns, matching the inventory/ports/OOB guards.
+        # This must precede the emptiness check: an empty non-list like {} is falsy, so checking
+        # `not transceivers` first would mislabel it as a successful "no transceivers" response
+        # and cache a degraded snapshot.
+        if not isinstance(transceivers, list) or any(not isinstance(txr, dict) for txr in transceivers):
+            return inventory_data, f"malformed transceiver payload (got {type(transceivers).__name__})"
         if not transceivers:
             return inventory_data, None
 
@@ -1674,6 +1833,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """
         if row.get("status") != "No Bay":
             return
+        # OOB controller rows are stamped read-only in _build_row; never offer carrier
+        # install options on them either (this runs after _build_row, so the central
+        # stamp doesn't cover it).
+        if row.get("_source") == "oob":
+            return
         device_bays = getattr(self, "_current_device_bays", None) or {}
         if not device_bays:
             return
@@ -2130,6 +2294,37 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         name = item.get("entPhysicalName", "") or "-"
         description = item.get("entPhysicalDescr", "") or ""
 
+        # OOB-controller modules come from a *separate* device. Comparing them against this
+        # host's bays/types/installed modules is meaningless, and the host matching below could
+        # render an OOB row as "Matched"/"Installed" whenever labels happened to line up — a
+        # false-positive comparison. Short-circuit *before* any host bay/type/status resolution
+        # (and before the integrated-child check below — an OOB controller can itself expose
+        # integrated-child duplicates, which would otherwise steal the row into the "Integrated"
+        # path and drop its OOB status). Emit a read-only informational row with neutral
+        # bay/type/status. (A late post-match scrub can't undo a status the matching computed.)
+        if item.get("_source") == "oob":
+            return {
+                "name": name,
+                "model": model_name or "-",
+                "serial": serial or "-",
+                "description": description,
+                "item_class": phys_class,
+                "module_bay": "-",
+                "module_type": "-",
+                "status": "OOB",
+                "can_install": False,
+                "module_bay_id": None,
+                "module_type_id": None,
+                "depth": depth,
+                "ent_physical_index": item.get("entPhysicalIndex"),
+                "has_installable_children": False,
+                "librenms_port_id": item.get("_librenms_port_id"),
+                "librenms_ifname": item.get("_librenms_ifname"),
+                "librenms_ifdescr": item.get("_librenms_ifdescr"),
+                "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
+                "_source": "oob",
+            }
+
         # Detect "integrated child" SNMP duplicates (e.g. Nokia XIOM with a
         # fixed integrated MDA exposed as two ENTITY-MIB rows sharing the
         # same serial+model).  The child row is informational only — it has
@@ -2155,6 +2350,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 "has_installable_children": False,
                 "integrated_in_name": ancestor_name,
                 "integrated_in_index": integrating_ancestor.get("entPhysicalIndex"),
+                "_source": item.get("_source", "main"),
             }
 
         # Match to NetBox module bay
@@ -2200,6 +2396,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "librenms_ifname": item.get("_librenms_ifname"),
             "librenms_ifdescr": item.get("_librenms_ifdescr"),
             "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
+            "_source": item.get("_source", "main"),
         }
         if name_conflict_reason:
             row["name_conflict_reason"] = name_conflict_reason
@@ -2307,6 +2504,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # overwritten it with "Installed" / "Serial Mismatch" / "Type Mismatch".
         if name_conflict_reason:
             row["status"] = "Name Conflict"
+
+        # Note: OOB-controller rows never reach here — they short-circuit to a neutral
+        # read-only row before any host bay/type/status matching (see the _source == "oob"
+        # block above), so no host-side action flags or model-editing payloads are ever set.
 
         return row
 

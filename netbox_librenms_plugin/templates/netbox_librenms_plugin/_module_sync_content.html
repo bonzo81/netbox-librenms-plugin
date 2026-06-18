@@ -16,8 +16,9 @@
     {% endif %}
 </div>
 
-{% if has_write_permission %}
-{# Install Selected: checked rows are injected into the HTMX POST at htmx:configRequest (ordering-independent — htmx's own submit listener serializes first on a fresh load); the submit-phase injector covers only the native no-JS fallback. hx-post swaps the table in place. #}
+{# Migrated donors must not install: drop the whole form (not just the button) so install_selected isn't a live POST target / wired JS handler in migrated mode — matching the other sync-content templates. #}
+{% if has_write_permission and not migrated_to_marker %}
+{# Separate form for Install Selected — uses JS to collect checked rows before submit #}
 <form id="install-selected-form" method="post"
     action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
     hx-post="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
@@ -31,6 +32,15 @@
         </button>
     </div>
 </form>
+{% elif migrated_to_marker %}
+{% comment %}
+Install form is dropped in migrated mode, but module VC-member changes still POST
+/verify-module/ via handleModuleChange(), which reads csrfmiddlewaretoken + server_key.
+Emit them as standalone hidden inputs so the verify fetch keeps working — mirrors the
+interface/IP/VLAN fragments.
+{% endcomment %}
+<input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+<input type="hidden" name="server_key" value="{{ module_sync.server_key|default:'' }}">
 {% endif %}
 <div class="card">
     {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}

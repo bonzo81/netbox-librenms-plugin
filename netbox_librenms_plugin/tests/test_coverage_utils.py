@@ -134,6 +134,26 @@ class TestGetLibreNMSSyncDeviceServerKey:
         result = get_librenms_sync_device(device, server_key=None)
         assert result is member_with_id
 
+    def test_float_id_is_rejected_not_int_truncated(self):
+        """A float id (e.g. 1.0) must not match: int(1.0) would truncate-pass here but then
+        fail coerce_librenms_id/get_librenms_device_id downstream. The float member is
+        skipped and a later member with a valid int id is chosen instead."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        device = MagicMock()
+        vc = MagicMock()
+        device.virtual_chassis = vc
+
+        member_float = MagicMock()
+        member_float.cf = {"librenms_id": {"default": 1.0}}  # invalid: float, not int/str
+        member_valid = MagicMock()
+        member_valid.cf = {"librenms_id": {"prod": 5}}
+
+        vc.members.all.return_value = [member_float, member_valid]
+
+        result = get_librenms_sync_device(device, server_key=None)
+        assert result is member_valid
+
     def test_server_key_none_matches_legacy_cf(self):
         """server_key=None: matches member with legacy bare int librenms_id."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device

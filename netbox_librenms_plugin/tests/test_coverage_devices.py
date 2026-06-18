@@ -626,6 +626,70 @@ class TestSingleModuleVerifyView:
             can_add_module_type_mapping=True,
         )
 
+    def test_post_threads_active_server_key_into_row_builder(self):
+        """On a non-default LibreNMS server, the POST server_key must reach the row builder.
+        _build_member_contexts falls back to the default librenms_api.server_key when
+        _active_server_key is unset, which would recompute interface binding against the
+        wrong server and disagree with the main modules tab."""
+        import json
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 1, "ent_physical_index": 10, "server_key": "prod"}).encode()
+        request.user.has_perm = MagicMock(return_value=False)
+
+        selected_device = MagicMock()
+        selected_device.virtual_chassis = None
+        selected_device.device_type = MagicMock()
+        selected_device.device_type.manufacturer = MagicMock()
+        inventory_data = [{"entPhysicalIndex": 10, "entPhysicalContainedIn": 0, "entPhysicalName": "Module 1"}]
+        row = {"ent_physical_index": 10, "depth": 0, "status": "Installed"}
+
+        captured = {}
+
+        def _capture_server_key(child_view, *args, **kwargs):
+            # autospec=True passes the bound DeviceModuleTableView instance as the first arg.
+            captured["server_key"] = child_view._active_server_key
+            return [row]
+
+        mock_table = MagicMock()
+        mock_table.format_module_data.return_value = "<tr>row</tr>"
+
+        with (
+            patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=selected_device),
+            patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache,
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
+            patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
+            patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSModuleTable", return_value=mock_table),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._get_module_types",
+                return_value={},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._find_transparent_indices",
+                return_value=set(),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._collect_top_items",
+                return_value=inventory_data,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._build_table_rows_for_member",
+                autospec=True,
+                side_effect=_capture_server_key,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView._detect_serial_conflicts",
+                return_value=None,
+            ),
+        ):
+            mock_cache.get.return_value = {"inventory": inventory_data}
+            view.post(request)
+
+        # The POST-resolved "prod" server_key (not the default) reached the row builder.
+        assert captured["server_key"] == "prod"
+
 
 class TestSingleVlanGroupVerifyView:
     """Tests for SingleVlanGroupVerifyView."""

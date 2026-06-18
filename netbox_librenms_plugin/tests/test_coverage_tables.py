@@ -1273,6 +1273,200 @@ class TestDeviceImportTableRenderActions:
         assert "btn-outline-warning" in result
         assert "Details" in result
 
+    def test_existing_oob_candidate_shows_add_as_oob_button(self):
+        """serial_action == 'oob_candidate' renders the purple "Add as OOB controller" button."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "serial",
+                "serial_action": "oob_candidate",
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-purple" in result
+        assert "mdi-chip" in result
+        assert "Add as OOB controller" in result
+
+    def test_existing_oob_linked_shows_linked_oob_button_with_paired_host(self):
+        """existing_match_type == 'librenms_oob' renders the info "Linked as OOB controller"
+        button and surfaces the paired host id in the title."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_oob",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"host_id": 42},
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-info" in result
+        assert "mdi-chip" in result
+        assert "Linked as OOB controller (paired host: LibreNMS #42)" in result
+
+    def test_existing_oob_linked_malformed_paired_host_id_omitted(self):
+        """A malformed paired host_id (bool/float) must use the strict coercion the host-half
+        branch uses, not int(): a boolean True must NOT render a bogus 'LibreNMS #1' — the title
+        falls back to the plain 'Linked as OOB controller'."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_oob",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"host_id": True},  # malformed (bool) — int() would give 1
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "Linked as OOB controller" in result
+        # The malformed id must NOT surface as a paired host number.
+        assert "paired host: LibreNMS #" not in result
+
+    def test_existing_librenms_link_non_dict_does_not_crash_render(self):
+        """A malformed ``existing_librenms_link`` that isn't a dict (e.g. a string) must not crash
+        the actions-column render for the whole page. It should be treated as no link — the plain
+        'Linked as OOB controller' title, no paired-host number. Pre-fix this raised AttributeError
+        on ``.get('oob_id')``."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_oob",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": "garbage-not-a-dict",  # malformed payload
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "Linked as OOB controller" in result
+        assert "paired host: LibreNMS #" not in result
+
+    def test_existing_paired_host_shows_host_button(self):
+        """A librenms_id match whose link carries an oob_id distinct from the host id renders
+        the info "Host" button (the host half of a host/OOB pair), escaping the oob type."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                # oob_type comes from a user-editable custom field — use a value that REQUIRES
+                # escaping so the assertion below actually proves render_actions() escapes it.
+                "existing_librenms_link": {"host_id": 42, "oob_id": 99, "oob_type": "<idrac>"},
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        assert "btn-outline-info" in result
+        assert "mdi-server-network" in result
+        # The oob_type must be HTML-escaped in the title; the raw value must not leak through.
+        assert "Linked as host (paired OOB: LibreNMS #99, &lt;idrac&gt;)" in result
+        assert "<idrac>" not in result
+
 
 # ===========================================================================
 # DeviceImportTable._build_validation_details_url tests
@@ -1437,6 +1631,17 @@ class TestLibreNMSInterfaceTableInit:
 
         assert table.tab == "interfaces"
         assert table.prefix == "interfaces_"
+
+    def test_ipaddress_table_sets_tab_and_prefix(self):
+        """The IP table must set tab='ipaddresses' so the paginator links (?tab={{ table.tab }})
+        keep the user on the IP Addresses tab, and prefix='ipaddresses_' so its per-page param is
+        namespaced (configure() passes self.prefix to get_table_paginate_count) rather than shared
+        with the generic one. Mirrors test_tab_and_prefix_set for LibreNMSInterfaceTable."""
+        from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
+
+        table = IPAddressTable([])
+        assert table.tab == "ipaddresses"
+        assert table.prefix == "ipaddresses_"
 
     def test_server_key_stored(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable

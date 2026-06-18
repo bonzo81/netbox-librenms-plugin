@@ -24,6 +24,111 @@ def _clear_device_info_cache():
 
 
 # =============================================================================
+# Real-DB builders (shared by the DB-backed conversions)
+# =============================================================================
+#
+# These plain helpers create real NetBox objects for tests marked
+# ``@pytest.mark.django_db`` (they must be called from within a DB-enabled test).
+# Centralised here so the DB-backed tests stop hand-rolling a private
+# Site/Manufacturer/DeviceType/DeviceRole quartet in every file. No new dependency
+# (e.g. factory_boy) is introduced — get_or_create keeps the shared infra to a single
+# row set per test transaction, and everything is rolled back between tests.
+
+
+def _shared_infra():
+    """get_or_create the shared Site / Manufacturer / DeviceType / DeviceRole."""
+    from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
+
+    site, _ = Site.objects.get_or_create(name="TestSite", slug="test-site")
+    mfr, _ = Manufacturer.objects.get_or_create(name="TestMfr", slug="test-mfr")
+    dtype, _ = DeviceType.objects.get_or_create(model="TestDT", slug="test-dt", defaults={"manufacturer": mfr})
+    role, _ = DeviceRole.objects.get_or_create(name="TestRole", slug="test-role", defaults={"color": "00ff00"})
+    return site, dtype, role
+
+
+def make_device(name, *, serial="", librenms_cf=None):
+    """Create a real Device on the shared infra, optionally seeding its librenms_id CF."""
+    from dcim.models import Device
+
+    site, dtype, role = _shared_infra()
+    dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
+    if librenms_cf is not None:
+        dev.custom_field_data["librenms_id"] = librenms_cf
+        dev.save()
+    return dev
+
+
+def make_cluster(name):
+    """Create a real Cluster on a shared ClusterType."""
+    from virtualization.models import Cluster, ClusterType
+
+    ctype, _ = ClusterType.objects.get_or_create(name="TestCType", slug="test-ctype")
+    return Cluster.objects.create(name=name, type=ctype)
+
+
+def make_vm(name, cluster=None):
+    """Create a real VirtualMachine (on a shared cluster unless one is supplied)."""
+    from virtualization.models import Cluster, ClusterType, VirtualMachine
+
+    if cluster is None:
+        ctype, _ = ClusterType.objects.get_or_create(name="TestCType", slug="test-ctype")
+        cluster, _ = Cluster.objects.get_or_create(name="TestCluster", defaults={"type": ctype})
+    return VirtualMachine.objects.create(name=name, cluster=cluster, status="active")
+
+
+def make_serial_device(name, *, csp_names=(), cp_names=()):
+    """Create a real Device with optional ConsoleServerPorts / ConsolePorts.
+
+    Returns ``(device, console_server_ports, console_ports)``.
+    """
+    from dcim.models import ConsolePort, ConsoleServerPort
+
+    dev = make_device(name)
+    csps = [ConsoleServerPort.objects.create(device=dev, name=n) for n in csp_names]
+    cps = [ConsolePort.objects.create(device=dev, name=n) for n in cp_names]
+    return dev, csps, cps
+
+
+def cable_together(term_a, term_b):
+    """Create a real Cable between two terminations (NetBox 4.x multi-termination API)."""
+    from dcim.models import Cable
+
+    cable = Cable(a_terminations=[term_a], b_terminations=[term_b])
+    cable.save()
+    return cable
+
+
+def make_interface(device, name, *, iface_type="other"):
+    """Create a real Interface on *device*."""
+    from dcim.models import Interface
+
+    return Interface.objects.create(device=device, name=name, type=iface_type)
+
+
+def make_ip(address, *, assigned_object=None, status="active"):
+    """Create a real IPAddress, optionally assigned to an interface/object."""
+    from ipam.models import IPAddress
+
+    return IPAddress.objects.create(address=address, assigned_object=assigned_object, status=status)
+
+
+def ip_on(device, address, ifname, *, iface_type="1000base-t"):
+    """Create an Interface on *device* and assign a real IPAddress to it."""
+    iface = make_interface(device, ifname, iface_type=iface_type)
+    return make_ip(address, assigned_object=iface)
+
+
+def delete_keeping_pk(obj):
+    """Delete the row via the queryset so the in-memory instance keeps its pk.
+
+    ``Model.delete()`` nulls ``instance.pk``; tests that simulate "object vanished since
+    caching" need the cached instance to retain its original pk, so the delete goes through
+    the manager rather than the instance.
+    """
+    type(obj).objects.filter(pk=obj.pk).delete()
+
+
+# =============================================================================
 # Configuration Fixtures
 # =============================================================================
 

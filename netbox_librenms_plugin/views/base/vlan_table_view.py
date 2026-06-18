@@ -14,6 +14,10 @@ from netbox_librenms_plugin.views.mixins import (
     VlanAssignmentMixin,
 )
 
+# Sentinel so _get_error_context can tell an *explicit* server_key=None (stale-server
+# branch — must be preserved) apart from an omitted arg (fall back to session server).
+_SERVER_KEY_UNSET = object()
+
 
 class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, CacheMixin, View):
     """
@@ -32,27 +36,52 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         """Handle POST request to fetch and cache LibreNMS VLAN data."""
         obj = self.get_object(pk)
 
-        # Get librenms_id
+        # Rebind the API to the POSTed server BEFORE resolving librenms_id, so the id
+        # (and the VLAN fetch/cache below) resolve against the right server in a
+        # multi-server tab refresh rather than the session/default one.
+        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            # Pass server_key=None explicitly so the fragment doesn't silently fall back to
+            # the session/default server (which would re-render with the wrong server selected
+            # and let the next retry sync VLANs against the wrong LibreNMS instance).
+            context = {
+                "vlan_sync": self._get_error_context(
+                    obj, "Selected LibreNMS server is no longer configured.", server_key=None
+                ),
+            }
+            return render(request, self.partial_template_name, context)
+
+        # Get librenms_id (now scoped to the POSTed server).
         self.librenms_id = self.librenms_api.get_librenms_id(obj)
 
         if not self.librenms_id:
+            # Drop any prior snapshot for this server: a failed refresh on a previously-synced
+            # device must not leave a stale VLAN table the next GET can render and act on. The
+            # cache is scoped by server_key, so evict the same scoped keys.
+            cache.delete(self.get_cache_key(obj, "vlans", server_key))
+            cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
             messages.error(request, "Device not found in LibreNMS.")
-            context = {"vlan_sync": self._get_error_context(obj, "Device not found in LibreNMS")}
+            context = {
+                "vlan_sync": self._get_error_context(obj, "Device not found in LibreNMS", server_key=server_key),
+            }
             return render(request, self.partial_template_name, context)
 
         # Fetch VLAN data from LibreNMS
-        success, error_msg = self._fetch_and_cache_vlan_data(obj)
+        success, error_msg = self._fetch_and_cache_vlan_data(obj, server_key)
         if not success:
+            cache.delete(self.get_cache_key(obj, "vlans", server_key))
+            cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
             messages.error(request, error_msg)
-            context = {"vlan_sync": self._get_error_context(obj, error_msg)}
+            context = {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key)}
             return render(request, self.partial_template_name, context)
 
         messages.success(request, "VLAN data refreshed successfully.")
 
-        context = {"vlan_sync": self.get_vlan_context(request, obj)}
+        context = {"vlan_sync": self.get_vlan_context(request, obj, server_key)}
         return render(request, self.partial_template_name, context)
 
-    def _fetch_and_cache_vlan_data(self, obj):
+    def _fetch_and_cache_vlan_data(self, obj, server_key=None):
         """
         Fetch VLAN data from LibreNMS and cache it.
 
@@ -71,8 +100,8 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         if not is_list_of_dicts(vlans_data):
             return False, "Unexpected response from LibreNMS (malformed VLAN payload)."
 
-        # Cache VLANs
-        server_key = self.librenms_api.server_key
+        # Cache VLANs (scoped to the POST-resolved server when provided).
+        server_key = server_key or self.librenms_api.server_key
         cache.set(
             self.get_cache_key(obj, "vlans", server_key),
             vlans_data,
@@ -86,7 +115,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
 
         return True, None
 
-    def get_vlan_context(self, request, obj):
+    def get_vlan_context(self, request, obj, server_key=None):
         """
         Build context for VLAN sync table.
 
@@ -96,11 +125,12 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         """
         vlan_table = None
 
-        # Get cached data. Use the shared degrading resolver (not a bare getattr on the lazy
-        # librenms_api property): on a missing/misconfigured default the property raises
-        # KeyError/ValueError, which would 500 the VLAN tab on GET — the exact failure mode
-        # _render_server_key() fixes for the sibling interface/module/cable/ip tabs.
-        server_key = self._render_server_key()
+        # Get cached data. Honour the POST-resolved server when provided; otherwise use the
+        # shared degrading resolver (not a bare getattr on the lazy librenms_api property): on a
+        # missing/misconfigured default the property raises KeyError/ValueError, which would 500
+        # the VLAN tab on GET — the exact failure mode _render_server_key() fixes for the sibling
+        # interface/module/cable/ip tabs.
+        server_key = server_key or self._render_server_key()
         cached_vlans = cache.get(self.get_cache_key(obj, "vlans", server_key))
         last_fetched = cache.get(self.get_last_fetched_key(obj, "vlans", server_key))
 
@@ -144,14 +174,22 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             "server_key": server_key,
         }
 
-    def _get_error_context(self, obj, error_message):
-        """Build context for error state."""
+    def _get_error_context(self, obj, error_message, server_key=_SERVER_KEY_UNSET):
+        """Build context for error state.
+
+        Keep the fragment's ``server_key`` on the POST-resolved server so a retry/action
+        after an error targets the same scope. An explicit ``server_key=None`` (the
+        stale-server branch) is preserved as-is — using ``or`` here would treat it as
+        falsey and silently fall back to the session server, re-rendering the fragment
+        on the wrong (still-configured) server. Only an *omitted* server_key falls back.
+        """
+        resolved = getattr(self.librenms_api, "server_key", None) if server_key is _SERVER_KEY_UNSET else server_key
         return {
             "object": obj,
             "error_message": error_message,
             "vlan_table": None,
             "vlan_groups": self.get_vlan_groups_for_device(obj),
-            "server_key": getattr(self.librenms_api, "server_key", None),
+            "server_key": resolved,
         }
 
     def compare_vlans(self, librenms_vlans, lookup_maps=None, device=None):

@@ -22,6 +22,23 @@ import pytest
 # =============================================================================
 
 
+def _q_leaves(q):
+    """Flatten a Django Q into a set of (lookup, value) leaf tuples.
+
+    Lets tests assert the predicates a Q composes without coupling to Q's string
+    representation (quote/order formatting), which is a framework internal.
+    """
+    from django.db.models import Q
+
+    leaves = set()
+    for child in q.children:
+        if isinstance(child, Q):
+            leaves |= _q_leaves(child)
+        else:
+            leaves.add(child)
+    return leaves
+
+
 def _mock_obj(model_name="device", pk=1, name="test-device"):
     obj = MagicMock()
     obj._meta = MagicMock()
@@ -119,6 +136,20 @@ class TestLibreNMSIdQ:
         # Confirm the extra string variant was added
         base_only = Q(custom_field_data__librenms_id__default=10) | Q(custom_field_data__librenms_id=10)
         assert str(result) != str(base_only)
+
+    def test_dict_form_paths_included(self):
+        """Dict-form devices ({server_key: {"id": N, "oob": {...}}}) must resolve too:
+        the Q must query the __id and __oob__id JSON paths, not just the scalar path."""
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+
+        leaves = _q_leaves(_librenms_id_q("default", 42))
+        # Both dict JSON paths must be queried, with BOTH the int and the JSON-string
+        # variant (JSON may store the id as "42"). Assert on the composed predicates rather
+        # than the Q's string form so framework formatting changes don't break the test.
+        assert ("custom_field_data__librenms_id__default__id", 42) in leaves
+        assert ("custom_field_data__librenms_id__default__id", "42") in leaves
+        assert ("custom_field_data__librenms_id__default__oob__id", 42) in leaves
+        assert ("custom_field_data__librenms_id__default__oob__id", "42") in leaves
 
     def test_non_int_string_value_except_caught(self):
         """Non-convertible string 'abc' → ValueError caught, base Q returned (lines 42-43)."""
@@ -307,6 +338,146 @@ class TestGetLinksDataPortNameNone:
         assert result is not None
         # local_port is None because port_id=10 was skipped from the map
         assert result[0]["local_port"] is None
+
+
+class TestGetLinksDataOobOnlyEmptyRefresh:
+    """OOB-only mapping (no host librenms_id) with a valid empty OOB result must return []
+    — not None — so _prepare_context() can overwrite the cache with the empty snapshot
+    rather than skip it and leave stale OOB rows behind after a genuine empty refresh."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        view.request = _mock_request()
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        return view
+
+    def test_oob_only_valid_empty_returns_empty_list_not_none(self):
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False  # no serial CSP rows to append
+
+        # OOB-only: no host librenms_id, so the host get_device_links() call fails and records
+        # _links_fetch_error even though no host fetch was meaningfully attempted; the OOB
+        # controller (id 99) validly returns no links.
+        view._librenms_api.get_librenms_id.return_value = None
+
+        def _links(dev_id):
+            if dev_id is None:  # host fetch — there is no host mapping
+                return (False, {"error": "Device not found in LibreNMS"})
+            return (True, {"links": []})  # OOB controller: valid, empty
+
+        view._librenms_api.get_device_links.side_effect = _links
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=obj,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_oob",
+                return_value={"id": 99},
+            ),
+        ):
+            result = view.get_links_data(obj)
+
+        # A successful empty OOB-only refresh yields [] (cacheable), not None (a mislabeled
+        # "fetch failure" that _prepare_context would refuse to cache).
+        assert result == []
+        # The host-fetch error WAS recorded (no host mapping) — proving the guard's None branch
+        # would have fired without the OOB-scoped exception.
+        assert view._links_fetch_error is not None
+        assert view.librenms_id is None
+
+    def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):
+        """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded. If the OOB
+        controller fetch itself fails, the refresh collects zero rows too — but treating that
+        as a successful empty refresh would overwrite the cache with [] and drop the very OOB
+        rows we couldn't re-fetch. So a failed OOB fetch on an OOB-only mapping must return
+        None (failure), letting _prepare_context() keep the prior snapshot."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False
+
+        view._librenms_api.get_librenms_id.return_value = None
+
+        def _links(dev_id):
+            if dev_id is None:  # host fetch — no host mapping
+                return (False, {"error": "Device not found in LibreNMS"})
+            return (False, {"error": "OOB controller unreachable"})  # OOB fetch FAILS
+
+        view._librenms_api.get_device_links.side_effect = _links
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=obj,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_oob",
+                return_value={"id": 99},
+            ),
+        ):
+            result = view.get_links_data(obj)
+
+        # Failed OOB fetch ⇒ None (not []), so the stale cache snapshot survives.
+        assert result is None
+        # The failure flag was set by the OOB branch, which is what disqualifies the exemption.
+        assert view._oob_links_fetch_failed is True
+
+    def test_oob_only_malformed_links_payload_returns_none(self):
+        """OOB fetch SUCCEEDS but returns a malformed links payload (links not a list). This used
+        to early-return links_data ([]) from inside the OOB block, bypassing the final failure
+        classification — so an OOB-only device cleared its cached rows on a degraded payload. The
+        malformed branch must now fall through so the final guard returns None (failure)."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False
+
+        view._librenms_api.get_librenms_id.return_value = None
+
+        def _links(dev_id):
+            if dev_id is None:  # host fetch — no host mapping
+                return (False, {"error": "Device not found in LibreNMS"})
+            return (True, {"links": None})  # OOB fetch OK, but links payload is malformed (not a list)
+
+        view._librenms_api.get_device_links.side_effect = _links
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=obj,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_oob",
+                return_value={"id": 99},
+            ),
+        ):
+            result = view.get_links_data(obj)
+
+        # Malformed OOB links ⇒ None (not []), so the cache isn't cleared by a degraded refresh.
+        assert result is None
+        assert view._oob_links_fetch_failed is True
 
 
 # =============================================================================
@@ -647,6 +818,50 @@ class TestProcessRemoteDevice:
 
         assert result["cable_status"] == "Device Not Found in NetBox"
         assert result["can_create_cable"] is False
+
+
+class TestCablePostHostFetchWarning:
+    """post() must warn when the host LLDP fetch failed but OOB/serial rows still made the
+    refresh look successful — otherwise host cables are silently omitted under a success banner.
+    A host failure is expected (and not warned) for an OOB-only device (librenms_id is None)."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        view.partial_template_name = "x.html"
+        view._librenms_api = MagicMock(server_key="default")
+        view.get_object = MagicMock(return_value=MagicMock(pk=1))
+        view.rebind_api_for_server = MagicMock(return_value="default")
+        return view
+
+    def _run(self, *, links_fetch_error, librenms_id):
+        view = self._make_view()
+        request = MagicMock()
+        request.POST.get.return_value = "default"
+
+        def _prep(*a, **k):
+            # Mirror get_links_data recording a host failure while other rows kept it "successful".
+            view._links_fetch_error = links_fetch_error
+            view.librenms_id = librenms_id
+            return {"object": MagicMock(), "table": MagicMock(), "server_key": "default"}
+
+        view._prepare_context = MagicMock(side_effect=_prep)
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_msgs,
+            patch("netbox_librenms_plugin.views.base.cables_view.render"),
+        ):
+            view.post(request, pk=1)
+        return [c.args[1] for c in mock_msgs.warning.call_args_list]
+
+    def test_warns_on_host_fetch_failure_with_rows(self):
+        warn_texts = self._run(links_fetch_error="auth failed", librenms_id=42)
+        assert any("host links fetch failed" in t for t in warn_texts)
+
+    def test_no_host_warning_for_oob_only_device(self):
+        # librenms_id is None → a host fetch "failure" is expected, not surfaced as a warning.
+        warn_texts = self._run(links_fetch_error="device not found", librenms_id=None)
+        assert not any("host links fetch failed" in t for t in warn_texts)
 
 
 # =============================================================================
@@ -1213,6 +1428,134 @@ class TestPrepareContextInterfaceNameFieldNone:
             result = view._prepare_context(request, obj, "ifName", fetch_fresh=False)
 
         assert result is None
+    def test_fetch_fresh_malformed_ip_payload_returns_none(self):
+        """A success flag with a non-list get_ip_addresses() payload (or a list with non-dict
+        entries) must be treated as a fetch failure — return None before enrichment so post()
+        neither renders an empty table under a success banner nor caches the empty snapshot."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch.object(view, "get_ip_addresses", return_value=(True, {"unexpected": "dict"})),
+            patch.object(view, "_resolve_management_ip", return_value="") as mock_mgmt,
+            patch.object(view, "enrich_ip_data") as mock_enrich,
+        ):
+            result = view._prepare_context(request, obj, "ifName", fetch_fresh=True)
+
+        assert result is None
+        mock_mgmt.assert_not_called()  # bail before the live mgmt-ip lookup
+        mock_enrich.assert_not_called()  # never enrich a malformed payload
+        mock_cache.set.assert_not_called()  # never cache the empty snapshot as complete
+
+    def test_fetch_fresh_dict_row_missing_ip_fields_returns_none(self):
+        """A dict row that passes the container-shape check but lacks the address/prefix and
+        port_id fields _create_base_ip_entry() reads would KeyError mid-enrichment and 500 the
+        fresh-refresh path. The per-row schema guard must reject it → return None before the
+        live mgmt-ip lookup and enrichment ever run."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            # Well-formed list of dicts, but the single row is missing the IP/prefix fields.
+            patch.object(view, "get_ip_addresses", return_value=(True, [{"port_id": 7}])),
+            patch.object(view, "_resolve_management_ip", return_value="") as mock_mgmt,
+            patch.object(view, "enrich_ip_data") as mock_enrich,
+        ):
+            result = view._prepare_context(request, obj, "ifName", fetch_fresh=True)
+
+        assert result is None
+        mock_mgmt.assert_not_called()  # bail before the live mgmt-ip lookup
+        mock_enrich.assert_not_called()  # never enrich a row that would KeyError downstream
+        mock_cache.set.assert_not_called()
+
+    def test_cached_render_reuses_cached_ports_without_live_calls(self):
+        """A warm-cache render must enrich from the cached ports_by_id map and never call
+        get_port_by_id(), so the IP tab keeps working when LibreNMS is unavailable."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        cached_payload = {
+            "ip_addresses": [{"ip_address": "10.0.0.5", "prefix_length": 32, "port_id": 5}],
+            "mgmt_ip": "10.0.0.1",
+            "ports_by_id": {5: {"ifName": "Gi0/1"}},
+        }
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch.object(
+                view,
+                "_prefetch_netbox_data",
+                return_value={
+                    "interfaces_by_librenms_id": {},
+                    "interfaces_by_name": {},
+                    "all_interfaces": [],
+                    "device": obj,
+                    "ip_addresses_map": {},
+                    "vrfs": [],
+                },
+            ),
+            patch.object(view, "get_table", return_value=MagicMock()) as mock_get_table,
+        ):
+            mock_cache.get.return_value = cached_payload
+            mock_cache.ttl.return_value = 100
+            view._prepare_context(request, obj, "ifName", fetch_fresh=False)
+
+        view._librenms_api.get_port_by_id.assert_not_called()
+        mock_get_table.assert_called_once()
+        # The cached port name must actually reach the rendered rows — i.e. enrich_ip_data
+        # used ports_by_id to set interface_name. Asserting only "no live calls" would still
+        # pass if a regression rendered the row without the cached name.
+        enriched_rows = mock_get_table.call_args.args[0]
+        assert enriched_rows[0]["interface_name"] == "Gi0/1"
+
+    def test_cache_hit_backfills_missing_ports_by_id(self):
+        """A pre-upgrade cache entry without ports_by_id: enrich rebuilds the port map via
+        live get_port_by_id(), and we backfill it into cache under the *remaining* TTL so
+        subsequent warm renders stop re-hitting LibreNMS until the entry would have expired."""
+        view = self._make_view()
+        view._librenms_api.cache_timeout = 300
+        view._librenms_api.get_port_by_id.return_value = (True, {"port": [{"ifName": "Gi0/1"}]})
+        obj = _mock_obj()
+        request = _mock_request()
+
+        cached_payload = {  # NO ports_by_id key → pre-upgrade entry
+            "ip_addresses": [{"ip_address": "10.0.0.5", "prefix_length": 32, "port_id": 5}],
+            "mgmt_ip": "10.0.0.1",
+        }
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch.object(
+                view,
+                "_prefetch_netbox_data",
+                return_value={
+                    "interfaces_by_librenms_id": {},
+                    "interfaces_by_name": {},
+                    "all_interfaces": [],
+                    "device": obj,
+                    "ip_addresses_map": {},
+                    "vrfs": [],
+                },
+            ),
+            patch.object(view, "get_table", return_value=MagicMock()),
+        ):
+            mock_cache.get.return_value = cached_payload
+            mock_cache.ttl.return_value = 120
+            view._prepare_context(request, obj, "ifName", fetch_fresh=False)
+
+        # The rebuilt port map is written back under the remaining TTL (not the full timeout).
+        mock_cache.set.assert_called_once()
+        args, kwargs = mock_cache.set.call_args
+        assert args[0] == "ck"
+        assert args[1]["ports_by_id"] == {5: {"ifName": "Gi0/1"}}
+        assert kwargs["timeout"] == 120
 
 
 # =============================================================================

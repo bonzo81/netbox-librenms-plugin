@@ -4,19 +4,42 @@
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
 
+{% if interface_sync.oob_incomplete %}
+<div class="alert alert-warning d-flex align-items-center noprint" role="alert">
+    <i class="mdi mdi-alert me-2"></i>
+    <div>Showing host interfaces only — the linked OOB controller's ports could not be fetched on the last refresh, so OOB rows and shared-LOM markers are missing. Refresh again to retry.</div>
+</div>
+{% endif %}
+
+{# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
+{% if migrated_to_marker %}
+<div>
+    {% comment %}
+    No POST form in migrated mode, but the interface table still renders interactive
+    relationship/VC-member dropdowns whose verify-interface POST reads the token via
+    document.querySelector('[name=csrfmiddlewaretoken]'). Emit a standalone token so those
+    JS-driven requests don't hit a null token (TypeError/403). A bare hidden input never
+    auto-submits, so it doesn't reintroduce the live-form problem flagged above.
+    {% endcomment %}
+    <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+{% else %}
 <form method="post"
     action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
-    {% endwith %}
+    {# Form-only inputs live inside the form branch so migrated (donor) mode, which renders a plain <div> wrapper, never emits hidden fields outside any <form>. #}
     {% csrf_token %}
     {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
+{% endif %}
+    {% endwith %}
     {% block table_actions %}
     <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
         <div>
+            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected Interfaces</span>
             </button>
+            {% endif %}
             <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#interfaceTypeHelpModal">
                 <i class="mdi mdi-help-circle"></i> info
             </a>
@@ -78,7 +101,7 @@
                     {% if interface_sync.netbox_only_interfaces %}
                     <a href="#" class="ms-2 text-warning text-decoration-none netbox-only-link" data-bs-toggle="modal"
                         data-bs-target="#netboxOnlyInterfacesModal"
-                        title="Click to view and delete NetBox-only interfaces">
+                        title="{% if migrated_to_marker %}Click to view and move NetBox-only interfaces{% else %}Click to view and delete NetBox-only interfaces{% endif %}">
                         <i class="mdi mdi-alert-circle-outline me-1"></i>
                         {{interface_sync.netbox_only_interfaces|length}} NetBox only interfaces
                     </a>
@@ -198,7 +221,11 @@
             </div>
         </div>
     </div>
+{% if migrated_to_marker %}
+</div>
+{% else %}
 </form>
+{% endif %}
 {% else %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">
@@ -312,6 +339,7 @@
                                     <th>Type</th>
                                     <th>Status</th>
                                     <th>Description</th>
+                                    {% if migrated_to_marker %}<th class="text-end">Migrate</th>{% endif %}
                                 </tr>
                             </thead>
                             <tbody>
@@ -334,6 +362,24 @@
                                         {% endif %}
                                     </td>
                                     <td>{{ interface.description|default:"-" }}</td>
+                                    {% if migrated_to_marker %}
+                                    <td class="text-end">
+                                        {% if migrated_to_winner %}
+                                        <button type="button"
+                                            class="btn btn-sm btn-outline-warning"
+                                            hx-post="{% url 'plugins:netbox_librenms_plugin:interface_move_to_winner' pk=interface.id %}"
+                                            hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+                                            {% if migrated_to_marker.server_key %}hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'{% endif %}
+                                            hx-swap="none"
+                                            hx-confirm="Move interface '{{ interface.name }}' to {{ migrated_to_winner.name }}?"
+                                            title="Reassign this interface (and its cables/IPs/MACs) to {{ migrated_to_winner.name }}">
+                                            <i class="mdi mdi-transfer-right"></i> Move
+                                        </button>
+                                        {% else %}
+                                        <span class="text-muted small">winner missing</span>
+                                        {% endif %}
+                                    </td>
+                                    {% endif %}
                                 </tr>
                                 {% endfor %}
                             </tbody>

@@ -393,6 +393,33 @@ class TestVirtualChassisHelpers:
 
         assert result == mock_netbox_device
 
+    @pytest.mark.django_db
+    def test_get_virtual_chassis_members_real_vc(self):
+        """get_virtual_chassis_members returns every member Device for a VC device (from either
+        member's perspective) and just [device] for a standalone one."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import get_virtual_chassis_members
+
+        solo = make_device("vcm-solo")
+        assert get_virtual_chassis_members(solo) == [solo]
+
+        vc = VirtualChassis.objects.create(name="vcm-vc")
+        m1 = make_device("vcm-1")
+        m1.virtual_chassis = vc
+        m1.vc_position = 1
+        m1.save()
+        m2 = make_device("vcm-2")
+        m2.virtual_chassis = vc
+        m2.vc_position = 2
+        m2.save()
+        vc.master = m1
+        vc.save()
+
+        assert {d.pk for d in get_virtual_chassis_members(m1)} == {m1.pk, m2.pk}
+        assert {d.pk for d in get_virtual_chassis_members(m2)} == {m1.pk, m2.pk}
+
     def test_get_virtual_chassis_member_with_vc(self):
         """Device with VC returns correct member."""
         from netbox_librenms_plugin.utils import get_virtual_chassis_member
@@ -466,6 +493,45 @@ class TestVirtualChassisHelpers:
         mock_device = MagicMock()
         mock_device.virtual_chassis = MagicMock()
         # member_a listed first — the function should still prefer member_b
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device, server_key="default")
+
+        assert result == member_b
+
+    def test_get_librenms_sync_device_host_id_preferred_over_oob_only(self):
+        """A member holding the real host id must win over a member that only carries an
+        OOB-only mapping for the same server, even when the OOB-only member is iterated first.
+        Host-side consumers (status redirect, cable/interface main-id lookup) target this."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        # Member A (listed first): OOB-only linkage — no host id.
+        member_a = MagicMock()
+        member_a.cf = {"librenms_id": {"default": {"oob": {"id": 7, "type": "drac"}}}}
+        # Member B: the real host id.
+        member_b = MagicMock()
+        member_b.cf = {"librenms_id": {"default": {"id": 42}}}
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
+        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+
+        result = get_librenms_sync_device(mock_device, server_key="default")
+
+        assert result == member_b
+
+    def test_get_librenms_sync_device_oob_only_resolves_when_no_host_id(self):
+        """When no member has a host id, an OOB-only mapping still resolves the sync device
+        (rather than falling through to the master/primary-IP fallback and picking wrong)."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        member_a = MagicMock()
+        member_a.cf = {}
+        member_b = MagicMock()
+        member_b.cf = {"librenms_id": {"default": {"oob": {"id": 7, "type": "drac"}}}}
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = MagicMock()
         mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
 
         result = get_librenms_sync_device(mock_device, server_key="default")

@@ -10,9 +10,14 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VRF, IPAddress
-from virtualization.models import VirtualMachine, VMInterface
+from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.utils import resolve_set_primary_ip, same_host
+from netbox_librenms_plugin.utils import (
+    get_librenms_device_id,
+    get_virtual_chassis_members,
+    resolve_set_primary_ip,
+    same_host,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -71,7 +76,23 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
         else:
             url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
-        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        # Resolve the server_key to scope the redirect back to a working tab. Prefer the
+        # POST-resolved key, then the already-bound _librenms_api (avoids reconstructing a
+        # client). Only when nothing is bound — the failed-rebind path, where rebind returned
+        # None — fall back to the librenms_api property to resolve the active/default server, but
+        # swallow a construction failure (a misconfigured default) so we still redirect
+        # gracefully instead of raising. The redirect must carry the resolved server_key (see
+        # test_unknown_server_key_errors_without_500), so a bare _librenms_api read isn't enough.
+        server_key = getattr(self, "_post_server_key", None)
+        if not server_key:
+            bound = getattr(self, "_librenms_api", None)
+            if bound is not None:
+                server_key = getattr(bound, "server_key", None)
+            else:
+                try:
+                    server_key = self.librenms_api.server_key
+                except Exception:  # a redirect helper must degrade, never 500 (misconfigured default)
+                    server_key = None
         url = f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
         if server_key:
             url += f"&server_key={quote_plus(server_key)}"
@@ -83,10 +104,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if error := self.require_all_permissions("POST"):
             return error
 
-        # Read server_key from POST so we use the exact server the user was viewing
-        self._post_server_key = request.POST.get("server_key") or self.librenms_api.server_key
-
         obj = self.get_object(object_type, pk)
+
+        # Rebind the cached API client to the POSTed server so live lookups (e.g. the
+        # management-IP fetch for Set-Primary-IP) hit the same LibreNMS instance the cached
+        # rows came from. The key comes from request POST, so a stale/tampered request could
+        # carry an unknown key — surface a user-facing error instead of a 500. (Uses the
+        # shared mixin helper, which also resolves/normalizes the key.)
+        post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if post_server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return redirect(self.get_ip_tab_url(obj))
+        self._post_server_key = post_server_key
 
         selected_ips = self.get_selected_ips(request)
         cached_ips = self.get_cached_ip_data(request, obj)
@@ -135,6 +164,68 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """True if two address strings refer to the same host IP."""
         return same_host(a, b)
 
+    def _build_interface_maps(self, obj, server_key):
+        """Index the object's *current* interfaces by LibreNMS port id and by name.
+
+        Used to re-resolve the target interface at sync time instead of trusting
+        the cached ``interface_url`` (see ``_match_interface``).
+
+        For a Device in a Virtual Chassis, all member interfaces are indexed (not just the
+        viewed member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``:
+        LibreNMS treats a VC as one logical device, so a VC member IP can legitimately resolve to
+        an interface on another member. Duplicate names are marked ambiguous (None) the same way
+        duplicate port ids are, so a same-named interface on another member can't silently rebind
+        the address to the wrong interface.
+        """
+        if isinstance(obj, Device):
+            # Route member expansion through the shared helper (returns [obj] when not in a VC)
+            # so this can't drift from the VC member set used by the interface-sync path.
+            member_devices = get_virtual_chassis_members(obj)
+            interfaces = list(Interface.objects.filter(device__in=member_devices))
+        else:
+            interfaces = list(obj.interfaces.all())
+        by_librenms_id = {}
+        by_name = {}
+        for iface in interfaces:
+            lib_id = get_librenms_device_id(iface, server_key, auto_save=False)
+            if lib_id is not None:
+                key = str(lib_id)
+                if key in by_librenms_id:
+                    # Two current interfaces carry the same stored port id — we can't tell which
+                    # one the IP belongs to. Mark the id ambiguous (None) so _match_interface fails
+                    # the row safe instead of binding the address to an arbitrary interface.
+                    by_librenms_id[key] = None
+                else:
+                    by_librenms_id[key] = iface
+            if iface.name in by_name:
+                # Same fail-safe for duplicate names (common across VC members): ambiguous → None.
+                by_name[iface.name] = None
+            else:
+                by_name[iface.name] = iface
+        return by_librenms_id, by_name
+
+    @staticmethod
+    def _match_interface(ip_data, by_librenms_id, by_name):
+        """Resolve the NetBox interface for a cached IP row against current state.
+
+        The cached ``interface_url`` is enrichment captured when the rows were
+        fetched, so an interface synced *afterwards* is missed and the sync would
+        wrongly report "no interface" until a manual cache refresh. The rendered
+        table re-enriches on every load (so it already shows the link); matching
+        here on the stable LibreNMS port id (preferred) then interface name keeps
+        the sync consistent with what the user sees. Returns the interface or None.
+        """
+        port_id = ip_data.get("port_id")
+        if port_id is not None and str(port_id) in by_librenms_id:
+            iface = by_librenms_id[str(port_id)]
+            # None marks an ambiguous port id (>1 interface shares it) — fail safe: don't
+            # fall through to a name match for the same id, which could be just as wrong.
+            return iface
+        name = ip_data.get("interface_name")
+        if name and name in by_name:
+            return by_name[name]
+        return None
+
     @staticmethod
     def _set_primary_ip(obj, ip_obj):
         """Point obj.primary_ip4/6 (by family) at *ip_obj*. Returns True if changed.
@@ -163,11 +254,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "failed": [],
             "primary_set": [],
             "primary_no_interface": [],
+            "skipped_no_interface": [],
             "errors": {},
         }
 
         set_primary = resolve_set_primary_ip(request)
         mgmt_ip = self.get_management_ip(obj) if set_primary else None
+
+        # Re-resolve interfaces from current NetBox state (not the cached
+        # interface_url) so an interface synced after these rows were cached is
+        # picked up without a manual cache refresh.
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        interfaces_by_librenms_id, interfaces_by_name = self._build_interface_maps(obj, server_key)
 
         for ip_address in selected_ips:
             try:
@@ -178,13 +276,19 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
                     vrf = self.get_vrf_selection(request, ip_address)
 
-                    interface = None
-                    if ip_data.get("interface_url"):
-                        interface_id = ip_data["interface_url"].split("/")[-2]
-                        if object_type == "device":
-                            interface = Interface.objects.get(id=interface_id)
+                    interface = self._match_interface(ip_data, interfaces_by_librenms_id, interfaces_by_name)
+
+                    if interface is None:
+                        # No matching NetBox interface — the row is stale, the interface isn't
+                        # synced yet, or _match_interface refused an ambiguous port_id. Writing
+                        # here would either drop an existing IP's binding (assigned_object=None)
+                        # or create an unassigned/global address, both of which violate the
+                        # interface-assigned model. Skip the row instead of corrupting state.
+                        if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
+                            results["primary_no_interface"].append(ip_address)
                         else:
-                            interface = VMInterface.objects.get(id=interface_id)
+                            results["skipped_no_interface"].append(ip_address)
+                        continue
 
                     ip_with_mask = ip_data["ip_with_mask"]
 
@@ -211,11 +315,19 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                         results["created"].append(ip_address)
 
-                    # Primary-IP auto-match for the management IP. NetBox requires
-                    # the IP be interface-assigned to be a primary, so when the
-                    # interface is missing we flag it rather than silently skip.
+                    # Primary-IP auto-match for the management IP. The no-interface case is
+                    # handled above (the row was skipped before any write), so here the IP is
+                    # guaranteed interface-assigned and can satisfy NetBox's primary constraint.
                     if mgmt_ip and self._same_host(ip_data["ip_address"], mgmt_ip):
-                        if interface is None:
+                        # _build_interface_maps indexes ALL VC member interfaces, so `interface`
+                        # can belong to a sibling member. Setting obj.primary_ip to an address on
+                        # another device's interface would persist an invalid primary (save() skips
+                        # full_clean), so only set it when the interface is obj's own.
+                        if (
+                            isinstance(obj, Device)
+                            and isinstance(interface, Interface)
+                            and interface.device_id != obj.pk
+                        ):
                             results["primary_no_interface"].append(ip_address)
                         elif self._set_primary_ip(obj, ip_obj):
                             results["primary_set"].append(ip_address)
@@ -241,6 +353,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "Primary IP not set for "
                 f"{', '.join(results['primary_no_interface'])} — no NetBox interface for this IP. "
                 "Sync interfaces first, then re-run.",
+            )
+        if results.get("skipped_no_interface"):
+            messages.warning(
+                request,
+                "Skipped (no matching NetBox interface): "
+                f"{', '.join(results['skipped_no_interface'])}. Sync interfaces first, then re-run.",
             )
         if results["unchanged"]:
             messages.warning(

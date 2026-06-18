@@ -244,3 +244,79 @@ class TestFindInCacheFailsClosed:
         """When every row is malformed, the lookup is a clean miss rather than a crash."""
         view = self._make_view()
         assert view._find_in_cache({"ip_addresses": ["x", 5, None]}, "10.0.0.1", 32) == (None, None, None)
+
+
+class TestNumericIDValidation:
+    """post() must reject a non-numeric device_id/vrf_id with a clean 400 rather than let
+    the value reach the ORM and surface as a generic 500."""
+
+    def test_non_numeric_object_id_returns_400(self):
+        view = _make_view()
+        request = _make_request({"device_id": "abc", "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        # Assert the specific message so the test can't pass on an unrelated 400 branch.
+        assert payload["message"] == "Invalid object ID"
+
+    def test_non_numeric_vrf_id_returns_400(self):
+        view = _make_view()
+        request = _make_request({"device_id": 5, "vrf_id": "xyz", "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        assert payload["message"] == "Invalid VRF ID"
+
+    def test_boolean_false_object_id_rejected_as_invalid(self):
+        # bool is an int subclass; object_id=False must hit the explicit boolean guard
+        # ("Invalid object ID"), not the falsy "No object ID provided" branch. The guard
+        # therefore has to run before `if not object_id`.
+        view = _make_view()
+        request = _make_request({"device_id": False, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"
+
+    def test_boolean_true_object_id_rejected_as_invalid(self):
+        # object_id=True would otherwise int() to 1 and validate as device #1.
+        view = _make_view()
+        request = _make_request({"device_id": True, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"
+
+    def test_boolean_vrf_id_rejected_as_invalid(self):
+        # bool is an int subclass; vrf_id=True would otherwise int() to 1 and validate as VRF #1.
+        # The boolean guard must reject it ("Invalid VRF ID"), mirroring the object_id guards —
+        # so true/false can't silently regress to 1/0.
+        view = _make_view()
+        request = _make_request({"device_id": 5, "vrf_id": True, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        assert payload["message"] == "Invalid VRF ID"
+
+    def test_float_object_id_rejected_as_invalid(self):
+        # A JSON float device_id=1.9 would otherwise int()-truncate to 1 and bind device #1.
+        # The explicit float guard must reject it with a clean 400 instead.
+        view = _make_view()
+        request = _make_request({"device_id": 1.9, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["message"] == "Invalid object ID"
+
+    def test_float_vrf_id_rejected_as_invalid(self):
+        # vrf_id=2.5 would otherwise int()-truncate to 2 and validate as VRF #2.
+        view = _make_view()
+        request = _make_request({"device_id": 5, "vrf_id": 2.5, "ip_address": "10.0.0.1/24", "object_type": "device"})
+        response = view.post(request)
+        assert response.status_code == 400
+        payload = json.loads(response.content)
+        assert payload["status"] == "error"
+        assert payload["message"] == "Invalid VRF ID"

@@ -62,9 +62,16 @@ class LibreNMSCableTable(tables.Table):
 
     def render_local_port(self, value, record):
         """Render local port name as a link if URL is available."""
+        # Static trusted markup — use mark_safe, not format_html (which requires
+        # interpolation args and raises TypeError when given a bare string in Django 6+).
+        oob_badge = (
+            mark_safe(' <span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>')  # noqa: S308
+            if record.get("_source") == "oob"
+            else ""
+        )
         if url := record.get("local_port_url"):
-            return format_html('<a href="{}">{}</a>', url, value)
-        return value
+            return format_html('<a href="{}">{}</a>{}', url, value, oob_badge)
+        return format_html("{}{}", value or "", oob_badge)
 
     def render_remote_port(self, value, record):
         """Render remote port name as a link if URL is available."""

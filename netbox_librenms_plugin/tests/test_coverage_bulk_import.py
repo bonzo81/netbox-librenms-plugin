@@ -9,6 +9,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Shared real-DB builders (see tests/conftest.py).
+from netbox_librenms_plugin.tests.conftest import delete_keeping_pk, make_device, make_vm
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -805,142 +808,562 @@ class TestBulkImportDevicesShared:
 # ===========================================================================
 
 
+@pytest.mark.django_db
 class TestRefreshExistingDevice:
-    """Tests for ``_refresh_existing_device``."""
+    """Real-DB coverage for ``_refresh_existing_device``.
 
-    # ------------------------------------------------------------------
-    # Lines 336-341: Device path → refreshed device with role
-    # ------------------------------------------------------------------
+    ``_refresh_existing_device`` re-queries Device / VirtualMachine / IPAddress to pick up
+    changes made in NetBox since a bulk-import row was cached: the matched object deleted, a
+    librenms_id link removed/repointed, or a fresh match now resolvable by name / serial / IP.
+    These tests drive it against real NetBox models so the ORM lookups (pk refresh,
+    ``name__iexact``, ``serial``, ``address__net_host``, librenms_id JSON containment), the
+    linkage re-derivation, the role/cluster reset, and the readiness recompute are all
+    exercised end-to-end — not asserted against MagicMock stand-ins that would stay green even
+    if the production query shapes drifted.
+    """
 
-    def test_device_path_refreshes_role(self):
-        """Non-VM existing device refreshed; role updated on result."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+    @staticmethod
+    def _device_validation(**overrides):
+        """Baseline device validation dict shaped like ``validate_device_for_import`` output.
 
-        existing = MagicMock()
-        existing.pk = 1
-        refreshed = MagicMock()
-        refreshed.role = MagicMock(name="switch")
-
-        validation = {
-            "existing_device": existing,
-            "import_as_vm": False,
-            "device_role": {},
-        }
-
-        with patch("dcim.models.Device") as mock_Device:
-            mock_Device.objects.filter.return_value.first.return_value = refreshed
-            _refresh_existing_device(validation)
-
-        assert validation["existing_device"] is refreshed
-        assert validation["device_role"]["found"] is True
-        assert validation["device_role"]["role"] is refreshed.role
-
-    # ------------------------------------------------------------------
-    # Lines 342-345: Device path → refreshed device without role
-    # ------------------------------------------------------------------
-
-    def test_device_path_refreshes_no_role(self):
-        """Refreshed device has no role → device_role = {'found': False}."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        existing = MagicMock()
-        existing.pk = 2
-        refreshed = MagicMock()
-        refreshed.role = None  # role removed since caching
-
-        validation = {
-            "existing_device": existing,
-            "import_as_vm": False,
-            "device_role": {"found": True, "role": MagicMock()},
-        }
-
-        with patch("dcim.models.Device") as mock_Device:
-            mock_Device.objects.filter.return_value.first.return_value = refreshed
-            _refresh_existing_device(validation)
-
-        assert validation["existing_device"] is refreshed
-        assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
-
-    # ------------------------------------------------------------------
-    # Lines 346-365: Existing device was deleted (Device.objects returns None)
-    # ------------------------------------------------------------------
-
-    def test_deleted_device_clears_existing_and_recomputes_readiness(self):
-        """Device deleted → existing_device=None, readiness recomputed."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        existing = MagicMock()
-        existing.pk = 3
-        validation = {
-            "existing_device": existing,
+        ``recalculate_validation_status(is_vm=False)`` reads site/device_type/device_role and
+        ``remove_validation_issue`` reads issues, so these keys are always present in a real
+        validation dict — include them here so the refresh exercises the real recompute instead
+        of tripping a KeyError that the production ``except`` would silently swallow.
+        """
+        base = {
+            "existing_device": None,
             "import_as_vm": False,
             "issues": [],
             "site": {"found": True},
             "device_type": {"found": True},
-            "device_role": {"found": True},
+            "device_role": {"found": False, "role": None, "available_roles": []},
         }
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def _vm_validation(**overrides):
+        """Baseline VM validation dict (recalculate is_vm=True reads cluster + issues)."""
+        base = {
+            "existing_device": None,
+            "import_as_vm": True,
+            "issues": [],
+            "site": {"found": True},
+            "cluster": {"found": False, "cluster": None, "available_clusters": []},
+        }
+        base.update(overrides)
+        return base
+
+    # ------------------------------------------------------------------
+    # Existing-device refresh (object still present)
+    # ------------------------------------------------------------------
+
+    def test_device_path_refreshes_role(self):
+        """A non-VM existing device is refreshed from the DB and its current role applied."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-role-dev")
+        validation = self._device_validation(existing_device=dev, device_role={})
+
+        _refresh_existing_device(validation)
+
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["device_role"]["found"] is True
+        assert validation["device_role"]["role"] == dev.role
+        # A matched existing device must never be import-ready.
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+
+    def test_device_path_refreshes_no_role(self):
+        """Defensive branch: a refreshed device with no role → device_role={'found': False}.
+
+        ``Device.role`` is NOT NULL in NetBox, so this state can't be built with a real Device;
+        the branch guards against corrupt data / model changes. We force it with a stub object
+        (the only justified mock here — the real model forbids the state under test).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        existing = MagicMock(pk=2)
+        refreshed = MagicMock(role=None)
+        validation = self._device_validation(existing_device=existing, device_role={"found": True, "role": MagicMock()})
 
         with patch("dcim.models.Device") as mock_Device:
-            mock_Device.objects.filter.return_value.first.return_value = None  # deleted
+            mock_Device.objects.filter.return_value.first.return_value = refreshed
             _refresh_existing_device(validation)
+
+        assert validation["existing_device"] is refreshed
+        assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
+
+    def test_neutralized_link_but_other_match_type_keeps_block(self):
+        """A non-librenms cached match (hostname) must survive the linkage refresh: only a
+        neutralized librenms/OOB link triggers re-evaluation, so the device stays matched and
+        the row stays blocked."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-hostname-dev")
+        validation = self._device_validation(
+            existing_device=dev,
+            existing_match_type="hostname",  # not librenms-based
+            device_role={"found": True, "role": dev.role},
+        )
+
+        _refresh_existing_device(validation, libre_device={"device_id": 1}, server_key="default")
+
+        # hostname match preserved → device kept (not cleared) and the row stays blocked.
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "hostname"
+        assert validation["can_import"] is False
+
+    def test_neutralized_librenms_link_clears_match_and_reevaluates(self):
+        """A cached ``librenms_id`` match whose link is gone in NetBox (the device carries no
+        librenms_id custom field anymore) must be dropped and the row re-evaluated under current
+        rules — not left wearing the stale "existing" badge until cache expiry. Exercised with a
+        real device that simply has no librenms link.
+
+        Note: this corrects the prior mock-based test, which asserted ``can_import is True``. That
+        only held because its validation dict omitted ``site``/``device_type``, so the clear
+        branch's ``recalculate_validation_status`` raised ``KeyError`` — swallowed by the
+        production ``except`` — and returned BEFORE the fresh-lookup re-evaluation ran. With a
+        real, fully-shaped validation dict the re-evaluation does run: the dropped match resets
+        ``device_role`` (found=False), so ``_reassert_new_import_blockers`` re-adds the
+        role-selection blocker. The row is therefore blocked by a fresh new-import requirement,
+        NOT by the vanished match — which is the actual contract."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        # Real device with NO librenms_id CF → linkage finds no host/OOB id → neutralizes.
+        dev = make_device("ref-unlinked")
+        validation = self._device_validation(
+            existing_device=dev,
+            existing_match_type="librenms_id",
+            device_role={"found": True, "role": dev.role},
+            resolved_name="router1",  # does not match dev.name → no fresh re-match
+        )
+        libre_device = {"device_id": 50, "hostname": "router1", "sysName": "router1"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # Stale librenms match dropped — no "existing" badge — and the row is re-evaluated as a
+        # fresh new import: now gated only on the role-selection blocker, not the vanished match.
+        assert validation["existing_device"] is None
+        assert validation["existing_match_type"] is None
+        assert any("role" in issue.lower() for issue in validation["issues"])
+        assert validation["can_import"] is False
+
+    def test_missing_scanned_id_preserves_live_librenms_link(self):
+        """A missing scanned device_id is NOT proof the link disappeared. When the current scan
+        payload omits/malforms ``device_id`` (so ``scanned_id`` is None) but the DB still carries
+        the librenms_id host link, the cached ``librenms_id`` match must be preserved — not
+        cleared to None. Pre-fix the else-branch wiped a still-valid match whenever the scan row
+        lacked a device_id."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
+
+        dev = make_device("ref-live-link", librenms_cf={"default": {"id": 50}})
+        validation = self._device_validation(existing_device=dev, existing_match_type="librenms_id")
+
+        # libre_device with no usable device_id → scanned_id is None.
+        _refresh_librenms_linkage(validation, dev, {"hostname": "h"}, "default")
+
+        assert validation["existing_match_type"] == "librenms_id"
+
+    def test_missing_scanned_id_with_gone_link_clears_match(self):
+        """The companion case: when scanned_id is None AND the DB linkage is genuinely gone
+        (no host_id, no oob_id), the stale librenms badge IS dropped."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
+
+        dev = make_device("ref-gone-link")  # no librenms_id CF → host_id/oob_id both None
+        validation = self._device_validation(existing_device=dev, existing_match_type="librenms_id")
+
+        _refresh_librenms_linkage(validation, dev, {"hostname": "h"}, "default")
+
+        assert validation["existing_match_type"] is None
+
+    # ------------------------------------------------------------------
+    # Deleted match → readiness recompute
+    # ------------------------------------------------------------------
+
+    def test_deleted_device_clears_existing_and_recomputes_readiness(self):
+        """Device deleted since caching → existing_device=None, role reset, readiness recomputed."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-deleted")
+        validation = self._device_validation(existing_device=dev, device_role={"found": True})
+        delete_keeping_pk(dev)
+
+        _refresh_existing_device(validation)
 
         assert validation["existing_device"] is None
         assert validation["existing_match_type"] is None
         assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
-        assert validation["can_import"] is True  # no issues
-        assert validation["is_ready"] is False  # device_role.found is now missing
+        # The dropped match is back in the "new import" path with no role selected, so the
+        # create-time role blocker is re-asserted (matching the fresh-lookup path) — can_import
+        # is False, not just is_ready. (Pre-fix this branch left it importable when libre_device
+        # was None, inconsistent with the same scenario when libre_device is present.)
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+        assert any("role" in issue.lower() for issue in validation["issues"])
 
-    def test_deleted_vm_recomputes_readiness_from_cluster(self):
-        """VM deleted → is_ready reflects cluster.found."""
+    def test_deleted_device_clears_stale_match_derived_actions(self):
+        """When the matched device is deleted, serial/OOB/merge/promote actions derived from it
+        must be cleared so the UI can't offer actions on a now-gone device."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        existing = MagicMock()
-        existing.pk = 4
-        validation = {
-            "existing_device": existing,
-            "import_as_vm": True,
-            "issues": [],
-            "cluster": {"found": True},
-        }
+        dev = make_device("ref-deleted-actions")
+        validation = self._device_validation(
+            existing_device=dev,
+            device_role={"found": True},
+            # Stale actions produced from the now-deleted match:
+            serial_action="merge_netbox_devices",
+            oob_candidate={"device": dev, "type": "idrac"},
+            promote_to_host={"existing_libre_id": 9},
+            merge_candidates={"host_named": {"pk": 4}, "oob_named": {"pk": 5}},
+            serial_role_choice_available=True,
+        )
+        delete_keeping_pk(dev)
 
-        with patch("virtualization.models.VirtualMachine") as mock_VM:
-            mock_VM.objects.filter.return_value.first.return_value = None  # deleted
-            _refresh_existing_device(validation)
+        _refresh_existing_device(validation)
 
         assert validation["existing_device"] is None
-        assert validation["can_import"] is True
-        assert validation["is_ready"] is True  # cluster.found=True
+        assert validation["serial_action"] is None
+        assert validation["oob_candidate"] is None
+        assert validation["serial_role_choice_available"] is False
+        assert "promote_to_host" not in validation
+        assert "merge_candidates" not in validation
 
-    def test_deleted_vm_not_ready_when_no_cluster(self):
-        """Deleted VM with no cluster → is_ready=False."""
+    def test_deleted_vm_match_clears_stale_cluster_selection(self):
+        """A dropped cached VM match must reset the stale cluster selection (preserving
+        available_clusters), mirroring the device_role reset on the device path — otherwise the
+        match-derived cluster.found=True survives and recalculate keeps the row "ready" even
+        though a new VM import requires a fresh cluster."""
+        from virtualization.models import Cluster, ClusterType
+
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        existing = MagicMock()
-        existing.pk = 5
-        validation = {
-            "existing_device": existing,
-            "import_as_vm": True,
-            "issues": ["some issue"],
-            "cluster": {"found": False},
-        }
+        vm = make_vm("ref-vm-deleted")
+        stale_cluster = vm.cluster
+        other_type, _ = ClusterType.objects.get_or_create(name="RefCType", slug="ref-ctype")
+        other_cluster = Cluster.objects.create(name="RefCluster-B", type=other_type)
+        available = [stale_cluster, other_cluster]
+        validation = self._vm_validation(
+            existing_device=vm,
+            cluster={"found": True, "cluster": stale_cluster, "available_clusters": available},
+        )
+        delete_keeping_pk(vm)
 
-        with patch("virtualization.models.VirtualMachine") as mock_VM:
-            mock_VM.objects.filter.return_value.first.return_value = None
-            _refresh_existing_device(validation)
+        _refresh_existing_device(validation)
+
+        assert validation["existing_device"] is None
+        # Cluster selection reset to unselected, available list preserved for the dropdown.
+        assert validation["cluster"]["found"] is False
+        assert validation["cluster"]["cluster"] is None
+        assert validation["cluster"]["available_clusters"] == available
+        # found=False feeds is_ready (is_vm=True), so the row can't slip through without a
+        # fresh cluster choice.
+        assert validation["is_ready"] is False
+
+    def test_deleted_vm_recomputes_readiness_from_cluster(self):
+        """VM deleted → the match-derived cluster is reset (found=False) and the row is back in
+        the new-import path. The create-time cluster blocker is re-asserted (matching the
+        fresh-lookup path), so can_import is False until a fresh cluster is chosen."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        vm = make_vm("ref-vm-recompute")
+        validation = self._vm_validation(existing_device=vm, cluster={"found": True})
+        delete_keeping_pk(vm)
+
+        _refresh_existing_device(validation)
+
+        assert validation["existing_device"] is None
+        assert validation["can_import"] is False  # cluster blocker re-asserted
+        assert validation["is_ready"] is False  # not ready until a fresh cluster is selected
+        assert any("cluster" in issue.lower() for issue in validation["issues"])
+
+    def test_deleted_vm_not_ready_when_no_cluster(self):
+        """Deleted VM with a blocking issue → can_import False and is_ready False."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        vm = make_vm("ref-vm-nocluster")
+        validation = self._vm_validation(existing_device=vm, issues=["some issue"], cluster={"found": False})
+        delete_keeping_pk(vm)
+
+        _refresh_existing_device(validation)
 
         assert validation["can_import"] is False  # has issues
         assert validation["is_ready"] is False
 
     # ------------------------------------------------------------------
-    # Lines 366-368: Exception caught → logger.error called
+    # Fresh lookup (existing_device was None at cache time)
+    # ------------------------------------------------------------------
+
+    def test_fresh_lookup_matches_by_serial_blocks_import(self):
+        """The refresh re-check uses validate_device_for_import's breadth: a row with no
+        librenms_id/name match must still be blocked when a NetBox device matches by hardware
+        serial, otherwise it flips to importable and creates a duplicate."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-serial-dev", serial="ABC123")
+        validation = self._device_validation()
+        # device_id has no CF match; hostname/sysName don't match dev.name → serial is the hook.
+        libre_device = {"device_id": 50, "hostname": "h", "sysName": "h", "serial": "ABC123"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "serial"
+        assert validation["can_import"] is False
+
+    def test_fresh_lookup_no_role_clears_stale_role_blocker(self):
+        """When a fresh lookup resolves a previously-unmatched row to an existing device, the
+        stale "Device role must be manually selected" blocker must be cleared so it doesn't
+        linger in the UI (the row is force-blocked as an existing match regardless)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-serial-role", serial="ABC124")
+        validation = self._device_validation(issues=["Device role must be manually selected before import"])
+        libre_device = {"device_id": 51, "hostname": "h", "sysName": "h", "serial": "ABC124"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        # The stale role-blocker issue must have been removed.
+        assert all("role" not in issue.lower() for issue in validation["issues"])
+
+    def test_fresh_lookup_clears_stale_site_and_device_type_blockers(self):
+        """A previously-unmatched row can carry create-time "No matching site…" / "No matching
+        device type…" blockers (device_operations.py). When a fresh lookup resolves it to an
+        existing device, those blockers no longer apply and must be cleared too — not just
+        role/cluster — or the validation detail stays inconsistent with the resolved match."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-serial-site-dt", serial="ABC125")
+        validation = self._device_validation(
+            issues=[
+                "No matching site found for location: 'BasementX'",
+                "No matching device type found for hardware: 'WidgetX'",
+            ],
+        )
+        libre_device = {"device_id": 52, "hostname": "h", "sysName": "h", "serial": "ABC125"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        # Both stale create-time blockers cleared.
+        assert all("site" not in issue.lower() for issue in validation["issues"])
+        assert all("device type" not in issue.lower() for issue in validation["issues"])
+        assert validation["can_import"] is False
+
+    def test_fresh_lookup_vm_clears_stale_cluster_blocker(self):
+        """A VM row resolves to an existing VM via a fresh name match (actual_is_vm=True). The
+        cached "Cluster must be manually selected" create-time blocker must be cleared — it only
+        applied while the row was an unmatched new import. The VM path previously cleared neither
+        the role nor the cluster blocker (both branches were gated on `not actual_is_vm`), so the
+        stale message lingered in the UI on every refresh."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        vm = make_vm("ref-vm-cluster-clear")
+        validation = self._vm_validation(
+            issues=["Cluster must be manually selected before importing as VM"],
+        )
+        # No librenms_id CF match; the VM is found by resolved_name → Model=VirtualMachine,
+        # found_as_cross_model=False → actual_is_vm=True (the branch that cleared nothing).
+        validation["resolved_name"] = vm.name
+        libre_device = {"device_id": 60, "hostname": "no-match", "sysName": "no-match"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == vm.pk
+        assert validation["import_as_vm"] is True
+        # The stale cluster-blocker issue must have been removed.
+        assert all("cluster" not in issue.lower() for issue in validation["issues"])
+        # An existing match is never import-ready.
+        assert validation["can_import"] is False
+
+    def test_cross_model_librenms_id_collision_blocks_import(self):
+        """The same librenms_id assigned to BOTH a Device and a VirtualMachine is ambiguous:
+        validate_device_for_import() blocks it as a duplicate, so the refresh re-check must agree.
+        Without the cross-model collision guard, _lookup_in_model(Model) returns on the first
+        (preferred-model) id hit and never consults the other model — the row would silently bind
+        to the Device and could flip back to importable. With the guard, the refresh raises
+        AmbiguousLibreNMSIdError and the row is force-blocked with the ambiguous-id marker.
+
+        Driven against real Device + VM rows so find_by_librenms_id's JSON-containment query runs
+        on both models end-to-end (a mock pair would never surface a real cross-model collision)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            _AMBIGUOUS_LIBRENMS_ID_MARKER,
+            _refresh_existing_device,
+        )
+
+        make_device("collide-dev", librenms_cf={"default": {"id": 77}})
+        vm = make_vm("collide-vm")
+        vm.custom_field_data["librenms_id"] = {"default": {"id": 77}}
+        vm.save()
+
+        # Device path (import_as_vm=False) → Model=Device, CrossModel=VirtualMachine. The id 77
+        # resolves in BOTH, so the lookup must fail closed rather than bind to the Device.
+        validation = self._device_validation(resolved_name="collide-dev")
+        libre_device = {"device_id": 77, "hostname": "collide-dev", "sysName": "collide-dev"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["ambiguous_librenms_id"] is True
+        assert validation["existing_match_type"] == "ambiguous_librenms_id"
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+        assert any(_AMBIGUOUS_LIBRENMS_ID_MARKER in issue for issue in validation["issues"])
+
+    def test_vanished_link_with_no_libre_device_stays_blocked(self):
+        """Fail-closed: a cached librenms_id match whose link vanished in NetBox, refreshed with
+        libre_device=None, drops the match and recomputes readiness — then the fresh lookup
+        early-returns (no libre_device). The create-time role blocker must be re-asserted in the
+        drop branch so the row can't flip to importable with no role selected. Real-DB: the device
+        has no librenms_id CF, so _refresh_librenms_linkage clears the (stale) librenms_id match."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("vanished-link-dev")  # no librenms_id CF → linkage re-derive finds no link
+        validation = self._device_validation(existing_device=dev, existing_match_type="librenms_id")
+
+        _refresh_existing_device(validation, libre_device=None, server_key="default")
+
+        # Match dropped (link gone) + no role selected ⇒ must stay blocked, with the role blocker
+        # present (recomputed readiness alone, without the re-assert, would let it go importable).
+        assert validation["can_import"] is False
+        assert any("role" in issue.lower() for issue in validation["issues"])
+
+    def test_fresh_lookup_matches_by_primary_ip_blocks_import(self):
+        """As above, but the existing NetBox device is reachable only via its management IP —
+        the refresh must catch it (interface-assigned IP → device) and block the import."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-ip-dev")
+        iface = Interface.objects.create(device=dev, name="mgmt0", type="1000base-t")
+        IPAddress.objects.create(address="10.0.0.9/24", assigned_object=iface)
+        validation = self._device_validation()
+        libre_device = {"device_id": 52, "hostname": "h2", "sysName": "h2", "ip": "10.0.0.9"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "primary_ip"
+        assert validation["can_import"] is False
+
+    def test_no_existing_device_found_by_librenms_id(self):
+        """existing=None: a device now carrying the scanned librenms_id host CF is re-matched.
+
+        Driven with a real device whose ``librenms_id`` custom field holds the host id, so
+        ``find_by_librenms_id`` resolves it via the real JSON-containment query and
+        ``_refresh_librenms_linkage`` re-verifies host_id == scanned id (42)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("sw01", librenms_cf={"default": {"id": 42}})
+        libre_device = {"device_id": 42, "hostname": "sw01", "sysName": "sw01"}
+        validation = self._device_validation(resolved_name="sw01")
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "librenms_id"
+        # Late-found existing match must never be import-ready.
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+        # Device has a role → device_role should be set.
+        assert validation["device_role"]["found"] is True
+
+    def test_no_existing_device_found_as_oob_reclassifies_and_links(self):
+        """existing=None at cache time, but the scanned LibreNMS id is now linked as a device's
+        OOB controller: refresh must reclassify the match as 'librenms_oob' and populate
+        existing_librenms_link (the stale-OOB-badge fix), DB-only. Driven with a real device
+        whose librenms_id CF carries an OOB sub-key pointing at the scanned id (42)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device(
+            "idrac-host",
+            librenms_cf={"default": {"id": 99, "oob": {"id": 42, "type": "drac"}}},
+        )
+        libre_device = {"device_id": 42, "hostname": "10.0.0.5", "sysName": "idrac-x"}
+        validation = self._device_validation(
+            existing_match_type=None, existing_librenms_link=None, resolved_name="idrac-x"
+        )
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # Matched via the OOB sub-key → librenms_oob, not plain librenms_id.
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "librenms_oob"
+        assert validation["existing_librenms_link"] == {"host_id": 99, "oob_id": 42, "oob_type": "drac"}
+        # A late-found existing match must never be import-ready.
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+
+    def test_no_existing_device_found_by_resolved_name(self):
+        """existing=None: not matched by librenms_id, but matched by resolved_name."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("sw02-resolved")
+        libre_device = {"device_id": 43, "hostname": "sw02", "sysName": "sw02"}
+        validation = self._device_validation(resolved_name="sw02-resolved")
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "resolved_name"
+        assert validation["can_import"] is False
+
+    def test_no_existing_device_non_numeric_librenms_id_skips_id_lookup(self):
+        """A non-numeric device_id is coerced to None (no id lookup), so the row still matches
+        by resolved_name rather than crashing on int('not-an-int')."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("sw05")
+        libre_device = {"device_id": "not-an-int", "hostname": "sw05", "sysName": "sw05"}
+        validation = self._device_validation(resolved_name="sw05")
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # Found via resolved_name; the non-numeric id neither crashed nor mis-matched.
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "resolved_name"
+
+    def test_no_existing_device_hostname_fallback(self):
+        """existing=None, not matched by id or resolved_name → hostname fallback."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("sw04")
+        libre_device = {"device_id": 45, "hostname": "sw04", "sysName": "sw04-sysname"}
+        validation = self._device_validation(resolved_name=None)
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "hostname"
+
+    def test_no_existing_device_no_libre_device_returns_early(self):
+        """existing=None + libre_device=None → immediate return, validation untouched."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        validation = {"existing_device": None}
+        _refresh_existing_device(validation, libre_device=None)
+        assert validation == {"existing_device": None}
+
+    # ------------------------------------------------------------------
+    # Error handling (exception simulation — justified mocks)
     # ------------------------------------------------------------------
 
     def test_exception_during_refresh_logs_error(self):
-        """DB error during refresh is caught and logged."""
+        """A DB error while refreshing an existing device is caught and logged, not raised.
+
+        We force the failure by making the ORM lookup raise — simulating an external failure
+        is the one place a mock is appropriate (the real query can't be made to fail on demand).
+        """
+        from unittest.mock import MagicMock, patch
+
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        existing = MagicMock()
-        existing.pk = 99
+        existing = MagicMock(pk=99)
         validation = {"existing_device": existing, "import_as_vm": False}
 
         with (
@@ -951,111 +1374,22 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation)  # must not raise
 
         mock_logger.error.assert_called_once()
-        # Inspect every positional arg, not just the format string, so this still passes if the
-        # production call switches to parameterized logging (logger.error("... %s", pk)) — the
-        # id would then land in a separate arg (issue #98).
-        assert any("99" in str(a) for a in mock_logger.error.call_args.args)
-
-    # ------------------------------------------------------------------
-    # Line 373: no existing_device, no libre_device → early return
-    # ------------------------------------------------------------------
-
-    def test_no_existing_device_no_libre_device_returns_early(self):
-        """existing=None + libre_device=None → immediate return."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        validation = {"existing_device": None}
-        # No exception and validation unchanged
-        _refresh_existing_device(validation, libre_device=None)
-        assert validation == {"existing_device": None}
-
-    # ------------------------------------------------------------------
-    # Lines 393-395: existing=None, found via librenms_id
-    # ------------------------------------------------------------------
-
-    def test_no_existing_device_found_by_librenms_id(self):
-        """existing=None: device found by librenms_id custom field."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        new_device = MagicMock()
-        new_device.role = MagicMock(name="switch")
-        libre_device = {"device_id": 42, "hostname": "sw01", "sysName": "sw01"}
-
-        validation = {
-            "existing_device": None,
-            "import_as_vm": False,
-            "resolved_name": "sw01",
-            "device_role": {"found": False, "role": None},
-            "site": {"found": True, "site": MagicMock()},
-            "device_type": {"found": True, "device_type": MagicMock()},
-            "issues": [],
-        }
-
-        with (
-            patch("dcim.models.Device") as mock_Device,
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id",
-                return_value=new_device,
-            ),
-        ):
-            mock_Device.objects.filter.return_value.first.return_value = None
-            _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
-
-        assert validation["existing_device"] is new_device
-        assert validation["existing_match_type"] == "librenms_id"
-        # Late-found existing match must never be import-ready, even if recalculate
-        # would otherwise set can_import=True (no issues + all fields found).
-        assert validation["can_import"] is False
-        assert validation["is_ready"] is False
-        # Device has a role → device_role should be set
-        assert validation["device_role"]["found"] is True
-
-    # ------------------------------------------------------------------
-    # Lines 400-402: existing=None, found by resolved_name
-    # ------------------------------------------------------------------
-
-    def test_no_existing_device_found_by_resolved_name(self):
-        """existing=None: not found by librenms_id, but found by resolved_name."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        new_device = MagicMock()
-        new_device.role = None  # no role
-        libre_device = {"device_id": 43, "hostname": "sw02", "sysName": "sw02"}
-
-        validation = {
-            "existing_device": None,
-            "import_as_vm": False,
-            "resolved_name": "sw02-resolved",
-        }
-
-        with (
-            patch("dcim.models.Device") as mock_Device,
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id",
-                return_value=None,
-            ),
-        ):
-            # resolved_name match
-            mock_Device.objects.filter.return_value.first.return_value = new_device
-            _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
-
-        assert validation["existing_device"] is new_device
-        assert validation["existing_match_type"] == "resolved_name"
-        assert validation["can_import"] is False
-
-    # ------------------------------------------------------------------
-    # Lines 420-421: exception in the "no existing device" lookup path
-    # ------------------------------------------------------------------
+        # Don't pin the pk to the format string only: a switch to parameterized logging
+        # (logger.error("... %s", pk)) would move "99" into a later positional arg while
+        # still logging correctly. Check every positional arg instead.
+        args = mock_logger.error.call_args.args
+        assert any("99" in str(arg) for arg in args)
 
     def test_exception_during_new_device_lookup_logs_error(self):
-        """Exception in the newly-imported-device check is caught and logged."""
+        """An exception in the newly-imported-device check is caught and logged (forced)."""
+        from unittest.mock import patch
+
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         libre_device = {"device_id": 44, "hostname": "sw03", "sysName": "sw03"}
         validation = {"existing_device": None, "import_as_vm": False, "resolved_name": None}
 
         with (
-            patch("dcim.models.Device"),
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id",
                 side_effect=Exception("lookup failed"),
@@ -1065,72 +1399,6 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
 
         mock_logger.error.assert_called()
-
-    def test_no_existing_device_non_numeric_librenms_id_falls_back_to_name(self):
-        """Non-numeric device_id yields no id match → falls back to resolved_name."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        new_device = MagicMock()
-        new_device.role = None
-        libre_device = {"device_id": "not-an-int", "hostname": "sw05", "sysName": "sw05"}
-
-        validation = {
-            "existing_device": None,
-            "import_as_vm": False,
-            "resolved_name": "sw05",
-        }
-
-        with (
-            patch("dcim.models.Device") as mock_Device,
-            # find_by_librenms_id returns None for a non-numeric id (its real contract), so the
-            # id lookup misses and the flow falls back to the resolved_name match.
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id",
-                return_value=None,
-            ),
-        ):
-            mock_Device.objects.filter.return_value.first.return_value = new_device
-            _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
-
-        assert validation["existing_device"] is new_device
-        assert validation["existing_match_type"] == "resolved_name"
-
-    def test_no_existing_device_hostname_fallback(self):
-        """existing=None, not found by id or resolved_name → hostname fallback."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        new_device = MagicMock()
-        new_device.role = None
-        libre_device = {"device_id": 45, "hostname": "sw04", "sysName": "sw04-sysname"}
-
-        validation = {
-            "existing_device": None,
-            "import_as_vm": False,
-            "resolved_name": None,  # no resolved_name → fall through to hostname
-        }
-
-        # filter returns new_device only for the hostname kwargs; any other filter
-        # call (e.g. resolved_name or sysname) returns None — so the test fails if
-        # the wrong lookup path is exercised.
-        def filter_first(*args, **kwargs):
-            m = MagicMock()
-            m.first.return_value = new_device if kwargs.get("name__iexact") == "sw04" else None
-            return m
-
-        with (
-            patch("dcim.models.Device") as mock_Device,
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id",
-                return_value=None,
-            ),
-        ):
-            mock_Device.objects.filter.side_effect = filter_first
-            _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
-
-        assert validation["existing_device"] is new_device
-        assert validation["existing_match_type"] == "hostname"
-        # Verify the hostname-keyed filter call was actually made
-        mock_Device.objects.filter.assert_any_call(name__iexact="sw04")
 
 
 # ===========================================================================
@@ -2378,3 +2646,53 @@ class TestCrossModelConflictDetection:
         # recalculate_validation_status regardless of issues/fields state.
         assert validation["can_import"] is False
         assert validation["is_ready"] is False
+
+
+class TestRefreshLibreNMSLinkage:
+    """_refresh_librenms_linkage: re-classify a librenms-id match on cache-hit refresh.
+
+    The host/OOB link can change in NetBox after a row is cached, so the match-type is
+    re-derived against the *scanned* device id rather than trusting the stale value.
+    """
+
+    def _call(self, *, match_type, scanned_id, host_id, oob_id):
+        from netbox_librenms_plugin.import_utils import bulk_import
+
+        validation = {"existing_match_type": match_type}
+        device = MagicMock()
+        libre_device = {"device_id": scanned_id}
+        oob = {"id": oob_id} if oob_id is not None else None
+        with (
+            patch.object(
+                bulk_import,
+                "_describe_existing_librenms_link",
+                return_value={"host_id": host_id, "oob_id": oob_id, "oob_type": None},
+            ) as mock_describe,
+            patch.object(bulk_import, "get_librenms_oob", return_value=oob) as mock_oob,
+        ):
+            bulk_import._refresh_librenms_linkage(validation, device, libre_device, "default")
+        # Both linkage reads must be scoped to the active server_key — a regression that
+        # dropped server_key would re-classify against the wrong server's mapping.
+        mock_describe.assert_called_once_with(device, "default")
+        if mock_oob.called:
+            mock_oob.assert_called_with(device, server_key="default")
+        return validation
+
+    def test_host_id_match_classifies_librenms_id(self):
+        v = self._call(match_type="librenms_id", scanned_id=42, host_id=42, oob_id=None)
+        assert v["existing_match_type"] == "librenms_id"
+
+    def test_oob_id_match_classifies_librenms_oob(self):
+        v = self._call(match_type="librenms_id", scanned_id=77, host_id=None, oob_id=77)
+        assert v["existing_match_type"] == "librenms_oob"
+
+    def test_neither_match_neutralizes_stale_badge(self):
+        """Linkage changed since caching: neither host nor OOB id matches the scanned
+        device, so the stale 'librenms_id' badge must be cleared (not kept)."""
+        v = self._call(match_type="librenms_id", scanned_id=42, host_id=99, oob_id=None)
+        assert v["existing_match_type"] is None
+
+    def test_non_librenms_match_type_untouched(self):
+        """Serial/hostname/primary_ip matches are left alone."""
+        v = self._call(match_type="serial", scanned_id=42, host_id=None, oob_id=None)
+        assert v["existing_match_type"] == "serial"

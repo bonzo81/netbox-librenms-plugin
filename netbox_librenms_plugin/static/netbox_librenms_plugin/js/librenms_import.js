@@ -1203,12 +1203,87 @@
                 // the outer HTMX modal. Buttons inside nested modals (e.g. the
                 // Promote-to-host modal rendered inside #htmx-modal-content)
                 // must be left for Bootstrap's own dismiss handler so they
-                // close the inner modal, not the outer one.
+                // close the inner modal, not the outer one. We also avoid
+                // preventDefault here so form submit buttons that happen to
+                // carry data-bs-dismiss="modal" in nested modals still submit.
                 const nearestModal = dismissTrigger.closest('.modal');
                 if (nearestModal === modalElement) {
                     event.preventDefault();
                     hideModal(modalElement, fallbackBackdropRef);
+                } else if (
+                    nearestModal &&
+                    !(typeof bootstrap !== 'undefined' && bootstrap.Modal) &&
+                    !(typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal)
+                ) {
+                    // No-Bootstrap fallback: Bootstrap's own dismiss handler isn't available to
+                    // close the nested modal, so the user would otherwise be stuck inside it.
+                    // Manually hide just the nested modal (not the outer HTMX modal).
+                    // Only suppress default for INERT dismiss controls: a dismiss button that also
+                    // submits a form or triggers an hx-* request must still execute that action, so
+                    // don't preventDefault for those (we still close the nested modal below).
+                    const isActionControl =
+                        dismissTrigger.type === 'submit' ||
+                        ['hx-post', 'hx-get', 'hx-put', 'hx-delete', 'hx-patch'].some((attr) =>
+                            dismissTrigger.hasAttribute(attr)
+                        );
+                    if (!isActionControl) {
+                        event.preventDefault();
+                    }
+                    nearestModal.classList.remove('show');
+                    nearestModal.style.display = 'none';
+                    nearestModal.setAttribute('aria-hidden', 'true');
+                    nearestModal.removeAttribute('aria-modal');
                 }
+            }
+        });
+
+        // Refresh the validation modal in place (used after promote / OOB
+        // attach actions that mutate device link state but should leave the
+        // user inside the modal so they can see the new state). Also closes
+        // any nested modals (e.g. the Promote-to-host pick modal) before
+        // re-fetching so the user sees the refreshed validation directly.
+        document.body.addEventListener('validationRefresh', function (event) {
+            // Close any nested Bootstrap modals currently open inside the
+            // outer validation modal content. Use the same detection order as
+            // the rest of the plugin: bare `bootstrap` global first (preferred),
+            // then `window.bootstrap` as fallback, then plain DOM toggling.
+            document.querySelectorAll('#htmx-modal-content .modal.show').forEach(function (nested) {
+                try {
+                    // Prefer Bootstrap: it tracks stacked modals and leaves the
+                    // outer HTMX modal's backdrop/body state intact. Only fall
+                    // back to a minimal DOM hide — never hideModal()/_hideManual,
+                    // which strips body.modal-open and the (shared, outer) backdrop
+                    // and would break the still-open outer modal.
+                    if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+                        bootstrap.Modal.getOrCreateInstance(nested).hide();
+                    } else if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal) {
+                        window.bootstrap.Modal.getOrCreateInstance(nested).hide();
+                    } else {
+                        nested.classList.remove('show');
+                        nested.style.display = 'none';
+                        nested.setAttribute('aria-hidden', 'true');
+                        nested.removeAttribute('aria-modal');
+                    }
+                } catch (err) {
+                    // Swallow - we still want to refresh the validation panel.
+                }
+            });
+
+            const deviceId = event.detail && (event.detail.deviceId || event.detail.device_id);
+            if (!deviceId) {
+                return;
+            }
+            const btn = document.querySelector(
+                'tr#device-row-' + deviceId + ' button[hx-get*="/validation/' + deviceId + '/"]'
+            );
+            if (btn) {
+                // htmx registers a delegated click handler on document, so a
+                // synthetic MouseEvent click on the row's "View details"
+                // button re-triggers the validation GET and swaps the new
+                // content into #htmx-modal-content. We cannot call
+                // `htmx.trigger()` directly because NetBox does not expose
+                // the htmx global to user scripts.
+                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
             }
         });
 
@@ -1222,6 +1297,20 @@
         // Handle Escape key to close modal
         document.addEventListener('keydown', function (event) {
             if (event.key === 'Escape') {
+                // A nested dialog (e.g. the promote-to-host modal rendered inside
+                // #htmx-modal-content) owns Escape while it is open — let Bootstrap close
+                // the topmost child, don't tear down the whole validation modal underneath it.
+                // Also gate on where the Escape originated: Bootstrap may strip `.show` from the
+                // nested modal before this listener runs (the `.modal.show` query would then miss
+                // and wrongly close the outer modal), but the event's origin is unaffected by that
+                // timing — so a keypress inside a nested modal still suppresses the outer close.
+                // event.target can be the Document (keydown with nothing focused), which has no
+                // .closest() — guard with instanceof Element so this never throws a TypeError.
+                const eventStartedInNestedModal =
+                    event.target instanceof Element && event.target.closest('#htmx-modal-content .modal');
+                if (eventStartedInNestedModal || document.querySelector('#htmx-modal-content .modal.show')) {
+                    return;
+                }
                 if (modalElement?.classList.contains('show')) {
                     hideModal(modalElement, fallbackBackdropRef);
                 }

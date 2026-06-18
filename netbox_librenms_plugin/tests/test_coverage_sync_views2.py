@@ -1,10 +1,15 @@
 """
 Coverage tests for views/sync/ (cables, devices, interfaces, ip_addresses, locations, vlans).
 
-All DB interactions are mocked via MagicMock.  No @pytest.mark.django_db.
+Most DB interactions are mocked via MagicMock, but some tests are DB-backed
+(``@pytest.mark.django_db``) where exercising the real ORM is clearer than mocking it.
 """
 
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
 
 # ---------------------------------------------------------------------------
@@ -915,13 +920,46 @@ class TestSyncIPAddressesViewPermissionDenied:
         assert result.status_code == 403
 
 
+class TestSyncIPAddressesViewUnknownServerKey:
+    def test_unknown_server_key_errors_without_500(self):
+        """A stale/tampered POST server_key must surface a user-facing error +
+        redirect, not raise (LibreNMSAPI raises KeyError for unknown keys)."""
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        view = object.__new__(SyncIPAddressesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        mock_device = MagicMock(pk=1)
+        mock_api = MagicMock(server_key="default")
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
+            # Drive the REAL failure mode end to end: LibreNMSAPI raises KeyError for an
+            # unknown key, and the real build_librenms_api must swallow it into None so
+            # the view degrades gracefully. Mocking build_librenms_api=None directly would
+            # keep passing even if that try/except regressed — this exercises the swallow.
+            patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI", side_effect=KeyError("ghost")) as mock_cls,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msgs,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
+            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+        ):
+            view.request = _make_request(post_data={"server_key": "ghost", "select": ["10.0.0.1/24"]})
+            result = view.post(view.request, object_type="device", pk=1)
+
+        mock_cls.assert_called_once_with(server_key="ghost")
+        mock_msgs.error.assert_called_once()
+        # Must redirect back to the IP-sync tab (resolved server_key), not just "somewhere".
+        mock_redirect.assert_called_once_with("/sync/?tab=ipaddresses&server_key=default")
+        assert result is mock_redirect.return_value
+
+
 class TestSyncIPAddressesViewCacheMiss:
     def test_cache_miss_redirects(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_device = MagicMock(pk=1)
@@ -949,7 +987,7 @@ class TestSyncIPAddressesViewNoSelection:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_device = MagicMock(pk=1)
@@ -994,16 +1032,21 @@ class TestSyncIPAddressesViewCreateIP:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
+        mock_iface = MagicMock()
+        mock_iface.name = "eth0"
         mock_device = MagicMock(pk=1)
+        mock_device.interfaces.all.return_value = [mock_iface]
         mock_api = MagicMock(server_key="default")
 
+        # Interface is resolved from current NetBox state by LibreNMS port id.
         ip_data = {
             "ip_address": "10.0.0.1",
             "ip_with_mask": "10.0.0.1/24",
-            "interface_url": "http://localhost/api/dcim/interfaces/5/",
+            "port_id": 5,
+            "interface_name": "eth0",
         }
 
         with (
@@ -1014,17 +1057,17 @@ class TestSyncIPAddressesViewCreateIP:
             patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ip_addresses": [ip_data]}
             mock_ip_cls.objects.filter.return_value.first.return_value = None
-            mock_iface_cls.objects.get.return_value = MagicMock()
 
             view.request = _make_request(post_data={"select": ["10.0.0.1"]})
             view.post(view.request, object_type="device", pk=1)
 
         mock_ip_cls.objects.create.assert_called_once()
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_iface
         mock_msgs.success.assert_called()
 
 
@@ -1034,21 +1077,24 @@ class TestSyncIPAddressesViewUpdateIP:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
+        mock_iface = MagicMock()
+        mock_iface.name = "eth0"
         mock_device = MagicMock(pk=1)
+        mock_device.interfaces.all.return_value = [mock_iface]
         mock_api = MagicMock(server_key="default")
 
         ip_data = {
             "ip_address": "10.0.0.1",
             "ip_with_mask": "10.0.0.1/24",
-            "interface_url": "http://localhost/api/dcim/interfaces/5/",
+            "port_id": 5,
+            "interface_name": "eth0",
         }
         mock_existing_ip = MagicMock()
         mock_existing_ip.assigned_object = MagicMock()  # Different from mock_iface
         mock_existing_ip.vrf = None
-        mock_iface = MagicMock()
 
         with (
             patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
@@ -1058,16 +1104,16 @@ class TestSyncIPAddressesViewUpdateIP:
             patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ip_addresses": [ip_data]}
             mock_ip_cls.objects.filter.return_value.first.return_value = mock_existing_ip
-            mock_iface_cls.objects.get.return_value = mock_iface
 
             view.request = _make_request(post_data={"select": ["10.0.0.1"]})
             view.post(view.request, object_type="device", pk=1)
 
+        assert mock_existing_ip.assigned_object is mock_iface
         mock_existing_ip.save.assert_called_once()
         mock_msgs.success.assert_called()
 
@@ -1078,16 +1124,17 @@ class TestSyncIPAddressesViewUnchangedIP:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
         mock_device = MagicMock(pk=1)
+        mock_device.interfaces.all.return_value = []
         mock_api = MagicMock(server_key="default")
 
         ip_data = {
             "ip_address": "10.0.0.1",
             "ip_with_mask": "10.0.0.1/24",
-            "interface_url": None,
+            "interface_name": None,
         }
         mock_existing_ip = MagicMock()
         mock_existing_ip.assigned_object = None
@@ -1250,17 +1297,21 @@ class TestSyncIPAddressesViewVMInterface:
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view._post_server_key = "default"
+        view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
 
+        mock_vmiface = MagicMock()
+        mock_vmiface.name = "eth0"
         mock_vm = MagicMock()
         mock_vm.pk = 2
+        mock_vm.interfaces.all.return_value = [mock_vmiface]
         mock_api = MagicMock(server_key="default")
 
         ip_data = {
             "ip_address": "10.0.0.5",
             "ip_with_mask": "10.0.0.5/24",
-            "interface_url": "http://localhost/api/virtualization/interfaces/9/",
+            "port_id": 9,
+            "interface_name": "eth0",
         }
 
         with (
@@ -1271,17 +1322,262 @@ class TestSyncIPAddressesViewVMInterface:
             patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.VMInterface") as mock_vmiface_cls,
+            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=9),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = {"ip_addresses": [ip_data]}
             mock_ip_cls.objects.filter.return_value.first.return_value = None
-            mock_vmiface_cls.objects.get.return_value = MagicMock()
 
             view.request = _make_request(post_data={"select": ["10.0.0.5"]})
             view.post(view.request, object_type="virtualmachine", pk=2)
 
-        mock_vmiface_cls.objects.get.assert_called_once()
+        mock_ip_cls.objects.create.assert_called_once()
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_vmiface
+
+
+@pytest.mark.django_db
+class TestSyncIPAddressesViewInterfaceResolution:
+    """The sync re-resolves the target interface against current NetBox state
+    rather than trusting the cached ``interface_url`` (which goes stale when an
+    interface is synced after the IP rows were cached).
+
+    Driven against real Device / Interface / IPAddress: the interface maps are built from real
+    interfaces carrying real librenms_id port-id custom fields, and the stale-url regression
+    creates a real IPAddress assigned to the re-resolved interface — not a patched IPAddress
+    manager whose ``create`` kwargs are merely asserted.
+    """
+
+    def _view(self):
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        return object.__new__(SyncIPAddressesView)
+
+    def test_match_interface_by_port_id(self):
+        dev = make_device("ipres-byid")
+        iface = make_interface(dev, "eth0")
+        result = self._view()._match_interface(
+            {"port_id": 5, "interface_name": "ignored"},
+            {"5": iface},
+            {},
+        )
+        assert result == iface
+
+    def test_match_interface_by_name_fallback(self):
+        dev = make_device("ipres-byname")
+        iface = make_interface(dev, "eth0")
+        result = self._view()._match_interface(
+            {"port_id": 5, "interface_name": "eth0"},
+            {},
+            {"eth0": iface},
+        )
+        assert result == iface
+
+    def test_match_interface_no_match_returns_none(self):
+        dev = make_device("ipres-nomatch")
+        result = self._view()._match_interface(
+            {"port_id": 99, "interface_name": "eth9"},
+            {"5": make_interface(dev, "eth5")},
+            {"eth0": make_interface(dev, "eth0")},
+        )
+        assert result is None
+
+    def test_match_interface_handles_missing_keys(self):
+        assert self._view()._match_interface({}, {}, {}) is None
+
+    def test_build_interface_maps_indexes_by_id_and_name(self):
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        view = self._view()
+        dev = make_device("ipres-build")
+        eth0 = make_interface(dev, "eth0")
+        set_librenms_device_id(eth0, 7, "default")  # mutates custom_field_data...
+        eth0.save()  # ...which set_librenms_device_id does not persist; _build_interface_maps re-queries
+
+        by_id, by_name = view._build_interface_maps(dev, "default")
+
+        assert set(by_id) == {"7"}
+        assert by_id["7"].pk == eth0.pk
+        assert set(by_name) == {"eth0"}
+        assert by_name["eth0"].pk == eth0.pk
+
+    def test_build_interface_maps_marks_duplicate_port_id_ambiguous(self):
+        """Two interfaces sharing the same stored port id must mark that id ambiguous
+        (None) rather than silently keeping the last one — so the IP isn't bound to an
+        arbitrary interface."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        view = self._view()
+        dev = make_device("ipres-dup")
+        a = make_interface(dev, "eth0")
+        b = make_interface(dev, "eth1")
+        set_librenms_device_id(a, 7, "default")
+        set_librenms_device_id(b, 7, "default")  # same port id on both
+        a.save()
+        b.save()
+
+        by_id, by_name = view._build_interface_maps(dev, "default")
+
+        assert by_id == {"7": None}  # ambiguous → no usable target
+        assert set(by_name) == {"eth0", "eth1"}
+
+    def test_match_interface_fails_safe_on_ambiguous_port_id(self):
+        """An ambiguous port id (None value) must return None and NOT fall through to a
+        name match for the same id, which could bind the address just as wrongly."""
+        dev = make_device("ipres-failsafe")
+        named = make_interface(dev, "eth0")
+        result = self._view()._match_interface(
+            {"port_id": 7, "interface_name": "eth0"},
+            {"7": None},
+            {"eth0": named},
+        )
+        assert result is None
+
+    def test_stale_interface_url_still_assigns_after_interface_synced(self):
+        """Regression: cached row was enriched before the interface existed
+        (``interface_url`` is None), but the interface has since been synced.
+        The IP must be assigned to it without a manual cache refresh — and a real
+        IPAddress is created and bound to the re-resolved interface."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        view = self._view()
+        view._post_server_key = "default"
+
+        dev = make_device("ipres-stale")
+        # Interface synced *after* these rows were cached, carrying port id 5.
+        iface = make_interface(dev, "lo0.0")
+        set_librenms_device_id(iface, 5, "default")
+        iface.save()
+
+        # Stale enriched row: interface_url is None because the interface did
+        # not exist in NetBox when the IP data was fetched/cached.
+        ip_data = {
+            "ip_address": "10.0.0.1",
+            "ip_with_mask": "10.0.0.1/24",
+            "interface_url": None,
+            "port_id": 5,
+            "interface_name": "lo0.0",
+        }
+
+        request = _make_request(post_data={"select": ["10.0.0.1"]})
+        results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], dev, "device")
+
+        created = IPAddress.objects.get(address="10.0.0.1/24")
+        assert created.assigned_object == iface
+        assert results["created"] == ["10.0.0.1"]
+        assert results["primary_no_interface"] == []
+
+    # --- Virtual-chassis member resolution (characterization: behavior must NOT drift when the
+    #     manual member expansion is routed through the shared helper) ---------------------------
+
+    @staticmethod
+    def _make_vc(name, positions):
+        """Build a real VirtualChassis with one member Device per position. Returns (vc, {pos: dev})."""
+        from dcim.models import VirtualChassis
+
+        vc = VirtualChassis.objects.create(name=name)
+        members = {}
+        for pos in positions:
+            dev = make_device(f"{name}-m{pos}")
+            dev.virtual_chassis = vc
+            dev.vc_position = pos
+            dev.save()
+            members[pos] = dev
+        vc.master = members[positions[0]]
+        vc.save()
+        return vc, members
+
+    def test_build_interface_maps_indexes_all_vc_members(self):
+        """LibreNMS treats a VC as one logical device, so a member's IP can resolve to an
+        interface on ANOTHER member: _build_interface_maps(viewed_member) must index every
+        member's interfaces, keyed by their stored LibreNMS port id."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        _vc, members = self._make_vc("ipres-vc", [1, 2])
+        m1, m2 = members[1], members[2]
+        i1 = make_interface(m1, "Ethernet1")
+        i2 = make_interface(m2, "Ethernet2")
+        set_librenms_device_id(i1, 101, "default")
+        set_librenms_device_id(i2, 202, "default")
+        i1.save()
+        i2.save()
+
+        # Build the maps from the viewed member m1 — m2's interface must still be present.
+        by_id, by_name = self._view()._build_interface_maps(m1, "default")
+
+        assert by_id["101"].pk == i1.pk
+        assert by_id["202"].pk == i2.pk  # cross-member: resolved from a different member
+        assert by_name["Ethernet1"].pk == i1.pk
+        assert by_name["Ethernet2"].pk == i2.pk
+
+    def test_primary_ip_not_set_from_sibling_vc_member_interface(self):
+        """Because _build_interface_maps indexes every VC member, a synced IP can resolve to a
+        SIBLING member's interface. The primary-IP auto-match must NOT point obj.primary_ip at an
+        address on another device's interface — save() skips full_clean, so it would persist an
+        invalid primary. The row is recorded as primary_no_interface instead."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        _vc, members = self._make_vc("ipres-vc-prim", [1, 2])
+        m1, m2 = members[1], members[2]
+        # The matching interface lives on the SIBLING member m2, carrying port id 5.
+        sibling_iface = make_interface(m2, "eth5")
+        set_librenms_device_id(sibling_iface, 5, "default")
+        sibling_iface.save()
+
+        view = self._view()
+        view._post_server_key = "default"
+        # The synced address is LibreNMS's management IP → the set-primary path is taken.
+        view.get_management_ip = MagicMock(return_value="10.0.0.1")
+
+        ip_data = {
+            "ip_address": "10.0.0.1",
+            "ip_with_mask": "10.0.0.1/24",
+            "interface_url": None,
+            "port_id": 5,
+            "interface_name": "eth5",
+        }
+        request = _make_request(post_data={"select": ["10.0.0.1"]})
+        with patch(
+            "netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip",
+            return_value=True,
+        ):
+            results = view.process_ip_sync(request, ["10.0.0.1"], [ip_data], m1, "device")
+
+        # The IP is created and bound to the sibling's interface (the maps include all members)...
+        created = IPAddress.objects.get(address="10.0.0.1/24")
+        assert created.assigned_object == sibling_iface
+        # ...but m1's primary IP must NOT be set from an address on m2's interface.
+        m1.refresh_from_db()
+        assert m1.primary_ip4_id is None
+        assert results["primary_set"] == []
+        assert results["primary_no_interface"] == ["10.0.0.1"]
+
+    def test_build_interface_maps_marks_cross_member_duplicate_name_ambiguous(self):
+        """A name shared by interfaces on two VC members can't silently rebind the address —
+        mark it ambiguous (None), the same fail-safe as a duplicate port id."""
+        _vc, members = self._make_vc("ipres-vcdup", [1, 2])
+        make_interface(members[1], "Ethernet1")
+        make_interface(members[2], "Ethernet1")  # same name on another member
+
+        _by_id, by_name = self._view()._build_interface_maps(members[1], "default")
+
+        assert by_name["Ethernet1"] is None  # ambiguous across members → fail safe
+
+    def test_build_interface_maps_non_vc_device_only_its_own_interfaces(self):
+        """A standalone (non-VC) device must index only its own interfaces — not another
+        device's same-named interface."""
+        dev = make_device("ipres-standalone")
+        other = make_device("ipres-other")
+        own = make_interface(dev, "Ethernet1")
+        make_interface(other, "Ethernet1")  # unrelated device, must NOT appear
+
+        _by_id, by_name = self._view()._build_interface_maps(dev, "default")
+
+        assert set(by_name) == {"Ethernet1"}
+        assert by_name["Ethernet1"].pk == own.pk
 
 
 # ===========================================================================

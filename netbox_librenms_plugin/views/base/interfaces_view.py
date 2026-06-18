@@ -1,12 +1,18 @@
+import logging
+from urllib.parse import quote_plus
+
 from django.contrib import messages
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     get_interface_name_field,
+    get_librenms_oob,
+    get_librenms_sync_device,
     get_virtual_chassis_member,
     is_list_of_dicts,
     normalize_librenms_port_id,
@@ -17,6 +23,8 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     VlanAssignmentMixin,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, CacheMixin, View):
@@ -52,6 +60,25 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         Should be implemented in subclasses.
         """
         raise NotImplementedError
+
+    def _failure_redirect(self, request, obj, server_key):
+        """Redirect to the sync tab after a refresh failure, preserving the POST-scoped
+        server_key so the user stays on the server they were working in (otherwise the next
+        retry/sync can target the session/default LibreNMS instance instead).
+
+        server_key is POST-derived, so the candidate URL is gated by Django's
+        ``url_has_allowed_host_and_scheme`` (sink inside the validated branch) — the
+        open-redirect barrier CodeQL recognises for py/url-redirection (CWE-601). The bare
+        ``url`` fallback is a pure ``reverse()`` path with no user input."""
+        url = self.get_redirect_url(obj)
+        if server_key:
+            sep = "&" if "?" in url else "?"
+            candidate = f"{url}{sep}server_key={quote_plus(server_key)}"
+            if url_has_allowed_host_and_scheme(
+                candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+            ):
+                return redirect(candidate)
+        return redirect(url)
 
     def get_select_related_field(self, obj):
         """Determine the appropriate select_related field based on object type"""
@@ -117,18 +144,56 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         interface_name_field = get_interface_name_field(request)
 
-        # Get librenms_id at the start
-        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        # Rebind the API to the POSTed server BEFORE fetching the id/ports, so the live
+        # lookups AND the cache writes below all target the same server in a multi-server
+        # tab refresh — otherwise data fetched from the session/default server is cached
+        # under the POSTed key (wrong interface set). Mirrors cables/ip/modules/vlan views.
+        post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        if post_server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return redirect(self.get_redirect_url(obj))
+
+        # Resolve the VC sync device once (the priority member for a VC, else obj) and use it
+        # for the main librenms_id lookup too — not just the cache/OOB scope below. On VC-member
+        # pages the active librenms_id can live on the priority member, so reading it from the
+        # viewed obj would fetch/cache another member's data. Mirrors cables_view.
+        _server_key = post_server_key
+        lookup_device = get_librenms_sync_device(obj, server_key=_server_key) or obj
+
+        # A refresh must actually refresh: drop the previous snapshot up front so that if
+        # the fetch below fails we fall back to an empty view + visible error, rather than
+        # silently serving stale data (and letting the follow-up sync run on it). The
+        # success path re-populates the cache below. This must precede the missing-librenms_id
+        # return too — otherwise a failed refresh on a previously-synced device leaves the old
+        # ports snapshot in place for the redirected tab and downstream sync actions to consume.
+        cache.delete(self.get_cache_key(lookup_device, "ports", _server_key))
+        cache.delete(self.get_last_fetched_key(lookup_device, "ports", _server_key))
+
+        # Resolve librenms_id (scoped to the POSTed server + resolved member) after the cache
+        # is already invalidated, so the missing-id path can't leave stale interface data behind.
+        self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS.")
-            return redirect(self.get_redirect_url(obj))
+            return self._failure_redirect(request, obj, post_server_key)
 
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
         if not success:
             messages.error(request, librenms_data)
-            return redirect(self.get_redirect_url(obj))
+            return self._failure_redirect(request, obj, _server_key)
+
+        # get_ports is an external boundary: a truthy success doesn't guarantee a dict with a list
+        # of dict port rows (the OOB branch below guards the same way). The old cache was already
+        # deleted, so a malformed 200 must fail closed with a warning rather than 500 on .get()/
+        # enrichment below.
+        if not (
+            isinstance(librenms_data, dict)
+            and isinstance(librenms_data.get("ports"), list)
+            and all(isinstance(port, dict) for port in librenms_data["ports"])
+        ):
+            messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
+            return self._failure_redirect(request, obj, _server_key)
 
         # A success=True response can still carry a malformed-but-truthy body (string/list/
         # dict-with-non-list "ports"); dereferencing it would 500 the refresh. Fail closed like
@@ -140,25 +205,104 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         # Enrich ports with VLAN data for trunk ports
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
+        for port in enriched_ports:
+            port["_source"] = "main"
         librenms_data["ports"] = enriched_ports
 
-        _server_key = self.librenms_api.server_key
-        # Store data in cache (keyed by server to avoid cross-server collisions)
+        # If an OOB controller is linked, fetch its ports and merge them in. The
+        # POST-resolved server key (the API was rebound above) and the sync-device cache
+        # scope (lookup_device) were resolved above, so the OOB fetch, cache writes, and
+        # migrated context all stay on one server — no mismatch between cached data and
+        # migrated mode. Resolving OOB from the sync device (not the viewed member) matters
+        # for a VC member: the OOB relationship lives on the sync device, so
+        # get_librenms_oob(obj) would miss it and drop OOB rows / shared-LOM flagging.
+        oob = get_librenms_oob(lookup_device, server_key=_server_key)
+        oob_ports_failed = False
+        if oob and oob.get("id"):
+            oob_success, oob_raw = self.librenms_api.get_ports(oob["id"])
+            # Treat a malformed-but-truthy OOB payload the same as oob_success=False so the
+            # host-only warning path runs instead of 500-ing on .get()/_enrich below. get_ports
+            # is an external boundary: success does not guarantee a dict with a list of dict rows.
+            if (
+                oob_success
+                and isinstance(oob_raw, dict)
+                and isinstance(oob_raw.get("ports"), list)
+                and all(isinstance(port, dict) for port in oob_raw["ports"])
+            ):
+                oob_ports = oob_raw.get("ports", [])
+                oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
+                for port in oob_enriched:
+                    port["_source"] = "oob"
+                # Detect shared-LOM: same MAC seen on BOTH main and OOB sides.
+                # Build separate per-source MAC sets so that within-source
+                # duplicates are not falsely flagged as cross-source conflicts.
+                main_macs: set[str] = set()
+                for port in enriched_ports:
+                    mac = (port.get("ifPhysAddress") or "").lower().strip()
+                    if mac:
+                        main_macs.add(mac)
+                oob_macs: set[str] = set()
+                for port in oob_enriched:
+                    mac = (port.get("ifPhysAddress") or "").lower().strip()
+                    if mac:
+                        oob_macs.add(mac)
+                shared_macs = main_macs & oob_macs
+                if shared_macs:
+                    for port in enriched_ports + oob_enriched:
+                        mac = (port.get("ifPhysAddress") or "").lower().strip()
+                        if mac in shared_macs:
+                            port["_dedup_conflict"] = True
+                librenms_data["ports"] = enriched_ports + oob_enriched
+            else:
+                # Surface the failure: silently caching main-only data under a
+                # success banner would make OOB rows / shared-LOM markers vanish
+                # with no indication. Main interfaces still render.
+                logger.warning(
+                    "OOB ports fetch failed for device %s (OOB id %s): %s",
+                    self.librenms_id,
+                    oob["id"],
+                    oob_raw,
+                )
+                messages.warning(
+                    request,
+                    f"Interfaces refreshed, but OOB controller ports fetch failed (OOB id {oob['id']}); "
+                    "showing host interfaces only. See server logs for details.",
+                )
+                oob_ports_failed = True
+        # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it
+        # (which would leave downstream views — SingleInterfaceVerifyView,
+        # SaveVlanGroupOverridesView — with no backing snapshot), tag it `oob_incomplete`
+        # and still cache it. get_context_data surfaces an "OOB incomplete" banner whenever
+        # such a snapshot is rendered, so the missing OOB rows / shared-LOM markers are
+        # never silently absent on a later cached render.
+        # Scope the ports cache to the VC sync device (lookup_device, resolved above), not the
+        # viewed member, so all VC members share one entry. Must match get_context_data()'s key.
+        if oob_ports_failed:
+            librenms_data["oob_incomplete"] = True
         cache.set(
-            self.get_cache_key(obj, "ports", _server_key),
+            self.get_cache_key(lookup_device, "ports", _server_key),
             librenms_data,
             timeout=self.librenms_api.cache_timeout,
         )
-        last_fetched = timezone.now()
         cache.set(
-            self.get_last_fetched_key(obj, "ports", _server_key),
-            last_fetched,
+            self.get_last_fetched_key(lookup_device, "ports", _server_key),
+            timezone.now(),
             timeout=self.librenms_api.cache_timeout,
         )
 
-        messages.success(request, "Interface data refreshed successfully.")
+        # On an OOB-fetch failure the warning above already conveys the partial outcome;
+        # use an accurate success banner ("host" only) rather than a blanket "successfully".
+        if oob_ports_failed:
+            messages.success(request, "Host interface data refreshed successfully.")
+        else:
+            messages.success(request, "Interface data refreshed successfully.")
 
-        context = self.get_context_data(request, obj, interface_name_field, _server_key)
+        context = self.get_context_data(
+            request,
+            obj,
+            interface_name_field,
+            _server_key,
+        )
         context = {"interface_sync": context}
         context["interface_name_field"] = interface_name_field
 
@@ -188,8 +332,17 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             enriched.append(port)
         return enriched
 
-    def get_context_data(self, request, obj, interface_name_field, server_key=None):
-        """Get the context data for the interface sync view."""
+    def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None):
+        """Get the context data for the interface sync view.
+
+        ``fresh_data`` is a render-from-snapshot escape hatch: when given, the view renders
+        from that in-memory dict instead of reading the ports cache (for a caller that built
+        a response without a preceding cache write). No in-tree caller currently passes it.
+
+        The OOB-ports-fetch-failure path does *not* use it: ``post()`` caches the host-only
+        snapshot tagged ``oob_incomplete=True`` and renders from the cache like the normal
+        flow; an inline banner (driven by that tag) surfaces the missing OOB rows.
+        """
         ports_data = []
         table = None
         netbox_only_interfaces = []
@@ -203,15 +356,32 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             # 500ing the cached tab render. Use the degrading resolve like cables/IP.
             server_key = self._render_server_key()
 
-        cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
-        last_fetched = cache.get(self.get_last_fetched_key(obj, "ports", server_key))
+        # Scope the ports cache to the VC sync device (not the viewed member) so all VC
+        # members share one entry instead of fragmenting / re-fetching per member. Mirrors
+        # cables_view; resolves to obj itself for non-VC devices. Must match post()'s key.
+        cache_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+
+        if fresh_data is not None:
+            cached_data = fresh_data
+            last_fetched = timezone.now()
+        else:
+            cached_data = cache.get(self.get_cache_key(cache_device, "ports", server_key))
+            last_fetched = cache.get(self.get_last_fetched_key(cache_device, "ports", server_key))
+
+        # A snapshot tagged oob_incomplete is host-only because the linked OOB controller's
+        # ports could not be fetched on the last refresh. Surface it on every render of that
+        # snapshot (via an inline banner) so the missing OOB rows are never silently absent.
+        oob_incomplete = bool(cached_data.get("oob_incomplete")) if isinstance(cached_data, dict) else False
 
         # Get VLAN groups for dropdown
         vlan_groups = self.get_vlan_groups_for_device(obj)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
 
         # Load any user VLAN group overrides from cache (set by "apply to all")
-        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(obj, server_key)) or {}
+        # Read overrides under the same VC-scoped key SaveVlanGroupOverridesView writes
+        # (the sync device, not the viewed member) — otherwise an "apply to all" made on a VC
+        # member is lost on the next render/member switch. cache_device mirrors that writer.
+        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {}
 
         # isinstance(dict) guard (mirroring the IP/VLAN/Cables/Modules render paths and the
         # interfaces SYNC path): a truthy-but-malformed cache entry — a legacy/older-shape snapshot
@@ -249,7 +419,8 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     chassis_member = get_virtual_chassis_member(obj, port.get(interface_name_field))
                     device_interfaces = interfaces_by_device.get(
-                        chassis_member.id, {"by_name": {}, "by_librenms_id": {}}
+                        chassis_member.id if chassis_member else obj.id,
+                        {"by_name": {}, "by_librenms_id": {}},
                     )
                 else:
                     device_interfaces = interfaces_by_device.get(obj.id, {"by_name": {}, "by_librenms_id": {}})
@@ -260,7 +431,10 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                     netbox_interface = device_interfaces["by_name"].get(port.get(interface_name_field))
                 port["exists_in_netbox"] = bool(netbox_interface)
                 port["netbox_interface"] = netbox_interface
-                if netbox_interface is not None:
+                # OOB-controller rows live on a separate LibreNMS device; never
+                # let them mark a main-device interface as matched, or a genuine
+                # netbox-only interface gets hidden by a same-named OOB port.
+                if netbox_interface is not None and port.get("_source") != "oob":
                     matched_interface_ids.add(netbox_interface.id)
 
                 if port.get("ifAlias") in (port.get("ifDescr"), port.get("ifName")):
@@ -276,8 +450,12 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             table.configure(request)
 
             # Identify NetBox-only interfaces (interfaces in NetBox but not in LibreNMS)
+            # Exclude OOB-controller rows: their names belong to a different
+            # device and must not suppress main-device netbox-only detection.
             librenms_interface_names = {
-                port.get(interface_name_field) for port in ports_data if port.get(interface_name_field)
+                port.get(interface_name_field)
+                for port in ports_data
+                if port.get(interface_name_field) and port.get("_source") != "oob"
             }
 
             netbox_only_interfaces = []
@@ -314,7 +492,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
-        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(obj, "ports", server_key))
+        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(cache_device, "ports", server_key))
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )
@@ -329,6 +507,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             "interface_name_field": interface_name_field,
             "netbox_only_interfaces": netbox_only_interfaces,
             "server_key": server_key,
+            "oob_incomplete": oob_incomplete,
         }
 
     def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):

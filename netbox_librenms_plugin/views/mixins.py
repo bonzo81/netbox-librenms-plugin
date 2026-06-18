@@ -5,6 +5,7 @@ from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.urls import get_script_prefix
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
@@ -71,7 +72,13 @@ def _get_safe_redirect_url(request):
         require_https=request.is_secure(),
     ):
         return referrer
-    return getattr(request, "path", "/")
+    # No usable Referer. On a non-GET request, request.path is often a POST-only
+    # action endpoint, so redirecting the browser there would 405 — fall back to a
+    # GET-safe app root instead. Use the deployment script prefix (e.g. "/netbox/")
+    # so a prefixed install doesn't bounce to the domain root. GET requests reload path.
+    if getattr(request, "method", "GET") != "GET":
+        return get_script_prefix()
+    return getattr(request, "path", get_script_prefix())
 
 
 def _safe_redirect_response(request):
@@ -100,9 +107,10 @@ def _safe_redirect_response(request):
             return HttpResponse("", headers={"HX-Redirect": target})
         return redirect(target)
 
+    app_root = get_script_prefix()
     if is_htmx:
-        return HttpResponse("", headers={"HX-Redirect": "/"})
-    return redirect("/")
+        return HttpResponse("", headers={"HX-Redirect": app_root})
+    return redirect(app_root)
 
 
 class LibreNMSPermissionMixin(PermissionRequiredMixin):
@@ -118,7 +126,8 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
 
     def has_write_permission(self):
         """Check if user can perform write actions."""
-        return self.request.user.has_perm(PERM_CHANGE_PLUGIN)
+        user = getattr(getattr(self, "request", None), "user", None)
+        return bool(user and user.has_perm(PERM_CHANGE_PLUGIN))
 
     def require_write_permission(self, error_message=None):
         """
@@ -132,6 +141,8 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             None if permitted, or appropriate response if denied
         """
         if not self.has_write_permission():
+            if getattr(self, "request", None) is None:
+                return HttpResponse(status=403)
             msg = error_message or "You do not have permission to perform this action."
             messages.error(self.request, msg)
 
@@ -197,13 +208,16 @@ class NetBoxObjectPermissionMixin:
             tuple: (has_all: bool, missing: list[str])
         """
         requirements = self.required_object_permissions.get(method, [])
-        missing = []
+        missing = [get_permission_for_model(model, action) for action, model in requirements]
 
-        for action, model in requirements:
-            perm = get_permission_for_model(model, action)
-            if not self.request.user.has_perm(perm):
-                missing.append(perm)
+        # Fail closed if there's no usable request/user (e.g. the view was invoked outside
+        # dispatch()): return the required perms as "missing" so callers get a deterministic
+        # permission denial instead of an AttributeError on self.request.user.
+        user = getattr(getattr(self, "request", None), "user", None)
+        if user is None:
+            return (not missing, missing)
 
+        missing = [perm for perm in missing if not user.has_perm(perm)]
         return (len(missing) == 0, missing)
 
     def require_object_permissions(self, method):
@@ -219,6 +233,8 @@ class NetBoxObjectPermissionMixin:
         """
         has_perms, missing = self.check_object_permissions(method)
         if not has_perms:
+            if getattr(self, "request", None) is None:
+                return HttpResponse(status=403)
             missing_str = ", ".join(missing)
             msg = f"Missing permissions: {missing_str}"
             messages.error(self.request, msg)
@@ -428,6 +444,46 @@ class LibreNMSAPIMixin:
             tuple[bool, dict | None]: ``(success, device_info)`` from ``get_device_info``.
         """
         return self.librenms_api.get_device_info(librenms_id, use_cache=False)
+    def rebind_api_for_server(self, server_key):
+        """Rebind ``self.librenms_api`` to the POST-scoped *server_key*.
+
+        Base refresh views run live LibreNMS lookups through ``self.librenms_api``;
+        in a multi-server setup the active session server can differ from the tab
+        the user is acting on, so the client must be re-scoped to the POSTed key —
+        otherwise data fetched from the session/default server is cached under the
+        posted key (wrong cable/VLAN/inventory set). Mirrors
+        :meth:`SyncIPAddressesView.post`.
+
+        Returns the resolved server key on success, or ``None`` when the posted key
+        is unknown/misconfigured (a stale page or tampered request) — the caller
+        surfaces a user-facing fragment error instead of an unhandled 500.
+        """
+        from netbox_librenms_plugin.librenms_api import build_librenms_api
+
+        server_key = (server_key or "").strip()
+        if not server_key:
+            # No posted key: fall back to the session/default server. Reuse an already-built
+            # client if present; otherwise build the default via build_librenms_api(None),
+            # which returns None on a misconfigured/missing default rather than raising. Going
+            # through self.librenms_api here would construct LibreNMSAPI() directly and could
+            # raise KeyError/ValueError, defeating this helper's fail-closed None contract.
+            cached_api = getattr(self, "_librenms_api", None)
+            if cached_api is not None:
+                return cached_api.server_key
+            api = build_librenms_api(None)
+            if api is None:
+                return None
+            self._librenms_api = api
+            return api.server_key
+
+        api = build_librenms_api(server_key)
+        if api is None:
+            return None
+        self._librenms_api = api
+        # Return the *resolved* key (build_librenms_api may normalize e.g. "default"
+        # to a configured name); downstream cache/OOB scoping must use api.server_key
+        # so live fetches and cache writes target the same server.
+        return api.server_key
 
     def get_server_info(self):
         """

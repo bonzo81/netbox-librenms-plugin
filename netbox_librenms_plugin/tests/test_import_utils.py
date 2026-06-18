@@ -1132,6 +1132,40 @@ class TestDeviceValidation:
         assert result["existing_device"] == existing_vm
         assert result["can_import"] is False
         assert result["import_as_vm"] is True
+        # The VM match must populate existing_librenms_link (mirrors the device path) so the
+        # UI doesn't render the VM as unlinked.
+        assert result["existing_librenms_link"] is not None
+
+    @patch("virtualization.models.VirtualMachine")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
+    @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
+    def test_librenms_id_matched_vm_populates_link(self, *mocks):
+        """A VM matched by librenms_id surfaces its LibreNMS linkage so it isn't shown
+        as unlinked."""
+        mock_vm = mocks[-1]
+        mock_device = mocks[-2]
+        existing_vm = MagicMock()
+        existing_vm.name = "vm-01"
+        existing_vm.custom_field_data = {"librenms_id": {"default": 42}}
+        existing_vm.cf = existing_vm.custom_field_data
+        # find_by_librenms_id consumes the queryset via list(qs[:2]); make the VM lookup match.
+        mock_vm.objects.filter.return_value.__getitem__.return_value = [existing_vm]
+        mock_device.objects.filter.return_value.__getitem__.return_value = []
+        mock_device.objects.filter.return_value.first.return_value = None
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        result = validate_device_for_import({"device_id": 42, "hostname": "vm-01"}, include_vc_detection=False)
+
+        assert result["existing_device"] == existing_vm
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["existing_librenms_link"] == {"host_id": 42, "oob_id": None, "oob_type": None}
 
 
 class TestDeviceNamingPreferencesLegacy:
@@ -1275,7 +1309,10 @@ class TestDeviceNamingPreferencesLegacy:
         existing = MagicMock()
         existing.name = "core-switch"
         existing.serial = ""
-        mock_device.objects.filter.return_value.first.side_effect = [None, existing]
+        # find_by_librenms_id consumes the queryset via list(qs[:2]) per side (host + OOB);
+        # both miss here (empty slice), then the hostname query's .first() returns existing.
+        mock_device.objects.filter.return_value.__getitem__.return_value = []
+        mock_device.objects.filter.return_value.first.return_value = existing
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1392,8 +1429,11 @@ class TestNameMatchesWithNamingPreferencesLegacy:
                         isinstance(child, tuple) and "librenms_id" in child[0] for child in q.children
                     ):
                         mock_qs.first.return_value = hit
+                        # find_by_librenms_id consumes the queryset via list(qs[:2]).
+                        mock_qs.__getitem__.return_value = [hit] if hit is not None else []
                         return mock_qs
                 mock_qs.first.return_value = None
+                mock_qs.__getitem__.return_value = []
                 return mock_qs
 
             return side_effect
@@ -1791,11 +1831,27 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "serial"
         assert "not linked to LibreNMS" in result["warnings"][0]
 
-    def test_serial_match_diff_hostname_offers_hostname_differs(self):
-        """Serial matches but hostname differs offers hostname_differs action."""
+    def test_serial_match_diff_hostname_defaults_to_oob_candidate(self):
+        """Serial matches but hostname differs → default action is `oob_candidate`,
+        with the host/OOB role-choice toggle NOT offered (serial_role_choice_available
+        is False) because there is no existing LibreNMS link to promote from.
+
+        Previously this returned `hostname_differs`. With the role-toggle work
+        (see device_validation_details.html + device_operations.py refactor),
+        when an existing NetBox device matches by serial but the names differ
+        AND neither host nor OOB role is conclusively chosen by the heuristic,
+        the `oob_candidate` data block is populated and the default action is
+        `oob_candidate` (least destructive).
+
+        `promote_to_host` is only populated when the existing device already
+        carries an OOB link (so there is a host_id to inherit); without an
+        existing LibreNMS link, only `oob_candidate` is surfaced.
+        """
         existing = MagicMock()
         existing.name = "old-hostname"
         existing.serial = "ABC123"
+        existing.pk = 7
+        existing.custom_field_data = {}
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
@@ -1814,9 +1870,13 @@ class TestSerialNumberMatching:
         device_data = {"device_id": 1, "hostname": "new-hostname", "serial": "ABC123"}
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
-        assert result["serial_action"] == "hostname_differs"
+        assert result["serial_action"] == "oob_candidate"
         assert result["existing_match_type"] == "serial"
-        assert "hostname differs" in result["warnings"][0]
+        assert result.get("oob_candidate") is not None
+        # No existing LibreNMS/OOB link → oob_candidate-only baseline, so promote_to_host
+        # must stay absent (the documented "absent otherwise" convention).
+        assert "promote_to_host" not in result
+        assert result.get("serial_role_choice_available") is False
 
     def test_hostname_match_diff_serial_offers_update(self):
         """Hostname matches but serial differs offers update_serial action."""
@@ -1944,8 +2004,11 @@ class TestSerialNumberMatching:
             )
             if q_has_librenms:
                 result.first.return_value = existing
+                # find_by_librenms_id consumes the queryset via list(qs[:2]).
+                result.__getitem__.return_value = [existing]
             else:
                 result.first.return_value = None
+                result.__getitem__.return_value = []
             return result
 
         self.mock_device.objects.filter.side_effect = device_filter
@@ -1988,11 +2051,15 @@ class TestSerialNumberMatching:
             )
             if q_has_librenms:
                 result.first.return_value = existing
+                # find_by_librenms_id consumes the queryset via list(qs[:2]).
+                result.__getitem__.return_value = [existing]
             elif "serial" in kwargs:
                 result.first.return_value = None
+                result.__getitem__.return_value = []
                 result.exclude.return_value.first.return_value = None
             else:
                 result.first.return_value = None
+                result.__getitem__.return_value = []
             return result
 
         self.mock_device.objects.filter.side_effect = device_filter
@@ -2034,8 +2101,11 @@ class TestSerialNumberMatching:
             )
             if q_has_librenms:
                 result.first.return_value = existing
+                # find_by_librenms_id consumes the queryset via list(qs[:2]).
+                result.__getitem__.return_value = [existing]
             else:
                 result.first.return_value = None
+                result.__getitem__.return_value = []
             return result
 
         self.mock_device.objects.filter.side_effect = device_filter
@@ -2276,6 +2346,8 @@ class TestNameMatchesWithNamingPreferences:
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
             result.first.return_value = existing if q_has_librenms else None
+            # find_by_librenms_id now consumes the queryset via list(qs[:2]) per side.
+            result.__getitem__.return_value = [existing] if q_has_librenms else []
             result.exclude.return_value.first.return_value = None
             return result
 
@@ -2530,6 +2602,8 @@ class TestLegacyLibreNMSIdMigration:
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
             result.first.return_value = existing if q_has_librenms else None
+            # find_by_librenms_id now consumes the queryset via list(qs[:2]) per side.
+            result.__getitem__.return_value = [existing] if q_has_librenms else []
             return result
 
         self.mock_device.objects.filter.side_effect = device_filter
@@ -2680,6 +2754,21 @@ class TestDeviceConflictActionView:
         }
         request.POST = post_data
         return request
+
+    def test_unknown_server_key_returns_error_without_500(self):
+        """A stale/tampered POST server_key must surface a graceful HTMX error,
+        not raise (build_librenms_api → None when the key is unknown)."""
+        view = self._create_view()
+        request = self._create_request("link", 42)
+        request.POST["server_key"] = "ghost"
+
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None) as mock_build:
+            view.request = request
+            resp = view.post(request, device_id=10)
+
+        mock_build.assert_called_once_with("ghost")
+        assert resp.status_code == 200
+        assert b"no longer configured" in resp.content
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -3644,7 +3733,10 @@ class TestDeviceNamingPreferences:
         existing.serial = ""
         existing.virtual_chassis = None
         existing.vc_position = None
-        mock_device.objects.filter.return_value.first.side_effect = [None, existing]
+        # find_by_librenms_id consumes the queryset via list(qs[:2]) per side (host + OOB);
+        # both miss here (empty slice), then the hostname query's .first() returns existing.
+        mock_device.objects.filter.return_value.__getitem__.return_value = []
+        mock_device.objects.filter.return_value.first.return_value = existing
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -6140,3 +6232,21 @@ class TestBulkImportColdCacheBackfill:
         assert cold_cache.get(123) == payload
         # Import decisions must run against live data, so the short device-info cache is bypassed.
         api.get_device_info.assert_called_once_with(123, use_cache=False)
+class TestDeviceValidationDetailsTemplate:
+    """The 'Full Sync Page' link in the import-validation panel must carry the active
+    server_key so it opens on the same LibreNMS instance the user is validating against,
+    not the session/default server."""
+
+    def _source(self):
+        from django.template.loader import get_template
+
+        return get_template("netbox_librenms_plugin/htmx/device_validation_details.html").template.source
+
+    def test_full_sync_link_includes_active_server_key(self):
+        import re
+
+        src = self._source()
+        assert "Full Sync Page" in src
+        # The href must conditionally append the active, url-encoded server_key. Match
+        # whitespace-tolerantly so harmless template formatting changes don't fail this.
+        assert re.search(r"server_key=\{\{\s*server_key\s*\|\s*urlencode\s*\}\}", src)

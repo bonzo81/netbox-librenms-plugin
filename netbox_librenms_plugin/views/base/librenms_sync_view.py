@@ -8,6 +8,7 @@ from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.utils import (
+    coerce_librenms_id,
     find_matching_platform,
     get_interface_name_field,
     get_librenms_device_id,
@@ -47,8 +48,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # Store for use in get_context_data (badge generation needs the same object)
         self._librenms_lookup_device = librenms_lookup_device
 
-        # Get librenms_id using the determined lookup device
-        self.librenms_id = self.librenms_api.get_librenms_id(librenms_lookup_device)
+        # Get librenms_id using the determined lookup device. Normalise to a positive int
+        # or None at the source so every downstream `is not None` check (has_librenms_id,
+        # get_device_info, etc.) can rely on the invariant without re-validating.
+        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(librenms_lookup_device))
 
         context = self.get_context_data(request, obj)
 
@@ -64,7 +67,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             {
                 "object": obj,
                 "tab": self.tab,
-                "has_librenms_id": bool(self.librenms_id),
+                # self.librenms_id is normalised to a positive int or None at assignment
+                # (see post()), so `is not None` is correct here — 0/negatives never reach it.
+                "has_librenms_id": self.librenms_id is not None,
             }
         )
 
@@ -188,6 +193,21 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         result = []
         for sk, did in cf_value.items():
+            is_oob_only = False
+            # New dict form {server_key: {"id": N, "oob": {...}}} — use the host id.
+            # An OOB-only entry ({"oob": {...}} with no host "id") is still a real link
+            # to this server: surface it (using the OOB controller's id) so the user can
+            # see and remove it, mirroring set_librenms_oob()'s lenient host-less shape.
+            # A migrated-only entry ({"_migrated_to": ...}) has neither id nor oob and is
+            # skipped.
+            if isinstance(did, dict):
+                host_id = did.get("id")
+                if host_id is None:
+                    oob = did.get("oob")
+                    if isinstance(oob, dict):
+                        host_id = oob.get("id")
+                        is_oob_only = host_id is not None
+                did = host_id
             # Validate device ID consistently with the int()-based coercion used everywhere
             # else for librenms_id: int() strips surrounding whitespace, so a value written as
             # " 42 " (hand-edited, or from a path that doesn't normalize) resolves fine in the
@@ -206,6 +226,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     continue
             elif not isinstance(did, int):
                 continue
+            # LibreNMS device IDs are strictly positive (matches coerce_librenms_id); a
+            # 0/negative here is a malformed CF entry, not a real mapping — don't surface
+            # it as ID 0 with a dead /device/device=0/ link.
             if did <= 0:
                 continue
             srv_cfg = servers_config.get(sk)
@@ -235,6 +258,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     "device_url": device_url,
                     "is_configured": is_configured,
                     "is_active": sk == active_server_key,
+                    "is_oob_only": is_oob_only,
                 }
             )
 
@@ -258,7 +282,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             "vc_inventory_serials": [],
         }
 
-        if self.librenms_id:
+        if self.librenms_id is not None:
             success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
             # device_info.get(...) calls below; fall back to the default details block instead

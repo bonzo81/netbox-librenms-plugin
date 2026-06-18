@@ -112,8 +112,10 @@ class TestLibreNMSAPIInit:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
+        # Use the default key so this exercises the missing URL/token ValueError path in legacy
+        # mode (no configured 'servers' dict, no librenms_url/api_token).
         with pytest.raises(ValueError):
-            LibreNMSAPI(server_key="nonexistent")
+            LibreNMSAPI(server_key="default")
 
     def test_init_nonexistent_server_key_raises_keyerror(self, mock_librenms_config):
         """Verify KeyError raised when specific server_key doesn't exist."""
@@ -121,6 +123,30 @@ class TestLibreNMSAPIInit:
 
         with pytest.raises(KeyError, match="nonexistent"):
             LibreNMSAPI(server_key="nonexistent")
+
+    def test_init_legacy_mode_binds_single_server_for_non_default_key(self, mock_librenms_config):
+        """Legacy single-server mode has only the implicit 'default' server, bound to the single
+        configured URL/token. An explicit non-default key must NOT raise here: the stricter
+        unknown-key contract is multi-server-only (a configured ``servers`` dict). In legacy mode
+        the one server is bound and view-layer validation handles cache/CF scoping. Regression
+        guard for the removed legacy-mode KeyError."""
+        mock_config = mock_librenms_config["mock_config"]
+
+        def config_side_effect(plugin, key, default=None):
+            if key == "servers":
+                return None  # legacy single-server mode (no multi-server dict)
+            legacy = {"librenms_url": "https://legacy.example.com", "api_token": "legacy-token"}
+            return legacy.get(key, default)
+
+        mock_config.side_effect = config_side_effect
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="stale")  # must not raise in legacy mode
+        assert api.librenms_url == "https://legacy.example.com"
+
+        # The default key must still work in legacy mode.
+        assert LibreNMSAPI(server_key="default").librenms_url == "https://legacy.example.com"
 
     def test_init_default_falls_back_to_first_server(self, mock_librenms_config):
         """Verify 'default' key falls back to first configured server."""
@@ -242,6 +268,29 @@ class TestLibreNMSAPIInit:
         assert servers == {"good": "Good"}
         assert "bad" not in servers
         assert "tokenless" not in servers
+    def test_init_non_mapping_server_config_raises_valueerror(self, mock_librenms_config):
+        """A structurally invalid (non-mapping) server entry must raise ValueError, not
+        leak a TypeError from the dict access — so build_librenms_api falls back to None."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"badserver": None}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI, build_librenms_api
+
+        with pytest.raises(ValueError, match="misconfigured"):
+            LibreNMSAPI(server_key="badserver")
+        # build_librenms_api must convert that into a clean None, not a 500.
+        assert build_librenms_api("badserver") is None
+
+    def test_get_available_servers_skips_malformed_entry(self, mock_librenms_config):
+        """A non-mapping server entry (e.g. {"prod": None}) must be skipped, not crash the
+        server selector with AttributeError on config.get() — mirrors the __init__ guard."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"good": {"display_name": "Good"}, "bad": None}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        result = LibreNMSAPI.get_available_servers()
+        assert result == {"good": "Good"}
 
 
 # =============================================================================

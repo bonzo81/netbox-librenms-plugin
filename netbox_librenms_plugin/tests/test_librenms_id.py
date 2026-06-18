@@ -8,6 +8,25 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
+def _qs_returning(rows):
+    """Build a mock queryset whose ``[:2]`` slice yields ``rows``.
+
+    ``find_by_librenms_id`` calls ``list(model.objects.filter(q)[:2])`` per side, so the
+    test double must support slice indexing rather than ``.first()``.
+    """
+    qs = MagicMock()
+
+    def _getitem(key):
+        # find_by_librenms_id must slice exactly [:2] — assert the contract so a regression
+        # to [:1] (or any other slice) fails loudly instead of silently passing the
+        # duplicate-match tests this helper is meant to protect.
+        assert key == slice(None, 2), f"expected [:2] slice, got {key!r}"
+        return rows
+
+    qs.__getitem__.side_effect = _getitem
+    return qs
+
+
 class TestGetLibreNMSDeviceId:
     """Tests for get_librenms_device_id()."""
 
@@ -119,19 +138,28 @@ class TestFindByLibreNMSId:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         find_by_librenms_id(mock_model, 42, "default")
 
-        mock_model.objects.filter.assert_called_once()
-        # Verify the Q predicate covers both the server-key JSON branch and legacy bare-int/string branches
-        call_args = mock_model.objects.filter.call_args
-        q_arg = call_args[0][0]
-        assert isinstance(q_arg, Q)
-        assert q_arg.connector == "OR"
-        assert set(q_arg.children) == {
+        # Host and OOB predicate sets are queried separately (so a host match and a
+        # different OOB match can be detected and rejected). Their union must still cover
+        # the server-key JSON branch, the __id/__oob__id dict forms, and the legacy
+        # bare-int/string branches.
+        assert mock_model.objects.filter.call_count == 2
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            q_arg = call[0][0]
+            assert isinstance(q_arg, Q)
+            assert q_arg.connector == "OR"
+            all_children |= set(q_arg.children)
+        assert all_children == {
             ("custom_field_data__librenms_id__default", 42),
             ("custom_field_data__librenms_id__default", "42"),
+            ("custom_field_data__librenms_id__default__id", 42),
+            ("custom_field_data__librenms_id__default__id", "42"),
+            ("custom_field_data__librenms_id__default__oob__id", 42),
+            ("custom_field_data__librenms_id__default__oob__id", "42"),
             ("custom_field_data__librenms_id", 42),
             ("custom_field_data__librenms_id", "42"),
         }
@@ -139,11 +167,11 @@ class TestFindByLibreNMSId:
     def test_returns_first_matching_object(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
 
-        expected = MagicMock()
+        expected = MagicMock(pk=7)
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = expected
+        mock_qs.__getitem__.return_value = [expected]
 
         result = find_by_librenms_id(mock_model, 42, "default")
         assert result is expected
@@ -156,19 +184,26 @@ class TestFindByLibreNMSId:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         result = find_by_librenms_id(mock_model, 999, "production")
         assert result is None
 
         # Any server_key must include legacy bare-int/string fallback conditions
         # so that devices imported before multi-server support are still found.
-        call_args = mock_model.objects.filter.call_args
-        q_arg = call_args[0][0]
-        assert isinstance(q_arg, Q)
-        assert set(q_arg.children) == {
+        # (Predicates are split across the host and OOB queries — aggregate them.)
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            q_arg = call[0][0]
+            assert isinstance(q_arg, Q)
+            all_children |= set(q_arg.children)
+        assert all_children == {
             ("custom_field_data__librenms_id__production", 999),
             ("custom_field_data__librenms_id__production", "999"),
+            ("custom_field_data__librenms_id__production__id", 999),
+            ("custom_field_data__librenms_id__production__id", "999"),
+            ("custom_field_data__librenms_id__production__oob__id", 999),
+            ("custom_field_data__librenms_id__production__oob__id", "999"),
             ("custom_field_data__librenms_id", 999),
             ("custom_field_data__librenms_id", "999"),
         }
@@ -187,23 +222,123 @@ class TestFindByLibreNMSId:
         mock_model = MagicMock()
         mock_qs = MagicMock()
         mock_model.objects.filter.return_value = mock_qs
-        mock_qs.first.return_value = None
+        mock_qs.__getitem__.return_value = []
 
         find_by_librenms_id(mock_model, 42)
 
-        mock_model.objects.filter.assert_called_once()
-        call_args = mock_model.objects.filter.call_args
-        q_arg = call_args[0][0]
-        assert isinstance(q_arg, Q)
-        assert q_arg.connector == "OR"
-        # The JSON-path branch must use "default" as the server key; exact tuple check prevents
-        # duplicate or missing branches from going undetected.
-        assert set(q_arg.children) == {
+        # The JSON-path branch must use "default" as the server key; exact tuple check
+        # across the host + OOB queries prevents duplicate or missing branches.
+        assert mock_model.objects.filter.call_count == 2
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            q_arg = call[0][0]
+            assert isinstance(q_arg, Q)
+            assert q_arg.connector == "OR"
+            all_children |= set(q_arg.children)
+        assert all_children == {
             ("custom_field_data__librenms_id__default", 42),
             ("custom_field_data__librenms_id__default", "42"),
+            ("custom_field_data__librenms_id__default__id", 42),
+            ("custom_field_data__librenms_id__default__id", "42"),
+            ("custom_field_data__librenms_id__default__oob__id", 42),
+            ("custom_field_data__librenms_id__default__oob__id", "42"),
             ("custom_field_data__librenms_id", 42),
             ("custom_field_data__librenms_id", "42"),
         }
+
+    def test_fail_closed_when_host_and_oob_match_different_rows(self):
+        """If the host query matches one object and the OOB query a *different* one, the
+        result is ambiguous — raise rather than binding to whichever sorts first (and rather
+        than returning None, which callers would treat as a clean miss and proceed)."""
+        import pytest
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
+
+        mock_model = MagicMock(__name__="Device")  # __name__ used in the fail-closed log
+        host_obj = MagicMock(pk=1)
+        oob_obj = MagicMock(pk=2)
+        # filter() is called twice (host_q, then oob_q); each result is sliced [:2].
+        mock_model.objects.filter.side_effect = [
+            _qs_returning([host_obj]),
+            _qs_returning([oob_obj]),
+        ]
+
+        with pytest.raises(AmbiguousLibreNMSIdError):
+            find_by_librenms_id(mock_model, 42, "default")
+
+    def test_same_row_for_host_and_oob_is_returned(self):
+        """When both queries resolve to the same row, it is returned (not ambiguous)."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        same = MagicMock(pk=5)
+        mock_model.objects.filter.side_effect = [_qs_returning([same]), _qs_returning([same])]
+
+        assert find_by_librenms_id(mock_model, 42, "default") is same
+
+    def test_host_match_wins_when_no_oob_match(self):
+        """Host identity is returned when only the host query matches."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        host_obj = MagicMock(pk=1)
+        mock_model.objects.filter.side_effect = [_qs_returning([host_obj]), _qs_returning([])]
+
+        assert find_by_librenms_id(mock_model, 42, "default") is host_obj
+
+    def test_fail_closed_on_duplicate_host_matches(self):
+        """Two distinct rows sharing the same host librenms_id is a data-integrity
+        violation — raise rather than picking whichever sorts first."""
+        import pytest
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
+
+        mock_model = MagicMock(__name__="Device")
+        # Host query returns two rows; OOB query is irrelevant (host ambiguity fails first).
+        mock_model.objects.filter.side_effect = [
+            _qs_returning([MagicMock(pk=1), MagicMock(pk=2)]),
+            _qs_returning([]),
+        ]
+
+        with pytest.raises(AmbiguousLibreNMSIdError):
+            find_by_librenms_id(mock_model, 42, "default")
+
+    def test_fail_closed_on_duplicate_oob_matches(self):
+        """Two distinct rows sharing the same OOB librenms_id is likewise rejected."""
+        import pytest
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, find_by_librenms_id
+
+        mock_model = MagicMock(__name__="Device")
+        mock_model.objects.filter.side_effect = [
+            _qs_returning([]),
+            _qs_returning([MagicMock(pk=3), MagicMock(pk=4)]),
+        ]
+
+        with pytest.raises(AmbiguousLibreNMSIdError):
+            find_by_librenms_id(mock_model, 42, "default")
+
+    def test_float_input_rejected_without_querying(self):
+        """A positive float bypasses the int-only coerce_librenms_id() contract, so it
+        must be rejected up front — never reaching the ORM predicates."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        assert find_by_librenms_id(mock_model, 42.0, "default") is None
+        mock_model.objects.filter.assert_not_called()
+
+    def test_non_scalar_input_rejected_without_querying(self):
+        """Arbitrary non-int/str objects (e.g. a dict) must fail closed before the
+        lookup queries rather than being coerced into junk variants."""
+        from unittest.mock import MagicMock
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        assert find_by_librenms_id(mock_model, {"id": 42}, "default") is None
+        mock_model.objects.filter.assert_not_called()
 
 
 class TestMigrateLegacyLibreNMSId:
@@ -417,3 +552,328 @@ class TestMigrateLegacyRejectsNonPositive:
         obj = SimpleNamespace(custom_field_data={"librenms_id": "-5"})
         assert migrate_legacy_librenms_id(obj, "default") is False
         assert obj.custom_field_data["librenms_id"] == "-5"
+class TestOOBHelpers:
+    """Tests for get_librenms_oob, set_librenms_oob, clear_librenms_oob,
+    and the dict-with-id changes to get/set_librenms_device_id and find_by_librenms_id.
+    """
+
+    # ── get_librenms_device_id: dict-with-id form ─────────────────────────────
+
+    def test_get_id_from_dict_with_id_form(self):
+        """get_librenms_device_id extracts 'id' from {"server": {"id": N}} form."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"primary": {"id": 42}}}
+        assert get_librenms_device_id(obj, "primary") == 42
+
+    def test_get_id_when_oob_also_present(self):
+        """get_librenms_device_id returns the main id, ignoring the oob sub-object."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"primary": {"id": 42, "oob": {"id": 17, "type": "drac"}}}}
+        assert get_librenms_device_id(obj, "primary") == 42
+
+    def test_get_returns_none_for_dict_without_id_key(self):
+        """dict entry without 'id' key returns None."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"primary": {"oob": {"id": 17}}}}
+        assert get_librenms_device_id(obj, "primary") is None
+
+    def test_get_normalises_string_id_inside_dict_with_id_form(self):
+        """String 'id' inside dict-with-id form is coerced to int."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"primary": {"id": "42"}}}
+        obj.custom_field_data = {"librenms_id": {"primary": {"id": "42"}}}
+        result = get_librenms_device_id(obj, "primary", auto_save=False)
+        assert result == 42
+
+    # ── set_librenms_device_id: oob preservation ─────────────────────────────
+
+    def test_set_preserves_oob_when_entry_has_oob(self):
+        """Updating main id preserves existing oob sub-object."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {
+            "librenms_id": {"primary": {"id": 42, "oob": {"id": 17, "type": "drac", "ip": "10.0.0.5"}}}
+        }
+        set_librenms_device_id(obj, 99, server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {
+            "primary": {"id": 99, "oob": {"id": 17, "type": "drac", "ip": "10.0.0.5"}}
+        }
+
+    def test_set_bare_int_when_no_oob_present(self):
+        """When no oob in existing entry, set_librenms_device_id stores bare int (no regression)."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 42}}
+        set_librenms_device_id(obj, 99, server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 99}
+
+    # ── find_by_librenms_id: dict-with-id and oob id lookups ─────────────────
+
+    def test_find_by_matches_main_id_in_dict_with_id_form(self):
+        """find_by_librenms_id Q includes __id sub-key lookup."""
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        mock_qs = MagicMock()
+        mock_model.objects.filter.return_value = mock_qs
+        mock_qs.__getitem__.return_value = []
+
+        find_by_librenms_id(mock_model, 42, "primary")
+
+        # Host and OOB predicate sets are now queried separately, so aggregate the
+        # children across every filter() call rather than inspecting only the last.
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            all_children |= set(call[0][0].children)
+        assert ("custom_field_data__librenms_id__primary__id", 42) in all_children
+        assert ("custom_field_data__librenms_id__primary__id", "42") in all_children
+
+    def test_find_by_matches_oob_id(self):
+        """find_by_librenms_id Q includes __oob__id sub-key lookup."""
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        mock_qs = MagicMock()
+        mock_model.objects.filter.return_value = mock_qs
+        mock_qs.__getitem__.return_value = []
+
+        find_by_librenms_id(mock_model, 17, "primary")
+
+        # Aggregate the Q children across all filter() calls rather than only the last one,
+        # so the assertion tests behaviour (the OOB sub-key is queried) and not the order of
+        # the host/OOB queries.
+        all_children = set()
+        for call in mock_model.objects.filter.call_args_list:
+            all_children |= set(call[0][0].children)
+        assert ("custom_field_data__librenms_id__primary__oob__id", 17) in all_children
+        assert ("custom_field_data__librenms_id__primary__oob__id", "17") in all_children
+
+    def test_find_by_does_not_return_unrelated_id(self):
+        """find_by_librenms_id returns None when no model matches."""
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        mock_qs = MagicMock()
+        mock_model.objects.filter.return_value = mock_qs
+        mock_qs.__getitem__.return_value = []
+
+        result = find_by_librenms_id(mock_model, 999, "primary")
+        assert result is None
+
+    # ── get_librenms_oob ──────────────────────────────────────────────────────
+
+    def test_get_oob_returns_none_for_legacy_bare_int(self):
+        from netbox_librenms_plugin.utils import get_librenms_oob
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": 42}
+        assert get_librenms_oob(obj, "primary") is None
+
+    def test_get_oob_returns_none_for_bare_int_entry(self):
+        """When server-key entry is a bare int (no oob), returns None."""
+        from netbox_librenms_plugin.utils import get_librenms_oob
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"primary": 42}}
+        assert get_librenms_oob(obj, "primary") is None
+
+    def test_get_oob_returns_oob_dict_when_present(self):
+        from netbox_librenms_plugin.utils import get_librenms_oob
+
+        oob_data = {"id": 17, "type": "drac", "version": "5.10", "ip": "10.0.0.5"}
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"primary": {"id": 42, "oob": oob_data}}}
+        result = get_librenms_oob(obj, "primary")
+        assert result == oob_data
+
+    # ── set_librenms_oob ──────────────────────────────────────────────────────
+
+    def test_set_oob_round_trip(self):
+        """set_librenms_oob stores only id + type; ip/version are not persisted.
+
+        Mutable LibreNMS state (the controller's IP and firmware version) is
+        deliberately NOT denormalised into the librenms_id custom field — it is
+        read live from LibreNMS via the stored id when needed.
+        """
+        from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 42}}
+        obj.cf = obj.custom_field_data
+
+        set_librenms_oob(obj, 17, "primary", oob_type="drac")
+        result = get_librenms_oob(obj, "primary")
+
+        assert result == {"id": 17, "type": "drac"}
+
+    def test_set_oob_promotes_bare_int_entry(self):
+        """set_librenms_oob promotes a bare-int entry to dict form, preserving the main id."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 42}}
+        obj.cf = obj.custom_field_data
+
+        set_librenms_oob(obj, 17, "primary", oob_type="idrac")
+        assert get_librenms_device_id(obj, "primary") == 42
+
+    def test_set_oob_fails_closed_on_non_positive_int_host_id(self):
+        """A stored bare-int host id of 0 or negative is corrupt: it must raise rather than be
+        wrapped into a bogus {"id": 0} that get_librenms_device_id() then reads as missing.
+        Mirrors the string branch, which already routes through coerce_librenms_id()."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        import pytest
+
+        for bad in (0, -5):
+            obj = MagicMock()
+            obj.custom_field_data = {"librenms_id": {"primary": bad}}
+            obj.cf = obj.custom_field_data
+            with pytest.raises(ValueError, match="not a valid id"):
+                set_librenms_oob(obj, 17, "primary", oob_type="idrac")
+
+    def test_set_oob_rejects_unknown_type(self):
+        """set_librenms_oob raises ValueError for a type that doesn't match OOB_TYPE_PATTERN."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 42}}
+
+        import pytest
+
+        with pytest.raises(ValueError, match="does not match any known OOB type"):
+            set_librenms_oob(obj, 17, "primary", oob_type="ubuntu")
+
+    def test_set_oob_fails_closed_on_corrupt_host_string(self):
+        """A non-empty, unparseable stored host id must raise rather than be silently
+        collapsed to {} (which would drop the host link). Mirrors merge_librenms_links."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": "not-an-id"}}
+
+        import pytest
+
+        with pytest.raises(ValueError, match="not a valid id"):
+            set_librenms_oob(obj, 17, "primary", oob_type="idrac")
+
+    def test_set_oob_fails_closed_on_corrupt_dict_host_id(self):
+        """A dict-form entry with a non-empty unparseable host id (e.g. {"id": "abc"})
+        must raise, not get OOB metadata attached over corrupt host state."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": {"id": "abc"}}}
+
+        import pytest
+
+        with pytest.raises(ValueError, match="not a valid id"):
+            set_librenms_oob(obj, 17, "primary", oob_type="idrac")
+
+    def test_set_oob_lenient_on_dict_without_host_id(self):
+        """A dict entry with no host id (absent/None) stays lenient — OOB is attached."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": {"id": None}}}
+
+        set_librenms_oob(obj, 17, "primary", oob_type="idrac")  # must not raise
+        assert obj.custom_field_data["librenms_id"]["primary"]["oob"] == {"id": 17, "type": "idrac"}
+
+    def test_set_oob_lenient_on_empty_host_string(self):
+        """An empty/whitespace host string is treated leniently (→ fresh dict), not an
+        error — consistent with merge_librenms_links's empty-string handling."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": "   "}}
+
+        set_librenms_oob(obj, 17, "primary", oob_type="idrac")  # must not raise
+        assert obj.custom_field_data["librenms_id"]["primary"]["oob"] == {"id": 17, "type": "idrac"}
+
+    def test_set_oob_accepts_generic_oob_sentinel(self):
+        """set_librenms_oob must accept "oob" as a generic fallback type.
+
+        The detection layer in device_operations.py uses "oob" as a sentinel when
+        neither the LibreNMS OS/hardware fields nor the device names contain any
+        specific OOB keyword (idrac/ilo/ipmi/bmc/drac). This is the common case for
+        devices like switch consoles or PDUs. Rejecting "oob" caused HTTP 400 on
+        AddAsOOBView / PromoteToHostView for every such device.
+        """
+        from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": 99}}
+        obj.cf = obj.custom_field_data
+
+        set_librenms_oob(obj, 55, "default", oob_type="oob")
+        result = get_librenms_oob(obj, "default")
+
+        assert result is not None
+        assert result["id"] == 55
+        assert result["type"] == "oob"
+
+    def test_set_oob_generic_sentinel_case_insensitive(self):
+        """The "oob" sentinel is accepted case-insensitively (OOB, Oob, etc.)."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": 99}}
+
+        # Should not raise
+        set_librenms_oob(obj, 55, "default", oob_type="OOB")
+        assert obj.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "oob"
+
+    def test_set_oob_does_not_call_save(self):
+        """set_librenms_oob must NOT call obj.save() — caller is responsible."""
+        from netbox_librenms_plugin.utils import set_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 42}}
+
+        set_librenms_oob(obj, 17, "primary", oob_type="ilo")
+        obj.save.assert_not_called()
+
+    # ── clear_librenms_oob ────────────────────────────────────────────────────
+
+    def test_clear_oob_removes_oob_sub_key(self):
+        from netbox_librenms_plugin.utils import clear_librenms_oob, get_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": {"id": 42, "oob": {"id": 17, "type": "drac"}}}}
+        obj.cf = obj.custom_field_data
+
+        clear_librenms_oob(obj, "primary")
+        assert get_librenms_oob(obj, "primary") is None
+        # Main id should still be accessible via dict-with-id form
+        assert obj.custom_field_data["librenms_id"]["primary"] == {"id": 42}
+
+    def test_clear_oob_is_noop_when_no_oob(self):
+        """clear_librenms_oob is a no-op when oob key is not present."""
+        from netbox_librenms_plugin.utils import clear_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": {"id": 42}}}
+
+        clear_librenms_oob(obj, "primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": {"id": 42}}
+
+    def test_clear_oob_does_not_call_save(self):
+        """clear_librenms_oob must NOT call obj.save() — caller is responsible."""
+        from netbox_librenms_plugin.utils import clear_librenms_oob
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": {"id": 42, "oob": {"id": 17, "type": "bmc"}}}}
+
+        clear_librenms_oob(obj, "primary")
+        obj.save.assert_not_called()

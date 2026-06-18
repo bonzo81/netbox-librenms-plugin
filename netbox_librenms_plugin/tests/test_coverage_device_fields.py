@@ -759,21 +759,121 @@ class TestCreateAndAssignPlatformView:
         mock_msg.error.assert_called_once()
         assert "required" in mock_msg.error.call_args[0][1].lower()
 
-    def test_platform_already_exists(self):
+    def test_platform_already_exists_is_reused_and_assigned(self):
+        """Existing platform is reused (not re-created) and assigned to the device;
+        its manufacturer/vendor scoping is left untouched."""
         view = self._view()
-        req = _make_request({"platform_name": "ios", "manufacturer": ""})
+        req = _make_request({"platform_name": "ios", "manufacturer": "", "create_mapping": ""})
 
+        existing_platform = MagicMock()
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = True
+        mock_platform_cls.objects.filter.return_value.first.return_value = existing_platform
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
 
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
             view.post(req, pk=1)
-        mock_msg.warning.assert_called_once()
+        # Reused, not constructed anew
+        mock_platform_cls.assert_not_called()
+        # Existing platform assigned to the locked device and saved
+        assert mock_locked.platform is existing_platform
+        mock_locked.save.assert_called_once()
+        # Existing platform itself is never saved/modified (vendor scoping preserved)
+        existing_platform.save.assert_not_called()
+        mock_msg.success.assert_called_once()
+        assert "already existed" in mock_msg.success.call_args[0][1].lower()
+
+    def test_platform_already_exists_creates_missing_mapping(self):
+        """When the platform exists and create_mapping is on, the missing mapping is added."""
+        view = self._view()
+        req = _make_request({"platform_name": "ios", "manufacturer": "", "librenms_os": "ios", "create_mapping": "1"})
+
+        existing_platform = MagicMock()
+        mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.filter.return_value.first.return_value = existing_platform
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.first.return_value = None
+        mock_mapping_instance = MagicMock()
+        mock_mapping_cls.return_value = mock_mapping_instance
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=1)
+        mock_platform_cls.assert_not_called()
+        # The mapping must point the posted OS at the reused existing platform — pin both so a
+        # regression that maps to the wrong platform (or swaps the args) is caught.
+        mock_mapping_cls.assert_called_once_with(librenms_os="ios", netbox_platform=existing_platform)
+        # Validate-before-save, same as the new-platform path: a regression that persists an
+        # unvalidated mapping must be caught.
+        mock_mapping_instance.full_clean.assert_called_once()
+        mock_mapping_instance.save.assert_called_once()
+        # The locked device must be assigned the existing platform (not left untouched).
+        assert mock_locked.platform is existing_platform
+        mock_locked.save.assert_called_once()
+        mock_msg.success.assert_called_once()
+
+    def test_mapping_existing_points_to_different_platform_warns(self):
+        """An existing OS mapping that targets a DIFFERENT platform must not be reported as
+        'already exists' — surface a warning and don't create a new mapping."""
+        view = self._view()
+        req = _make_request({"platform_name": "ios", "manufacturer": "", "librenms_os": "ios", "create_mapping": "1"})
+
+        found_platform = MagicMock(pk=5)
+        mock_platform_cls = MagicMock()
+        mock_platform_cls.objects.filter.return_value.first.return_value = found_platform
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        # Existing mapping for "ios" points at a different platform (id 999, not 5).
+        other_mapping = MagicMock(netbox_platform_id=999)
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.first.return_value = other_mapping
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=1)
+
+        # No new mapping created (PlatformMapping class never instantiated for a create), and
+        # the platform-mismatch is surfaced as a warning rather than a silent "already exists".
+        mock_mapping_cls.assert_not_called()
+        assert any("pointing to" in str(c.args) for c in mock_msg.warning.call_args_list)
+        # The mapping conflict is non-fatal: the primary action (assign the found platform to
+        # the locked device and persist it) must still happen, not warn-and-return.
+        assert mock_locked.platform is found_platform
+        mock_locked.save.assert_called_once()
 
     def test_manufacturer_not_found(self):
         """manufacturer_id provided but Manufacturer.DoesNotExist: manufacturer stays None."""
@@ -781,7 +881,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": "99"})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -814,7 +914,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -845,7 +945,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": platform_name, "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -877,7 +977,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_instance.full_clean.side_effect = ValidationError({"name": ["err"]})
         mock_platform_cls.return_value = mock_platform_instance
@@ -901,7 +1001,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -932,7 +1032,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
 
@@ -966,7 +1066,7 @@ class TestCreateAndAssignPlatformView:
         req = _make_request({"platform_name": "ios", "manufacturer": ""})
 
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         # Make save raise IntegrityError
         mock_platform_instance.save.side_effect = IntegrityError("duplicate")
@@ -991,6 +1091,59 @@ class TestCreateAndAssignPlatformView:
         mock_msg.error.assert_called_once()
         mock_txn.set_rollback.assert_called_once_with(True)
 
+    def test_integrity_error_reuses_concurrently_created_platform(self):
+        """IntegrityError on create, but the same-named platform now exists (a concurrent
+        insert won the race): reuse it and assign — no error, no rollback."""
+        from django.db import IntegrityError
+
+        view = self._view()
+        req = _make_request({"platform_name": "ios", "manufacturer": ""})
+
+        reused_platform = MagicMock()
+        mock_platform_cls = MagicMock()
+        # First .first() is the up-front existence check (None → take the create path);
+        # the second is the post-IntegrityError re-query (the concurrently-created row).
+        mock_platform_cls.objects.filter.return_value.first.side_effect = [None, reused_platform]
+        mock_platform_instance = MagicMock()
+        mock_platform_instance.save.side_effect = IntegrityError("duplicate")
+        mock_platform_cls.return_value = mock_platform_instance
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.DoesNotExist = type("DoesNotExist", (Exception,), {})
+        mock_locked = MagicMock()
+        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+        # __exit__ must return False so the IntegrityError propagates out of the nested atomic.
+        mock_atomic_cm = MagicMock()
+        mock_atomic_cm.__enter__ = MagicMock(return_value=None)
+        mock_atomic_cm.__exit__ = MagicMock(return_value=False)
+        mock_txn = MagicMock()
+        mock_txn.atomic.return_value = mock_atomic_cm
+        mock_txn.set_rollback = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction", mock_txn),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(req, pk=1)
+
+        # Reuse path: the concurrently-created platform is assigned and persisted, with
+        # no error/rollback. The save() assertion guards against a regression that wires
+        # up the FK but skips persistence.
+        mock_msg.error.assert_not_called()
+        # Nested atomic() boundaries isolate the Platform.save() that may raise IntegrityError so
+        # the outer transaction stays usable for the re-query. The mock makes atomic() a no-op, so
+        # a single-atomic regression would otherwise still pass — pin the nesting explicitly.
+        assert mock_txn.atomic.call_count >= 2
+        mock_txn.set_rollback.assert_not_called()
+        assert mock_locked.platform is reused_platform
+        mock_locked.save.assert_called_once()
+        mock_msg.success.assert_called_once()
+
     def _success_patches(self, platform_name="ios", librenms_os="ios", create_mapping="1"):
         """Return (view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked)."""
         view = self._view()
@@ -1003,7 +1156,7 @@ class TestCreateAndAssignPlatformView:
             }
         )
         mock_platform_cls = MagicMock()
-        mock_platform_cls.objects.filter.return_value.exists.return_value = False
+        mock_platform_cls.objects.filter.return_value.first.return_value = None
         mock_platform_instance = MagicMock()
         mock_platform_cls.return_value = mock_platform_instance
         mock_device_cls = MagicMock()
@@ -1080,14 +1233,60 @@ class TestCreateAndAssignPlatformView:
 
         mock_mapping_cls.assert_not_called()
 
-    def test_required_object_permissions_include_platformmapping_when_create_mapping(self):
-        """When create_mapping is checked, ('add', PlatformMapping) is added to required_object_permissions
-        BEFORE require_all_permissions runs (so the authorization check sees it)."""
-        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
+    def test_mapping_skipped_when_lacking_add_perm_at_write(self):
+        """TOCTOU guard: a mapping existed at the preflight gate (so add wasn't required) but
+        was deleted before the write. The write-site permission re-check must skip the create
+        rather than bypass the permission — and warn the user."""
+        view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
+        )
+        # Upfront object-permission gate passes (user has change Device / add Platform); the
+        # write-site re-check is what must catch the missing PlatformMapping add permission.
+        view.require_object_permissions = MagicMock(return_value=None)
+        # Deny ONLY the PlatformMapping add permission at the write site; every other perm
+        # check must pass, so the test can't succeed via an unrelated permission-denied path.
+        mapping_add_perm = "netbox_librenms_plugin.add_platformmapping"
+        req.user.has_perm = MagicMock(side_effect=lambda perm: perm != mapping_add_perm)
+        mock_mapping_cls = MagicMock()
+        mock_mapping_cls.objects.filter.return_value.first.return_value = None  # deleted since preflight
 
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", mock_mapping_cls),
+            patch("utilities.permissions.get_permission_for_model", return_value=mapping_add_perm),
+        ):
+            view.post(req, pk=1)
+
+        # Prove the write-site permission check actually ran (so the skip is due to the TOCTOU
+        # re-check, not some unrelated path), then that no mapping was created and the user warned.
+        req.user.has_perm.assert_any_call(mapping_add_perm)
+        # No mapping created without permission, and the user is told why.
+        mock_mapping_cls.assert_not_called()
+        assert any("not created" in c.args[1] for c in mock_msg.warning.call_args_list)
+        # The platform itself must still be assigned to the locked device and persisted — only
+        # the secondary mapping is skipped, so this branch can't silently return pre-persist.
+        assert mock_locked.platform is mock_platform_instance
+        mock_locked.save.assert_called_once()
+
+    def test_required_object_permissions_never_include_platformmapping_upfront(self):
+        """Even when create_mapping is on, an OS is supplied, and no mapping exists yet, the
+        upfront POST gate must NOT require ('add', PlatformMapping): assigning the platform is
+        the primary action and must not be blocked for a user who can't create mappings. The
+        optional mapping write is gated at its own site (skip-with-warning) instead."""
         view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
+        # The upfront gate no longer reads PlatformMapping at all (neither .exists() nor
+        # .first()), so no lookup stub is needed — the gate must not require the perm
+        # regardless of whether a mapping exists. Assert against the REAL model symbol so a
+        # regression that left ('add', PlatformMapping) in the perms can't slip past a
+        # MagicMock that never equals the real class.
+        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
 
         captured = {}
 
@@ -1106,8 +1305,40 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
 
-        assert ("add", RealPlatformMapping) in captured["perms"], (
-            "Expected ('add', PlatformMapping) in required_object_permissions when create_mapping=True"
+        assert ("add", RealPlatformMapping) not in captured["perms"], (
+            "('add', PlatformMapping) must not gate the upfront POST — the mapping is gated "
+            "at the write site so the primary platform-assign isn't blocked"
+        )
+
+    def test_required_object_permissions_exclude_platformmapping_when_mapping_exists(self):
+        """create_mapping on but a mapping for the OS already exists → no mapping write
+        occurs, so ('add', PlatformMapping) must NOT be required (don't block the assign)."""
+        view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
+            platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
+        )
+        # The upfront gate no longer reads PlatformMapping (see the sibling test); the perm
+        # is never required upfront, the mapping write gates itself at its own site. Assert
+        # against the REAL model symbol so a regression can't hide behind a MagicMock.
+        from netbox_librenms_plugin.models import PlatformMapping as RealPlatformMapping
+
+        captured = {}
+
+        def fake_require(method):
+            captured["perms"] = view.required_object_permissions.get(method, [])
+            return MagicMock()
+
+        view.require_all_permissions = fake_require
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Platform", mock_platform_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
+            patch("netbox_librenms_plugin.views.sync.device_fields.PlatformMapping", RealPlatformMapping),
+        ):
+            view.post(req, pk=1)
+
+        assert ("add", RealPlatformMapping) not in captured["perms"], (
+            "Did not expect ('add', PlatformMapping) when a mapping for the OS already exists"
         )
 
     def test_required_object_permissions_exclude_platformmapping_when_no_create_mapping(self):
@@ -1804,13 +2035,118 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         view = self._view()
         with patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir:
             view._sync_url("device", 1)
-        mock_redir.assert_called_once_with("plugins:netbox_librenms_plugin:device_librenms_sync", pk=1)
+        # No request/server_key in scope → bare reversed sync URL (no query string).
+        (url,), _ = mock_redir.call_args
+        assert isinstance(url, str) and "server_key" not in url
+        assert "1" in url
 
     def test_sync_url_vm(self):
         view = self._view()
         with patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir:
             view._sync_url("vm", 1)
-        mock_redir.assert_called_once_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=1)
+        (url,), _ = mock_redir.call_args
+        assert isinstance(url, str) and "server_key" not in url
+
+    def test_sync_url_propagates_known_server_key(self):
+        """A POST-scoped server_key that matches a configured server is preserved so
+        multi-server users return to the server they were working in."""
+        view = self._view()
+        view.request = MagicMock()
+        view.request.POST = {"server_key": "prod"}
+        view.request.GET = {}
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)
+        (url,), _ = mock_redir.call_args
+        assert "server_key=prod" in url
+
+    def test_sync_url_stale_post_key_falls_back_to_active_server(self):
+        """A POST server_key that is no longer configured (stale page / removed server) must not
+        drop the server context: it doesn't match the allowlist, so the redirect falls back to the
+        active/default server the action ran against (here the bound _librenms_api='default'),
+        re-validated through the allowlist — instead of emitting a bare URL."""
+        view = self._view()  # _view() binds _librenms_api = MagicMock(server_key="default")
+        view.request = MagicMock()
+        view.request.POST = {"server_key": "ghost"}  # unconfigured / stale
+        view.request.GET = {}
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"default": "Default LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)
+        (url,), _ = mock_redir.call_args
+        assert "server_key=default" in url
+        assert "ghost" not in url
+
+    def test_sync_url_drops_unknown_server_key(self):
+        """An unconfigured/spoofed server_key is not reflected into the redirect URL
+        (allowlist guard — open-redirect safe)."""
+        view = self._view()
+        view.request = MagicMock()
+        view.request.POST = {"server_key": "//evil.com/steal"}
+        view.request.GET = {}
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)
+        (url,), _ = mock_redir.call_args
+        assert "evil.com" not in url
+        assert "server_key" not in url
+
+    def test_sync_url_unbound_api_misconfigured_default_degrades_without_500(self):
+        """On a redirect after a failed rebind, _librenms_api is unbound (None) and the request
+        carries no server_key. The fallback resolves the default server via the librenms_api
+        property, but if even the default is misconfigured (property construction raises) the
+        helper must degrade to a bare URL rather than 500."""
+        view = self._view()
+        view._librenms_api = None
+        view.request = MagicMock()
+        view.request.POST = {}
+        view.request.GET = {}
+        with (
+            # Property constructs the default client → misconfigured default raises.
+            patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI", side_effect=KeyError("ghost")),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)  # must not raise
+        (url,), _ = mock_redir.call_args
+        assert "server_key" not in url
+
+    def test_sync_url_drops_server_key_when_url_validation_fails(self):
+        """Even for an allowlisted server_key, if url_has_allowed_host_and_scheme rejects the
+        candidate (the CodeQL open-redirect barrier), fall back to the bare URL. Mocking the
+        validator to False exercises that reject branch explicitly rather than relying on
+        Django's internals to accept the relative candidate."""
+        view = self._view()
+        view.request = MagicMock()
+        view.request.POST = {"server_key": "prod"}
+        view.request.GET = {}
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.url_has_allowed_host_and_scheme",
+                return_value=False,
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redir,
+        ):
+            view._sync_url("device", 1)
+        (url,), _ = mock_redir.call_args
+        assert "server_key" not in url
 
 
 # ---------------------------------------------------------------------------
@@ -2473,3 +2809,76 @@ class TestCreatePlatformFullClean:
         assert result == "redirected"
         mock_messages.error.assert_called_once()
         assert "could not be created" in mock_messages.error.call_args[0][1]
+class TestSyncRedirectServerKeyValidation:
+    """_sync_redirect must only reflect a server_key that matches a configured server,
+    so untrusted request input can't be steered into the redirect URL (open-redirect)."""
+
+    def test_valid_server_key_is_reflected(self):
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        req = _make_request(post_data={"server_key": "prod"})
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        ):
+            CreateAndAssignPlatformView._sync_redirect(req, 1)
+        url = mock_redirect.call_args[0][0]
+        assert "server_key=prod" in url
+
+    def test_unknown_server_key_is_dropped(self):
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        req = _make_request(post_data={"server_key": "//evil.com/steal"})
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        ):
+            CreateAndAssignPlatformView._sync_redirect(req, 1)
+        url = mock_redirect.call_args[0][0]
+        assert "evil.com" not in url
+        assert "server_key" not in url
+
+    def test_falls_back_to_active_server_when_form_omits_key(self):
+        """When the form omits server_key, _sync_redirect reflects the active API server
+        (passed as fallback) so a multi-server user isn't dropped onto the default tab."""
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        req = _make_request(post_data={})  # no server_key in POST
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        ):
+            CreateAndAssignPlatformView._sync_redirect(req, 1, "prod")
+        url = mock_redirect.call_args[0][0]
+        assert "server_key=prod" in url
+
+    def test_valid_server_key_is_dropped_when_redirect_url_fails_validation(self):
+        """Even an allowlisted server_key must be dropped if the resulting redirect URL fails
+        url_has_allowed_host_and_scheme — mirrors the _sync_url guard (open-redirect barrier),
+        so a regression that reflected a known key into a rejected URL is caught here too."""
+        from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
+
+        req = _make_request(post_data={"server_key": "prod"})
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"prod": "Prod LibreNMS"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.url_has_allowed_host_and_scheme",
+                return_value=False,
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        ):
+            CreateAndAssignPlatformView._sync_redirect(req, 1)
+        url = mock_redirect.call_args[0][0]
+        assert "server_key" not in url

@@ -137,6 +137,102 @@ def remove_validation_issue(validation: dict, keyword: str) -> None:
     validation["issues"] = [issue for issue in validation["issues"] if keyword.lower() not in issue.lower()]
 
 
+def apply_oob_detection_result(
+    result: dict,
+    *,
+    serial_action: "str | None",
+    oob_candidate: "dict | None",
+    promote_to_host: "dict | None",
+    serial_role_choice_available: bool,
+    warnings: "list | None" = None,
+) -> None:
+    """Apply OOB/promote-to-host serial detection results to the validation dict.
+
+    Call this after computing all OOB/promote-to-host flags from the LibreNMS
+    and NetBox data.  All mutations to ``result["oob_candidate"]``,
+    ``result["promote_to_host"]``, ``result["serial_action"]``,
+    ``result["serial_role_choice_available"]``, and their associated warnings
+    are routed through here so the mutation pattern stays consistent and
+    testable independently of the DB-heavy computation in device_operations.
+
+    Args:
+        result: Validation dict produced by validate_device_for_import()
+        serial_action: The resolved action string, or None
+        oob_candidate: Dict {device, type, version, ip} when OOB role is available
+        promote_to_host: Dict {existing_libre_id, existing_oob_type, existing_device}
+            when host-promotion is available
+        serial_role_choice_available: True when both oob_candidate and
+            promote_to_host are feasible and the UI should offer a toggle
+        warnings: Optional list of warning strings to append to result["warnings"]
+    """
+    result["serial_action"] = serial_action
+    result["oob_candidate"] = oob_candidate
+    # Honor the "absent otherwise" contract: only carry promote_to_host when a real
+    # promotion target exists, clearing any stale key rather than storing a None sentinel.
+    if promote_to_host is None:
+        result.pop("promote_to_host", None)
+    else:
+        result["promote_to_host"] = promote_to_host
+    result["serial_role_choice_available"] = serial_role_choice_available
+    # Clear merge-only state: this is the non-merge path, so if the same result
+    # dict was previously marked a merge candidate, the stale merge UI data must
+    # not linger (apply_merge_candidates is the only writer of merge_candidates).
+    result["merge_candidates"] = None
+    result.setdefault("warnings", [])
+    for warning in warnings or []:
+        result["warnings"].append(warning)
+
+
+def apply_merge_candidates(
+    result: dict,
+    *,
+    host_named: dict,
+    oob_named: dict,
+    warning: str,
+) -> None:
+    """Apply merge-candidates detection results to the validation dict.
+
+    Called when the hostname-matched and serial-matched NetBox devices are
+    different objects and at least one already has a LibreNMS linkage,
+    indicating they likely represent the two sides of a single physical box.
+
+    Sets ``serial_action`` to ``"merge_netbox_devices"``, populates
+    ``merge_candidates``, sets ``can_import`` to False, and appends the
+    supplied warning so callers do not need to know the dict shape.
+
+    Args:
+        result: Validation dict produced by validate_device_for_import()
+        host_named: Dict {pk, name, librenms_link} for the hostname-matched device
+        oob_named: Dict {pk, name, librenms_link} for the serial-matched device
+        warning: Warning string describing the merge situation
+    """
+    result["serial_action"] = "merge_netbox_devices"
+    result["merge_candidates"] = {
+        "host_named": host_named,
+        "oob_named": oob_named,
+    }
+    result["can_import"] = False
+    # Keep readiness in lockstep with can_import: an earlier path (e.g. hostname-first row
+    # processing) may have set is_ready=True, which would otherwise leave contradictory state
+    # (is_ready=True while merge mode blocks import).
+    result["is_ready"] = False
+    result["oob_candidate"] = None
+    # Clear earlier serial-conflict state so the merge path is the single source of truth:
+    # a hostname-first row may have already set serial_duplicate / serial_confirmed, which
+    # would otherwise leave a stale "serial conflict" signal alongside "merge these devices".
+    result["serial_duplicate"] = False
+    result["serial_confirmed"] = False
+    # "absent otherwise" contract — the merge path has no promotion target.
+    result.pop("promote_to_host", None)
+    result["serial_role_choice_available"] = False
+    # Merge supersedes the serial/hostname-detection signals that ran earlier in this
+    # validation pass, so their warnings (e.g. "hostname differs", "already has an OOB
+    # controller linked", "serial conflict") would now contradict the merge guidance.
+    # Reset to just the merge warning; later validation stages (role/platform/cluster)
+    # append their own warnings after this point, so nothing actionable is lost.
+    result["warnings"] = [warning]
+
+
 def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None:
     """
     Recalculate can_import and is_ready flags based on current validation state.
