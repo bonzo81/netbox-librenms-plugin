@@ -10,6 +10,32 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+def _two_member_vc(name, cf_first, cf_second):
+    """Create a real VirtualChassis with two members (vc_position 1 then 2), seeding each
+    member's ``librenms_id`` custom field with *cf_first* / *cf_second* (use ``_UNSET`` /
+    skip by passing None to leave it empty). Returns (first, second); ``first`` is the
+    member iterated first by ``members.all()`` so selection-precedence is testable."""
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    vc = VirtualChassis.objects.create(name=name)
+    first = make_device(f"{name}-m1")
+    first.virtual_chassis = vc
+    first.vc_position = 1
+    if cf_first is not None:
+        first.custom_field_data["librenms_id"] = cf_first
+    first.save()
+    second = make_device(f"{name}-m2")
+    second.virtual_chassis = vc
+    second.vc_position = 2
+    if cf_second is not None:
+        second.custom_field_data["librenms_id"] = cf_second
+    second.save()
+    return first, second
+
+
 # =============================================================================
 # TestDeviceTypeMatching - 5 tests
 # =============================================================================
@@ -456,124 +482,60 @@ class TestVirtualChassisHelpers:
 
         assert result == mock_netbox_device
 
+    @pytest.mark.django_db
     def test_get_librenms_sync_device_with_librenms_id(self):
-        """VC member with librenms_id is returned."""
+        """VC member with librenms_id is returned (real VC; the member without one iterated first)."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        mock_device = MagicMock()
-        mock_member_with_id = MagicMock()
-        mock_member_with_id.cf = {"librenms_id": 123}
-        mock_member_without_id = MagicMock()
-        mock_member_without_id.cf = {}
+        without_id, with_id = _two_member_vc("sync-withid", None, {"default": 123})
+        assert get_librenms_sync_device(without_id) == with_id
 
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [
-            mock_member_without_id,
-            mock_member_with_id,
-        ]
-
-        result = get_librenms_sync_device(mock_device)
-
-        assert result == mock_member_with_id
-
+    @pytest.mark.django_db
     def test_get_librenms_sync_device_dict_preferred_over_legacy_bare_int(self):
-        """
-        In a partially migrated VC, a member with per-server dict format
-        is preferred over a member with legacy bare-int format."""
+        """In a partially migrated VC, a per-server dict member is preferred over a legacy bare-int."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        # Member A: legacy bare-int librenms_id (not yet migrated)
-        member_a = MagicMock()
-        member_a.cf = {"librenms_id": 42}
+        # member_a (legacy bare-int) iterated first — the function should still prefer member_b (dict).
+        member_a, member_b = _two_member_vc("sync-dictpref", 42, {"default": 42})
+        assert get_librenms_sync_device(member_a, server_key="default") == member_b
 
-        # Member B: migrated per-server dict format
-        member_b = MagicMock()
-        member_b.cf = {"librenms_id": {"default": 42}}
-
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()
-        # member_a listed first — the function should still prefer member_b
-        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
-
-        result = get_librenms_sync_device(mock_device, server_key="default")
-
-        assert result == member_b
-
+    @pytest.mark.django_db
     def test_get_librenms_sync_device_host_id_preferred_over_oob_only(self):
-        """A member holding the real host id must win over a member that only carries an
-        OOB-only mapping for the same server, even when the OOB-only member is iterated first.
-        Host-side consumers (status redirect, cable/interface main-id lookup) target this."""
+        """A member holding the real host id wins over an OOB-only member, even iterated first."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        # Member A (listed first): OOB-only linkage — no host id.
-        member_a = MagicMock()
-        member_a.cf = {"librenms_id": {"default": {"oob": {"id": 7, "type": "drac"}}}}
-        # Member B: the real host id.
-        member_b = MagicMock()
-        member_b.cf = {"librenms_id": {"default": {"id": 42}}}
+        member_a, member_b = _two_member_vc(
+            "sync-hostpref",
+            {"default": {"oob": {"id": 7, "type": "drac"}}},  # OOB-only, first
+            {"default": {"id": 42}},  # real host id
+        )
+        assert get_librenms_sync_device(member_a, server_key="default") == member_b
 
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
-
-        result = get_librenms_sync_device(mock_device, server_key="default")
-
-        assert result == member_b
-
+    @pytest.mark.django_db
     def test_get_librenms_sync_device_oob_only_resolves_when_no_host_id(self):
-        """When no member has a host id, an OOB-only mapping still resolves the sync device
-        (rather than falling through to the master/primary-IP fallback and picking wrong)."""
+        """When no member has a host id, an OOB-only mapping still resolves the sync device."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        member_a = MagicMock()
-        member_a.cf = {}
-        member_b = MagicMock()
-        member_b.cf = {"librenms_id": {"default": {"oob": {"id": 7, "type": "drac"}}}}
+        member_a, member_b = _two_member_vc("sync-oobonly", None, {"default": {"oob": {"id": 7, "type": "drac"}}})
+        assert get_librenms_sync_device(member_a, server_key="default") == member_b
 
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
-
-        result = get_librenms_sync_device(mock_device, server_key="default")
-
-        assert result == member_b
-
+    @pytest.mark.django_db
     def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
         """When no member has a per-server dict, fall back to legacy bare-int."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        member_a = MagicMock()
-        member_a.cf = {"librenms_id": 42}
-        member_b = MagicMock()
-        member_b.cf = {}
+        # member_b (no id) iterated first, member_a (legacy bare-int) second → member_a wins.
+        member_b, member_a = _two_member_vc("sync-legacy", None, 42)
+        assert get_librenms_sync_device(member_b, server_key="default") == member_a
 
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [member_b, member_a]
-
-        result = get_librenms_sync_device(mock_device, server_key="default")
-
-        assert result == member_a
-
+    @pytest.mark.django_db
     def test_get_librenms_sync_device_dict_for_different_server_falls_through(self):
         """Per-server dict with a different key does not match; legacy bare-int resolves instead."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
-        # Member A: legacy bare-int (universal fallback)
-        member_a = MagicMock()
-        member_a.cf = {"librenms_id": 42}
-
-        # Member B: dict but only for "production", not "default"
-        member_b = MagicMock()
-        member_b.cf = {"librenms_id": {"production": 99}}
-
-        mock_device = MagicMock()
-        mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
-
-        result = get_librenms_sync_device(mock_device, server_key="default")
-
-        assert result == member_a
+        # member_a: legacy bare-int (universal); member_b: dict only for "production".
+        member_a, member_b = _two_member_vc("sync-diffserver", 42, {"production": 99})
+        assert get_librenms_sync_device(member_a, server_key="default") == member_a
 
     def test_get_librenms_sync_device_fallback_to_member_with_ip(self):
         """Priority 3: no dict member, master has no IP, another member has primary IP → that member."""
