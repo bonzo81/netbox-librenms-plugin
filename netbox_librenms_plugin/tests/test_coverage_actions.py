@@ -2286,8 +2286,16 @@ class TestDeviceConflictActionMorePaths:
         assert b"not found in NetBox" in response.content
 
 
+@pytest.mark.django_db
 class TestDeviceConflictUpdateAction:
-    """Tests for DeviceConflictActionView 'update' action (lines 1108-1120)."""
+    """DeviceConflictActionView 'update' action against a real Device.
+
+    The 'update' action sets the name + serial and links the LibreNMS id in one
+    transaction. Previously every write collaborator was mocked (so only render-was-called
+    could be asserted); now they run for real and the persisted name/serial/librenms_id are
+    reloaded from the DB. Only auth, the LibreNMS validation pipeline, the hostname resolver,
+    and the row render stay mocked.
+    """
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -2295,65 +2303,35 @@ class TestDeviceConflictUpdateAction:
         view = object.__new__(DeviceConflictActionView)
         view._librenms_api = _make_api()
         view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
         return view
 
-    def test_update_action_executes(self):
-        """Update action updates device name."""
+    def test_update_action_persists_name_serial_and_link(self):
+        from dcim.models import Device
+        from django.http import HttpResponse
+
         view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "update",
-                "existing_device_id": "1",
-            }
-        )
+        dev = make_device("router-update", serial="SN-OLD")
+        request = _make_request(post={"action": "update", "existing_device_id": str(dev.pk)})
 
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
+        libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN-NEW"}
+        validation = {"existing_device": dev, "device_type_mismatch": False}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
 
-        libre_device = {"device_id": 42, "hostname": "router01"}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-        }
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions._get_hostname_for_action",
+            return_value="router01-updated",
+        ):
+            response = view.post(request, device_id=42)
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
-                MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
-                            with patch("netbox_librenms_plugin.views.imports.actions.set_librenms_device_id"):
-                                with patch(
-                                    "netbox_librenms_plugin.views.imports.actions._save_device", return_value=None
-                                ):
-                                    with patch("netbox_librenms_plugin.views.imports.actions.cache"):
-                                        with patch(
-                                            "netbox_librenms_plugin.views.imports.actions.transaction"
-                                        ) as mock_tx:
-                                            mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-                                            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-                                            with patch(
-                                                "netbox_librenms_plugin.views.imports.actions._get_hostname_for_action",
-                                                return_value="router01",
-                                            ):
-                                                with patch(
-                                                    "netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key",
-                                                    return_value="key",
-                                                ):
-                                                    with patch(
-                                                        "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                                                        return_value={"device_id": 42},
-                                                    ):
-                                                        with patch.object(
-                                                            view, "render_device_row", return_value=MagicMock()
-                                                        ) as mock_render:
-                                                            view.post(request, device_id=42)
-
-        mock_render.assert_called_once()
+        assert response["HX-Trigger"] == "closeModal"
+        view.render_device_row.assert_called_once()
+        reloaded = Device.objects.get(pk=dev.pk)
+        assert reloaded.name == "router01-updated"
+        assert reloaded.serial == "SN-NEW"
+        assert reloaded.custom_field_data["librenms_id"]["default"] == 42
 
 
 class TestDeviceClusterRackRenderRow:
@@ -3246,8 +3224,14 @@ class TestMoreSaveErrorPaths:
         assert response.status_code == 400
 
 
+@pytest.mark.django_db
 class TestSyncSerialAction:
-    """Tests for sync_serial action (lines 1173-1210)."""
+    """DeviceConflictActionView 'sync_serial' action against a real Device.
+
+    Real Device + the real transaction/select_for_update/conflict-check/_save_device path;
+    the persisted serial is reloaded from the DB. Only auth and the LibreNMS validation
+    pipeline are mocked.
+    """
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -3255,35 +3239,61 @@ class TestSyncSerialAction:
         view = object.__new__(DeviceConflictActionView)
         view._librenms_api = _make_api()
         view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
         return view
 
     def test_sync_serial_no_serial_renders_htmx_error_toast(self):
-        """Line 1210: sync_serial with empty serial → htmx error toast (200)."""
+        """sync_serial with an empty incoming serial → htmx error toast, nothing persisted."""
         view = self._make_view()
-        request = _make_request(post={"action": "sync_serial", "existing_device_id": "1"})
-        mock_existing = MagicMock()
-        mock_existing.pk = 1
-
+        dev = make_device("sync-serial-empty", serial="KEEP-ME")
+        request = _make_request(post={"action": "sync_serial", "existing_device_id": str(dev.pk)})
         libre_device = {"device_id": 42, "hostname": "router01", "serial": ""}
-        validation = {
-            "existing_device": mock_existing,
-            "device_type_mismatch": False,
-        }
+        validation = {"existing_device": dev, "device_type_mismatch": False}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
 
-        DoesNotExistExc = type("DoesNotExist", (Exception,), {})
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing
-                MockDevice.DoesNotExist = DoesNotExistExc
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch.object(
-                        view, "get_validated_device_with_selections", return_value=(libre_device, validation, {})
-                    ):
-                        response = view.post(request, device_id=42)
+        response = view.post(request, device_id=42)
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"No valid serial from LibreNMS" in response.content
+
+    def test_sync_serial_persists_serial(self):
+        """sync_serial with a valid serial writes it through the real locked save path."""
+        from dcim.models import Device
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        dev = make_device("sync-serial-ok", serial="SN-OLD")
+        request = _make_request(post={"action": "sync_serial", "existing_device_id": str(dev.pk)})
+        libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN-FRESH"}
+        validation = {"existing_device": dev, "device_type_mismatch": False}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=42)
+
+        assert response["HX-Trigger"] == "closeModal"
+        assert Device.objects.get(pk=dev.pk).serial == "SN-FRESH"
+
+    def test_sync_serial_conflict_blocks_and_keeps_serial(self):
+        """A serial already owned by another device blocks the sync; the target keeps its serial."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        make_device("sync-serial-owner", serial="SN-TAKEN")
+        dev = make_device("sync-serial-target", serial="SN-OLD")
+        request = _make_request(post={"action": "sync_serial", "existing_device_id": str(dev.pk)})
+        libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN-TAKEN"}
+        validation = {"existing_device": dev, "device_type_mismatch": False}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+
+        response = view.post(request, device_id=42)
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Serial conflict" in response.content
+        assert Device.objects.get(pk=dev.pk).serial == "SN-OLD"
 
 
 class TestUpdateAndSerialSaveErrors:
