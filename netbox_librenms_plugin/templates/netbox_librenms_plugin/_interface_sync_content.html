@@ -367,7 +367,7 @@
                                             class="btn btn-sm btn-outline-warning"
                                             hx-post="{% url 'plugins:netbox_librenms_plugin:interface_move_to_winner' pk=interface.id %}"
                                             hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
-                                            hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'
+                                            {% if migrated_to_marker.server_key %}hx-vals='{"server_key": "{{ migrated_to_marker.server_key|escapejs }}"}'{% endif %}
                                             hx-swap="none"
                                             hx-confirm="Move interface '{{ interface.name }}' to {{ migrated_to_winner.name }}?"
                                             title="Reassign this interface (and its cables/IPs/MACs) to {{ migrated_to_winner.name }}">

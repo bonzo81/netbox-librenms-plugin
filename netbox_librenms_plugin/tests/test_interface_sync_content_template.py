@@ -14,7 +14,7 @@ import pytest
 
 @pytest.mark.django_db
 class TestInterfaceSyncContentTemplateMigratedMode:
-    def _render(self, *, migrated, netbox_only=()):
+    def _render(self, *, migrated, netbox_only=(), winner=None):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -44,7 +44,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             "interface_sync": interface_sync,
             "interface_name_field": "ifName",
             "migrated_to_marker": migrated,
-            "migrated_to_winner": None,
+            "migrated_to_winner": winner,
             "has_write_permission": False,
         }
         return render_to_string("netbox_librenms_plugin/_interface_sync_content.html", ctx, request=request)
@@ -77,3 +77,38 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
         assert "Click to view and delete NetBox-only interfaces" in html
         assert "Click to view and move NetBox-only interfaces" not in html
+
+    def test_move_button_emits_server_key_hx_vals_when_marker_has_key(self):
+        # When the migrated marker carries a server_key, the migrated-mode Move button must
+        # post it so the move hits the right LibreNMS server/cache (non-default servers).
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-tmpl-winner")
+        # Alphanumeric key so escapejs leaves it intact (it escapes e.g. '-' to -); the
+        # guard behaviour, not escapejs, is what this test pins.
+        html = self._render(
+            migrated={"server_key": "edgelondon", "device_id": 1, "at": "now"},
+            winner=winner,
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+        )
+        # The Move button renders for the NetBox-only row and carries the server_key.
+        assert "mdi-transfer-right" in html
+        assert 'hx-vals=\'{"server_key": "edgelondon"}\'' in html
+
+    def test_move_button_omits_server_key_hx_vals_when_marker_has_no_key(self):
+        # Mirror the form-mode guard (lines 29/35): when the marker has no server_key, the Move
+        # button must omit hx-vals entirely rather than POST an empty {"server_key": ""}, which
+        # would override the active/default server with a blank key on a non-default install.
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-tmpl-winner-nokey")
+        html = self._render(
+            migrated={"device_id": 1, "at": "now"},  # no server_key
+            winner=winner,
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+        )
+        # The Move button still renders...
+        assert "mdi-transfer-right" in html
+        # ...but never with an empty server_key payload.
+        assert '"server_key": ""' not in html
+        assert 'hx-vals=\'{"server_key": ""}\'' not in html
