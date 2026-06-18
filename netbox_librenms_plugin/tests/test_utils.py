@@ -1551,3 +1551,56 @@ class TestPredictModuleInterfaceRenameSignalGuard:
     def test_scalar_string_return_is_ignored(self):
         """A bare string is iterable but must not be exploded into characters and mispaired."""
         assert self._call_with_receiver("Gi0/0") == ["Gi0/0", "Gi0/1"]
+
+
+@pytest.mark.django_db
+class TestSetDeviceIpFkFamily:
+    """set_device_ip_fk() must enforce the IP family that NetBox's Device.clean() requires for
+    primary_ip4/primary_ip6, since the helper persists via save(update_fields=...) which bypasses
+    full_clean(). oob_ip is family-agnostic. (Real DB: the family comes from the actual address.)"""
+
+    def test_primary_ip4_rejects_ipv6_address(self):
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("fam-v4dev")
+        v6 = ip_on(device, "2001:db8::1/64", "eth0")
+        with pytest.raises(ValueError, match="non-IPv4"):
+            set_device_ip_fk(device, "primary_ip4", v6)
+        device.refresh_from_db()
+        assert device.primary_ip4_id is None  # nothing persisted
+
+    def test_primary_ip6_rejects_ipv4_address(self):
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("fam-v6dev")
+        v4 = ip_on(device, "10.0.0.1/24", "eth0")
+        with pytest.raises(ValueError, match="non-IPv6"):
+            set_device_ip_fk(device, "primary_ip6", v4)
+        device.refresh_from_db()
+        assert device.primary_ip6_id is None
+
+    def test_matching_families_are_accepted(self):
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("fam-okdev")
+        v4 = ip_on(device, "10.0.0.2/24", "eth0")
+        v6 = ip_on(device, "2001:db8::2/64", "eth1")
+        set_device_ip_fk(device, "primary_ip4", v4)
+        set_device_ip_fk(device, "primary_ip6", v6)
+        device.refresh_from_db()
+        assert device.primary_ip4_id == v4.pk
+        assert device.primary_ip6_id == v6.pk
+
+    def test_oob_ip_is_family_agnostic(self):
+        # oob_ip has no family restriction in NetBox; an IPv6 oob_ip must be accepted.
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("fam-oobdev")
+        v6 = ip_on(device, "2001:db8::3/64", "eth0")
+        set_device_ip_fk(device, "oob_ip", v6)
+        device.refresh_from_db()
+        assert device.oob_ip_id == v6.pk

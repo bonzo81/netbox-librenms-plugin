@@ -1765,6 +1765,14 @@ def set_device_ip_fk(device, field, ip, *, save=True):
                 f"set_device_ip_fk: refusing to set {field} on device pk={device.pk} — "
                 f"address {ip} is not assigned to an interface on that device"
             )
+        # NetBox's Device.clean() requires primary_ip4 to be IPv4 and primary_ip6 to be IPv6;
+        # update_fields skips full_clean(), so enforce the family here too (oob_ip is family-
+        # agnostic). Otherwise an IPv6 address could be silently stored as primary_ip4.
+        ip_family = getattr(ip, "family", None)
+        if field == "primary_ip4" and ip_family != 4:
+            raise ValueError(f"set_device_ip_fk: refusing to set primary_ip4 to non-IPv4 address {ip}")
+        if field == "primary_ip6" and ip_family != 6:
+            raise ValueError(f"set_device_ip_fk: refusing to set primary_ip6 to non-IPv6 address {ip}")
     setattr(device, field, ip)
     if save:
         device.save(update_fields=[field])

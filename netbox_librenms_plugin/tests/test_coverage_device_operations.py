@@ -3042,3 +3042,51 @@ class TestMergeCandidateNonUniqueSerialPeer:
 
         assert any("Multiple NetBox devices share hostname 'dup-host'" in w for w in result["warnings"])
         assert not result.get("merge_candidates")
+
+
+@pytest.mark.django_db
+class TestValidateDeviceForImportOOBIPFallback:
+    """validate_device_for_import must find a device that references the LibreNMS IP via its
+    Device.oob_ip FK even when that IP is assigned to no interface (assigned_object is None) —
+    e.g. a NAT'd OOB IP. Real DB: the device + IP are real; only the LibreNMS API is mocked."""
+
+    def _make_api(self):
+        api = MagicMock()
+        api.server_key = "default"
+        api.cache_timeout = 300
+        api.get_device_info.return_value = (True, {"device_id": 7})
+        return api
+
+    def test_unassigned_oob_ip_device_is_detected(self):
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.tests.conftest import make_device, make_ip
+
+        device = make_device("b2-oob-host")
+        # An OOB IP assigned to no interface; set it on the device via update_fields so NetBox's
+        # full_clean() (which would require an interface assignment) is bypassed — the exact state
+        # the import's assigned_object-gated lookup used to miss.
+        oob_ip = make_ip("192.0.2.50/32")
+        assert oob_ip.assigned_object is None
+        device.oob_ip = oob_ip
+        device.save(update_fields=["oob_ip"])
+
+        # A LibreNMS row that self-identifies as an OOB controller (iDRAC) whose IP is the
+        # device's oob_ip; hostname/serial deliberately don't match so only the oob_ip FK links.
+        libre_device = {
+            "device_id": 7,
+            "hostname": "idrac-probe-xyz",
+            "sysName": "idrac-probe-xyz",
+            "hardware": "iDRAC9",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "type": "network",
+            "ip": "192.0.2.50",
+        }
+
+        result = validate_device_for_import(libre_device, api=self._make_api())
+
+        # Found via the oob_ip fallback → OOB candidate (pre-fix: device None → block skipped).
+        assert result["existing_device"] == device
+        assert result["serial_action"] == "oob_candidate"
+        assert result["oob_candidate"]["device"] == device

@@ -868,12 +868,18 @@ def validate_device_for_import(
                     from ipam.models import IPAddress
 
                     existing_ip = IPAddress.objects.filter(address__net_host=primary_ip).first()
-                    if existing_ip and existing_ip.assigned_object:
+                    if existing_ip:
                         device = (
                             existing_ip.assigned_object.device
-                            if hasattr(existing_ip.assigned_object, "device")
+                            if existing_ip.assigned_object and hasattr(existing_ip.assigned_object, "device")
                             else None
                         )
+                        # Device.oob_ip is a direct FK independent of assigned_object: an IP can be
+                        # a device's OOB address while assigned to no interface (e.g. a NAT'd OOB IP
+                        # whose assigned_object is None). Fall back to the oob_ip FK so the OOB
+                        # detection below still finds such devices.
+                        if device is None:
+                            device = Device.objects.filter(oob_ip=existing_ip).first()
                         if device:
                             # Surface any existing host/OOB linkage so the import UI renders the
                             # correct row state (the librenms_id / serial branches do the same;

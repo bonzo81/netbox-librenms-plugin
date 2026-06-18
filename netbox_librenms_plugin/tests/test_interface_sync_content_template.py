@@ -77,3 +77,22 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
         assert "Click to view and delete NetBox-only interfaces" in html
         assert "Click to view and move NetBox-only interfaces" not in html
+
+    def test_migrated_mode_hides_destructive_delete_controls(self):
+        # Migrated mode is move-only: the donor-side bulk-delete UI (select-all + per-row
+        # checkboxes + "Delete Selected Interfaces") must not render next to the Move actions,
+        # or a donor could destructively delete interfaces mid-migration.
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+        )
+        assert "select-all-netbox-interfaces" not in html
+        assert "netbox-interface-checkbox" not in html
+        assert "Delete Selected Interfaces" not in html
+
+    def test_normal_mode_keeps_delete_controls(self):
+        # Without a migration marker the bulk-delete UI is the intended affordance and must render.
+        html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
+        assert "select-all-netbox-interfaces" in html
+        assert "netbox-interface-checkbox" in html
+        assert "Delete Selected Interfaces" in html

@@ -330,11 +330,13 @@
                         <table class="table table-hover">
                             <thead>
                                 <tr>
+                                    {% if not migrated_to_marker %}
                                     <th>
                                         <input type="checkbox" id="select-all-netbox-interfaces"
                                             class="form-check-input"
                                             aria-label="Select all NetBox-only interfaces">
                                     </th>
+                                    {% endif %}
                                     <th>Interface Name</th>
                                     <th>Type</th>
                                     <th>Status</th>
@@ -345,11 +347,13 @@
                             <tbody>
                                 {% for interface in interface_sync.netbox_only_interfaces %}
                                 <tr>
+                                    {% if not migrated_to_marker %}
                                     <td>
                                         <input type="checkbox" name="interface_ids" value="{{ interface.id }}"
                                             class="form-check-input netbox-interface-checkbox"
                                             aria-label="Select interface {{ interface.name }}">
                                     </td>
+                                    {% endif %}
                                     <td>
                                         <a href="{{ interface.url }}" target="_blank">{{ interface.name }}</a>
                                     </td>
@@ -394,7 +398,7 @@
                 {% endif %}
             </div>
             <div class="modal-footer">
-                {% if interface_sync.netbox_only_interfaces %}
+                {% if interface_sync.netbox_only_interfaces and not migrated_to_marker %}
                 <button type="button" class="btn btn-danger" id="confirm-delete-interfaces">
                     <i class="mdi mdi-delete"></i> Delete Selected Interfaces
                 </button>

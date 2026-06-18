@@ -1786,6 +1786,7 @@ class TestSyncIPAddressesViewPost:
         mock_redirect.assert_called_once()
 
 
+@pytest.mark.django_db
 class TestSyncIPAddressesViewProcessIpSync:
     def _setup_view(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1795,11 +1796,14 @@ class TestSyncIPAddressesViewProcessIpSync:
         return view
 
     def _obj_with_iface(self, name="eth0"):
-        """Build an obj whose single interface matches port_id 5 (via get_librenms_device_id)."""
-        iface = MagicMock()
-        iface.name = name
-        obj = MagicMock()
-        obj.interfaces.all.return_value = [iface]
+        """Build a REAL Device with one interface, so process_ip_sync's _build_interface_maps()
+        takes the production Device branch (Interface.objects.filter(device__in=
+        get_virtual_chassis_members(obj))) instead of the MagicMock obj.interfaces.all() path.
+        The interface is keyed in the map by the patched get_librenms_device_id (5) or its name."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        obj = make_device("ipsync-procipsync-dev")
+        iface = make_interface(obj, name)
         return obj, iface
 
     def test_creates_new_ip_address(self):
@@ -1818,7 +1822,9 @@ class TestSyncIPAddressesViewProcessIpSync:
                     with patch.object(view, "get_vrf_selection", return_value=None):
                         results = view.process_ip_sync(view.request, selected, cached, obj, "device")
         assert "10.0.0.1" in results["created"]
-        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is iface
+        # _build_interface_maps re-fetches the interface from the DB (Device branch); compare by
+        # pk via Django model __eq__ rather than Python `is`.
+        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] == iface
 
     def test_updates_existing_ip_address_different_interface(self):
         view = self._setup_view()
@@ -1837,7 +1843,9 @@ class TestSyncIPAddressesViewProcessIpSync:
                     with patch.object(view, "get_vrf_selection", return_value=None):
                         results = view.process_ip_sync(view.request, selected, cached, obj, "device")
         assert "10.0.0.1" in results["updated"]
-        assert existing_ip.assigned_object is iface
+        # _build_interface_maps re-fetches the interface from the DB (Device branch), so compare
+        # by identity-via-pk (Django model __eq__) rather than Python `is`.
+        assert existing_ip.assigned_object == iface
         existing_ip.save.assert_called_once()
 
     def test_unchanged_ip_address_skipped(self):
@@ -2730,6 +2738,7 @@ class TestSyncVLANsViewHandleCreateVlans:
         mock_msg.warning.assert_called_once()
 
 
+@pytest.mark.django_db
 class TestSyncIPAddressesViewSetPrimaryIp:
     """Phase 1: auto-match the LibreNMS management IP and set it as Primary IP."""
 
@@ -2775,60 +2784,60 @@ class TestSyncIPAddressesViewSetPrimaryIp:
         assert obj.primary_ip6 is ip_obj
 
     def _run_process(self, view, cached, *, mgmt_ip, set_primary=True):
+        """Drive process_ip_sync against a REAL Device + interface so _build_interface_maps()
+        takes the production Device branch. The IP is created for real (no IPAddress mock) so the
+        primary-IP set actually persists onto the device's own interface (what NetBox requires)."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
         selected = ["10.0.0.1"]
-        created_ip = MagicMock(family=4, pk=42)
-        obj = MagicMock()
-        obj.primary_ip4_id = None
-        # The interface is resolved from the object's current interfaces; the
-        # cached row matches it by LibreNMS port id (5) or name ("eth0").
-        mock_iface = MagicMock()
-        mock_iface.name = "eth0"
-        obj.interfaces.all.return_value = [mock_iface]
+        obj = make_device("ipsync-setprimary-dev")
+        make_interface(obj, "eth0")  # matched by LibreNMS port id (5, patched) or name ("eth0")
         with patch("netbox_librenms_plugin.views.sync.ip_addresses.resolve_set_primary_ip", return_value=set_primary):
             with patch.object(view, "get_management_ip", return_value=mgmt_ip) as mock_mgmt:
                 with patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction", _atomic_txn()):
-                    with patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls:
-                        mock_ip_cls.objects.filter.return_value.first.return_value = None
-                        mock_ip_cls.objects.create.return_value = created_ip
-                        with patch(
-                            "netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id",
-                            return_value=5,
-                        ):
-                            with patch.object(view, "get_vrf_selection", return_value=None):
-                                results = view.process_ip_sync(view.request, selected, cached, obj, "device")
-        return results, obj, created_ip, mock_mgmt
+                    with patch(
+                        "netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id",
+                        return_value=5,
+                    ):
+                        with patch.object(view, "get_vrf_selection", return_value=None):
+                            results = view.process_ip_sync(view.request, selected, cached, obj, "device")
+        obj.refresh_from_db()
+        return results, obj, mock_mgmt
 
     def test_primary_set_when_matched_and_interface_assigned(self):
         view = self._setup_view()
         # No interface_name → match can ONLY succeed via port_id, so a port-id regression
         # can't be masked by the name fallback.
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
-        results, obj, created_ip, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
+        results, obj, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
         assert results["primary_set"] == ["10.0.0.1"]
-        assert obj.primary_ip4 is created_ip
+        # The real device now points its primary_ip4 at the (real) created address.
+        assert obj.primary_ip4_id is not None
+        assert str(obj.primary_ip4.address).startswith("10.0.0.1")
 
     def test_primary_skipped_when_no_interface(self):
         view = self._setup_view()
         # No port_id / interface_name match -> interface cannot be resolved.
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_name": None}]
-        results, obj, _, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
+        results, obj, _ = self._run_process(view, cached, mgmt_ip="10.0.0.1")
         assert results["primary_set"] == []
         assert results["primary_no_interface"] == ["10.0.0.1"]
-        obj.save.assert_not_called()
+        assert obj.primary_ip4_id is None  # nothing persisted as primary
 
     def test_primary_skipped_when_ip_does_not_match_mgmt(self):
         view = self._setup_view()
         # No interface_name → match can ONLY succeed via port_id, so a port-id regression
         # can't be masked by the name fallback.
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
-        results, obj, _, _ = self._run_process(view, cached, mgmt_ip="10.9.9.9")
+        results, obj, _ = self._run_process(view, cached, mgmt_ip="10.9.9.9")
         assert results["primary_set"] == []
+        assert obj.primary_ip4_id is None
 
     def test_toggle_off_skips_mgmt_lookup_and_primary(self):
         view = self._setup_view()
         # No interface_name → match can ONLY succeed via port_id, so a port-id regression
         # can't be masked by the name fallback.
         cached = [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5}]
-        results, obj, _, mock_mgmt = self._run_process(view, cached, mgmt_ip="10.0.0.1", set_primary=False)
+        results, obj, mock_mgmt = self._run_process(view, cached, mgmt_ip="10.0.0.1", set_primary=False)
         assert results["primary_set"] == []
         mock_mgmt.assert_not_called()
