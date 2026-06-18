@@ -16,6 +16,34 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+
+def _seed_lib_id(iface, value, server_key="default"):
+    """Seed an interface's librenms_id custom field under *server_key*."""
+    iface.custom_field_data["librenms_id"] = {server_key: value}
+    iface.save()
+
+
+def _vc_with_member(vc_name, master_name, member_name, member_pos=1):
+    """Create a real VirtualChassis with a master (pos 9) and one member at *member_pos*.
+
+    Returns (master, member). ``get_virtual_chassis_member`` maps a port like
+    ``Gi<member_pos>/...`` to *member*.
+    """
+    from dcim.models import VirtualChassis
+
+    vc = VirtualChassis.objects.create(name=vc_name)
+    master = make_device(master_name)
+    master.virtual_chassis = vc
+    master.vc_position = 9
+    master.save()
+    member = make_device(member_name)
+    member.virtual_chassis = vc
+    member.vc_position = member_pos
+    member.save()
+    return master, member
+
 
 # =============================================================================
 # Helpers
@@ -485,8 +513,9 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestGetDeviceByIdOrNameEdgeCases:
-    """Tests for get_device_by_id_or_name edge cases (lines 123-126, 144-145)."""
+    """Real-DB tests for get_device_by_id_or_name edge cases."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -497,20 +526,12 @@ class TestGetDeviceByIdOrNameEdgeCases:
         return view
 
     def test_multiple_objects_returned_for_librenms_id(self):
-        """MultipleObjectsReturned on librenms_id → (None, False, error message)."""
-        from django.core.exceptions import MultipleObjectsReturned
-
+        """Two devices sharing librenms_id 42 → MultipleObjectsReturned → (None, False, error)."""
         view = self._make_view()
+        make_device("dup-id-a", librenms_cf={"default": 42})
+        make_device("dup-id-b", librenms_cf={"default": 42})
 
-        with patch("netbox_librenms_plugin.views.base.cables_view.Device") as MockDevice:
-            # Use a narrow DoesNotExist so it doesn't swallow MultipleObjectsReturned
-            class _DoesNotExist(Exception):
-                pass
-
-            MockDevice.DoesNotExist = _DoesNotExist
-            MockDevice.objects.get.side_effect = MultipleObjectsReturned
-
-            device, found, error = view.get_device_by_id_or_name(42, "switch.example.com")
+        device, found, error = view.get_device_by_id_or_name(42, "switch.example.com")
 
         assert device is None
         assert found is False
@@ -518,30 +539,14 @@ class TestGetDeviceByIdOrNameEdgeCases:
         assert "42" in error
 
     def test_fqdn_fails_simple_hostname_succeeds(self):
-        """FQDN lookup raises DoesNotExist; short hostname lookup succeeds (lines 144-145)."""
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+        """FQDN not found; the short hostname (before the first dot) resolves to a real device."""
+        view = self._make_view()
+        dev = make_device("switch")  # only the short name exists
 
-        view = object.__new__(BaseCableTableView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-
-        mock_device = MagicMock()
-
-        with patch("netbox_librenms_plugin.views.base.cables_view.Device") as MockDevice:
-
-            class _DoesNotExist(Exception):
-                pass
-
-            MockDevice.DoesNotExist = _DoesNotExist
-            # remote_device_id=None → skip librenms_id lookup, go straight to name
-            # First get() (FQDN "switch.example.com") raises DoesNotExist
-            # Second get() (simple "switch") succeeds
-            MockDevice.objects.get.side_effect = [_DoesNotExist, mock_device]
-
-            device, found, error = view.get_device_by_id_or_name(None, "switch.example.com")
+        device, found, error = view.get_device_by_id_or_name(None, "switch.example.com")
 
         assert found is True
-        assert device is mock_device
+        assert device == dev
         assert error is None
 
 
@@ -550,8 +555,9 @@ class TestGetDeviceByIdOrNameEdgeCases:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestEnrichLocalPortVC:
-    """Tests for enrich_local_port when obj.virtual_chassis is truthy."""
+    """Real-DB test for enrich_local_port when obj.virtual_chassis is truthy."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -561,36 +567,17 @@ class TestEnrichLocalPortVC:
         view._librenms_api.server_key = "default"
         return view
 
-    def test_vc_path_calls_get_virtual_chassis_member(self):
-        """VC device → get_virtual_chassis_member called; interface URL set."""
+    def test_vc_path_resolves_member_interface(self):
+        """VC device → the port's slot number selects the member; its interface URL is set."""
         view = self._make_view()
+        master, member = _vc_with_member("vc-elp", "elp-master", "elp-member", member_pos=1)
+        iface = make_interface(member, "Gi1/0/0")  # "Gi1/..." → vc_position 1 → member
 
-        obj = MagicMock()
-        obj.virtual_chassis = MagicMock()  # truthy
+        link = {"local_port": "Gi1/0/0", "local_port_id": 10}
+        view.enrich_local_port(link, master)
 
-        mock_interface = MagicMock()
-        mock_interface.pk = 99
-
-        mock_member = MagicMock()
-        mock_member.interfaces.filter.return_value.first.return_value = mock_interface
-
-        link = {"local_port": "Gi0/0", "local_port_id": 10}
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member",
-                return_value=mock_member,
-            ) as mock_vc,
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                return_value="/dcim/interfaces/99/",
-            ),
-        ):
-            view.enrich_local_port(link, obj)
-
-        mock_vc.assert_called_once_with(obj, "Gi0/0")
-        assert link.get("local_port_url") == "/dcim/interfaces/99/"
-        assert link.get("netbox_local_interface_id") == 99
+        assert link.get("netbox_local_interface_id") == iface.pk
+        assert link.get("local_port_url", "").endswith(f"/dcim/interfaces/{iface.pk}/")
 
 
 # =============================================================================
@@ -598,8 +585,9 @@ class TestEnrichLocalPortVC:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestEnrichRemotePort:
-    """Tests for enrich_remote_port VC and non-VC paths."""
+    """Real-DB tests for enrich_remote_port VC and non-VC paths."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -610,140 +598,69 @@ class TestEnrichRemotePort:
         return view
 
     def test_vc_path_finds_by_librenms_id(self):
-        """VC device: remote interface found by librenms_id; URL/name/id set."""
+        """VC device: remote interface found on the slot member by librenms_id."""
         view = self._make_view()
-
-        device = MagicMock()
-        device.virtual_chassis = MagicMock()  # truthy
-
-        mock_interface = MagicMock()
-        mock_interface.pk = 77
-        mock_interface.name = "Gi1/0/1"
-
-        mock_member = MagicMock()
-        mock_member.interfaces.filter.return_value.first.return_value = mock_interface
+        master, member = _vc_with_member("vc-erp1", "erp1-master", "erp1-member", member_pos=1)
+        iface = make_interface(member, "Gi1/0/1")
+        _seed_lib_id(iface, 20)
 
         link = {"remote_port": "Gi1/0/1", "remote_port_id": 20}
+        result = view.enrich_remote_port(link, master)
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member",
-                return_value=mock_member,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                return_value="/dcim/interfaces/77/",
-            ),
-        ):
-            result = view.enrich_remote_port(link, device)
-
-        assert result["netbox_remote_interface_id"] == 77
-        assert result["remote_port_url"] == "/dcim/interfaces/77/"
+        assert result["netbox_remote_interface_id"] == iface.pk
+        assert result["remote_port_url"].endswith(f"/dcim/interfaces/{iface.pk}/")
         assert result["remote_port_name"] == "Gi1/0/1"
 
     def test_vc_path_falls_back_to_name_when_librenms_id_miss(self):
-        """VC device: librenms_id lookup returns None → falls back to name match."""
+        """VC device: librenms_id lookup misses (no CF) → falls back to name match."""
         view = self._make_view()
+        master, member = _vc_with_member("vc-erp2", "erp2-master", "erp2-member", member_pos=1)
+        iface = make_interface(member, "Gi1/0/2")  # no librenms_id seeded
 
-        device = MagicMock()
-        device.virtual_chassis = MagicMock()  # truthy
+        link = {"remote_port": "Gi1/0/2", "remote_port_id": 20}  # id 20 matches nothing
+        result = view.enrich_remote_port(link, master)
 
-        mock_interface = MagicMock()
-        mock_interface.pk = 55
-        mock_interface.name = "Gi1/0/2"
-
-        mock_member = MagicMock()
-        # remote_port_id=20 (truthy) → librenms_id filter called (returns None),
-        # then name filter called (returns interface)
-        mock_member.interfaces.filter.return_value.first.side_effect = [None, mock_interface]
-
-        link = {"remote_port": "Gi1/0/2", "remote_port_id": 20}
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member",
-                return_value=mock_member,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                return_value="/dcim/interfaces/55/",
-            ),
-        ):
-            result = view.enrich_remote_port(link, device)
-
-        assert result["netbox_remote_interface_id"] == 55
+        assert result["netbox_remote_interface_id"] == iface.pk
 
     def test_non_vc_path_finds_by_librenms_id(self):
-        """Non-VC device: remote interface found by librenms_id; URL/name/id set."""
+        """Non-VC device: remote interface found by librenms_id."""
         view = self._make_view()
-
-        device = MagicMock()
-        device.virtual_chassis = None  # falsy
-
-        mock_interface = MagicMock()
-        mock_interface.pk = 33
-        mock_interface.name = "eth0"
-
-        device.interfaces.filter.return_value.first.return_value = mock_interface
+        device = make_device("erp-nonvc-id")
+        iface = make_interface(device, "eth0")
+        _seed_lib_id(iface, 15)
 
         link = {"remote_port": "eth0", "remote_port_id": 15}
+        result = view.enrich_remote_port(link, device)
 
-        with patch(
-            "netbox_librenms_plugin.views.base.cables_view.reverse",
-            return_value="/dcim/interfaces/33/",
-        ):
-            result = view.enrich_remote_port(link, device)
-
-        assert result["netbox_remote_interface_id"] == 33
-        assert result["remote_port_url"] == "/dcim/interfaces/33/"
+        assert result["netbox_remote_interface_id"] == iface.pk
+        assert result["remote_port_url"].endswith(f"/dcim/interfaces/{iface.pk}/")
         assert result["remote_port_name"] == "eth0"
 
     def test_non_vc_path_falls_back_to_name(self):
-        """Non-VC device: librenms_id lookup returns None → falls back to name match."""
+        """Non-VC device: librenms_id lookup misses → falls back to name match."""
         view = self._make_view()
+        device = make_device("erp-nonvc-name")
+        iface = make_interface(device, "eth1")  # no librenms_id seeded
 
-        device = MagicMock()
-        device.virtual_chassis = None  # falsy
+        link = {"remote_port": "eth1", "remote_port_id": 15}  # id matches nothing
+        result = view.enrich_remote_port(link, device)
 
-        mock_interface = MagicMock()
-        mock_interface.pk = 44
-        mock_interface.name = "eth1"
-
-        # remote_port_id=15 (truthy) → librenms_id filter called first (returns None),
-        # then name filter called (returns interface)
-        device.interfaces.filter.return_value.first.side_effect = [None, mock_interface]
-
-        link = {"remote_port": "eth1", "remote_port_id": 15}
-
-        with patch(
-            "netbox_librenms_plugin.views.base.cables_view.reverse",
-            return_value="/dcim/interfaces/44/",
-        ):
-            result = view.enrich_remote_port(link, device)
-
-        assert result["netbox_remote_interface_id"] == 44
+        assert result["netbox_remote_interface_id"] == iface.pk
 
     def test_no_remote_port_key_returns_none(self):
         """When link has no 'remote_port', method falls through and returns None."""
         view = self._make_view()
-        device = MagicMock()
-        link = {}  # No remote_port key
-
-        result = view.enrich_remote_port(link, device)
+        device = make_device("erp-nokey")
+        result = view.enrich_remote_port({}, device)
         assert result is None
 
     def test_interface_not_found_does_not_set_url(self):
-        """When no remote interface found, url/id keys are not set."""
+        """When no remote interface matches by id or name, url/id keys are not set."""
         view = self._make_view()
-
-        device = MagicMock()
-        device.virtual_chassis = None
-
-        # Both lookups return None
-        device.interfaces.filter.return_value.first.return_value = None
+        device = make_device("erp-nomatch")
+        make_interface(device, "eth9")  # present but not referenced
 
         link = {"remote_port": "eth2", "remote_port_id": 99}
-
         result = view.enrich_remote_port(link, device)
 
         assert "remote_port_url" not in result
@@ -755,8 +672,13 @@ class TestEnrichRemotePort:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestProcessRemoteDevice:
-    """Tests for process_remote_device found=True and found=False paths."""
+    """Real-DB tests for process_remote_device found=True and found=False paths.
+
+    The real get_device_by_id_or_name + enrich_remote_port run end-to-end against
+    real Device rows, so the orchestration is exercised through the actual sub-calls
+    rather than stubbed return tuples."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -766,55 +688,39 @@ class TestProcessRemoteDevice:
         view._librenms_api.server_key = "default"
         return view
 
-    def test_found_true_sets_remote_device_url_and_calls_enrich(self):
-        """found=True → sets remote_device_url, netbox_remote_device_id, calls enrich_remote_port."""
+    def test_found_true_sets_remote_device_url(self):
+        """A real remote device resolved by name → remote_device_url + id set (real reverse)."""
         view = self._make_view()
-
-        mock_device = MagicMock()
-        mock_device.pk = 5
+        remote = make_device("switch-b")
 
         link = {"remote_port": "Gi0/1", "remote_port_id": None}
+        result = view.process_remote_device(link, "switch-b", None)
 
-        with (
-            patch.object(view, "get_device_by_id_or_name", return_value=(mock_device, True, None)),
-            patch.object(
-                view, "enrich_remote_port", side_effect=lambda link, *_args, **_kwargs: dict(link)
-            ) as mock_enrich,
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                return_value="/dcim/devices/5/",
-            ),
-        ):
-            result = view.process_remote_device(link, "switch-b", 99)
-
-        assert result["remote_device_url"] == "/dcim/devices/5/"
-        assert result["netbox_remote_device_id"] == 5
-        mock_enrich.assert_called_once()
+        assert result["netbox_remote_device_id"] == remote.pk
+        assert result["remote_device_url"].endswith(f"/dcim/devices/{remote.pk}/")
 
     def test_found_false_with_error_message(self):
-        """found=False with error_message → cable_status set to the error."""
+        """Two devices share the name → ambiguity error surfaces as cable_status."""
+        from dcim.models import Device, Site
+
         view = self._make_view()
+        d1 = make_device("switch-b")
+        site2 = Site.objects.create(name="prd-site2", slug="prd-site2")
+        Device.objects.create(name="switch-b", device_type=d1.device_type, role=d1.role, site=site2, status="active")
 
         link = {"remote_port": "Gi0/1", "remote_port_id": None}
+        result = view.process_remote_device(link, "switch-b", None)
 
-        with patch.object(
-            view,
-            "get_device_by_id_or_name",
-            return_value=(None, False, "Multiple devices found: 99"),
-        ):
-            result = view.process_remote_device(link, "switch-b", 99)
-
-        assert result["cable_status"] == "Multiple devices found: 99"
+        assert "Multiple devices found" in result["cable_status"]
         assert result["can_create_cable"] is False
 
     def test_found_false_without_error_message_uses_default(self):
-        """found=False, error_message=None → cable_status = 'Device Not Found in NetBox'."""
+        """No device matches → cable_status = 'Device Not Found in NetBox'."""
         view = self._make_view()
+        make_device("some-other-device")
 
         link = {"remote_port": "Gi0/1", "remote_port_id": None}
-
-        with patch.object(view, "get_device_by_id_or_name", return_value=(None, False, None)):
-            result = view.process_remote_device(link, "switch-b", None)
+        result = view.process_remote_device(link, "switch-b", None)
 
         assert result["cable_status"] == "Device Not Found in NetBox"
         assert result["can_create_cable"] is False
@@ -2120,33 +2026,23 @@ class TestSingleIPAddressVerifyViewPost:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestGetDeviceByIdOrNameLine124:
-    """Test that DoesNotExist on librenms_id lookup falls through to name lookup (line 124)."""
+    """DoesNotExist on librenms_id lookup falls through to name lookup (real DB)."""
 
     def test_librenms_id_doesnotexist_falls_through_to_name(self):
-        """remote_device_id provided but DoesNotExist → falls through to name match."""
+        """remote_device_id 42 matches no device → falls through to the name lookup, which hits."""
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
         view = object.__new__(BaseCableTableView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        dev = make_device("switch-a")  # no librenms_id 42 anywhere → id lookup misses, name hits
 
-        mock_device = MagicMock()
-
-        with patch("netbox_librenms_plugin.views.base.cables_view.Device") as MockDevice:
-
-            class _DoesNotExist(Exception):
-                pass
-
-            MockDevice.DoesNotExist = _DoesNotExist
-            # First call: librenms_id lookup → DoesNotExist (line 124: pass)
-            # Second call: name lookup → success
-            MockDevice.objects.get.side_effect = [_DoesNotExist, mock_device]
-
-            device, found, error = view.get_device_by_id_or_name(42, "switch-a")
+        device, found, error = view.get_device_by_id_or_name(42, "switch-a")
 
         assert found is True
-        assert device is mock_device
+        assert device == dev
 
 
 # =============================================================================
@@ -2154,30 +2050,24 @@ class TestGetDeviceByIdOrNameLine124:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestGetDeviceByIdOrNameSimpleHostnameMultiple:
-    """MultipleObjectsReturned when searching by simple hostname (lines 144-145)."""
+    """MultipleObjectsReturned when searching by simple hostname (real DB)."""
 
     def test_simple_hostname_multiple_returns_error(self):
-        """FQDN DoesNotExist, simple hostname raises MultipleObjectsReturned → (None, False, msg)."""
-        from django.core.exceptions import MultipleObjectsReturned
+        """FQDN not found; the short hostname matches two devices (across sites) → error."""
+        from dcim.models import Device, Site
+
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
         view = object.__new__(BaseCableTableView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        d1 = make_device("switch")  # short name, on the shared site
+        site2 = Site.objects.create(name="shmult-site2", slug="shmult-site2")
+        Device.objects.create(name="switch", device_type=d1.device_type, role=d1.role, site=site2, status="active")
 
-        with patch("netbox_librenms_plugin.views.base.cables_view.Device") as MockDevice:
-
-            class _DoesNotExist(Exception):
-                pass
-
-            MockDevice.DoesNotExist = _DoesNotExist
-            # remote_device_id=None → skip librenms_id
-            # First get() (FQDN) → DoesNotExist
-            # Second get() (simple hostname) → MultipleObjectsReturned
-            MockDevice.objects.get.side_effect = [_DoesNotExist, MultipleObjectsReturned]
-
-            device, found, error = view.get_device_by_id_or_name(None, "switch.example.com")
+        device, found, error = view.get_device_by_id_or_name(None, "switch.example.com")
 
         assert device is None
         assert found is False
@@ -2190,78 +2080,39 @@ class TestGetDeviceByIdOrNameSimpleHostnameMultiple:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestEnrichLocalPortVCNameFallback:
-    """Tests for enrich_local_port VC path name fallback when librenms_id miss (line 174)."""
+    """Real-DB tests for enrich_local_port VC-path name fallback (line 174)."""
 
     def test_vc_name_fallback_when_librenms_id_miss(self):
-        """VC path: librenms_id lookup returns None → falls back to name lookup (line 174)."""
+        """VC path: librenms_id lookup misses (no CF) → falls back to name lookup."""
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
         view = object.__new__(BaseCableTableView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        master, member = _vc_with_member("vc-elpnf1", "elpnf1-m", "elpnf1-mem", member_pos=1)
+        iface = make_interface(member, "Gi1/0/0")  # no librenms_id seeded → name fallback
 
-        obj = MagicMock()
-        obj.virtual_chassis = MagicMock()  # truthy
+        link = {"local_port": "Gi1/0/0", "local_port_id": 10}  # id 10 matches nothing
+        view.enrich_local_port(link, master)
 
-        mock_interface = MagicMock()
-        mock_interface.pk = 88
-
-        mock_member = MagicMock()
-        # librenms_id lookup (first .first()) returns None → triggers name fallback
-        # name lookup (second .first()) returns the interface
-        mock_member.interfaces.filter.return_value.first.side_effect = [None, mock_interface]
-
-        link = {"local_port": "Gi0/0", "local_port_id": 10}
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member",
-                return_value=mock_member,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                return_value="/dcim/interfaces/88/",
-            ),
-        ):
-            view.enrich_local_port(link, obj)
-
-        assert link.get("netbox_local_interface_id") == 88
+        assert link.get("netbox_local_interface_id") == iface.pk
 
     def test_vc_no_local_port_id_goes_straight_to_name(self):
-        """VC path with local_port_id=None → skips librenms_id, goes to name lookup (line 174)."""
+        """VC path with local_port_id=None → skips librenms_id, resolves by name."""
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
         view = object.__new__(BaseCableTableView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        master, member = _vc_with_member("vc-elpnf2", "elpnf2-m", "elpnf2-mem", member_pos=1)
+        iface = make_interface(member, "Gi1/0/0")
 
-        obj = MagicMock()
-        obj.virtual_chassis = MagicMock()  # truthy
+        link = {"local_port": "Gi1/0/0", "local_port_id": None}
+        view.enrich_local_port(link, master)
 
-        mock_interface = MagicMock()
-        mock_interface.pk = 77
-
-        mock_member = MagicMock()
-        mock_member.interfaces.filter.return_value.first.return_value = mock_interface
-
-        # local_port_id=None → `if local_port_id:` is False → skips librenms_id
-        # → goes directly to line 174 (name lookup)
-        link = {"local_port": "Gi0/0", "local_port_id": None}
-
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member",
-                return_value=mock_member,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                return_value="/dcim/interfaces/77/",
-            ),
-        ):
-            view.enrich_local_port(link, obj)
-
-        assert link.get("netbox_local_interface_id") == 77
+        assert link.get("netbox_local_interface_id") == iface.pk
 
 
 # =============================================================================
