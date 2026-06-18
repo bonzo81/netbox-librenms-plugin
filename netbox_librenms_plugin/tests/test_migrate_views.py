@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Shared real-DB builders (see tests/conftest.py).
-from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_interface, make_ip
 
 
 # ── helper: get_migrated_to_marker ────────────────────────────────────────
@@ -191,173 +191,109 @@ def _hx_request(post=None):
     return req
 
 
+@pytest.mark.django_db
 class TestMoveInterfaceToWinnerView:
     def _setup_view(self):
         from netbox_librenms_plugin.views.sync.migrate import MoveInterfaceToWinnerView
 
         view = MoveInterfaceToWinnerView()
+        # The plugin-write + object-perm gate is exercised separately in
+        # test_perm_gate_short_circuits; null it here so each test drives the real
+        # move logic against real rows.
         view.require_all_permissions = MagicMock(return_value=None)
         return view
 
+    @staticmethod
+    def _mark(donor, winner):
+        """Write a real ``_migrated_to`` marker so the view's _resolve_winner_for_donor()
+        reads it from the donor's librenms_id custom field for real."""
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
     def test_rejects_when_donor_has_no_marker(self):
+        # Real donor with no migration marker → the move is refused and the interface
+        # stays put. No queryset patching: the marker read runs against the real cf.
         view = self._setup_view()
+        donor = make_device("mi-nomark-donor")
+        interface = make_interface(donor, "Eth0")
         req = _hx_request({"server_key": "default"})
 
-        donor = MagicMock(pk=10, cf={})
-        interface = MagicMock(pk=5, name="Eth0", device=donor)
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(None, None),
-            ),
-        ):
-            resp = view.post(req, pk=5)
+        resp = view.post(req, pk=interface.pk)
 
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
+        # Reject path flows through _fail(): HX-Reswap:none and never the success
+        # HX-Refresh header (a regression that "succeeded" would set HX-Refresh=true).
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
+        interface.refresh_from_db()
+        assert interface.device_id == donor.pk  # not moved
 
     def test_rejects_on_name_collision(self):
+        # The winner already has a same-named interface → the real collision query finds
+        # it and the move is refused; the donor interface is not reassigned.
         view = self._setup_view()
+        donor = make_device("mi-coll-donor")
+        winner = make_device("mi-coll-winner")
+        self._mark(donor, winner)
+        interface = make_interface(donor, "Eth0")
+        make_interface(winner, "Eth0")  # collision on the winner side
         req = _hx_request({"server_key": "default"})
 
-        donor = MagicMock(pk=10)
-        winner = MagicMock(pk=20, name="winner")
-        interface = MagicMock(pk=5, name="Eth0", device=donor)
+        resp = view.post(req, pk=interface.pk)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
-        ):
-            mock_iface_cls.objects.filter.return_value.exists.return_value = True
-            resp = view.post(req, pk=5)
-
-        # Lock in the actual collision query (winner device + same interface name).
-        mock_iface_cls.objects.filter.assert_called_with(device=winner, name=interface.name)
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
-        # Prove the collision reject moved/persisted nothing before the toast: a regression
-        # that reassigned the interface to the winner (then errored) would still 200 here.
-        assert interface.device is donor
-        interface.save.assert_not_called()
-        winner.save.assert_not_called()
+        interface.refresh_from_db()
+        assert interface.device_id == donor.pk  # stayed on the donor
 
     def test_happy_path_reassigns_device_and_returns_hx_refresh(self):
+        # Real end-to-end move: the interface row's device FK is reassigned to the winner
+        # through the view's full_clean()+save() path, and the reload proves it persisted.
         view = self._setup_view()
+        donor = make_device("mi-happy-donor")
+        winner = make_device("mi-happy-winner")
+        self._mark(donor, winner)
+        interface = make_interface(donor, "Eth0")
         req = _hx_request({"server_key": "default"})
 
-        donor = MagicMock(pk=10)
-        winner = MagicMock(pk=20, name="winner")
-        interface = MagicMock(pk=5, name="Eth0", device=donor)
-        # The donor interface re-read under the row lock — distinct from the
-        # pre-lock instance, with an explicit (non-MagicMock-name) name so the
-        # collision re-check is asserted against the *locked* name.
-        locked_iface = MagicMock(pk=5, device=donor)
-        locked_iface.name = "Eth0"
+        resp = view.post(req, pk=interface.pk)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
-            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
-        ):
-            # All objects.filter() calls are collision probes now: the move mutates and
-            # saves the locked interface rather than running a filter(pk=...).update().
-            collision_qs = MagicMock()
-            collision_qs.exists.return_value = False
-            mock_iface_cls.objects.filter.return_value = collision_qs
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
-            # Locked device rows (donor + winner) are now captured and re-verified
-            # against the migration marker under the lock.
-            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
-                donor,
-                winner,
-            ]
-            resp = view.post(req, pk=5)
-
-        # Donor interface is locked + re-read by (pk, device=donor) before the move.
-        mock_iface_cls.objects.select_for_update.return_value.filter.assert_called_with(pk=interface.pk, device=donor)
-        # Collision re-check uses the LOCKED interface name on the winner device.
-        mock_iface_cls.objects.filter.assert_any_call(device=winner, name=locked_iface.name)
-        # The move runs Interface.clean() via full_clean()+save() on the LOCKED row — a
-        # bare .update() would bypass the cross-device parent/lag/bridge validation.
-        assert locked_iface.device is winner
-        locked_iface.full_clean.assert_called_once()
-        locked_iface.save.assert_called_once()
-        # The pre-lock instance is never the one persisted.
-        interface.save.assert_not_called()
+        assert resp.status_code == 200
         assert resp.headers.get("HX-Refresh") == "true"
+        interface.refresh_from_db()
+        assert interface.device_id == winner.pk  # really moved to the winner
 
     def test_cross_device_relationship_rejected_with_409(self):
-        """If the move would leave the interface with a parent/lag/bridge on the donor
-        (a cross-device link), full_clean() raises and the move is rejected, not saved."""
-        from django.core.exceptions import ValidationError
-
+        """Real cross-device LAG: the donor interface is a member of a LAG that lives on the
+        donor. Moving only the member to the winner would leave its ``lag`` on the donor —
+        NetBox's real Interface.clean() rejects that, so the move aborts and nothing persists.
+        (Previously this injected the ValidationError via a mock side_effect; now the actual
+        validator runs.)"""
         view = self._setup_view()
+        donor = make_device("mi-xdev-donor")
+        winner = make_device("mi-xdev-winner")
+        self._mark(donor, winner)
+        donor_lag = make_interface(donor, "Po1", iface_type="lag")
+        member = make_interface(donor, "Eth0")
+        member.lag = donor_lag  # member's LAG lives on the donor
+        member.save()
         req = _hx_request({"server_key": "default"})
 
-        donor = MagicMock(pk=10)
-        winner = MagicMock(pk=20)
-        winner.name = "winner"
-        interface = MagicMock(pk=5, device=donor)
-        interface.name = "Eth0"
-        locked_iface = MagicMock(pk=5, device=donor)
-        locked_iface.name = "Eth0"
-        locked_iface.full_clean.side_effect = ValidationError({"lag": ["Must belong to the same device."]})
+        resp = view.post(req, pk=member.pk)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=interface),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
-            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
-        ):
-            collision_qs = MagicMock()
-            collision_qs.exists.return_value = False
-            mock_iface_cls.objects.filter.return_value = collision_qs
-            mock_iface_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
-            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
-                donor,
-                winner,
-            ]
-            resp = view.post(req, pk=5)
-
-        # clean() failed → row not saved, error surfaced via the OOB toast (HTMX path).
-        # HTMX errors are signalled by the OOB toast at HTTP 200 (see _fail docstring),
-        # not by the status code; assert the *absence* of the success HX-Refresh header
-        # so this stays distinct from the success response, which sets HX-Refresh=true.
-        locked_iface.full_clean.assert_called_once()
-        locked_iface.save.assert_not_called()
+        # full_clean() failed for real → row not saved, error surfaced via the OOB toast.
         assert b"django-messages" in resp.content
-        # Error contract (see _fail): HTMX errors are an OOB toast at HTTP 200 with
-        # HX-Reswap:none and no HX-Refresh — never the success refresh response.
         assert resp.status_code == 200
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
+        member.refresh_from_db()
+        assert member.device_id == donor.pk  # not moved
+        assert member.lag_id == donor_lag.pk  # relationship untouched
 
     def test_save_integrity_error_rejected_with_409(self):
         """A concurrent winner-side rename/create can trip a unique constraint at save()
@@ -469,6 +405,7 @@ class TestMoveInterfaceToWinnerView:
 # ── TransferDeviceIPView ──────────────────────────────────────────────────
 
 
+@pytest.mark.django_db
 class TestTransferDeviceIPView:
     def _setup_view(self):
         from netbox_librenms_plugin.views.sync.migrate import TransferDeviceIPView
@@ -477,165 +414,98 @@ class TestTransferDeviceIPView:
         view.require_all_permissions = MagicMock(return_value=None)
         return view
 
+    @staticmethod
+    def _mark(donor, winner):
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
     def test_unknown_ip_kind_rejected(self):
+        # Pure guard clause before any DB work: an unknown ip_kind is rejected outright,
+        # so a bare request (no device needed) is sufficient.
         view = self._setup_view()
         req = _hx_request()
         resp = view.post(req, pk=10, ip_kind="bogus")
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
 
     def test_rejects_when_winner_already_has_field(self):
+        # Real rows: both donor and winner already have a primary IPv4 → the transfer is
+        # refused (the winner slot is occupied) and neither device's FK is touched.
         view = self._setup_view()
+        donor = make_device("tx-occ-donor")
+        winner = make_device("tx-occ-winner")
+        self._mark(donor, winner)
+        donor_ip = ip_on(donor, "10.0.0.1/24", "mgmt0")
+        winner_ip = ip_on(winner, "10.0.0.99/24", "mgmt0")
+        donor.primary_ip4 = donor_ip
+        donor.save()
+        winner.primary_ip4 = winner_ip
+        winner.save()
         req = _hx_request({"server_key": "default"})
 
-        donor_ip = MagicMock(address="10.0.0.1/24")
-        donor = MagicMock(pk=10, primary_ip4=donor_ip)
-        winner = MagicMock(pk=20, name="winner", primary_ip4=MagicMock(address="10.0.0.99/24"))
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=donor),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-        ):
-            resp = view.post(req, pk=10, ip_kind="primary4")
+        resp = view.post(req, pk=donor.pk, ip_kind="primary4")
 
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
-        # Prove the reject left the donor's IP field intact and persisted neither device:
-        # a regression that cleared/moved primary_ip4 before the toast would still 200 here.
-        assert donor.primary_ip4 is donor_ip
-        donor.save.assert_not_called()
-        winner.save.assert_not_called()
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.primary_ip4_id == donor_ip.pk  # donor FK intact
+        assert winner.primary_ip4_id == winner_ip.pk  # winner FK intact
 
     def test_happy_path_transfers_oob_ip(self):
+        """Real unique-constraint ordering: ``Device.oob_ip`` is UNIQUE per address, so the
+        donor must release the FK before the winner claims it. The address already lives on a
+        winner-owned interface (NetBox requires oob_ip on one of the device's own interfaces);
+        the donor's FK dangles at it after a prior interface move. Driving real rows exercises
+        the actual constraint — a reversed save order would trip it for real."""
         view = self._setup_view()
+        donor = make_device("tx-happy-donor")
+        winner = make_device("tx-happy-winner")
+        self._mark(donor, winner)
+        # Address sits on a WINNER interface; donor.oob_ip dangles at it (save skips clean()).
+        oob_ip = ip_on(winner, "10.0.0.5/24", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
         req = _hx_request({"server_key": "default"})
 
-        from dcim.models import Interface as InterfaceModel
+        resp = view.post(req, pk=donor.pk, ip_kind="oob")
 
-        oob_ip = MagicMock(address="10.0.0.5/24")
-        # The address must already belong to the winner for the transfer to be valid
-        # (NetBox requires oob_ip on one of the device's own interfaces). The owning
-        # interface is re-locked, so the locked row carries the winner's device_id.
-        # spec=Interface so the view's isinstance(assigned, Interface) guard accepts it.
-        oob_ip.assigned_object = MagicMock(spec=InterfaceModel)
-        oob_ip.assigned_object.pk = 99
-        locked_iface = MagicMock(pk=99, device_id=20)
-        # Pre-lock instances drive the pre-checks only; the view must mutate the
-        # *locked* rows fetched inside the transaction.
-        donor = MagicMock(pk=10, oob_ip=oob_ip)
-        winner = MagicMock(pk=20, name="winner", oob_ip=None)
-        locked_donor = MagicMock(pk=10, oob_ip=oob_ip)
-        locked_winner = MagicMock(pk=20, name="winner", oob_ip=None)
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=donor),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
-            # Patch only the manager so Interface stays a real class for the isinstance guard.
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface.objects") as mock_iface_objects,
-            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
-            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
-        ):
-            # Locked queryset returns DISTINCT mocks so the test fails if the view
-            # mutates the stale pre-lock instances instead of the locked rows.
-            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
-                locked_donor,
-                locked_winner,
-            ]
-            # The IPAddress row is now re-fetched under select_for_update; return the same
-            # logical address so its assignment is validated from the locked row.
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
-            # The owning interface is re-locked; return a row owned by the winner (device_id=20).
-            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
-            # device oob_ip/primary_ip FKs are UNIQUE per address — the donor must release the FK
-            # before the winner claims it. Capture save() order to pin that ordering.
-            save_order = MagicMock()
-            save_order.attach_mock(locked_donor.save, "donor_save")
-            save_order.attach_mock(locked_winner.save, "winner_save")
-            resp = view.post(req, pk=10, ip_kind="oob")
-        # The locked rows are the ones mutated and saved.
-        assert locked_donor.oob_ip is None
-        assert locked_winner.oob_ip is oob_ip
-        # Pin the targeted FK-only save: a regression to a full save() would run
-        # full_clean() and reject the merge over pre-existing device inconsistencies.
-        locked_winner.save.assert_called_once_with(update_fields=["oob_ip"])
-        locked_donor.save.assert_called_once_with(update_fields=["oob_ip"])
-        # Donor save MUST precede winner save (unique-per-address FK); the reverse order would
-        # trip the unique constraint with the donor still holding the address.
-        _save_names = [c[0] for c in save_order.mock_calls]
-        assert _save_names.index("donor_save") < _save_names.index("winner_save")
-        # Stale pre-lock instances must be left untouched.
-        donor.save.assert_not_called()
-        winner.save.assert_not_called()
         assert resp.headers.get("HX-Refresh") == "true"
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert winner.oob_ip_id == oob_ip.pk  # winner claimed it
+        assert donor.oob_ip_id is None  # donor released it
 
     def test_rejects_when_address_still_attached_to_donor(self):
-        """The transfer only flips the FK (save skips full_clean), so it must refuse to
-        point the winner at an address still assigned to a donor interface — otherwise the
-        winner would own an oob_ip/primary_ip that isn't on one of its interfaces."""
+        """The transfer only flips the FK (save skips full_clean), so it must refuse to point
+        the winner at an address still assigned to a DONOR interface — otherwise the winner
+        would own an oob_ip that isn't on one of its interfaces. Driven against real rows:
+        the owning interface's real device_id is what the view checks."""
         view = self._setup_view()
+        donor = make_device("tx-attached-donor")
+        winner = make_device("tx-attached-winner")
+        self._mark(donor, winner)
+        # Address sits on a DONOR interface (device_id == donor), so the transfer must refuse.
+        oob_ip = ip_on(donor, "10.0.0.5/24", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
         req = _hx_request({"server_key": "default"})
 
-        from dcim.models import Interface as InterfaceModel
+        resp = view.post(req, pk=donor.pk, ip_kind="oob")
 
-        oob_ip = MagicMock(address="10.0.0.5/24")
-        oob_ip.assigned_object = MagicMock(spec=InterfaceModel)
-        oob_ip.assigned_object.pk = 99
-        locked_iface = MagicMock(pk=99, device_id=10)  # still on the DONOR, not the winner
-        donor = MagicMock(pk=10, oob_ip=oob_ip)
-        winner = MagicMock(pk=20, name="winner", oob_ip=None)
-        locked_donor = MagicMock(pk=10, oob_ip=oob_ip)
-        locked_winner = MagicMock(pk=20, name="winner", oob_ip=None)
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=donor),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch("netbox_librenms_plugin.views.sync.migrate.Device") as mock_device_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.migrate.Interface.objects") as mock_iface_objects,
-            patch("netbox_librenms_plugin.views.sync.migrate.transaction"),
-            patch("netbox_librenms_plugin.views.sync.migrate.messages"),
-        ):
-            mock_device_cls.objects.select_for_update.return_value.filter.return_value.order_by.return_value = [
-                locked_donor,
-                locked_winner,
-            ]
-            # Locked re-fetch returns the address still assigned to the donor (device_id=10).
-            mock_ip_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = oob_ip
-            # The owning interface re-locks to a row still owned by the donor (device_id=10).
-            mock_iface_objects.select_for_update.return_value.filter.return_value.first.return_value = locked_iface
-            resp = view.post(req, pk=10, ip_kind="oob")
-
-        # Refused (409 surfaced via toast); neither side mutated/saved.
         assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
-        assert locked_winner.oob_ip is None
-        locked_winner.save.assert_not_called()
-        locked_donor.save.assert_not_called()
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert winner.oob_ip_id is None  # winner never claimed the donor-attached address
+        assert donor.oob_ip_id == oob_ip.pk  # donor FK untouched
 
     def test_rejects_when_assignment_is_not_an_interface(self):
         """A non-Interface assignment (e.g. a VMInterface) must fail closed: the Interface
@@ -687,6 +557,7 @@ class TestTransferDeviceIPView:
 # ── MoveIPAddressToWinnerView ────────────────────────────────────────────
 
 
+@pytest.mark.django_db
 class TestMoveIPAddressToWinnerView:
     def _setup_view(self):
         from netbox_librenms_plugin.views.sync.migrate import MoveIPAddressToWinnerView
@@ -695,71 +566,49 @@ class TestMoveIPAddressToWinnerView:
         view.require_all_permissions = MagicMock(return_value=None)
         return view
 
+    @staticmethod
+    def _mark(donor, winner):
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        mark_librenms_migrated(donor, winner.pk, "default")
+        donor.save()
+
     def test_rejects_when_ip_not_assigned_to_interface(self):
+        # A real unassigned IP picked from the donor sync page → no donor relationship to
+        # migrate, so the move is refused and the IP's assignment stays empty.
         view = self._setup_view()
+        ip = make_ip("10.0.0.1/24")  # unassigned
         req = _hx_request({"server_key": "default"})
 
-        ip = MagicMock(pk=7)
-        ip.assigned_object = None  # not an Interface
-
-        with patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=ip):
-            resp = view.post(req, pk=7)
+        resp = view.post(req, pk=ip.pk)
 
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
+        ip.refresh_from_db()
+        assert ip.assigned_object is None
 
     def test_rejects_when_winner_lacks_same_name_interface(self):
-        from dcim.models import Interface
-
-        from netbox_librenms_plugin.views.sync.migrate import MoveIPAddressToWinnerView
-
-        view = MoveIPAddressToWinnerView()
-        view.require_all_permissions = MagicMock(return_value=None)
-
+        # The IP is on a donor interface whose name does NOT exist on the winner → the real
+        # same-name lookup finds nothing, so the move is refused and the IP stays on the donor.
+        view = self._setup_view()
+        donor = make_device("mip-noname-donor")
+        winner = make_device("mip-noname-winner")  # no matching interface
+        self._mark(donor, winner)
+        donor_iface = make_interface(donor, "Eth0")
+        ip = make_ip("10.0.0.1/24", assigned_object=donor_iface)
         req = _hx_request({"server_key": "default"})
 
-        donor = MagicMock(pk=10)
-        winner = MagicMock(pk=20, name="winner")
-        donor_iface = MagicMock(spec=Interface)
-        donor_iface.name = "Eth0"
-        donor_iface.device = donor
-        ip = MagicMock(pk=7, address="10.0.0.1/24")
-        ip.assigned_object = donor_iface
+        resp = view.post(req, pk=ip.pk)
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.migrate.get_object_or_404", return_value=ip),
-            patch(
-                "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
-                return_value=(winner, {"device_id": 20, "server_key": "default", "at": "x"}),
-            ),
-            patch.object(Interface, "objects") as mock_objects,
-        ):
-            # exists() drives the pre-check; returns False so the view rejects
-            # before transaction.atomic() is entered.
-            mock_objects.filter.return_value.exists.return_value = False
-            resp = view.post(req, pk=7)
-
-        # Lock in the same-name lookup (winner device + donor interface name).
-        mock_objects.filter.assert_called_with(device=winner, name="Eth0")
         assert resp.status_code == 200
         assert b"django-messages" in resp.content
-        # Reject path flows through _fail(): the HTMX response carries HX-Reswap:none and
-        # never the success HX-Refresh header, so a regression that returned HX-Refresh=true
-        # (refreshing as if the move/transfer succeeded) would be caught here.
         assert resp.headers.get("HX-Reswap") == "none"
         assert resp.headers.get("HX-Refresh") is None
-        # Prove the IP stayed on the donor interface and was never persisted: a regression
-        # that reassigned ip.assigned_object before the missing-interface check would still
-        # 200 here.
-        assert ip.assigned_object is donor_iface
-        ip.save.assert_not_called()
+        ip.refresh_from_db()
+        assert ip.assigned_object == donor_iface  # stayed on the donor interface
 
-    @pytest.mark.django_db
     def test_happy_path_reassigns_ip_to_winner_interface(self):
         """Real DB end-to-end: the IP on the donor's interface is reassigned to the winner's
         same-named interface. Because the move is driven against real rows, the donor re-lock
@@ -767,19 +616,11 @@ class TestMoveIPAddressToWinnerView:
         name=...)`` must use the correct device/name — a wrong lookup would leave the IP off
         the winner's interface and the reload assertion would fail (no mock-call inspection
         needed to pin the exact kwargs)."""
-        from netbox_librenms_plugin.tests.conftest import make_interface, make_ip
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
-        from netbox_librenms_plugin.views.sync.migrate import MoveIPAddressToWinnerView
-
-        view = MoveIPAddressToWinnerView()
-        view.require_all_permissions = MagicMock(return_value=None)
+        view = self._setup_view()
 
         donor = make_device("donor-device")
         winner = make_device("winner-device")
-        # Mark the donor migrated into the winner so the real _resolve_winner_for_donor()
-        # (which reads the _migrated_to cf marker) resolves the winner for real.
-        mark_librenms_migrated(donor, winner.pk, "default")
-        donor.save()
+        self._mark(donor, winner)
 
         donor_iface = make_interface(donor, "Eth0")
         winner_iface = make_interface(winner, "Eth0")  # same name on the winner

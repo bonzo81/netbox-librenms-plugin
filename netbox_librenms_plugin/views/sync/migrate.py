@@ -349,7 +349,18 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             # interface keeping a parent/lag/bridge that still lives on the donor (a
             # cross-device link NetBox forbids). Surface that as a 409 so the user unlinks
             # the relationship first rather than silently creating an invalid interface.
+            #
+            # NetBox's ComponentModel.clean() also hard-blocks ANY device change on an
+            # existing component ("Components cannot be moved to a different device"), keyed
+            # on the device_id cached into self._original_device at load time. That blanket
+            # block is precisely the operation this view exists to perform, so re-seed the
+            # cached original to the new device to defeat ONLY that one check — every other
+            # validation in clean() (the cross-device parent/lag/bridge checks above, name
+            # uniqueness, …) still runs, and save() still refreshes the denormalized
+            # _site/_location/_rack columns. A bare .update(device=...) would skip all of
+            # that (stale denormalized location + no relationship validation).
             interface.device = winner
+            interface._original_device = winner.pk
             try:
                 interface.full_clean()
             except ValidationError as exc:
