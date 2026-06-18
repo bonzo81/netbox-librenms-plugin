@@ -614,8 +614,14 @@ class TestFetchDeviceWithCache:
         assert "secondary" in cache_key
 
 
+@pytest.mark.django_db
 class TestValidateDeviceForImport:
-    """Tests for validate_device_for_import main validation logic."""
+    """Main validation logic of validate_device_for_import, against real Device/VM rows.
+
+    Only the LibreNMS API is mocked (external boundary). The previous versions patched the
+    whole ORM surface (Device/VM/IPAddress/Site/...) via _patch_all_db(), so the production
+    queryset lookups never actually ran.
+    """
 
     def _make_api(self):
         api = MagicMock()
@@ -624,61 +630,14 @@ class TestValidateDeviceForImport:
         api.get_device_info.return_value = (True, {"device_id": 1})
         return api
 
-    def _patch_all_db(self):
-        """Context manager patches for all DB interactions."""
-        mock_device = MagicMock()
-        mock_device.objects.filter.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device.objects.filter.return_value.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
-        mock_device.objects.all.return_value = []
-
-        mock_vm = MagicMock()
-        mock_vm.objects.filter.return_value.first.return_value = None
-
-        mock_cluster = MagicMock()
-        mock_cluster.objects.all.return_value = []
-
-        mock_device_role = MagicMock()
-        mock_device_role.objects.all.return_value = []
-
-        mock_site = MagicMock()
-        mock_site.objects.all.return_value = []
-
-        mock_ip = MagicMock()
-        mock_ip.objects.filter.return_value.first.return_value = None
-
-        patches = [
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
-                return_value={"found": False, "site": None, "match_type": None, "suggestions": []},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
-                return_value={"matched": False, "device_type": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
-                return_value={"found": False, "platform": None, "match_type": None},
-            ),
-            patch(
-                "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
-            ),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_device_role),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Device", mock_device),
-            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType", MagicMock()),
-            patch("netbox_librenms_plugin.import_utils.device_operations.Site", mock_site),
-            patch("netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine", mock_vm),
-            patch("ipam.models.IPAddress", mock_ip),
-        ]
-        return patches
-
-    def test_minimal_device_validation(self):
+    def _validate(self, libre_device, **kwargs):
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
+        kwargs.setdefault("include_vc_detection", False)
+        return validate_device_for_import(libre_device, api=self._make_api(), **kwargs)
+
+    def test_minimal_device_validation(self):
+        # A brand-new device (nothing in NetBox matches) still returns a well-formed result.
         libre_device = {
             "device_id": 1,
             "hostname": "router01",
@@ -689,23 +648,17 @@ class TestValidateDeviceForImport:
             "location": "-",
             "type": "network",
         }
-        api = self._make_api()
-
-        patches = self._patch_all_db()
-        try:
-            for p in patches:
-                p.start()
-            result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
+        result = self._validate(libre_device)
 
         assert result is not None
-        assert "status" in result or "is_ready" in result
+        assert "is_ready" in result
+        assert result["existing_device"] is None
 
     def test_vm_import_uses_correct_model(self):
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        """import_as_vm=True matches a VirtualMachine by hostname (uses the VM model, not Device)."""
+        from netbox_librenms_plugin.tests.conftest import make_vm
 
+        vm = make_vm("vm01")
         libre_device = {
             "device_id": 1,
             "hostname": "vm01",
@@ -716,30 +669,16 @@ class TestValidateDeviceForImport:
             "location": "-",
             "type": "network",
         }
-        api = self._make_api()
+        result = self._validate(libre_device, import_as_vm=True)
 
-        patches = self._patch_all_db()
-        mock_vm_cls = MagicMock()
-        mock_vm_cls.objects.filter.return_value.first.return_value = None
-        try:
-            for p in patches:
-                p.start()
-            # Override with a controlled mock so we can assert the VM model was consulted
-            with patch("virtualization.models.VirtualMachine", mock_vm_cls):
-                result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result is not None
         assert result.get("import_as_vm") is True
-        # Verify VirtualMachine model (not Device) was used for the hostname lookup
-        mock_vm_cls.objects.filter.assert_called()
+        assert result["existing_device"].pk == vm.pk
 
     def test_existing_device_detected(self):
-        """When device with same librenms_id exists, sets existing_device in result."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        """A device carrying the incoming librenms_id is found via find_by_librenms_id."""
+        from netbox_librenms_plugin.tests.conftest import make_device
 
+        dev = make_device("router01", librenms_cf={"default": 1})
         libre_device = {
             "device_id": 1,
             "hostname": "router01",
@@ -749,33 +688,10 @@ class TestValidateDeviceForImport:
             "os": "-",
             "location": "-",
         }
-        api = self._make_api()
+        result = self._validate(libre_device)
 
-        existing = MagicMock()
-        existing.name = "router01"
-        existing.serial = ""
-
-        patches = self._patch_all_db()
-        # Override find_by_librenms_id: return None for VM, existing for Device
-        try:
-            for p in patches:
-                p.start()
-
-            def _find_side_effect(model, device_id, server_key):
-                from virtualization.models import VirtualMachine as VM
-
-                return None if model is VM else existing
-
-            with patch(
-                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
-                side_effect=_find_side_effect,
-            ):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        assert result.get("existing_device") is existing
+        assert result["existing_device"].pk == dev.pk
+        assert result["existing_match_type"] == "librenms_id"
 
 
 class TestImportSingleDevice:
