@@ -7,6 +7,8 @@ comparison logic in _build_row.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -35,71 +37,6 @@ def _captured_table_view(view):
 
     view.get_table = fake_get_table
     return rows_store
-
-
-def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, module_types, bay_mappings=None):
-    """Call _build_context with all DB-accessing calls mocked out.
-
-    `bay_mappings` is an optional (exact_list, regex_list) tuple of ModuleBayMapping-like
-    objects.  When None, mappings are empty and matching exercises only direct-name
-    and positional fallbacks.
-    """
-    rows_store = _captured_table_view(view)
-    view._get_module_bays = MagicMock(return_value=(device_bays, module_scoped_bays))
-    view._get_module_types = MagicMock(return_value=module_types)
-    view._get_generic_module_types = MagicMock(return_value={})
-    view._get_module_type_ambiguities = MagicMock(return_value={})
-    view._get_carrier_install_rules = MagicMock(return_value=[])
-
-    if bay_mappings is None:
-        bay_mappings = ([], [])
-
-    with (
-        patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
-        patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=bay_mappings),
-        patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
-        patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
-        patch("netbox_librenms_plugin.utils.preload_normalization_rules", return_value={}),
-        patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
-        # _detect_serial_conflicts makes a real DB query; mock it out for unit tests
-        patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
-    ):
-        mock_cache.ttl = MagicMock(return_value=None)
-
-        # Inline import: patch ModuleBayMapping inside models module
-        view._build_context(MagicMock(), MagicMock(), inventory_data)
-
-    return rows_store.get("rows", [])
-
-
-def _load_contrib_bay_mappings():
-    """Load contrib bay mappings as fake ModuleBayMapping objects (no DB)."""
-    import re as _re
-    from pathlib import Path
-
-    import yaml
-
-    contrib_path = Path(__file__).resolve().parents[2] / "contrib" / "module_bay_mappings.yaml"
-    with open(contrib_path) as f:
-        data = yaml.safe_load(f)
-
-    class _FakeMap:
-        def __init__(self, **kw):
-            self.librenms_name = kw["librenms_name"]
-            self.librenms_class = kw.get("librenms_class") or ""
-            self.netbox_bay_name = kw["netbox_bay_name"]
-            self.is_regex = kw.get("is_regex", False)
-            self._compiled_pattern = None
-            if self.is_regex:
-                try:
-                    self._compiled_pattern = _re.compile(self.librenms_name)
-                except _re.error:
-                    pass
-
-    mappings = [_FakeMap(**m) for m in data]
-    exact = [m for m in mappings if not m.is_regex]
-    regex = [m for m in mappings if m.is_regex]
-    return exact, regex
 
 
 class TestMergeTransceiverDataPortIdentity:
@@ -748,76 +685,50 @@ def _linecard_inventory():
     ]
 
 
-def _bay_setup():
-    """Build mock device_bays and module_scoped_bays matching _linecard_inventory."""
-    # --- module instances (NetBox Module objects) ---
-    linecard_module = MagicMock()
-    linecard_module.pk = 100
-    linecard_module.serial = "S_LINECARD"
-    linecard_module.module_type_id = 10  # matches mt_linecard.pk
-
-    cvr2_module = MagicMock()
-    cvr2_module.pk = 200
-    cvr2_module.serial = "FDO_CVR2"
-    cvr2_module.module_type_id = 20  # matches mt_cvr.pk
-
-    glc_te_installed = MagicMock()
-    glc_te_installed.serial = "MTC213403BB"
-    glc_te_installed.get_absolute_url.return_value = "/modules/99/"
-    glc_te_installed.module_type_id = 30  # matches mt_glc_te.pk
-
-    # --- device-level bays ---
-    slot3_bay = MagicMock()
-    slot3_bay.name = "Slot 3"
-    slot3_bay.installed_module = linecard_module
-    device_bays = {"Slot 3": slot3_bay}
-
-    # --- module-scoped bays created by the linecard ---
-    x2p2_bay = MagicMock()
-    x2p2_bay.name = "X2 Port 2"
-    x2p2_bay.installed_module = cvr2_module  # INSTALLED
-
-    x2p4_bay = MagicMock()
-    x2p4_bay.name = "X2 Port 4"
-    x2p4_bay.installed_module = None  # NOT installed
-
-    # --- module-scoped bays created by the installed CVR at X2 Port 2 ---
-    sfp1_bay = MagicMock()
-    sfp1_bay.name = "SFP 1"
-    sfp1_bay.installed_module = glc_te_installed
-
-    sfp2_bay = MagicMock()
-    sfp2_bay.name = "SFP 2"
-    sfp2_bay.installed_module = None
-
-    module_scoped_bays = {
-        100: {"X2 Port 2": x2p2_bay, "X2 Port 4": x2p4_bay},
-        200: {"SFP 1": sfp1_bay, "SFP 2": sfp2_bay},
-    }
-
-    return device_bays, module_scoped_bays
+# ---------------------------------------------------------------------------
+# Real-DB scenario builders (replace the MagicMock _bay_setup / _module_types)
+# ---------------------------------------------------------------------------
 
 
-def _module_types():
-    """Minimal module-type dict for the test scenario."""
-    mt_linecard = MagicMock()
-    mt_linecard.pk = 10
-    mt_linecard.model = "WS-X4908"
-    mt_cvr = MagicMock()
-    mt_cvr.pk = 20
-    mt_cvr.model = "CVR-X2-SFP"
-    mt_glc_te = MagicMock()
-    mt_glc_te.pk = 30
-    mt_glc_te.model = "GLC-TE"
-    mt_glc_t = MagicMock()
-    mt_glc_t.pk = 40
-    mt_glc_t.model = "GLC-T"
-    return {
-        "WS-X4908": mt_linecard,
-        "CVR-X2-SFP": mt_cvr,
-        "GLC-TE": mt_glc_te,
-        "GLC-T": mt_glc_t,
-    }
+def _build_linecard_device(*, with_cvr6=False):
+    """Real-DB equivalent of ``_bay_setup()`` + ``_module_types()``.
+
+    Builds a device whose *installed modules* create the nested ModuleBay hierarchy that
+    ``_get_module_bays`` reads back — so the bay-matching algorithm runs against real bays,
+    real installed Modules (real serials/types) and real ``ModuleType`` indexing instead of
+    MagicMock stand-ins. Mirrors the prod-lab03-sw4 scenario:
+
+        Slot 3  ← linecard WS-X4908 (S_LINECARD)
+          X2 Port 2 ← CVR-X2-SFP (FDO_CVR2)
+            SFP 1 ← GLC-TE (MTC213403BB)
+            SFP 2 ← (empty)
+          X2 Port 4 ← (empty)
+    """
+    from netbox_librenms_plugin.tests.conftest import (
+        install_module,
+        make_device_with_module_bays,
+        make_module_type_with_bays,
+    )
+
+    linecard_bays = ["X2 Port 2", "X2 Port 4"] + (["X2 Port 6"] if with_cvr6 else [])
+    dev = make_device_with_module_bays("lc-dev", ["Slot 3"])
+    install_module(dev, "Slot 3", "WS-X4908", serial="S_LINECARD", child_bays=linecard_bays)
+    install_module(dev, "X2 Port 2", "CVR-X2-SFP", serial="FDO_CVR2", child_bays=["SFP 1", "SFP 2"])
+    install_module(dev, "SFP 1", "GLC-TE", serial="MTC213403BB")
+    make_module_type_with_bays("GLC-T")  # exists for matching the uninstalled converter's child
+    if with_cvr6:
+        # A third converter (installed) at X2 Port 6 with its own SFP 1 holding a GLC-TE.
+        cvr6 = install_module(dev, "X2 Port 6", "CVR-X2-SFP", serial="FDO_CVR6")
+        install_module(dev, "SFP 1", "GLC-TE", serial="SFP6_SERIAL", parent_module=cvr6)
+    return dev
+
+
+def _run_build_context_real(view, inventory_data, device):
+    """Drive ``_build_context`` against a REAL device — real ``_get_module_bays`` /
+    ``_get_module_types`` and the real bay-matching algorithm; only ``get_table`` is captured."""
+    rows_store = _captured_table_view(view)
+    view._build_context(MagicMock(), device, inventory_data)
+    return rows_store.get("rows", [])
 
 
 # ---------------------------------------------------------------------------
@@ -825,6 +736,7 @@ def _module_types():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestBayDepthScopeWithUninstalledParent:
     """
     Regression tests for the stale bays_by_depth bug.
@@ -844,9 +756,8 @@ class TestBayDepthScopeWithUninstalledParent:
 
     def _build_rows(self):
         view = _make_view()
-        device_bays, module_scoped_bays = _bay_setup()
-        module_types = _module_types()
-        return _run_build_context(view, _linecard_inventory(), device_bays, module_scoped_bays, module_types)
+        device = _build_linecard_device()
+        return _run_build_context_real(view, _linecard_inventory(), device)
 
     def _row(self, rows, name):
         for r in rows:
@@ -942,31 +853,10 @@ class TestBayDepthScopeWithUninstalledParent:
         ]
 
         view = _make_view()
-        device_bays, module_scoped_bays = _bay_setup()
-        module_types = _module_types()
+        # Real device with the extra installed CVR at X2 Port 6 (its own SFP 1 holds a GLC-TE).
+        device = _build_linecard_device(with_cvr6=True)
 
-        # Add a third installed CVR at X2 Port 6 with its own SFP 1 bay
-        cvr6_module = MagicMock()
-        cvr6_module.pk = 300
-        cvr6_module.serial = "FDO_CVR6"
-        cvr6_module.module_type_id = 20  # matches mt_cvr.pk
-
-        sfp1_bay_6 = MagicMock()
-        sfp1_bay_6.name = "SFP 1"
-        sfp6_installed = MagicMock()
-        sfp6_installed.serial = "SFP6_SERIAL"
-        sfp6_installed.get_absolute_url.return_value = "/modules/199/"
-        sfp6_installed.module_type_id = 30  # matches mt_glc_te.pk
-        sfp1_bay_6.installed_module = sfp6_installed
-
-        x2p6_bay = MagicMock()
-        x2p6_bay.name = "X2 Port 6"
-        x2p6_bay.installed_module = cvr6_module
-
-        module_scoped_bays[100]["X2 Port 6"] = x2p6_bay
-        module_scoped_bays[300] = {"SFP 1": sfp1_bay_6}
-
-        rows = _run_build_context(view, inventory, device_bays, module_scoped_bays, module_types)
+        rows = _run_build_context_real(view, inventory, device)
 
         def _row(name):
             return next((r for r in rows if r.get("name") == name), None)
@@ -1102,99 +992,55 @@ def _prod_inventory_ws_x4908():
     ]
 
 
-def _prod_bay_setup_ws_x4908(cvr_installed=True):
+def _build_prod_ws4908_device(*, cvr_installed=True):
+    """Real-DB equivalent of ``_prod_bay_setup_ws_x4908``: a prod-lab03-sw4-shaped device.
+
+    Slot 3 ← linecard WS-X4908-10GE (S_LINECARD)
+      X2 Port 1..8  (X2 Port 2 ← CVR-X2-SFP S_CVR2 when *cvr_installed*)
+        SFP 1, SFP 2  (none installed)
     """
-    NetBox bay structure mirroring prod-lab03-sw4:
-        Device-bays: Slot 3 (linecard installed)
-        WS-X4908-10GE bays: X2 Port 1..8 (X2 Port 2 holds CVR if cvr_installed)
-        CVR-X2-SFP bays: SFP 1, SFP 2 (none installed)
-    """
-    linecard_module = MagicMock()
-    linecard_module.pk = 100
-    linecard_module.serial = "S_LINECARD"
-    linecard_module.module_type_id = 10
+    from netbox_librenms_plugin.tests.conftest import (
+        install_module,
+        make_device_with_module_bays,
+        make_module_type_with_bays,
+    )
 
-    cvr2_module = MagicMock()
-    cvr2_module.pk = 200
-    cvr2_module.serial = "S_CVR2"
-    cvr2_module.module_type_id = 20
-
-    slot3_bay = MagicMock()
-    slot3_bay.name = "Slot 3"
-    slot3_bay.installed_module = linecard_module
-    slot3_bay.get_absolute_url.return_value = "/bay/slot3"
-    device_bays = {"Slot 3": slot3_bay}
-
-    linecard_bays = {}
-    for n in range(1, 9):
-        b = MagicMock()
-        b.name = f"X2 Port {n}"
-        b.installed_module = cvr2_module if (n == 2 and cvr_installed) else None
-        b.get_absolute_url.return_value = f"/bay/x2-{n}"
-        linecard_bays[f"X2 Port {n}"] = b
-
-    module_scoped_bays = {100: linecard_bays}
-
+    dev = make_device_with_module_bays("prod-sw4", ["Slot 3"])
+    install_module(
+        dev,
+        "Slot 3",
+        "WS-X4908-10GE",
+        serial="S_LINECARD",
+        child_bays=[f"X2 Port {n}" for n in range(1, 9)],
+    )
     if cvr_installed:
-        cvr_bays = {}
-        for n in range(1, 3):
-            b = MagicMock()
-            b.name = f"SFP {n}"
-            b.installed_module = None
-            b.get_absolute_url.return_value = f"/bay/sfp-{n}"
-            cvr_bays[f"SFP {n}"] = b
-        module_scoped_bays[200] = cvr_bays
-
-    return device_bays, module_scoped_bays
+        install_module(dev, "X2 Port 2", "CVR-X2-SFP", serial="S_CVR2", child_bays=["SFP 1", "SFP 2"])
+    # Transceiver module types exist so resolve_module_type can match the port rows.
+    make_module_type_with_bays("GLC-TE")
+    make_module_type_with_bays("GLC-T")
+    return dev
 
 
-def _prod_module_types():
-    mt_lc = MagicMock()
-    mt_lc.pk = 10
-    mt_lc.model = "WS-X4908-10GE"
-    mt_lc.get_absolute_url.return_value = "/mt/lc"
-    mt_cvr = MagicMock()
-    mt_cvr.pk = 20
-    mt_cvr.model = "CVR-X2-SFP"
-    mt_cvr.get_absolute_url.return_value = "/mt/cvr"
-    mt_glc_te = MagicMock()
-    mt_glc_te.pk = 30
-    mt_glc_te.model = "GLC-TE"
-    mt_glc_te.get_absolute_url.return_value = "/mt/glc-te"
-    mt_glc_t = MagicMock()
-    mt_glc_t.pk = 40
-    mt_glc_t.model = "GLC-T"
-    mt_glc_t.get_absolute_url.return_value = "/mt/glc-t"
-    return {
-        "WS-X4908-10GE": mt_lc,
-        "CVR-X2-SFP": mt_cvr,
-        "GLC-TE": mt_glc_te,
-        "GLC-T": mt_glc_t,
-    }
-
-
+@pytest.mark.django_db
 class TestProdShapeWS4908Matching:
     """
     Bay matching against real production data shape from a Cisco WS-X4908-10GE.
 
     Distinct from `TestBayDepthScopeWithUninstalledParent`, whose synthetic
     container names match bay names directly without exercising the contrib
-    regex paths.  This class loads the contrib YAML and asserts each level
-    of the chain — linecard regex, X2 slot regex, and CVR-internal positional
-    fallback — actually does what the contrib mappings claim.
+    regex paths.  This class loads the contrib YAML into real ModuleBayMapping rows and
+    asserts each level of the chain — linecard regex, X2 slot regex, and CVR-internal
+    positional fallback — actually does what the contrib mappings claim, end-to-end
+    through real ``load_bay_mappings()`` and real installed-module bays.
     """
 
     def _build_rows(self, cvr_installed=True):
+        from netbox_librenms_plugin.tests.conftest import load_contrib_bay_mappings
+
         view = _make_view()
-        device_bays, module_scoped_bays = _prod_bay_setup_ws_x4908(cvr_installed=cvr_installed)
-        return _run_build_context(
-            view,
-            _prod_inventory_ws_x4908(),
-            device_bays,
-            module_scoped_bays,
-            _prod_module_types(),
-            bay_mappings=_load_contrib_bay_mappings(),
-        )
+        load_contrib_bay_mappings()  # real ModuleBayMapping rows drive load_bay_mappings()
+        device = _build_prod_ws4908_device(cvr_installed=cvr_installed)
+        return _run_build_context_real(view, _prod_inventory_ws_x4908(), device)
 
     def _row(self, rows, name):
         for r in rows:
@@ -1347,16 +1193,12 @@ class TestProdShapeWS4908Matching:
                 "entPhysicalParentRelPos": 1,
             },
         ]
+        from netbox_librenms_plugin.tests.conftest import load_contrib_bay_mappings
+
         view = _make_view()
-        device_bays, module_scoped_bays = _prod_bay_setup_ws_x4908(cvr_installed=True)
-        rows = _run_build_context(
-            view,
-            no_cvr_inventory,
-            device_bays,
-            module_scoped_bays,
-            _prod_module_types(),
-            bay_mappings=_load_contrib_bay_mappings(),
-        )
+        load_contrib_bay_mappings()
+        device = _build_prod_ws4908_device(cvr_installed=True)
+        rows = _run_build_context_real(view, no_cvr_inventory, device)
         row = self._row(rows, "GigabitEthernet3/11")
         assert row is not None, "GigabitEthernet3/11 row not found"
         assert row["module_bay"] != "X2 Port 2", (

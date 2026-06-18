@@ -131,6 +131,89 @@ def make_module_bay(device, name):
     return ModuleBay.objects.create(device=device, name=name)
 
 
+def make_module_type_with_bays(model, *, manufacturer=None, bay_names=()):
+    """get_or_create a real ModuleType and (when first created) attach ModuleBayTemplates.
+
+    Installing a Module of this type then auto-instantiates one module-scoped ModuleBay per
+    template (NetBox 4.x nested-module support), which is exactly the structure
+    ``_get_module_bays`` reads back.
+    """
+    from dcim.models import Manufacturer, ModuleBayTemplate, ModuleType
+
+    if manufacturer is None:
+        _shared_infra()
+        manufacturer = Manufacturer.objects.get(slug="test-mfr")
+    mt, created = ModuleType.objects.get_or_create(manufacturer=manufacturer, model=model)
+    if created:
+        for bn in bay_names:
+            ModuleBayTemplate.objects.create(module_type=mt, name=bn)
+    return mt
+
+
+def make_device_with_module_bays(name, bay_names, *, manufacturer=None, serial=""):
+    """Create a real Device on a dedicated DeviceType carrying device-level ModuleBayTemplates.
+
+    The device-level ModuleBays auto-instantiate on Device creation. Returns the Device.
+    """
+    from dcim.models import Device, DeviceType, ModuleBayTemplate
+
+    site, _, role = _shared_infra()
+    if manufacturer is None:
+        from dcim.models import Manufacturer
+
+        manufacturer = Manufacturer.objects.get(slug="test-mfr")
+    slug = f"mbt-dt-{name}".lower().replace(" ", "-")
+    dtype = DeviceType.objects.create(manufacturer=manufacturer, model=f"DT-{name}", slug=slug)
+    for bn in bay_names:
+        ModuleBayTemplate.objects.create(device_type=dtype, name=bn)
+    return Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
+
+
+def load_contrib_bay_mappings():
+    """Create real ModuleBayMapping rows from contrib/module_bay_mappings.yaml.
+
+    Lets bay-matching tests exercise the real ``load_bay_mappings()`` (DB-backed) + regex
+    resolution against the shipped contrib mappings, instead of patching the loader.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from netbox_librenms_plugin.models import ModuleBayMapping
+
+    contrib = Path(__file__).resolve().parents[2] / "contrib" / "module_bay_mappings.yaml"
+    with open(contrib) as f:
+        data = yaml.safe_load(f)
+    return [
+        ModuleBayMapping.objects.create(
+            librenms_name=m["librenms_name"],
+            librenms_class=m.get("librenms_class") or "",
+            netbox_bay_name=m["netbox_bay_name"],
+            is_regex=m.get("is_regex", False),
+        )
+        for m in data
+    ]
+
+
+def install_module(device, bay_name, model, *, serial="", child_bays=(), manufacturer=None, parent_module=None):
+    """Install a real Module of type *model* into *device*'s ModuleBay named *bay_name*.
+
+    The ModuleType is created (with *child_bays* ModuleBayTemplates) if needed, so installing
+    the module auto-creates its module-scoped child bays. Returns the created Module.
+
+    When the same bay name exists under more than one parent module (e.g. "SFP 1" under two
+    converters), pass *parent_module* to disambiguate which module's bay to install into.
+    """
+    from dcim.models import Module, ModuleBay
+
+    mt = make_module_type_with_bays(model, manufacturer=manufacturer, bay_names=child_bays)
+    qs = ModuleBay.objects.filter(device=device, name=bay_name)
+    if parent_module is not None:
+        qs = qs.filter(module=parent_module)
+    bay = qs.get()
+    return Module.objects.create(device=device, module_bay=bay, module_type=mt, serial=serial, status="active")
+
+
 def ip_on(device, address, ifname, *, iface_type="1000base-t"):
     """Create an Interface on *device* and assign a real IPAddress to it."""
     iface = make_interface(device, ifname, iface_type=iface_type)
