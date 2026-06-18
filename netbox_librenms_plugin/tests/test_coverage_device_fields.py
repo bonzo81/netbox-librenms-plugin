@@ -1647,6 +1647,7 @@ class TestRemoveServerMappingViewHelpers:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestRemoveServerMappingViewPost:
     def _view(self):
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
@@ -1937,69 +1938,41 @@ class TestRemoveServerMappingViewPost:
         mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_success_removes_mapping(self):
-        """Happy path: mapping removed, last entry → cf set to None."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5}}
+        """Happy path: an UNCONFIGURED server's mapping is removed; last entry → cf None.
 
+        Real Device + the real select_for_update / full_clean / save path; the persisted
+        custom_field_data is reloaded from the DB. 'orphan' is not a configured server in the
+        test config, so the protection guard allows removal."""
+        from dcim.models import Device
+
+        view = self._view()
+        dev = make_device("rm-orphan", librenms_cf={"orphan": 5})
         req = _make_request({"object_type": "device", "server_key": "orphan"})
 
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan": 5}}
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
         ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
+            view.post(req, pk=dev.pk)
         mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
-        # After deleting the last key, cf should be set to None
-        assert mock_locked.custom_field_data["librenms_id"] is None
+        # Last key removed → cf librenms_id collapses to None.
+        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] is None
 
     def test_success_keeps_remaining_mappings(self):
-        """Happy path: mapping removed, other entries remain → cf retains them."""
-        view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": {"orphan": 5, "other": 6}}
+        """Happy path: removing one unconfigured mapping keeps the others (verified via DB reload)."""
+        from dcim.models import Device
 
+        view = self._view()
+        dev = make_device("rm-keep", librenms_cf={"orphan": 5, "other": 6})
         req = _make_request({"object_type": "device", "server_key": "orphan"})
 
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.custom_field_data = {"librenms_id": {"orphan": 5, "other": 6}}
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
-
-        mock_cfg = {"netbox_librenms_plugin": {"servers": {}, "librenms_url": ""}}
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
-            patch("django.conf.settings") as mock_settings,
         ):
-            mock_settings.PLUGINS_CONFIG = mock_cfg
-            view.post(req, pk=1)
+            view.post(req, pk=dev.pk)
         mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
-        assert mock_locked.custom_field_data["librenms_id"] == {"other": 6}
+        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"other": 6}
 
 
 # ---------------------------------------------------------------------------
@@ -2154,6 +2127,7 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestConvertLegacyLibreNMSIdViewPost:
     def _view(self):
         from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
@@ -2580,71 +2554,41 @@ class TestConvertLegacyLibreNMSIdViewPost:
         mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_success_integer_cf_value(self):
-        """Happy path with integer cf_value → success message."""
+        """Happy path, legacy int cf_value: the real migrate + save converts it to the dict form.
+
+        Real Device through the real select_for_update / find_by_librenms_id conflict check /
+        migrate_legacy_librenms_id / full_clean / save; reloaded from the DB. No POSTed
+        server_key, so rebind_api_for_server reuses the mock API (server_key 'default')."""
+        from dcim.models import Device
+
         view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": 42}
-        mock_obj.serial = "SN-MATCH"
         view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": 42}
-        mock_locked.serial = "SN-MATCH"
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+        dev = make_device("convert-int", serial="SN-MATCH", librenms_cf=42)
 
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            view.post(_make_request({"object_type": "device"}), pk=dev.pk)
         mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
         assert "42" in mock_msg.success.call_args[0][1]
+        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"default": 42}
 
     def test_success_string_cf_value(self):
-        """Happy path with string digit cf_value → success message."""
+        """Happy path, legacy string-digit cf_value '42' → converted to {'default': 42}."""
+        from dcim.models import Device
+
         view = self._view()
-        mock_obj = MagicMock()
-        mock_obj.custom_field_data = {"librenms_id": "42"}
-        mock_obj.serial = "SN-MATCH"
         view._librenms_api.get_device_info.return_value = (True, {"serial": "SN-MATCH"})
-        view._librenms_api.server_key = "default"
-
-        DoesNotExist = type("DoesNotExist", (Exception,), {})
-        mock_locked = MagicMock()
-        mock_locked.pk = 1
-        mock_locked.custom_field_data = {"librenms_id": "42"}
-        mock_locked.serial = "SN-MATCH"
-
-        mock_device_cls = MagicMock()
-        mock_device_cls.DoesNotExist = DoesNotExist
-        mock_device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+        dev = make_device("convert-str", serial="SN-MATCH", librenms_cf="42")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
-            patch("netbox_librenms_plugin.views.sync.device_fields.Device", mock_device_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
-            view.post(_make_request({"object_type": "device"}), pk=1)
+            view.post(_make_request({"object_type": "device"}), pk=dev.pk)
         mock_msg.success.assert_called_once()
-        mock_locked.full_clean.assert_called_once()
-        mock_locked.save.assert_called_once()
+        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"default": 42}
 
     def test_conflict_same_object_is_not_conflict(self):
         """find_by_librenms_id returns the same object → no conflict, proceeds."""
