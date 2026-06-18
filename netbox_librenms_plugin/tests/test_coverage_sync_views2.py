@@ -116,51 +116,54 @@ class TestSyncCablesViewNoSelection:
         mock_msgs.error.assert_called_once()
 
 
+@pytest.mark.django_db
 class TestSyncCablesViewSuccessPath:
     def test_valid_cable_created(self):
+        """A real Cable is created between two real Interfaces (verified via the interfaces'
+        cable FKs). Only the cached LibreNMS link payload + messages/redirect/reverse/librenms_api
+        boundaries are mocked; the real Cable.objects.create + duplicate check run."""
+        from dcim.models import Cable
+
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         view = object.__new__(SyncCablesView)
         view.require_all_permissions = MagicMock(return_value=None)
-        view.request = _make_request(post_data={"select": ["port1"], "device_selection_port1": "1"})
         view.get_cache_key = MagicMock(return_value="key")
         view._post_server_key = "default"
 
-        mock_device = MagicMock(pk=1)
-        local_iface = MagicMock(pk=10)
-        remote_iface = MagicMock(pk=20)
+        dev_local = make_device("cable-local")
+        local = make_interface(dev_local, "Gi0/1")
+        dev_remote = make_device("cable-remote")
+        remote = make_interface(dev_remote, "Gi0/2")
+
+        view.request = _make_request(post_data={"select": ["port1"], "device_selection_port1": str(dev_local.pk)})
         link_data = {
             "local_port_id": "port1",
             "local_port": "Gi0/1",
-            "netbox_local_interface_id": 10,
-            "netbox_remote_interface_id": 20,
+            "netbox_local_interface_id": local.pk,
+            "netbox_remote_interface_id": remote.pk,
         }
 
         with (
-            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=mock_device),
+            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=dev_local),
             patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.cables.redirect"),
             patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
-            patch("netbox_librenms_plugin.views.sync.cables.Interface") as mock_iface_cls,
-            patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
-            patch("netbox_librenms_plugin.views.sync.cables.transaction"),
             patch.object(
                 type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
             ),
         ):
             mock_cache.get.return_value = {"links": [link_data]}
-            local_iface = MagicMock(pk=10)
-            local_iface.device_id = 1  # match selected_device_id ("1") to skip VC re-lookup
-            mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
-            mock_cable_cls.objects.filter.return_value.exists.return_value = False
-            mock_ct.objects.get_for_model.return_value = MagicMock()
+            view.post(view.request, pk=dev_local.pk)
 
-            view.post(view.request, pk=1)
-
-        mock_cable_cls.objects.create.assert_called_once()
         mock_msgs.success.assert_called_once()
+        # A real cable now connects the two interfaces.
+        local.refresh_from_db()
+        remote.refresh_from_db()
+        assert local.cable_id is not None
+        assert local.cable_id == remote.cable_id
+        assert Cable.objects.filter(pk=local.cable_id).exists()
 
 
 class TestSyncCablesViewDuplicateCable:
