@@ -1026,137 +1026,98 @@ class TestSyncIPAddressesGetManagementIp:
         assert view._librenms_api.get_device_info.call_args.kwargs.get("use_cache") is False
 
 
-class TestSyncIPAddressesViewCreateIP:
-    def test_new_ip_is_created(self):
+@pytest.mark.django_db
+class TestSyncIPAddressesViewIPWrites:
+    """SyncIPAddressesView create/update/unchanged against real IPAddress rows.
+
+    Real Device + Interface (carrying a real librenms_id port-id CF) + IPAddress; the interface
+    is re-resolved from current NetBox state and the IP is created / re-homed / left unchanged
+    via the real ORM (verified by reload). Only the cached LibreNMS payload and the
+    messages/redirect/reverse/librenms_api boundaries are mocked.
+    """
+
+    def _view(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
         view = object.__new__(SyncIPAddressesView)
         view.require_all_permissions = MagicMock(return_value=None)
         view.rebind_api_for_server = MagicMock(return_value="default")
         view.get_cache_key = MagicMock(return_value="k")
+        return view
 
-        mock_iface = MagicMock()
-        mock_iface.name = "eth0"
-        mock_device = MagicMock(pk=1)
-        mock_device.interfaces.all.return_value = [mock_iface]
+    def _run(self, view, dev, ip_addresses):
         mock_api = MagicMock(server_key="default")
-
-        # Interface is resolved from current NetBox state by LibreNMS port id.
-        ip_data = {
-            "ip_address": "10.0.0.1",
-            "ip_with_mask": "10.0.0.1/24",
-            "port_id": 5,
-            "interface_name": "eth0",
-        }
-
         with (
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
             patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5),
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
-            mock_cache.get.return_value = {"ip_addresses": [ip_data]}
-            mock_ip_cls.objects.filter.return_value.first.return_value = None
-
+            mock_cache.get.return_value = {"ip_addresses": ip_addresses}
             view.request = _make_request(post_data={"select": ["10.0.0.1"]})
-            view.post(view.request, object_type="device", pk=1)
+            view.post(view.request, object_type="device", pk=dev.pk)
+        return mock_msgs
 
-        mock_ip_cls.objects.create.assert_called_once()
-        assert mock_ip_cls.objects.create.call_args.kwargs["assigned_object"] is mock_iface
+    def test_new_ip_is_created_and_assigned(self):
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        view = self._view()
+        dev = make_device("ip-create")
+        eth0 = make_interface(dev, "eth0")
+        set_librenms_device_id(eth0, 5, "default")  # port_id 5 → eth0
+        eth0.save()
+
+        mock_msgs = self._run(
+            view,
+            dev,
+            [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}],
+        )
+
+        ip = IPAddress.objects.get(address="10.0.0.1/24")
+        assert ip.assigned_object_id == eth0.pk  # really created + assigned
+        assert ip.status == "active"
         mock_msgs.success.assert_called()
 
+    def test_existing_ip_rehomed_when_interface_differs(self):
+        from ipam.models import IPAddress
 
-class TestSyncIPAddressesViewUpdateIP:
-    def test_existing_ip_updated_when_interface_differs(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+        from netbox_librenms_plugin.utils import set_librenms_device_id
 
-        view = object.__new__(SyncIPAddressesView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.rebind_api_for_server = MagicMock(return_value="default")
-        view.get_cache_key = MagicMock(return_value="k")
+        view = self._view()
+        dev = make_device("ip-update")
+        eth0 = make_interface(dev, "eth0")
+        set_librenms_device_id(eth0, 5, "default")
+        eth0.save()
+        eth1 = make_interface(dev, "eth1")
+        ip = IPAddress.objects.create(address="10.0.0.1/24", assigned_object=eth1, status="active")
 
-        mock_iface = MagicMock()
-        mock_iface.name = "eth0"
-        mock_device = MagicMock(pk=1)
-        mock_device.interfaces.all.return_value = [mock_iface]
-        mock_api = MagicMock(server_key="default")
+        self._run(
+            view,
+            dev,
+            [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "port_id": 5, "interface_name": "eth0"}],
+        )
 
-        ip_data = {
-            "ip_address": "10.0.0.1",
-            "ip_with_mask": "10.0.0.1/24",
-            "port_id": 5,
-            "interface_name": "eth0",
-        }
-        mock_existing_ip = MagicMock()
-        mock_existing_ip.assigned_object = MagicMock()  # Different from mock_iface
-        mock_existing_ip.vrf = None
+        ip.refresh_from_db()
+        assert ip.assigned_object_id == eth0.pk  # re-homed to the port_id-resolved interface
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_librenms_device_id", return_value=5),
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = {"ip_addresses": [ip_data]}
-            mock_ip_cls.objects.filter.return_value.first.return_value = mock_existing_ip
-
-            view.request = _make_request(post_data={"select": ["10.0.0.1"]})
-            view.post(view.request, object_type="device", pk=1)
-
-        assert mock_existing_ip.assigned_object is mock_iface
-        mock_existing_ip.save.assert_called_once()
-        mock_msgs.success.assert_called()
-
-
-class TestSyncIPAddressesViewUnchangedIP:
     def test_unchanged_ip_shows_warning(self):
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+        from ipam.models import IPAddress
 
-        view = object.__new__(SyncIPAddressesView)
-        view.require_all_permissions = MagicMock(return_value=None)
-        view.rebind_api_for_server = MagicMock(return_value="default")
-        view.get_cache_key = MagicMock(return_value="k")
+        view = self._view()
+        dev = make_device("ip-unchanged")
+        # An unassigned IP with no interface to match → left unchanged (warning), not re-homed.
+        ip = IPAddress.objects.create(address="10.0.0.1/24", status="active")
 
-        mock_device = MagicMock(pk=1)
-        mock_device.interfaces.all.return_value = []
-        mock_api = MagicMock(server_key="default")
-
-        ip_data = {
-            "ip_address": "10.0.0.1",
-            "ip_with_mask": "10.0.0.1/24",
-            "interface_name": None,
-        }
-        mock_existing_ip = MagicMock()
-        mock_existing_ip.assigned_object = None
-        mock_existing_ip.vrf = None
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.get_object_or_404", return_value=mock_device),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.redirect"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.transaction"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.ip_addresses.IPAddress") as mock_ip_cls,
-            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
-        ):
-            mock_cache.get.return_value = {"ip_addresses": [ip_data]}
-            mock_ip_cls.objects.filter.return_value.first.return_value = mock_existing_ip
-
-            view.request = _make_request(post_data={"select": ["10.0.0.1"]})
-            view.post(view.request, object_type="device", pk=1)
+        mock_msgs = self._run(
+            view, dev, [{"ip_address": "10.0.0.1", "ip_with_mask": "10.0.0.1/24", "interface_name": None}]
+        )
 
         mock_msgs.warning.assert_called()
+        ip.refresh_from_db()
+        assert ip.assigned_object_id is None  # untouched
 
 
 class TestSyncIPAddressesViewHelpers:
@@ -1678,8 +1639,13 @@ class TestSyncVLANsViewCacheMiss:
         mock_msgs.error.assert_called_once()
 
 
+@pytest.mark.django_db
 class TestSyncVLANsViewCreateVLAN:
-    def test_new_vlan_created(self):
+    """SyncVLANsView create path against a real VLAN row (only the cached LibreNMS data and the
+    messages/redirect/reverse framework seams are mocked; the real get_or_create + transaction
+    run and the created VLAN is reloaded from the DB)."""
+
+    def _run(self, vlans):
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
         view = object.__new__(SyncVLANsView)
@@ -1687,34 +1653,35 @@ class TestSyncVLANsViewCreateVLAN:
         view._post_server_key = "default"
         view.get_cache_key = MagicMock(return_value="k")
         mock_api = MagicMock(server_key="default")
-
-        mock_device = MagicMock(pk=1)
-        mock_vlan = MagicMock()
-
-        librenms_vlans = [{"vlan_vlan": 100, "vlan_name": "Management"}]
+        dev = make_device("vlan-sync-dev")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
             patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
-            mock_cache.get.return_value = librenms_vlans
-            mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, True)
-
+            mock_cache.get.return_value = vlans
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["100"]})
-            view.post(view.request, object_type="device", object_id=1)
+            view.post(view.request, object_type="device", object_id=dev.pk)
+        return mock_msgs
 
-        mock_vlan_cls.objects.get_or_create.assert_called_once()
+    def test_new_vlan_created(self):
+        from ipam.models import VLAN
+
+        mock_msgs = self._run([{"vlan_vlan": 100, "vlan_name": "Management"}])
+        vlan = VLAN.objects.get(vid=100, group=None)
+        assert vlan.name == "Management"
+        assert vlan.status == "active"
         mock_msgs.success.assert_called_once()
 
 
+@pytest.mark.django_db
 class TestSyncVLANsViewUpdateVLAN:
     def test_existing_vlan_name_updated(self):
+        from ipam.models import VLAN
+
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
         view = object.__new__(SyncVLANsView)
@@ -1722,34 +1689,28 @@ class TestSyncVLANsViewUpdateVLAN:
         view._post_server_key = "default"
         view.get_cache_key = MagicMock(return_value="k")
         mock_api = MagicMock(server_key="default")
-
-        mock_device = MagicMock(pk=1)
-        mock_vlan = MagicMock()
-        mock_vlan.name = "OldName"
-
-        librenms_vlans = [{"vlan_vlan": 100, "vlan_name": "Management"}]
+        dev = make_device("vlan-update-dev")
+        VLAN.objects.create(vid=100, name="OldName", status="active")
 
         with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.vlans.messages"),
             patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
             patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
-            mock_cache.get.return_value = librenms_vlans
-            mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, False)
-
+            mock_cache.get.return_value = [{"vlan_vlan": 100, "vlan_name": "Management"}]
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["100"]})
-            view.post(view.request, object_type="device", object_id=1)
+            view.post(view.request, object_type="device", object_id=dev.pk)
 
-        mock_vlan.save.assert_called_once()
+        assert VLAN.objects.get(vid=100, group=None).name == "Management"  # renamed in place
 
 
+@pytest.mark.django_db
 class TestSyncVLANsViewUnchangedVLAN:
     def test_unchanged_vlan_counts_as_skipped(self):
+        from ipam.models import VLAN
+
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
         view = object.__new__(SyncVLANsView)
@@ -1757,31 +1718,23 @@ class TestSyncVLANsViewUnchangedVLAN:
         view._post_server_key = "default"
         view.get_cache_key = MagicMock(return_value="k")
         mock_api = MagicMock(server_key="default")
-
-        mock_device = MagicMock(pk=1)
-        mock_vlan = MagicMock()
-        mock_vlan.name = "Management"  # Same name as librenms → unchanged
-
-        librenms_vlans = [{"vlan_vlan": 100, "vlan_name": "Management"}]
+        dev = make_device("vlan-unchanged-dev")
+        VLAN.objects.create(vid=100, name="Management", status="active")  # already matches
 
         with (
-            patch("netbox_librenms_plugin.views.sync.vlans.get_object_or_404", return_value=mock_device),
             patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.transaction"),
             patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.vlans.VLAN") as mock_vlan_cls,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
-            mock_cache.get.return_value = librenms_vlans
-            mock_vlan_cls.objects.get_or_create.return_value = (mock_vlan, False)
-
+            mock_cache.get.return_value = [{"vlan_vlan": 100, "vlan_name": "Management"}]
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["100"]})
-            view.post(view.request, object_type="device", object_id=1)
+            view.post(view.request, object_type="device", object_id=dev.pk)
 
         mock_msgs.success.assert_called()
         assert "unchanged" in str(mock_msgs.success.call_args_list)
+        assert VLAN.objects.filter(vid=100).count() == 1  # no duplicate created
 
 
 class TestSyncVLANsViewWithGroup:
