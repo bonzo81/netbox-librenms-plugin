@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
 
 
 def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
@@ -257,7 +257,25 @@ class TestResolveVCDetectionEnabled:
 
 
 class TestBulkImportConfirmView:
-    """Tests for BulkImportConfirmView.post (lines 235-300)."""
+    """BulkImportConfirmView.post — the preview/confirm render step.
+
+    Device fetching is driven through the REAL ``fetch_device_with_cache`` (our 3-tier
+    cache/lookup), mocking only ``api.get_device_info`` — the actual LibreNMS HTTP boundary.
+    Earlier these stubbed ``fetch_device_with_cache`` itself, bypassing the cache-key
+    computation, the Django-cache read/write, and the ``get_librenms_device_by_id`` parsing.
+    ``validate_device_for_import`` (its own real-DB tests) and ``render`` (template boundary)
+    remain mocked so each test stays focused on the view's selection/VC-flag plumbing.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_django_cache(self):
+        # fetch_device_with_cache reads/writes the real Django cache; isolate tests so a
+        # device cached by one doesn't satisfy another's lookup.
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView
@@ -288,27 +306,28 @@ class TestBulkImportConfirmView:
 
     def test_invalid_device_id_renders_generic_alert(self):
         view = self._make_view()
+        # Invalid id never reaches the API; get_device_info would not be called.
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
                 "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
-                with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
-                    request = _make_request(post={"select": ["not-an-int"]})
-                    result = view.post(request)
+                request = _make_request(post={"select": ["not-an-int"]})
+                result = view.post(request)
         # No valid devices and nothing expired → generic alert, rendered 200 in the modal.
         assert result.status_code == 200
         assert b"No valid devices selected" in result.content
 
     def test_all_cache_expired_renders_expiry_alert(self):
         view = self._make_view()
+        # The LibreNMS API reports the device is gone → real fetch_device_with_cache returns
+        # None for every valid id → all-expired alert.
+        view._librenms_api.get_device_info.return_value = (False, None)
         with patch.object(view, "require_write_permission", return_value=None):
             with patch(
                 "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
-                with patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=None):
-                    request = _make_request(post={"select": ["1", "2"]})
-                    result = view.post(request)
-        # All selected devices expired → expiry alert, 200 so the modal renders it.
+                request = _make_request(post={"select": ["1", "2"]})
+                result = view.post(request)
         assert result.status_code == 200
         assert b"expired" in result.content.lower()
 
@@ -318,6 +337,9 @@ class TestBulkImportConfirmView:
         mock_render.return_value = MagicMock(status_code=200)
 
         libre_device = {"device_id": 1, "hostname": "router01"}
+        # Real fetch_device_with_cache will call this (cache miss → API), parse the tuple via
+        # get_librenms_device_by_id, and cache the result.
+        view._librenms_api.get_device_info.return_value = (True, libre_device)
         validation = {
             "resolved_name": "router01",
             "virtual_chassis": {"is_stack": False},
@@ -329,21 +351,20 @@ class TestBulkImportConfirmView:
                 "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
-                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device
+                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
+                    return_value={"cluster_id": None, "role_id": None, "rack_id": None},
                 ):
                     with patch(
-                        "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                        return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                            return_value=validation,
-                        ) as mock_validate:
-                            request = _make_request(post={"select": ["1"]}, get={"enable_vc_detection": "false"})
-                            view.post(request)
+                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                        return_value=validation,
+                    ) as mock_validate:
+                        request = _make_request(post={"select": ["1"]}, get={"enable_vc_detection": "false"})
+                        view.post(request)
 
         mock_render.assert_called_once()
         assert mock_validate.call_args.kwargs["include_vc_detection"] is True
+        # The device dict reached validation via the real fetch path.
+        assert mock_validate.call_args.args[0] == libre_device
         call_args = mock_render.call_args
         assert "bulk_import_confirm.html" in call_args[0][1]
 
@@ -353,6 +374,7 @@ class TestBulkImportConfirmView:
         mock_render.return_value = MagicMock(status_code=200)
 
         libre_device = {"device_id": 1, "hostname": "router01"}
+        view._librenms_api.get_device_info.return_value = (True, libre_device)
         validation = {
             "resolved_name": "router01",
             "virtual_chassis": {"is_stack": False},
@@ -364,23 +386,20 @@ class TestBulkImportConfirmView:
                 "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
             ):
                 with patch(
-                    "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", return_value=libre_device
+                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
+                    return_value={"cluster_id": None, "role_id": None, "rack_id": None},
                 ):
                     with patch(
-                        "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                        return_value={"cluster_id": None, "role_id": None, "rack_id": None},
+                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                        return_value=validation,
                     ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                            return_value=validation,
-                        ):
-                            request = _make_request(
-                                post={
-                                    "select": ["1"],
-                                    "return_url": "/plugins/librenms_plugin/librenms-import/?enable_vc_detection=true",
-                                }
-                            )
-                            view.post(request)
+                        request = _make_request(
+                            post={
+                                "select": ["1"],
+                                "return_url": "/plugins/librenms_plugin/librenms-import/?enable_vc_detection=true",
+                            }
+                        )
+                        view.post(request)
 
         call_args = mock_render.call_args
         context = call_args[0][2]
@@ -1780,8 +1799,17 @@ class TestDeviceVCDetailsViewAdditional:
         mock_render.assert_called_once()
 
 
+@pytest.mark.django_db
 class TestDeviceConflictActionMigrateLibreNMSId:
-    """Tests for DeviceConflictActionView migrate_librenms_id action (lines 1247-1323)."""
+    """DeviceConflictActionView migrate_librenms_id action against a real VirtualMachine.
+
+    The migrate path converts a legacy bare-int librenms_id to the per-server dict form and
+    persists it under a real ``select_for_update`` lock. Previously every collaborator was
+    mocked (transaction, migrate_legacy_librenms_id, find_by_librenms_id, the locked re-read)
+    so the conversion never ran; now they run for real against a VM and the migrated
+    custom_field_data is reloaded from the DB. Only auth, the LibreNMS validation pipeline,
+    and the row render stay mocked.
+    """
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -1789,78 +1817,35 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         view = object.__new__(DeviceConflictActionView)
         view._librenms_api = _make_api()
         view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
         return view
 
-    def test_migrate_librenms_id_for_vm(self):
-        """Lines 1000-1002: VM model selection for migrate action."""
+    def test_migrate_librenms_id_for_vm_persists_dict_format(self):
+        """The VM's legacy bare-int librenms_id is converted to {server_key: id} and saved."""
+        from django.http import HttpResponse
+        from virtualization.models import VirtualMachine
+
         view = self._make_view()
+        vm = make_vm("vm01-migrate")
+        vm.custom_field_data["librenms_id"] = 42  # legacy bare int, matches active device_id
+        vm.save()
         request = _make_request(
             post={
                 "action": "migrate_librenms_id",
-                "existing_device_id": "1",
+                "existing_device_id": str(vm.pk),
                 "existing_device_type": "virtualmachine",
             }
         )
+        validation = {"existing_device": vm, "device_type_mismatch": False, "serial_confirmed": True}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 42}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
 
-        mock_vm = MagicMock()
-        mock_vm.pk = 1
-        mock_vm.name = "vm01"
-        # Legacy bare-int id matching the active device_id (42) → migration applies.
-        mock_vm.custom_field_data = {"librenms_id": 42}
-        # A DISTINCT locked instance so the test fails if the view mutates the stale
-        # pre-lock VM instead of the row re-read under select_for_update.
-        locked_vm = MagicMock()
-        locked_vm.pk = 1
-        locked_vm.name = "vm01"
-        locked_vm.custom_field_data = {"librenms_id": 42}
+        response = view.post(request, device_id=42)
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("virtualization.models.VirtualMachine") as MockVM:
-                MockVM.objects.get.return_value = mock_vm
-                # The locked re-read inside the transaction returns the distinct locked VM.
-                MockVM.objects.select_for_update.return_value.get.return_value = locked_vm
-                MockVM.DoesNotExist = Exception
-                with patch("dcim.models.Device"):
-                    with patch.object(view, "require_object_permissions", return_value=None):
-                        with patch.object(
-                            view,
-                            "get_validated_device_with_selections",
-                            return_value=(
-                                {"device_id": 42},
-                                {
-                                    "existing_device": mock_vm,
-                                    "device_type_mismatch": False,
-                                    "serial_confirmed": True,
-                                },
-                                {},
-                            ),
-                        ):
-                            with patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx:
-                                mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-                                mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-                                with patch("netbox_librenms_plugin.views.imports.actions.cache"):
-                                    # migrate_librenms_id converts via migrate_legacy_librenms_id
-                                    # and guards against duplicate ownership via find_by_librenms_id.
-                                    with patch(
-                                        "netbox_librenms_plugin.utils.migrate_legacy_librenms_id", return_value=True
-                                    ) as mock_migrate:
-                                        with patch(
-                                            "netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None
-                                        ):
-                                            with patch(
-                                                "netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key",
-                                                return_value="key",
-                                            ):
-                                                with patch.object(
-                                                    view, "render_device_row", return_value=MagicMock()
-                                                ) as mock_render:
-                                                    view.post(request, device_id=42)
-        # The VM branch was actually exercised (no blanket try/except masking crashes):
-        # the migrate path converted the VM's legacy id and rendered the updated row.
-        MockVM.objects.get.assert_called_once_with(pk=1)
-        # The conversion operates on the LOCKED instance, not the stale pre-lock one.
-        assert mock_migrate.call_args.args[0] is locked_vm
-        assert mock_render.called
+        assert response["HX-Trigger"] == "closeModal"
+        # The real migrate_legacy_librenms_id + save converted the bare int under lock.
+        assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == {"default": 42}
 
 
 class TestDeviceConflictActionMissingExisting:
