@@ -25,6 +25,7 @@ from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
     bulk_import_vms,
+    detect_bulk_collisions,
     fetch_device_with_cache,
     get_import_device_cache_key,
     get_librenms_device_by_id,
@@ -882,6 +883,19 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "server_key": self.librenms_api.server_key,
             "vc_detection_enabled": vc_detection_enabled,
         }
+
+        collisions = detect_bulk_collisions(devices)
+        if collisions:
+            # Render at 200 (not 4xx): this is an interstitial modal swapped
+            # into #htmx-modal-content, exactly like the confirm step. A non-2xx
+            # status makes HTMX skip the swap and route the body through
+            # htmx:responseError -> showErrorToast(), which would dump the
+            # collision template as raw text in a toast.
+            return render(
+                request,
+                "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+                {"collisions": collisions, "device_count": len(devices)},
+            )
 
         return render(
             request,
