@@ -1675,6 +1675,52 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
     return summary
 
 
+# The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
+# Stage-2b "move to winner" actions. NetBox requires each to reference an address assigned to
+# one of THAT device's own interfaces.
+DEVICE_IP_FK_FIELDS = ("primary_ip4", "primary_ip6", "oob_ip")
+
+
+def set_device_ip_fk(device, field, ip, *, save=True):
+    """Assign a device's ``primary_ip4`` / ``primary_ip6`` / ``oob_ip`` FK with the NetBox
+    ownership invariant enforced, then (by default) persist ONLY that column.
+
+    NetBox requires ``Device.primary_ip4/primary_ip6/oob_ip`` to reference an address assigned
+    to one of *that* device's own interfaces. The OOB/merge/move flows persist these via
+    ``save(update_fields=[...])`` to avoid ``full_clean()`` rejecting the write over unrelated
+    pre-existing inconsistencies (e.g. ``face`` set without ``rack``) — but ``update_fields``
+    also skips the ownership check, so a careless call site could silently store an FK pointing
+    at an address on *another* device's interface. This is the single guarded chokepoint for
+    those writes: a non-``None`` *ip* that is not assigned to an interface on *device* raises
+    ``ValueError``, so the invalid state can never be persisted. Clearing (``ip is None``) is
+    always allowed.
+
+    Re-homing an FK between two devices must still order the writes in the caller — release the
+    donor (set ``None``) BEFORE the winner claims it, because ``primary_ip*``/``oob_ip`` are
+    UNIQUE per address. Pass ``save=False`` to validate + assign only (when the column is
+    batched into a larger ``update_fields`` list saved elsewhere); the caller adds the returned
+    *field* to its own ``update_fields``. Run inside the caller's transaction with the relevant
+    rows locked.
+
+    Returns *field* (handy for ``update_fields.append(set_device_ip_fk(...))``).
+    """
+    from dcim.models import Interface
+
+    if field not in DEVICE_IP_FK_FIELDS:
+        raise ValueError(f"set_device_ip_fk: unsupported field {field!r} (expected one of {DEVICE_IP_FK_FIELDS})")
+    if ip is not None:
+        assigned = getattr(ip, "assigned_object", None)
+        if not isinstance(assigned, Interface) or assigned.device_id != device.pk:
+            raise ValueError(
+                f"set_device_ip_fk: refusing to set {field} on device pk={device.pk} — "
+                f"address {ip} is not assigned to an interface on that device"
+            )
+    setattr(device, field, ip)
+    if save:
+        device.save(update_fields=[field])
+    return field
+
+
 def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", at: str | None = None) -> None:
     """
     Mark *donor* as migrated to the device with primary key *winner_pk*.

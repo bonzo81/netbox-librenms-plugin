@@ -722,6 +722,68 @@ class TestReconcileDonorDeviceIpFks:
         assert notes == []
 
 
+@pytest.mark.django_db
+class TestSetDeviceIpFk:
+    """Real-DB coverage for utils.set_device_ip_fk: the single guarded chokepoint every
+    device primary/OOB IP-FK write (which bypass full_clean via update_fields) goes through.
+    It must enforce the NetBox invariant that the address sits on one of the device's OWN
+    interfaces, so a careless caller can never persist an off-device FK."""
+
+    def test_sets_and_saves_fk_when_address_on_device_interface(self):
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("sdf-owner")
+        ip = ip_on(device, "10.20.0.1/24", "eth0")
+        ret = set_device_ip_fk(device, "oob_ip", ip)
+        assert ret == "oob_ip"
+        device.refresh_from_db()
+        assert device.oob_ip_id == ip.pk  # persisted
+
+    def test_raises_and_does_not_persist_when_address_on_another_device(self):
+        # The address lives on a DIFFERENT device's interface → the helper must refuse and
+        # never persist the off-device FK (the bare update_fields save would have accepted it).
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("sdf-dev")
+        other = make_device("sdf-other")
+        ip = ip_on(other, "10.20.0.2/24", "eth0")
+        with pytest.raises(ValueError, match="not assigned to an interface on that device"):
+            set_device_ip_fk(device, "primary_ip4", ip)
+        device.refresh_from_db()
+        assert device.primary_ip4_id is None  # nothing persisted
+
+    def test_clearing_is_always_allowed(self):
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("sdf-clear")
+        ip = ip_on(device, "10.20.0.3/24", "eth0")
+        device.oob_ip = ip
+        device.save()
+        set_device_ip_fk(device, "oob_ip", None)
+        device.refresh_from_db()
+        assert device.oob_ip_id is None
+
+    def test_save_false_assigns_without_persisting(self):
+        # save=False: in-memory assignment + return field, but the DB row is untouched until
+        # the caller runs its own (batched) save — used where oob_ip rides a larger update_fields.
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("sdf-nosave")
+        ip = ip_on(device, "10.20.0.4/24", "eth0")
+        ret = set_device_ip_fk(device, "oob_ip", ip, save=False)
+        assert ret == "oob_ip"
+        assert device.oob_ip_id == ip.pk  # set in memory
+        device.refresh_from_db()
+        assert device.oob_ip_id is None  # not yet persisted
+
+    def test_unsupported_field_raises(self):
+        from netbox_librenms_plugin.utils import set_device_ip_fk
+
+        device = make_device("sdf-badfield")
+        with pytest.raises(ValueError, match="unsupported field"):
+            set_device_ip_fk(device, "name", None)
+
+
 class TestSyncTabUrl:
     """_sync_tab_url builds the donor device sync URL with tab + server_key."""
 

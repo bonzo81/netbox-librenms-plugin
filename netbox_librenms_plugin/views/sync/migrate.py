@@ -26,7 +26,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
 
-from netbox_librenms_plugin.utils import get_migrated_to_marker
+from netbox_librenms_plugin.utils import get_migrated_to_marker, set_device_ip_fk
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
@@ -194,15 +194,15 @@ def _reconcile_donor_device_ip_fks(donor, winner):
         if getattr(winner, f"{field}_id", None) is None:
             # device.primary_ip4/6 / oob_ip are UNIQUE per address, so the donor must release the
             # FK *before* the winner claims it — saving the winner first while the donor still
-            # holds the same address violates the unique constraint.
-            setattr(donor, field, None)
-            donor.save(update_fields=[field])
-            setattr(winner, field, ip)
-            winner.save(update_fields=[field])
+            # holds the same address violates the unique constraint. set_device_ip_fk() enforces
+            # the "address must live on the target device's own interface" invariant the
+            # update_fields save would otherwise skip (the locked-row check above is the lock-
+            # stabilized first line; the helper is the shared backstop).
+            set_device_ip_fk(donor, field, None)
+            set_device_ip_fk(winner, field, ip)
             notes.append(f"transferred donor {human} to {winner.name}")
         else:
-            setattr(donor, field, None)
-            donor.save(update_fields=[field])
+            set_device_ip_fk(donor, field, None)
             notes.append(f"cleared donor {human} (winner already had a {human})")
     return notes
 
@@ -613,17 +613,14 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                     f"Move its interface/IP to '{winner.name}' first.",
                     status=409,
                 )
-            setattr(winner, field, donor_ip)
-            setattr(donor, field, None)
-            # Save only the touched FK column to avoid full_clean() rejecting
-            # the merge over pre-existing inconsistencies on either device
-            # (e.g. ``face`` set without ``rack``).
-            # device.primary_ip4/6 / oob_ip are UNIQUE per address, so the donor must release
-            # the FK *before* the winner claims it — saving the winner first while the donor
-            # still holds the same address violates the unique constraint (mirrors
-            # _reconcile_donor_device_ip_fks above).
-            donor.save(update_fields=[field])
-            winner.save(update_fields=[field])
+            # set_device_ip_fk() saves only the touched FK column (skips full_clean(), so a
+            # pre-existing inconsistency like ``face`` without ``rack`` can't block the merge)
+            # while enforcing the "address must live on the winner's own interface" invariant
+            # the bare update_fields save would skip. device.primary_ip4/6 / oob_ip are UNIQUE
+            # per address, so the donor must release the FK (saved first, below) BEFORE the
+            # winner claims it — the reverse order trips the unique constraint.
+            set_device_ip_fk(donor, field, None)
+            set_device_ip_fk(winner, field, donor_ip)
 
         return _hx_response(
             request,

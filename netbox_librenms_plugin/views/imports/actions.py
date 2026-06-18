@@ -41,6 +41,7 @@ from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
     resolve_naming_preferences,
     save_user_pref,
+    set_device_ip_fk,
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
@@ -2390,8 +2391,11 @@ class AddAsOOBView(
                             )
                         deferred_messages.append((messages.WARNING, msg))
                     else:
-                        existing_device.oob_ip = oob_ip
-                        update_fields.append("oob_ip")
+                        # Guarded write: set_device_ip_fk() enforces that oob_ip is assigned to
+                        # an interface on existing_device (it is — _attach_oob_ip() just hung it
+                        # on oob_iface) before the batched update_fields save below, which skips
+                        # full_clean() and would otherwise accept an off-device address.
+                        update_fields.append(set_device_ip_fk(existing_device, "oob_ip", oob_ip, save=False))
                         deferred_messages.append(
                             (messages.INFO, f"Set OOB IP {oob_ip_str} on interface {oob_iface.name}.")
                         )
@@ -3014,8 +3018,13 @@ class MergeNetBoxDevicesView(
             if donor.oob_ip_id and not winner.oob_ip_id:
                 oob_assigned = donor.oob_ip.assigned_object
                 if getattr(oob_assigned, "device_id", None) == winner.pk:
-                    winner.oob_ip = donor.oob_ip
-                    donor.oob_ip = None
+                    # Capture before clearing the donor; set_device_ip_fk() re-checks the
+                    # address is on a winner interface (it is, per the guard above) and assigns
+                    # without saving — the batched donor-then-winner save below preserves the
+                    # release-before-claim ordering the UNIQUE oob_ip FK requires.
+                    transferred_oob_ip = donor.oob_ip
+                    set_device_ip_fk(winner, "oob_ip", transferred_oob_ip, save=False)
+                    set_device_ip_fk(donor, "oob_ip", None, save=False)
                     oob_ip_transferred = True
 
             # Clear donor's active link and stamp migration marker.
