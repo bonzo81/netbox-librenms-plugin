@@ -573,6 +573,15 @@ function initializeVCMemberSelect() {
             interfaceSelects.forEach(select => {
                 if (select.tomselect && !select.dataset.interfaceSelectInitialized) {
                     select.dataset.interfaceSelectInitialized = 'true';
+                    // Seed the rollback baseline HERE, before the change listener is attached:
+                    // at init time select.value still reflects the originally rendered (verified)
+                    // assignment. Seeding it lazily inside handleInterfaceChange instead would run
+                    // after select.value already equals the newly-selected member, so a verify
+                    // failure would "roll back" to the rejected member.
+                    if (typeof select._lastVerifiedMember === 'undefined') {
+                        select._lastVerifiedMember =
+                            select.querySelector('option[selected]')?.value || select.value || null;
+                    }
                     select.tomselect.on('change', function (value) {
                         handleInterfaceChange(select, value);
                     });
@@ -1212,15 +1221,13 @@ function handleInterfaceChange(select, value) {
     // post the wrong row's port_id and repaint the wrong row. closest('tr') is unique.
     const row = select.closest('tr');
 
-    // Remember the last server-confirmed member so a failed verify can roll the dropdown back
-    // to it — otherwise the user is stranded on an unverified selection while the row HTML and
-    // relationship metadata still belong to the previous member. Seed once from the originally
-    // rendered <option selected> (the current NetBox assignment, which is verified).
+    // Defensive fallback: the baseline is normally seeded at init time (initializeVCMemberSelect),
+    // before this change listener is attached, while select.value still holds the verified
+    // assignment. If for some reason it wasn't, seed it ONLY from the rendered <option selected> —
+    // NOT from select.value, which by the time this callback runs already equals the newly
+    // selected (unverified) member, so a verify failure would otherwise "roll back" to it.
     if (typeof select._lastVerifiedMember === 'undefined') {
-        // Fall back to select.value: a hydrated control can have a valid current value without a
-        // rendered option[selected] attribute. Without the fallback the baseline stays null and
-        // rollbackToLastVerified() leaves the row's LAG/parent buttons locked after a verify failure.
-        select._lastVerifiedMember = select.querySelector('option[selected]')?.value || select.value || null;
+        select._lastVerifiedMember = select.querySelector('option[selected]')?.value || null;
     }
 
     // Disable this row's LAG/parent sync buttons while the verify is in flight. A click landing

@@ -2476,6 +2476,20 @@ class TestResolvePortRelationships:
         result = mock_librenms_api.resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1])
         assert result["lag_members"] == {301: 302}
 
+    @pytest.mark.django_db
+    def test_db_patterns_non_string_device_os_falls_back_to_all(self, mock_librenms_api):
+        """A truthy non-string device_os (LibreNMS can return ``os`` as a number) must not crash
+        on ``.strip()``; it falls back to the full unscoped pattern set instead of raising
+        AttributeError. Driven through the real queryset filter with a real stored pattern."""
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        PortStackLagPattern.objects.create(librenms_os="ztest_pochannel", lag_name_pattern=r"^Po\d+$")
+
+        # device_os=123 (int) would raise AttributeError on device_os.strip() before the fix.
+        result = mock_librenms_api.resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], device_os=123)
+        # Unscoped fallback loads every stored pattern, so Po10 is still classified as a LAG.
+        assert result["lag_members"] == {301: 302}
+
     def test_invalid_lag_pattern_is_skipped_and_logged(self, mock_librenms_api, caplog):
         """A configured LAG pattern that isn't valid regex is skipped (it must not crash
         relationship resolution) AND logged at WARNING — otherwise a user with a typo in their

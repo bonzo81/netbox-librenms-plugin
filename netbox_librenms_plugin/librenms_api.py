@@ -655,8 +655,13 @@ class LibreNMSAPI:
             from netbox_librenms_plugin.models import PortStackLagPattern
 
             queryset = PortStackLagPattern.objects.all()
-            if device_os:
-                queryset = queryset.filter(librenms_os__iexact=device_os.strip())
+            # device_os comes straight from device_info.get("os"); LibreNMS can return a
+            # truthy non-string (e.g. a number) there, which would raise AttributeError on
+            # .strip(). Only a non-empty string scopes the patterns; anything else falls
+            # back to the full (unscoped) set rather than crashing relationship resolution.
+            os_filter = device_os.strip() if isinstance(device_os, str) else ""
+            if os_filter:
+                queryset = queryset.filter(librenms_os__iexact=os_filter)
             lag_patterns = {p.librenms_os: p.lag_name_pattern for p in queryset}
 
         # Guard against malformed payload items (non-dict) so a single bad entry from
