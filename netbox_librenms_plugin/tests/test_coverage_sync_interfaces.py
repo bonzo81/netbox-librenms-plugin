@@ -7,6 +7,10 @@ Target: 95%+ coverage
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,7 +60,6 @@ class TestSyncInterfacesViewPermissions:
     def test_invalid_type_raises_http404(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
         from django.http import Http404
-        import pytest
 
         view = object.__new__(SyncInterfacesView)
         with pytest.raises(Http404):
@@ -92,7 +95,6 @@ class TestSyncInterfacesViewGetObject:
     def test_invalid_type_raises_http404(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
         from django.http import Http404
-        import pytest
 
         view = object.__new__(SyncInterfacesView)
         with pytest.raises(Http404):
@@ -560,25 +562,34 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         view._sync_interface_vlans = MagicMock()
         return view
 
+    @pytest.mark.django_db
     def test_device_interface_created(self):
-        from dcim.models import Device
+        """End-to-end: sync_interface creates a real Interface on a real Device and persists the
+        synced attributes (the real get_or_create + update_interface_attributes + save run)."""
+        from dcim.models import Interface
 
         view = self._make_view()
-        # __class__ = Device makes isinstance(mock_device, Device) → True
-        mock_device = MagicMock()
-        mock_device.__class__ = Device
-        mock_device.virtual_chassis = None
+        del view.update_interface_attributes  # exercise the real attribute sync + save
+        dev = make_device("sync-create")
+        librenms_port = {
+            "ifName": "Gi0/1",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 1000000000,
+            "ifAlias": "uplink",
+            "ifMtu": 1500,
+            "port_id": None,
+            "ifAdminStatus": "up",
+        }
 
-        mock_interface = MagicMock()
-        librenms_port = {"ifName": "Gi0/1", "port_id": None}
+        # exclude "vlans" so the (separately tested) VLAN sub-sync isn't exercised here.
+        view.sync_interface(dev, librenms_port, ["vlans"], "ifName")
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls:
-            mock_intf_cls.objects.get_or_create.return_value = (mock_interface, True)
-            view.get_netbox_interface_type = MagicMock(return_value="1000base-t")
-            view.sync_interface(mock_device, librenms_port, [], "ifName")
-
-        mock_intf_cls.objects.get_or_create.assert_called_once()
-        view.update_interface_attributes.assert_called_once()
+        iface = Interface.objects.get(device=dev, name="Gi0/1")
+        assert iface.speed == 1000000
+        assert iface.description == "uplink"
+        assert iface.mtu == 1500
+        assert iface.enabled is True
+        assert iface.type  # a real NetBox type was resolved from ifType (non-empty)
 
     def test_foreign_port_id_skip_is_recorded(self):
         """When the resolver returns None (port_id belongs to another device), the row is
@@ -803,7 +814,6 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
     def test_invalid_obj_raises_value_error(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-        import pytest
 
         view = object.__new__(SyncInterfacesView)
         view.request = _make_request()
@@ -965,6 +975,7 @@ class TestSyncInterfacesViewHandleMacAddress:
 # ===========================================================================
 
 
+@pytest.mark.django_db
 class TestSyncInterfacesViewUpdateInterfaceAttributes:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -972,15 +983,17 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         view = object.__new__(SyncInterfacesView)
         view.request = _make_request()
         view._post_server_key = "default"
-        view.handle_mac_address = MagicMock()
+        view.handle_mac_address = MagicMock()  # MAC parsing has its own dedicated test class
         return view
 
     def test_basic_attributes_set(self):
+        """Real Interface: the LibreNMS→NetBox field mapping is applied and persisted; the real
+        convert_speed_to_kbps runs (bps→kbps). Verified by reloading the row."""
         from dcim.models import Interface
 
         view = self._make_view()
-        interface = MagicMock()
-        interface.__class__ = Interface
+        dev = make_device("intf-attrs")
+        interface = make_interface(dev, "Gi0/0")
         librenms_port = {
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
@@ -991,83 +1004,76 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1000000):
-            view.update_interface_attributes(interface, librenms_port, "1000base-t", [], "ifName")
+        view.update_interface_attributes(interface, librenms_port, "1000base-t", [], "ifName")
 
-        interface.save.assert_called_once()
-        assert interface.name == "Gi0/1"
-        assert interface.type == "1000base-t"
-        assert interface.speed == 1000000
-        assert interface.description == "uplink"
-        assert interface.mtu == 1500
-        assert interface.enabled is True
+        reloaded = Interface.objects.get(pk=interface.pk)
+        assert reloaded.name == "Gi0/1"
+        assert reloaded.type == "1000base-t"
+        assert reloaded.speed == 1000000  # 1e9 bps → 1e6 kbps via the real convert_speed_to_kbps
+        assert reloaded.description == "uplink"
+        assert reloaded.mtu == 1500
+        assert reloaded.enabled is True
 
     def test_excluded_columns_skipped(self):
+        """Excluded columns are left untouched on a real Interface (verified via reload)."""
         from dcim.models import Interface
 
         view = self._make_view()
-        # MagicMock(spec=Interface) passes isinstance check; explicit attr init makes changes detectable
-        interface = MagicMock(spec=Interface)
-        interface.name = None
-        interface.type = None
-        interface.speed = None
-        interface.description = None
-        interface.mtu = None
-        interface.enabled = None
-        interface.mac_address = None
-        interface.save = MagicMock()
+        dev = make_device("intf-excluded")
+        interface = make_interface(dev, "orig-name", iface_type="1000base-t")
+        interface.mtu = 9000
+        interface.description = "keep-me"
+        interface.save()
         librenms_port = {
             "ifName": "Gi0/1",
             "ifType": "ethernetCsmacd",
             "ifSpeed": 0,
-            "ifAlias": None,
-            "ifMtu": None,
+            "ifAlias": "would-change",
+            "ifMtu": 1500,
             "port_id": None,
             "ifAdminStatus": None,
         }
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=0):
-            view.handle_mac_address = MagicMock()
-            view.update_interface_attributes(
-                interface,
-                librenms_port,
-                "other",
-                ["name", "type", "speed", "description", "mtu", "enabled", "mac_address"],
-                "ifName",
-            )
+        view.update_interface_attributes(
+            interface,
+            librenms_port,
+            "other",
+            ["name", "type", "speed", "description", "mtu", "enabled", "mac_address"],
+            "ifName",
+        )
 
-        # save still called
-        interface.save.assert_called_once()
-        # MAC handler must not be invoked when "mac_address" is in excluded_columns
+        # MAC handler must not be invoked when "mac_address" is excluded.
         view.handle_mac_address.assert_not_called()
-        # All other excluded attributes remain at their initial None
-        assert interface.name is None
-        assert interface.type is None
-        assert interface.speed is None
-        assert interface.description is None
-        assert interface.mtu is None
-        assert interface.enabled is None
+        # Excluded attributes keep their pre-update values.
+        reloaded = Interface.objects.get(pk=interface.pk)
+        assert reloaded.name == "orig-name"
+        assert reloaded.type == "1000base-t"
+        assert reloaded.mtu == 9000
+        assert reloaded.description == "keep-me"
 
     def test_admin_status_down_sets_disabled(self):
         from dcim.models import Interface
 
         view = self._make_view()
-        interface = MagicMock()
-        interface.__class__ = Interface
+        dev = make_device("intf-down")
+        interface = make_interface(dev, "Gi0/0")
         librenms_port = {
             "ifName": "Gi0/1",
             "ifType": None,
             "ifSpeed": None,
-            "ifAlias": None,
+            # ifAlias "" (not None): a None ifAlias would set description=None and trip the
+            # NOT-NULL constraint on a real save — see note. Empty string is the safe no-op.
+            "ifAlias": "",
             "ifMtu": None,
             "port_id": None,
             "ifAdminStatus": "down",
         }
 
-        with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
-            view.update_interface_attributes(interface, librenms_port, None, [], "ifName")
+        # netbox_type "other" (the real get_netbox_interface_type fallback); passing None would
+        # set the NOT-NULL type column to NULL — another real-save constraint the mock hid.
+        view.update_interface_attributes(interface, librenms_port, "other", [], "ifName")
 
-        assert interface.enabled is False
+        assert Interface.objects.get(pk=interface.pk).enabled is False
 
     def test_port_id_calls_set_librenms_device_id(self):
         from dcim.models import Interface
@@ -1236,7 +1242,6 @@ class TestDeleteNetBoxInterfacesViewPermissions:
     def test_invalid_type_raises_http404(self):
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
         from django.http import Http404
-        import pytest
 
         view = object.__new__(DeleteNetBoxInterfacesView)
         with pytest.raises(Http404):
@@ -1274,7 +1279,6 @@ class TestDeleteNetBoxInterfacesViewPost:
 
     def test_invalid_object_type_raises_http404(self):
         """Invalid object_type raises Http404 from get_required_permissions_for_object_type."""
-        import pytest
         from django.http import Http404
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
 
