@@ -1191,44 +1191,30 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
         return int_id
     if isinstance(cf_value, dict):
         value = cf_value.get(server_key)
-        if isinstance(value, bool):
-            return None
         if isinstance(value, dict):
             # New form: {"id": 42, "oob": {...}} — extract the main device id.
+            # coerce_librenms_id centralizes the bool/int/str/positive checks.
             inner = value.get("id")
-            if isinstance(inner, bool):
+            int_id = coerce_librenms_id(inner)
+            if int_id is None:
                 return None
-            if isinstance(inner, int):
-                return inner if inner > 0 else None
-            if isinstance(inner, str):
-                try:
-                    int_id = int(inner)
-                except (ValueError, TypeError):
-                    return None
-                if int_id <= 0:
-                    return None
-                if auto_save:
-                    value["id"] = int_id
-                    obj.custom_field_data["librenms_id"] = cf_value
-                    obj.save(update_fields=["custom_field_data"])
-                return int_id
-            return None
-        if isinstance(value, str):
-            # Normalise string-stored ID inside JSON dict and write back.
-            try:
-                value = int(value)
-            except (ValueError, TypeError):
-                return None
-            if value <= 0:
-                return None
-            if auto_save:
-                cf_value[server_key] = value
+            # Normalise a string-stored id ("42" → 42) back to the DB.
+            if auto_save and isinstance(inner, str):
+                value["id"] = int_id
                 obj.custom_field_data["librenms_id"] = cf_value
                 obj.save(update_fields=["custom_field_data"])
-            return value
-        if isinstance(value, int):
-            return value if value > 0 else None
-        return None
+            return int_id
+        # Bare scalar entry ({"primary": 42} / {"primary": "42"}): coerce_librenms_id
+        # rejects bools, non-positive, and non-numeric strings in one place.
+        int_id = coerce_librenms_id(value)
+        if int_id is None:
+            return None
+        # Normalise a string-stored id back to the DB so later queries use a plain int.
+        if auto_save and isinstance(value, str):
+            cf_value[server_key] = int_id
+            obj.custom_field_data["librenms_id"] = cf_value
+            obj.save(update_fields=["custom_field_data"])
+        return int_id
     return None
 
 

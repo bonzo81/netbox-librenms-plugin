@@ -3090,3 +3090,88 @@ class TestValidateDeviceForImportOOBIPFallback:
         assert result["existing_device"] == device
         assert result["serial_action"] == "oob_candidate"
         assert result["oob_candidate"]["device"] == device
+
+
+@pytest.mark.django_db
+class TestDetectSerialMatchRole:
+    """_detect_serial_match_role is the pure role-decision step extracted from
+    validate_device_for_import's serial-match branch. Exercise it directly against REAL
+    Device objects (+ the real _describe_existing_librenms_link), so the host/OOB heuristic
+    is verified end-to-end on actual NetBox state rather than synthesized mocks."""
+
+    def _role(self, existing_device, hostname, libre_device, *, server_key="default"):
+        from netbox_librenms_plugin.import_utils.device_operations import (
+            _describe_existing_librenms_link,
+            _detect_serial_match_role,
+        )
+
+        existing_link = _describe_existing_librenms_link(existing_device, server_key)
+        serial = (libre_device.get("serial") or "").strip()
+        return _detect_serial_match_role(existing_device, existing_link, hostname, serial, libre_device, server_key)
+
+    def test_oob_candidate_default_when_incoming_is_oob_and_name_differs(self):
+        # Existing unlinked host; incoming LibreNMS row is clearly an iDRAC whose hostname
+        # differs (the OOB side of the same chassis) → default to oob_candidate.
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("host-server-1")
+        libre_device = {
+            "device_id": 7,
+            "os": "",
+            "hardware": "iDRAC9",
+            "hostname": "host-server-1-idrac",
+            "serial": "ABC123",
+        }
+        out = self._role(device, "host-server-1-idrac", libre_device)
+
+        assert out["serial_action"] == "oob_candidate"
+        assert out["oob_candidate"]["device"] == device
+        assert out["oob_candidate"]["type"] == "idrac"
+        assert out["promote_to_host"] is None
+        # Host promotion isn't feasible (existing has no host link), so no manual toggle.
+        assert out["serial_role_choice_available"] is False
+        assert out["warnings"] == []
+
+    def test_promote_to_host_when_existing_named_oob_and_linked_elsewhere(self):
+        # Existing device is NAME-tagged as the OOB ("...-idrac") and already host-linked to a
+        # DIFFERENT LibreNMS id; incoming row is a plain host → default to promote_to_host, with
+        # both roles feasible so the UI can offer the toggle.
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("leaf01-idrac", librenms_cf={"default": 99})
+        libre_device = {
+            "device_id": 7,
+            "os": "linux",
+            "hardware": "PowerEdge R740",
+            "hostname": "leaf01",
+            "serial": "ABC123",
+        }
+        out = self._role(device, "leaf01", libre_device)
+
+        assert out["serial_action"] == "promote_to_host"
+        assert out["promote_to_host"]["existing_libre_id"] == 99
+        assert out["promote_to_host"]["existing_oob_type"] == "idrac"
+        assert out["promote_to_host"]["existing_device"] == device
+        # Both oob_candidate and promote_to_host are feasible → user may flip the default.
+        assert out["serial_role_choice_available"] is True
+
+    def test_plain_link_when_names_match_and_unlinked(self):
+        # Names match and the existing device has no LibreNMS link → not a chassis pair; fall
+        # back to a plain "link" with the unlinked warning, no role choice.
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("switch-7")
+        libre_device = {
+            "device_id": 7,
+            "os": "linux",
+            "hardware": "Catalyst",
+            "hostname": "switch-7",
+            "serial": "ABC123",
+        }
+        out = self._role(device, "switch-7", libre_device)
+
+        assert out["serial_action"] == "link"
+        assert out["oob_candidate"] is None
+        assert out["promote_to_host"] is None
+        assert out["serial_role_choice_available"] is False
+        assert any("not linked to LibreNMS" in w for w in out["warnings"])

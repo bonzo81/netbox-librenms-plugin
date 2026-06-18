@@ -39,6 +39,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
     is_legacy_librenms_id,
+    coerce_librenms_id,
     resolve_naming_preferences,
     save_user_pref,
     set_device_ip_fk,
@@ -1364,14 +1365,10 @@ class DeviceConflictActionView(
         if validation.get("device_type_mismatch") and force:
             librenms_device_type = validation.get("device_type", {}).get("device_type")
 
-        librenms_id = libre_device.get("device_id")
-        if isinstance(librenms_id, bool):
-            return _htmx_error_response("Invalid or missing LibreNMS device_id in payload")
-        try:
-            librenms_id = int(librenms_id)
-        except (TypeError, ValueError):
-            return _htmx_error_response("Invalid or missing LibreNMS device_id in payload")
-        if librenms_id <= 0:
+        # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
+        # non-numeric strings, zero/negatives) in one place.
+        librenms_id = coerce_librenms_id(libre_device.get("device_id"))
+        if librenms_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id in payload")
 
         # Wrap the LibreNMS-ID collision check and subsequent write in a single
@@ -2268,15 +2265,11 @@ class AddAsOOBView(
         if oob_candidate["device"].pk != existing_device.pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
 
-        librenms_id = libre_device.get("device_id")
-        if isinstance(librenms_id, bool):
+        # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
+        # non-numeric strings, zero/negatives) in one place.
+        librenms_id = coerce_librenms_id(libre_device.get("device_id"))
+        if librenms_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id")
-        try:
-            librenms_id = int(librenms_id)
-        except (TypeError, ValueError):
-            return _htmx_error_response("Invalid or missing LibreNMS device_id")
-        if librenms_id <= 0:
-            return _htmx_error_response("Invalid LibreNMS device_id")
 
         # Reject legacy bare-int librenms_id (same guard as DeviceConflictActionView).
         stored_id = existing_device.custom_field_data.get("librenms_id")
@@ -2306,7 +2299,6 @@ class AddAsOOBView(
 
             from netbox_librenms_plugin.utils import (
                 AmbiguousLibreNMSIdError,
-                coerce_librenms_id,
                 find_by_librenms_id,
                 get_librenms_device_id,
                 get_librenms_oob,

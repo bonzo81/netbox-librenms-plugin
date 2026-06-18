@@ -210,6 +210,144 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
         result["issues"].append(message)
 
 
+def _detect_serial_match_role(existing_by_serial, existing_link, hostname, serial, libre_device, server_key):
+    """Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
+
+    Pure decision step for the serial-match branch of :func:`validate_device_for_import`:
+    reads NetBox/LibreNMS state but does **not** mutate ``result``. Computes whether the
+    incoming device is an OOB-controller candidate, a host-promotion, a plain link, or a
+    hostname-differs case, and returns the keyword arguments for
+    :func:`apply_oob_detection_result` (``serial_action``, ``oob_candidate``,
+    ``promote_to_host``, ``serial_role_choice_available``, ``warnings``).
+
+    Args:
+        existing_by_serial: the NetBox Device matched by serial.
+        existing_link: ``_describe_existing_librenms_link`` dict for *existing_by_serial*.
+        hostname: the incoming LibreNMS hostname (already resolved).
+        serial: the incoming serial (for warning text only).
+        libre_device: the raw LibreNMS device payload.
+        server_key: active LibreNMS server key.
+    """
+    # Compute both possible roles for the incoming LibreNMS device against
+    # the existing NetBox device, then pick a heuristic default. The UI
+    # offers a manual toggle whenever both roles are feasible so the user
+    # can override the heuristic (e.g. mark a "linux"-OS device as OOB or
+    # demote an apparent host into the OOB slot).
+    oob_type_from_libre = normalize_oob_type(
+        libre_device.get("os", ""),
+        libre_device.get("hardware", ""),
+    )
+    existing_oob = get_librenms_oob(existing_by_serial, server_key=server_key)
+
+    # Only treat this as a possible host/OOB chassis-pair situation when
+    # there is a real ambiguity: either the existing NetBox device's name
+    # differs from the incoming LibreNMS hostname (so they likely represent
+    # two sides of one physical box), or the existing device is already
+    # linked to a different LibreNMS id. When names match exactly and the
+    # existing has no link, the user almost certainly just wants to link.
+    names_match = bool(existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower())
+    # Normalize to int so that a string device_id from the API
+    # (e.g. "17") doesn't cause a false "linked elsewhere" result
+    # when compared to the int host_id from coerce_librenms_id.
+    normalized_device_id = coerce_librenms_id(libre_device.get("device_id"))
+    already_linked_elsewhere = bool(
+        existing_link and existing_link["host_id"] and existing_link["host_id"] != normalized_device_id
+    )
+    chassis_pair_likely = (not names_match) or already_linked_elsewhere
+
+    oob_possible = chassis_pair_likely and existing_oob is None
+    host_possible = chassis_pair_likely and bool(
+        existing_link
+        and existing_link["host_id"]
+        and existing_link["host_id"] != normalized_device_id
+        and not existing_link.get("oob_id")
+    )
+    existing_oob_from_name = _detect_oob_type_from_name(existing_by_serial.name)
+
+    # --- Compute all values before mutating result ---
+    oob_candidate_data = None
+    if oob_possible:
+        inferred_oob_type = (
+            oob_type_from_libre
+            or _detect_oob_type_from_name(libre_device.get("hostname") or libre_device.get("sysName") or "")
+            or "oob"
+        )
+        oob_candidate_data = {
+            "device": existing_by_serial,
+            "type": inferred_oob_type,
+            "version": libre_device.get("version") or None,
+            "ip": libre_device.get("ip") or None,
+        }
+
+    promote_to_host_data = None
+    if host_possible:
+        promote_to_host_data = {
+            "existing_libre_id": existing_link["host_id"],
+            "existing_oob_type": existing_oob_from_name or "oob",
+            # Included for bulk-collision detection: lets
+            # detect_bulk_collisions identify which NetBox device
+            # would be modified without an extra DB round-trip.
+            "existing_device": existing_by_serial,
+        }
+
+    # Heuristic default: incoming-OS clearly OOB -> oob; otherwise if the
+    # existing device's NAME suggests it is the OOB and a host link can be
+    # demoted, offer promote; otherwise fall back to whichever is feasible.
+    if oob_type_from_libre and oob_possible:
+        serial_action_value = "oob_candidate"
+    elif host_possible and existing_oob_from_name:
+        serial_action_value = "promote_to_host"
+    elif oob_possible and host_possible:
+        # Both feasible but neither heuristic matches strongly --
+        # default to oob_candidate (least-destructive), let the user flip.
+        serial_action_value = "oob_candidate"
+    elif oob_possible:
+        serial_action_value = "oob_candidate"
+    elif host_possible:
+        serial_action_value = "promote_to_host"
+    else:
+        serial_action_value = None
+
+    block_warnings: list = []
+    if oob_type_from_libre and existing_oob is not None:
+        # OOB-typed incoming but existing already has an OOB linked --
+        # inform without blocking. No actionable button in this branch.
+        serial_action_value = "link"
+        block_warnings.append(
+            f"Device '{existing_by_serial.name}' already has an OOB controller linked. "
+            f"Re-import will update the existing OOB entry."
+        )
+    elif not oob_possible and not host_possible:
+        # Neither role is feasible -- fall back to legacy hostname/serial
+        # warning behaviour so the user still sees a useful message.
+        if existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower():
+            if existing_link and existing_link["host_id"]:
+                block_warnings.append(
+                    f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
+                    f"(currently linked to LibreNMS device #{existing_link['host_id']})"
+                )
+            else:
+                block_warnings.append(
+                    f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
+                    f"(not linked to LibreNMS)"
+                )
+            serial_action_value = "link"
+        else:
+            block_warnings.append(
+                f"Device with same serial ({serial}) exists as '{existing_by_serial.name}' "
+                f"but hostname differs (LibreNMS: '{hostname}'). Device may have been reinstalled."
+            )
+            serial_action_value = "hostname_differs"
+
+    return {
+        "serial_action": serial_action_value,
+        "oob_candidate": oob_candidate_data,
+        "promote_to_host": promote_to_host_data,
+        "serial_role_choice_available": oob_possible and host_possible,
+        "warnings": block_warnings,
+    }
+
+
 def validate_device_for_import(
     libre_device: dict,
     import_as_vm: bool = False,
@@ -635,130 +773,14 @@ def validate_device_for_import(
                         existing_link = _describe_existing_librenms_link(existing_by_serial, server_key)
                         result["existing_librenms_link"] = existing_link
 
-                        # Compute both possible roles for the incoming LibreNMS device against
-                        # the existing NetBox device, then pick a heuristic default. The UI
-                        # offers a manual toggle whenever both roles are feasible so the user
-                        # can override the heuristic (e.g. mark a "linux"-OS device as OOB or
-                        # demote an apparent host into the OOB slot).
-                        oob_type_from_libre = normalize_oob_type(
-                            libre_device.get("os", ""),
-                            libre_device.get("hardware", ""),
-                        )
-                        existing_oob = get_librenms_oob(existing_by_serial, server_key=server_key)
-
-                        # Only treat this as a possible host/OOB chassis-pair situation when
-                        # there is a real ambiguity: either the existing NetBox device's name
-                        # differs from the incoming LibreNMS hostname (so they likely represent
-                        # two sides of one physical box), or the existing device is already
-                        # linked to a different LibreNMS id. When names match exactly and the
-                        # existing has no link, the user almost certainly just wants to link.
-                        names_match = bool(
-                            existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower()
-                        )
-                        # Normalize to int so that a string device_id from the API
-                        # (e.g. "17") doesn't cause a false "linked elsewhere" result
-                        # when compared to the int host_id from coerce_librenms_id.
-                        normalized_device_id = coerce_librenms_id(libre_device.get("device_id"))
-                        already_linked_elsewhere = bool(
-                            existing_link
-                            and existing_link["host_id"]
-                            and existing_link["host_id"] != normalized_device_id
-                        )
-                        chassis_pair_likely = (not names_match) or already_linked_elsewhere
-
-                        oob_possible = chassis_pair_likely and existing_oob is None
-                        host_possible = chassis_pair_likely and bool(
-                            existing_link
-                            and existing_link["host_id"]
-                            and existing_link["host_id"] != normalized_device_id
-                            and not existing_link.get("oob_id")
-                        )
-                        existing_oob_from_name = _detect_oob_type_from_name(existing_by_serial.name)
-
-                        # --- Compute all values before mutating result ---
-                        oob_candidate_data = None
-                        if oob_possible:
-                            inferred_oob_type = (
-                                oob_type_from_libre
-                                or _detect_oob_type_from_name(
-                                    libre_device.get("hostname") or libre_device.get("sysName") or ""
-                                )
-                                or "oob"
-                            )
-                            oob_candidate_data = {
-                                "device": existing_by_serial,
-                                "type": inferred_oob_type,
-                                "version": libre_device.get("version") or None,
-                                "ip": libre_device.get("ip") or None,
-                            }
-
-                        promote_to_host_data = None
-                        if host_possible:
-                            promote_to_host_data = {
-                                "existing_libre_id": existing_link["host_id"],
-                                "existing_oob_type": existing_oob_from_name or "oob",
-                                # Included for bulk-collision detection: lets
-                                # detect_bulk_collisions identify which NetBox device
-                                # would be modified without an extra DB round-trip.
-                                "existing_device": existing_by_serial,
-                            }
-
-                        # Heuristic default: incoming-OS clearly OOB -> oob; otherwise if the
-                        # existing device's NAME suggests it is the OOB and a host link can be
-                        # demoted, offer promote; otherwise fall back to whichever is feasible.
-                        if oob_type_from_libre and oob_possible:
-                            serial_action_value = "oob_candidate"
-                        elif host_possible and existing_oob_from_name:
-                            serial_action_value = "promote_to_host"
-                        elif oob_possible and host_possible:
-                            # Both feasible but neither heuristic matches strongly --
-                            # default to oob_candidate (least-destructive), let the user flip.
-                            serial_action_value = "oob_candidate"
-                        elif oob_possible:
-                            serial_action_value = "oob_candidate"
-                        elif host_possible:
-                            serial_action_value = "promote_to_host"
-                        else:
-                            serial_action_value = None
-
-                        block_warnings: list = []
-                        if oob_type_from_libre and existing_oob is not None:
-                            # OOB-typed incoming but existing already has an OOB linked --
-                            # inform without blocking. No actionable button in this branch.
-                            serial_action_value = "link"
-                            block_warnings.append(
-                                f"Device '{existing_by_serial.name}' already has an OOB controller linked. "
-                                f"Re-import will update the existing OOB entry."
-                            )
-                        elif not oob_possible and not host_possible:
-                            # Neither role is feasible -- fall back to legacy hostname/serial
-                            # warning behaviour so the user still sees a useful message.
-                            if existing_by_serial.name and existing_by_serial.name.lower() == hostname.lower():
-                                if existing_link and existing_link["host_id"]:
-                                    block_warnings.append(
-                                        f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
-                                        f"(currently linked to LibreNMS device #{existing_link['host_id']})"
-                                    )
-                                else:
-                                    block_warnings.append(
-                                        f"Device with same serial and hostname exists as '{existing_by_serial.name}' "
-                                        f"(not linked to LibreNMS)"
-                                    )
-                                serial_action_value = "link"
-                            else:
-                                block_warnings.append(
-                                    f"Device with same serial ({serial}) exists as '{existing_by_serial.name}' "
-                                    f"but hostname differs (LibreNMS: '{hostname}'). Device may have been reinstalled."
-                                )
-                                serial_action_value = "hostname_differs"
-
+                        # Decide OOB-candidate / promote-to-host / link / hostname-differs role
+                        # for the incoming device (pure: reads state, doesn't mutate result),
+                        # then apply the decision.
                         apply_oob_detection_result(
                             result,
-                            serial_action=serial_action_value,
-                            oob_candidate=oob_candidate_data,
-                            promote_to_host=promote_to_host_data,
-                            serial_role_choice_available=oob_possible and host_possible,
-                            warnings=block_warnings,
+                            **_detect_serial_match_role(
+                                existing_by_serial, existing_link, hostname, serial, libre_device, server_key
+                            ),
                         )
 
             # Refresh local variable to reflect any VM-mode adjustments made during detection
