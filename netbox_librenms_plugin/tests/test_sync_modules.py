@@ -851,101 +851,128 @@ class TestInstallSingleStatus:
 
         return device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt
 
+    @pytest.mark.django_db
     def test_returns_installed_on_success(self):
-        from contextlib import contextmanager
+        """A real Module is created in the matched bay and persisted (the create was faked before)."""
+        from dcim.models import Module, ModuleBay, ModuleType
 
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         view = _make_install_branch_view()
-        device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
-        module_instance = MagicMock()
-        module_instance.pk = 123
-        Module.return_value = module_instance
+        device = make_device("install-ok-dev")
+        bay = make_module_bay(device, "Slot 1")
+        mt = make_module_type("WS-X4748")
+        item = {
+            "entPhysicalIndex": 10,
+            "entPhysicalModelName": "WS-X4748",
+            "entPhysicalSerialNum": "SN123",
+            "entPhysicalName": "Line Card",
+            "entPhysicalContainedIn": 0,
+        }
 
-        @contextmanager
-        def noop_atomic():
-            yield
-
-        with patch("netbox_librenms_plugin.views.sync.modules.transaction.atomic", noop_atomic):
-            with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
-                with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
-                    with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
-                        with patch.object(InstallBranchView, "_match_bay", return_value=bay):
-                            result = view._install_single(
-                                device, item, index_map, module_types, ModuleBay, ModuleType, Module
-                            )
+        with (
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch.object(InstallBranchView, "_find_parent_module_id", return_value=None),
+            patch.object(InstallBranchView, "_match_bay", return_value=bay),
+        ):
+            result = view._install_single(device, item, {10: item}, {"WS-X4748": mt}, ModuleBay, ModuleType, Module)
 
         assert result["status"] == "installed"
         assert "WS-X4748" in result["name"]
-        assert result["module_pk"] == 123
-        assert module_instance._adopt_components is True
+        # A real Module now occupies the bay with the LibreNMS serial.
+        module = Module.objects.get(pk=result["module_pk"])
+        assert module.module_bay_id == bay.pk
+        assert module.module_type_id == mt.pk
+        assert module.serial == "SN123"
 
+    @pytest.mark.django_db
     def test_returns_skipped_when_no_type(self):
-        view = _make_install_branch_view()
-        device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
+        """No module type matches the model → skipped, no Module created."""
+        from dcim.models import Module, ModuleBay, ModuleType
 
-        with patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None):
-            result = view._install_single(
-                device,
-                item,
-                index_map,
-                {},  # empty module_types → no match
-                ModuleBay,
-                ModuleType,
-                Module,
-            )
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
+
+        view = _make_install_branch_view()
+        device = make_device("install-notype-dev")
+        make_module_bay(device, "Slot 1")
+        item = {
+            "entPhysicalIndex": 10,
+            "entPhysicalModelName": "WS-X4748",
+            "entPhysicalSerialNum": "SN123",
+            "entPhysicalName": "Line Card",
+            "entPhysicalContainedIn": 0,
+        }
+
+        result = view._install_single(device, item, {10: item}, {}, ModuleBay, ModuleType, Module)
 
         assert result["status"] == "skipped"
         assert "no matching type" in result["reason"]
+        assert not Module.objects.filter(device=device).exists()
 
+    @pytest.mark.django_db
     def test_returns_skipped_when_no_bay(self):
+        """A matching type but no matching bay → skipped, no Module created."""
+        from dcim.models import Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         view = _make_install_branch_view()
-        device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
+        device = make_device("install-nobay-dev")
+        make_module_bay(device, "Slot 1")
+        mt = make_module_type("WS-X4748")
+        item = {
+            "entPhysicalIndex": 10,
+            "entPhysicalModelName": "WS-X4748",
+            "entPhysicalSerialNum": "SN123",
+            "entPhysicalName": "Line Card",
+            "entPhysicalContainedIn": 0,
+        }
 
-        with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
-            with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
-                with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
-                    with patch.object(InstallBranchView, "_match_bay", return_value=None):
-                        result = view._install_single(
-                            device, item, index_map, module_types, ModuleBay, ModuleType, Module
-                        )
+        with (
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch.object(InstallBranchView, "_find_parent_module_id", return_value=None),
+            patch.object(InstallBranchView, "_match_bay", return_value=None),
+        ):
+            result = view._install_single(device, item, {10: item}, {"WS-X4748": mt}, ModuleBay, ModuleType, Module)
 
         assert result["status"] == "skipped"
         assert "no matching bay" in result["reason"]
+        assert not Module.objects.filter(device=device).exists()
 
+    @pytest.mark.django_db
     def test_returns_skipped_when_bay_already_occupied(self):
-        from contextlib import contextmanager
+        """The matched bay already holds a real module → skipped, returns the occupant's pk."""
+        from dcim.models import Module, ModuleBay, ModuleType
 
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         view = _make_install_branch_view()
-        device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
-        occupied_module = _module()
-        bay.installed_module = occupied_module
-        # Update the locked bay to also appear occupied
-        locked_bay = MagicMock()
-        locked_bay.installed_module = occupied_module
-        locked_bay.pk = bay.pk
-        ModuleBay.objects.select_for_update.return_value.select_related.return_value.get.return_value = locked_bay
+        device = make_device("install-occupied-dev")
+        bay = make_module_bay(device, "Slot 1")
+        mt = make_module_type("WS-X4748")
+        # Pre-install a real module so the locked bay reads as occupied.
+        occupied = Module.objects.create(device=device, module_bay=bay, module_type=mt, status="active")
+        item = {
+            "entPhysicalIndex": 10,
+            "entPhysicalModelName": "WS-X4748",
+            "entPhysicalSerialNum": "SN123",
+            "entPhysicalName": "Line Card",
+            "entPhysicalContainedIn": 0,
+        }
 
-        @contextmanager
-        def noop_atomic():
-            yield
-
-        with patch("netbox_librenms_plugin.views.sync.modules.transaction.atomic", noop_atomic):
-            with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
-                with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
-                    with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
-                        with patch.object(InstallBranchView, "_match_bay", return_value=bay):
-                            result = view._install_single(
-                                device, item, index_map, module_types, ModuleBay, ModuleType, Module
-                            )
+        with (
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch.object(InstallBranchView, "_find_parent_module_id", return_value=None),
+            patch.object(InstallBranchView, "_match_bay", return_value=bay),
+        ):
+            result = view._install_single(device, item, {10: item}, {"WS-X4748": mt}, ModuleBay, ModuleType, Module)
 
         assert result["status"] == "skipped"
         assert "already occupied" in result["reason"]
-        assert result["module_pk"] == occupied_module.pk
+        assert result["module_pk"] == occupied.pk
 
     def test_infers_port_bay_from_interface_label_suffix(self):
         """_install_single should install port rows by inferring bay index from interface labels."""

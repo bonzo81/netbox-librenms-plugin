@@ -112,6 +112,25 @@ def make_ip(address, *, assigned_object=None, status="active"):
     return IPAddress.objects.create(address=address, assigned_object=assigned_object, status=status)
 
 
+def make_module_type(model, *, manufacturer=None):
+    """Create a real ModuleType (on the shared TestMfr unless one is supplied)."""
+    from dcim.models import ModuleType
+
+    if manufacturer is None:
+        _, _, _ = _shared_infra()  # ensure shared infra exists
+        from dcim.models import Manufacturer
+
+        manufacturer = Manufacturer.objects.get(slug="test-mfr")
+    return ModuleType.objects.create(manufacturer=manufacturer, model=model)
+
+
+def make_module_bay(device, name):
+    """Create a real ModuleBay on *device*."""
+    from dcim.models import ModuleBay
+
+    return ModuleBay.objects.create(device=device, name=name)
+
+
 def ip_on(device, address, ifname, *, iface_type="1000base-t"):
     """Create an Interface on *device* and assign a real IPAddress to it."""
     iface = make_interface(device, ifname, iface_type=iface_type)
