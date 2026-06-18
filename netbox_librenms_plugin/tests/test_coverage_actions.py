@@ -947,92 +947,81 @@ class TestDeviceRackUpdateView:
         assert b"Device not found" in result.content
 
 
+@pytest.mark.django_db
 class TestDeviceConflictActionView:
-    """Tests for DeviceConflictActionView.post (lines ~995+)."""
+    """DeviceConflictActionView.post — input guards + real-DB lookup paths.
+
+    The DB-touching cases (device-not-found, unknown-action) run against a real Device:
+    the existing-device pk is resolved through the real ``Device.objects.get`` lookup, so a
+    miss is a genuine ORM miss rather than a stubbed manager raising. Auth gates and the
+    LibreNMS validation pipeline (``get_validated_device_with_selections``) stay mocked —
+    those are external boundaries. The early input guards short-circuit before any DB access,
+    so they remain light unit tests.
+    """
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         view = object.__new__(DeviceConflictActionView)
         view._librenms_api = _make_api()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
         return view
 
     def test_no_permission_returns_error(self):
         view = self._make_view()
         error_resp = MagicMock()
-        with patch.object(view, "require_write_permission", return_value=error_resp):
-            result = view.post(MagicMock(), device_id=1)
+        view.require_write_permission = MagicMock(return_value=error_resp)
+        result = view.post(MagicMock(), device_id=1)
         assert result is error_resp
 
     def test_missing_action_renders_htmx_error_toast(self):
         view = self._make_view()
-        with patch.object(view, "require_write_permission", return_value=None):
-            request = _make_request(post={"existing_device_id": "1"})
-            result = view.post(request, device_id=1)
+        request = _make_request(post={"existing_device_id": "1"})
+        result = view.post(request, device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Missing action or existing_device_id" in result.content
 
     def test_missing_existing_device_id_renders_htmx_error_toast(self):
         view = self._make_view()
-        with patch.object(view, "require_write_permission", return_value=None):
-            request = _make_request(post={"action": "link"})
-            result = view.post(request, device_id=1)
+        request = _make_request(post={"action": "link"})
+        result = view.post(request, device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Missing action or existing_device_id" in result.content
 
     def test_vm_with_unsupported_action_renders_htmx_error_toast(self):
         view = self._make_view()
-        with patch.object(view, "require_write_permission", return_value=None):
-            request = _make_request(
-                post={
-                    "action": "link",
-                    "existing_device_id": "5",
-                    "existing_device_type": "virtualmachine",
-                }
-            )
-            result = view.post(request, device_id=1)
+        request = _make_request(
+            post={
+                "action": "link",
+                "existing_device_id": "5",
+                "existing_device_type": "virtualmachine",
+            }
+        )
+        result = view.post(request, device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"is not supported for virtual machines" in result.content
 
     def test_existing_device_not_found_renders_htmx_error_toast(self):
+        # A pk that isn't in the DB → a real Device.objects.get miss, not a stubbed raise.
         view = self._make_view()
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.DoesNotExist = type("DoesNotExist", (Exception,), {})
-                MockDevice.objects.get.side_effect = MockDevice.DoesNotExist()
-                MockDevice.objects.get.side_effect = ValueError("invalid pk")
-
-                request = _make_request(post={"action": "link", "existing_device_id": "abc"})
-                result = view.post(request, device_id=1)
+        request = _make_request(post={"action": "link", "existing_device_id": "987654321"})
+        result = view.post(request, device_id=1)
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
         assert b"Existing device not found" in result.content
 
     def test_unknown_action_renders_htmx_error_toast(self):
         view = self._make_view()
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                existing_device = MagicMock()
-                MockDevice.objects.get.return_value = existing_device
-                MockDevice.DoesNotExist = type("DoesNotExist", (Exception,), {})
-
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    view.required_object_permissions = {"POST": [("change", MockDevice)]}
-
-                    with patch.object(view, "get_validated_device_with_selections") as mock_validated:
-                        validation = {"existing_device": existing_device}
-                        mock_validated.return_value = ({"device_id": 1, "serial": "-"}, validation, {})
-
-                        request = _make_request(
-                            post={
-                                "action": "unknown_action",
-                                "existing_device_id": "5",
-                            }
-                        )
-                        result = view.post(request, device_id=1)
+        existing_device = make_device("conflict-unknown-action")
+        view.get_validated_device_with_selections = MagicMock(
+            return_value=({"device_id": 1, "serial": "-"}, {"existing_device": existing_device}, {})
+        )
+        request = _make_request(post={"action": "unknown_action", "existing_device_id": str(existing_device.pk)})
+        result = view.post(request, device_id=1)
 
         assert result.status_code == 200
         assert result.headers.get("HX-Reswap") == "none"
@@ -1486,8 +1475,18 @@ class TestDeviceRoleClusterRackViews:
         mock_render.assert_called_once()
 
 
+@pytest.mark.django_db
 class TestDeviceConflictActionLinkAction:
-    """Tests for DeviceConflictActionView 'link' action (lines 1083-1094)."""
+    """DeviceConflictActionView 'link' action against a real Device.
+
+    The whole write path — the real ``find_by_librenms_id`` conflict re-check under
+    ``select_for_update``, ``set_librenms_device_id``, and ``_save_device`` inside a real
+    ``transaction.atomic`` — runs for real, and the persisted state is reloaded from the DB.
+    The earlier version patched every one of those, so the only thing it could assert was
+    that ``render_device_row`` was called; the link itself never happened. Mocked: the auth
+    gates, the LibreNMS validation pipeline (``get_validated_device_with_selections``), the
+    hostname resolver (its own tests), and the HTML row render (template/table boundary).
+    """
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -1495,67 +1494,65 @@ class TestDeviceConflictActionLinkAction:
         view = object.__new__(DeviceConflictActionView)
         view._librenms_api = _make_api()
         view.request = MagicMock()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
         return view
 
-    def test_link_action_executes(self):
-        """Link action links device to LibreNMS."""
-        view = self._make_view()
-        request = _make_request(
-            post={
-                "action": "link",
-                "existing_device_id": "1",
-            }
-        )
+    def test_link_action_persists_librenms_id(self):
+        """The 'link' action writes the LibreNMS id into custom_field_data and sets the name."""
+        from dcim.models import Device
+        from django.http import HttpResponse
 
-        mock_existing_device = MagicMock()
-        mock_existing_device.name = "router01"
-        mock_existing_device.pk = 1
+        view = self._make_view()
+        dev = make_device("router01-link")  # unlinked → not legacy, no id conflict
+        request = _make_request(post={"action": "link", "existing_device_id": str(dev.pk)})
 
         libre_device = {"device_id": 42, "hostname": "router01", "hardware": "Cisco"}
-        # validation must have existing_device that matches mock_existing_device
-        validation = {
-            "status": "conflict",
-            "existing_device": mock_existing_device,
-            "device_type_mismatch": False,
-        }
-        selections = {}
+        validation = {"existing_device": dev, "device_type_mismatch": False}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
 
-        with patch.object(view, "require_all_permissions", return_value=None):
-            with patch("dcim.models.Device") as MockDevice:
-                MockDevice.objects.get.return_value = mock_existing_device
-                MockDevice.objects.select_for_update.return_value.get.return_value = mock_existing_device
-                MockDevice.DoesNotExist = Exception
-                with patch.object(view, "require_object_permissions", return_value=None):
-                    with patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None):
-                        with patch("netbox_librenms_plugin.views.imports.actions.set_librenms_device_id"):
-                            with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=None):
-                                with patch("netbox_librenms_plugin.views.imports.actions.cache"):
-                                    with patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx:
-                                        mock_tx.atomic.return_value.__enter__ = MagicMock(return_value=None)
-                                        mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-                                        with patch.object(
-                                            view,
-                                            "get_validated_device_with_selections",
-                                            return_value=(libre_device, validation, selections),
-                                        ):
-                                            with patch.object(
-                                                view, "render_device_row", return_value=MagicMock()
-                                            ) as mock_render:
-                                                with patch(
-                                                    "netbox_librenms_plugin.views.imports.actions._get_hostname_for_action",
-                                                    return_value="router01",
-                                                ):
-                                                    with patch(
-                                                        "netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key",
-                                                        return_value="key",
-                                                    ):
-                                                        with patch(
-                                                            "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
-                                                            return_value={"device_id": 42},
-                                                        ):
-                                                            view.post(request, device_id=42)
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions._get_hostname_for_action",
+            return_value="router01-linked",
+        ):
+            response = view.post(request, device_id=42)
 
-        mock_render.assert_called_once()
+        assert response["HX-Trigger"] == "closeModal"
+        view.render_device_row.assert_called_once()
+        # Reload from the DB: the real set_librenms_device_id + _save_device committed the link.
+        reloaded = Device.objects.get(pk=dev.pk)
+        assert reloaded.custom_field_data["librenms_id"]["default"] == 42
+        assert reloaded.name == "router01-linked"
+
+    def test_link_action_blocked_by_librenms_id_conflict(self):
+        """If another device already owns the incoming LibreNMS id, the link is refused and
+        nothing is persisted — driven by the real find_by_librenms_id conflict check."""
+        from dcim.models import Device
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        owner = make_device("router-owns-42", librenms_cf={"default": 42})
+        dev = make_device("router01-link-conflict")
+        request = _make_request(post={"action": "link", "existing_device_id": str(dev.pk)})
+
+        libre_device = {"device_id": 42, "hostname": "router01", "hardware": "Cisco"}
+        validation = {"existing_device": dev, "device_type_mismatch": False}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        with patch(
+            "netbox_librenms_plugin.views.imports.actions._get_hostname_for_action",
+            return_value="router01",
+        ):
+            response = view.post(request, device_id=42)
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"already assigned to device" in response.content
+        assert owner.name.encode() in response.content  # the conflicting owner is named
+        # The target device was NOT linked.
+        assert "librenms_id" not in Device.objects.get(pk=dev.pk).custom_field_data
 
 
 class TestApplyUserSelectionsToValidation:
