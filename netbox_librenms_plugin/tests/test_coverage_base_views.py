@@ -1383,6 +1383,40 @@ class TestBaseInterfaceTableViewBasics:
         assert result == "fragment"
         mock_render.assert_called_once()
 
+    def test_ip_post_stale_server_key_keeps_migrated_context(self):
+        """IP sync's stale-server branch must include build_migrated_context so a migrated
+        donor keeps its suppressed sync form/button — a stale server_key must not silently
+        re-enable IP sync. Mirrors cables_view."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        view.rebind_api_for_server = MagicMock(return_value=None)  # stale key → rebind fails
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "ghost"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.get_interface_name_field", return_value="name"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
+            patch(
+                "netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context",
+                return_value={"migrated_to_marker": {"device_id": 7}},
+            ) as mock_migrated,
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render", return_value="rendered") as mock_render,
+        ):
+            result = view.post(req, pk=1)
+
+        mock_messages.error.assert_called_once()
+        # Migrated context resolved from the POSTed (stale) key and merged into the render.
+        mock_migrated.assert_called_once_with(obj, "ghost")
+        ctx = mock_render.call_args.args[2]
+        assert ctx["migrated_to_marker"] == {"device_id": 7}
+        assert result == "rendered"
+
     def test_get_select_related_field_for_vm(self):
         """Returns 'virtual_machine' for VirtualMachine model."""
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView

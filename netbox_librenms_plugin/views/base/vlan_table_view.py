@@ -6,7 +6,12 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
-from netbox_librenms_plugin.utils import cache_remaining_ttl, coerce_librenms_id, is_list_of_dicts
+from netbox_librenms_plugin.utils import (
+    build_migrated_context,
+    cache_remaining_ttl,
+    coerce_librenms_id,
+    is_list_of_dicts,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -49,8 +54,13 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
                 "vlan_sync": self._get_error_context(
                     obj, "Selected LibreNMS server is no longer configured.", server_key=None
                 ),
+                # Preserve migrated-context flags on this error exit too (every other POST
+                # path includes them); otherwise a donor/winner device loses its migration
+                # controls on a stale-server refresh until the next full reload.
+                **build_migrated_context(obj, request.POST.get("server_key")),
             }
             return render(request, self.partial_template_name, context)
+        migrated = build_migrated_context(obj, server_key)
 
         # Get librenms_id (now scoped to the POSTed server). coerce_librenms_id fails closed on a
         # poisoned cached value (bool/zero/negative/garbage) — the device-id cache path of
@@ -67,6 +77,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             messages.error(request, "Device not found in LibreNMS.")
             context = {
                 "vlan_sync": self._get_error_context(obj, "Device not found in LibreNMS", server_key=server_key),
+                **migrated,
             }
             return render(request, self.partial_template_name, context)
 
@@ -76,12 +87,12 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
             messages.error(request, error_msg)
-            context = {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key)}
+            context = {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key), **migrated}
             return render(request, self.partial_template_name, context)
 
         messages.success(request, "VLAN data refreshed successfully.")
 
-        context = {"vlan_sync": self.get_vlan_context(request, obj, server_key)}
+        context = {"vlan_sync": self.get_vlan_context(request, obj, server_key), **migrated}
         return render(request, self.partial_template_name, context)
 
     def _fetch_and_cache_vlan_data(self, obj, server_key=None):

@@ -18,6 +18,7 @@ from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     build_librenms_id_qs,
+    build_migrated_context,
     coerce_librenms_id,
     get_interface_name_field,
     get_librenms_oob,
@@ -741,11 +742,15 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         server_key = self.rebind_api_for_server(posted_server_key)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
+            # Keep migrated-donor context so the template still suppresses the live POST
+            # form/button — a stale server_key must not silently re-enable cable sync on a
+            # migrated donor. Resolve the marker from the POSTed key (the rebind failed).
             return render(
                 request,
                 self.partial_template_name,
                 {
                     "cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
+                    **build_migrated_context(obj, posted_server_key),
                 },
             )
         context = self._prepare_context(request, obj, fetch_fresh=True, server_key=server_key)
@@ -767,6 +772,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                         "cache_expiry": None,
                         "server_key": server_key,
                     },
+                    **build_migrated_context(obj, server_key),
                 },
             )
 
@@ -795,7 +801,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         return render(
             request,
             self.partial_template_name,
-            {"cable_sync": context},
+            {"cable_sync": context, **build_migrated_context(obj, server_key)},
         )
 
 

@@ -15,6 +15,11 @@ from .views import (
     AddAsOOBView,
     AddDeviceTypeMappingView,
     AddPlatformMappingView,
+    PromoteToHostView,
+    MergeNetBoxDevicesView,
+    MoveInterfaceToWinnerView,
+    MoveIPAddressToWinnerView,
+    TransferDeviceIPView,
     AssignVCSerialView,
     BulkImportConfirmView,
     BulkImportDevicesView,
@@ -436,6 +441,31 @@ urlpatterns = [
         "device-import/add-as-oob/<int:device_id>/",
         AddAsOOBView.as_view(),
         name="device_add_as_oob",
+    ),
+    path(
+        "device-import/promote-to-host/<int:device_id>/",
+        PromoteToHostView.as_view(),
+        name="device_promote_to_host",
+    ),
+    path(
+        "device-import/merge-netbox-devices/<int:device_id>/",
+        MergeNetBoxDevicesView.as_view(),
+        name="device_merge_netbox_devices",
+    ),
+    path(
+        "interface/<int:pk>/move-to-winner/",
+        MoveInterfaceToWinnerView.as_view(),
+        name="interface_move_to_winner",
+    ),
+    path(
+        "ipaddress/<int:pk>/move-to-winner/",
+        MoveIPAddressToWinnerView.as_view(),
+        name="ipaddress_move_to_winner",
+    ),
+    path(
+        "device/<int:pk>/transfer-ip/<str:ip_kind>/",
+        TransferDeviceIPView.as_view(),
+        name="device_transfer_ip",
     ),
     path(
         "device-import/add-device-type-mapping/<int:device_id>/",

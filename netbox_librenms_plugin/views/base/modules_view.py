@@ -8,6 +8,7 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
+    build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
     get_librenms_device_id,
@@ -353,6 +354,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 {
                     "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
                     "has_write_permission": self.has_write_permission(),
+                    # Keep donor-mode flags on this render too — resolve from the posted key
+                    # (server_key is None here) so a migrated donor doesn't lose context.
+                    **build_migrated_context(obj, request.POST.get("server_key")),
                 },
             )
         sync_device = self._get_sync_device(obj, server_key=server_key)
@@ -375,6 +379,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         "server_key": server_key,
                     },
                     "has_write_permission": self.has_write_permission(),
+                    **build_migrated_context(obj, server_key),
                 },
             )
 
@@ -403,6 +408,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         "server_key": server_key,
                     },
                     "has_write_permission": self.has_write_permission(),
+                    **build_migrated_context(obj, server_key),
                 },
             )
 
@@ -541,6 +547,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             {
                 "module_sync": context,
                 "has_write_permission": self.has_write_permission(),
+                **build_migrated_context(obj, server_key),
             },
         )
 

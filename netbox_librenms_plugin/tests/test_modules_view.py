@@ -390,6 +390,7 @@ class TestMergeTransceiverDataPortIdentity:
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
 
@@ -419,6 +420,7 @@ class TestMergeTransceiverDataPortIdentity:
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
 

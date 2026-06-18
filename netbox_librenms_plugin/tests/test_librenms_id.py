@@ -718,3 +718,290 @@ class TestOOBHelpers:
         assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {
             "primary": {"id": 42, "oob": {"id": 17, "type": "bmc"}}
         }
+
+
+class TestMergeLibreNMSLinks:
+    """Tests for merge_librenms_links() — winner-wins conflict policy."""
+
+    def _make_dev(self, name, librenms_id_dict):
+        d = MagicMock()
+        d.name = name
+        d.custom_field_data = {"librenms_id": librenms_id_dict} if librenms_id_dict is not None else {}
+        return d
+
+    def test_winner_inherits_id_when_winner_has_no_id(self):
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {}})
+        donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 99
+        assert summary["host_id_from_donor"] == 99
+        assert summary["donor_id_demoted_to_oob"] is None
+
+    def test_winner_inherits_string_id_coerced_to_int(self):
+        """inherit-id branch must coerce donor_id to int, matching the demote branch."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {}})
+        # Simulate a custom field value that arrived as a JSON string (e.g. "99").
+        donor = self._make_dev("router-spare", {"default": {"id": "99"}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        stored = winner.custom_field_data["librenms_id"]["default"]["id"]
+        assert stored == 99
+        assert isinstance(stored, int)
+        assert summary["host_id_from_donor"] == 99
+        assert isinstance(summary["host_id_from_donor"], int)
+
+    def test_donor_id_demoted_to_oob_when_winner_has_id_and_donor_name_matches_oob_pattern(self):
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 42
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 99
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "idrac"
+        assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
+
+    def test_donor_real_oob_preferred_over_demoting_donor_id(self):
+        """Donor shaped {"id": X, "oob": {...}} with the winner already holding a host id:
+        the donor's REAL oob must be inherited, not the donor's host id demoted into oob —
+        otherwise the actual OOB controller is silently lost during merge."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99, "oob": {"id": 77, "type": "ilo"}}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        # Winner keeps its own host id and inherits the donor's REAL oob (77/ilo) — the
+        # donor's host id (99) is NOT demoted into oob.
+        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 42
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 77, "type": "ilo"}
+        assert summary.get("oob_from_donor") == {"id": 77, "type": "ilo"}
+        assert summary.get("donor_id_demoted_to_oob") is None
+
+    def test_donor_id_demoted_to_oob_generic_when_no_pattern_in_name(self):
+        """Donor id is always demoted; type falls back to 'oob' when no keyword in name."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("eve-ng-03-spare", {"default": {"id": 99}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 42
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 99, "type": "oob"}
+        assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "oob"}
+
+    def test_winner_inherits_donor_oob_when_winner_has_none(self):
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 77, "type": "ipmi"}
+        assert summary["oob_from_donor"] == {"id": 77, "type": "ipmi"}
+
+    def test_malformed_donor_oob_id_fails_closed_on_inherit(self):
+        """A corrupt donor oob link ({"oob": {"id": "abc"}}) must not be inherited verbatim;
+        the inherit branch coerces the host id and raises on a non-empty invalid value."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": "abc", "type": "ipmi"}}})
+        with pytest.raises(ValueError, match="unparseable librenms_id.*oob id"):
+            merge_librenms_links(winner, donor, "default")
+
+    def test_donor_oob_id_coerced_to_int_on_inherit(self):
+        """A numeric-string donor oob id is normalized to int when inherited."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": "77", "type": "ipmi"}}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 77, "type": "ipmi"}
+        assert summary["oob_from_donor"] == {"id": 77, "type": "ipmi"}
+
+    def test_blank_donor_oob_id_is_lenient_and_dropped(self):
+        """A blank/whitespace donor oob id ({"oob": {"id": "   "}}) must be treated as 'no oob
+        id' (lenient) — the same as a blank host id and an absent oob id — not raise like a
+        non-blank corrupt one. The blank id is dropped so the winner inherits the oob (type)
+        without carrying a bogus id string."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("idrac-x", {"default": {"oob": {"id": "   ", "type": "drac"}}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        inherited = winner.custom_field_data["librenms_id"]["default"]["oob"]
+        assert inherited == {"type": "drac"}  # blank id dropped, type preserved
+        assert "id" not in inherited
+        assert summary["oob_from_donor"] == {"type": "drac"}
+
+    def test_winner_oob_never_overwritten(self):
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": {"id": 11, "type": "drac"}}})
+        donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 11, "type": "drac"}
+        assert summary["oob_from_donor"] is None
+
+    def test_legacy_bare_int_raises(self):
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = MagicMock()
+        winner.custom_field_data = {"librenms_id": 42}
+        donor = self._make_dev("idrac-x", {"default": {"id": 99}})
+        with pytest.raises(ValueError):
+            merge_librenms_links(winner, donor, "default")
+
+    def test_malformed_donor_id_raises_clear_error_in_inherit_branch(self):
+        """coerce_librenms_id raises ValueError with a clear message for non-numeric donor ids."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {}})
+        donor = self._make_dev("router-spare", {"default": {"id": "not-a-number"}})
+        with pytest.raises(ValueError, match="unparseable librenms_id"):
+            merge_librenms_links(winner, donor, "default")
+
+    def test_malformed_per_server_string_id_fails_closed(self):
+        """A bare per-server string entry ({server_key: 'abc'}) that can't be parsed must
+        raise, not silently collapse to {} (which would drop/swap link state)."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        # Bad winner string id.
+        winner = self._make_dev("eve-ng-02", {"default": "abc"})
+        donor = self._make_dev("router-spare", {"default": {"id": 99}})
+        with pytest.raises(ValueError, match="unparseable librenms_id"):
+            merge_librenms_links(winner, donor, "default")
+
+        # Bad donor string id.
+        winner = self._make_dev("eve-ng-02", {"default": {}})
+        donor = self._make_dev("router-spare", {"default": "xyz"})
+        with pytest.raises(ValueError, match="unparseable librenms_id"):
+            merge_librenms_links(winner, donor, "default")
+
+    def test_empty_per_server_string_id_is_lenient(self):
+        """An empty/whitespace string is treated as 'no id', not a hard error."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": "  "})
+        donor = self._make_dev("router-spare", {"default": {"id": 99}})
+        summary = merge_librenms_links(winner, donor, "default")
+        # Winner had no usable id → inherits donor's host id.
+        assert summary["host_id_from_donor"] == 99
+
+    def test_blank_dict_form_id_is_lenient(self):
+        """A blank/whitespace dict-form id ({"id": "   "}) must be treated as 'no id'
+        (lenient), the same as a blank top-level string — not raise like a non-blank
+        corrupt id ('abc'). Equivalent stored states must behave the same."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": "   "}})
+        donor = self._make_dev("router-spare", {"default": {"id": 99}})
+        summary = merge_librenms_links(winner, donor, "default")
+        # Winner's blank id is "no id" → it inherits the donor's host id rather than raising.
+        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 99
+        assert summary["host_id_from_donor"] == 99
+
+    def test_malformed_donor_id_raises_clear_error_in_demote_branch(self):
+        """Same clear error when demoting donor id into winner's oob slot."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": "bad"}})
+        with pytest.raises(ValueError, match="unparseable librenms_id"):
+            merge_librenms_links(winner, donor, "default")
+
+
+class TestMarkLibreNMSMigrated:
+    """Tests for mark_librenms_migrated()."""
+
+    def test_clears_id_and_oob_and_writes_marker(self):
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        donor = MagicMock()
+        donor.custom_field_data = {"librenms_id": {"default": {"id": 99, "oob": {"id": 11, "type": "drac"}}}}
+        mark_librenms_migrated(donor, winner_pk=42, server_key="default", at="2025-01-01T00:00:00Z")
+
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert "id" not in entry
+        assert "oob" not in entry
+        assert entry["_migrated_to"] == {
+            "device_id": 42,
+            "server_key": "default",
+            "at": "2025-01-01T00:00:00Z",
+        }
+
+    def test_default_timestamp_is_iso_z(self):
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        donor = MagicMock()
+        donor.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
+        mark_librenms_migrated(donor, winner_pk=42, server_key="default")
+
+        ts = donor.custom_field_data["librenms_id"]["default"]["_migrated_to"]["at"]
+        # Contract: an ISO-8601 UTC string ending in "Z" (tolerate fractional seconds).
+        assert ts.endswith("Z")
+        from datetime import datetime
+
+        datetime.fromisoformat(ts.replace("Z", "+00:00"))  # must parse without raising
+
+    def test_rejects_bool_and_non_positive_winner_pk(self):
+        import pytest
+
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        for bad in (True, 0, -1):
+            donor = MagicMock()
+            donor.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
+            with pytest.raises(ValueError):
+                mark_librenms_migrated(donor, winner_pk=bad, server_key="default")
+
+    def test_after_marker_find_by_librenms_id_no_longer_matches(self):
+        """Donor with only _migrated_to should not be returned by find_by_librenms_id."""
+        from netbox_librenms_plugin.utils import find_by_librenms_id, mark_librenms_migrated
+
+        donor = MagicMock()
+        donor.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
+        donor.cf = donor.custom_field_data
+        mark_librenms_migrated(donor, winner_pk=42, server_key="default")
+
+        # cf.librenms_id[default] now only has _migrated_to — no id, no oob.
+        # find_by_librenms_id walks cf via the model query, but logic-wise: simulate
+        # by directly inspecting the entry.
+        entry = donor.cf["librenms_id"]["default"]
+        assert entry.get("id") is None
+        assert entry.get("oob") is None
+        # Mock model.objects.filter: should return empty queryset for either id or oob lookup
+        mock_model = MagicMock()
+        mock_model.objects.filter.return_value.__getitem__.return_value = []
+        assert find_by_librenms_id(mock_model, 99, "default") is None
+
+        # Prove the function actually built the lookup (not a vacuous pass): the
+        # combined Q must target the id/oob predicates and must NEVER match on the
+        # _migrated_to marker, so a migrated-only donor can't be returned.
+        # Host and OOB predicates are queried separately now — aggregate across calls.
+        lookups = []
+        for call in mock_model.objects.filter.call_args_list:
+            lookups += [child[0] for child in call[0][0].children]
+        assert any(lk == "custom_field_data__librenms_id__default__id" for lk in lookups)
+        assert any(lk == "custom_field_data__librenms_id__default__oob__id" for lk in lookups)
+        assert all("_migrated_to" not in lk for lk in lookups)

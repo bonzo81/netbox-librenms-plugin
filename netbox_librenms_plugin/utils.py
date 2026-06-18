@@ -1879,6 +1879,167 @@ def ip_family(ip):
     return address.version
 
 
+def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
+    """
+    Merge donor's ``librenms_id[server_key]`` link state into winner's.
+
+    Used by the Stage-2 "two NetBox devices represent the same physical box"
+    flow.  This function **only mutates the winner's** ``custom_field_data``.
+    The donor is not modified here — callers must call
+    :func:`mark_librenms_migrated` separately (and save both objects
+    themselves) to clear the donor's active link and stamp the
+    ``_migrated_to`` marker.
+
+    Conflict policy (winner-wins for already-populated fields):
+
+    * If winner already has ``id`` set, donor's ``id`` is moved into the
+      ``oob`` slot (only when winner has no ``oob`` yet, with type derived
+      from the donor's name when possible).
+    * If winner has no ``id`` and donor does, winner inherits ``id``.
+    * If donor has an ``oob`` sub-block and winner has none, winner
+      inherits it verbatim.
+    * Winner's existing ``oob`` is never overwritten.
+
+    Args:
+        winner: NetBox Device that will hold the merged link state.
+        donor: NetBox Device whose link state will be absorbed.
+        server_key: LibreNMS server key to scope the merge to.
+
+    Returns:
+        A dict describing what was actually merged: keys ``host_id_from_donor``,
+        ``oob_from_donor`` (None or dict), ``donor_id_demoted_to_oob``
+        (None or dict).  Useful for audit logging and tests.
+    """
+    from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN
+
+    summary = {
+        "host_id_from_donor": None,
+        "oob_from_donor": None,
+        "donor_id_demoted_to_oob": None,
+    }
+
+    winner_cf = winner.custom_field_data.get("librenms_id") or {}
+    donor_cf = donor.custom_field_data.get("librenms_id") or {}
+    if not isinstance(winner_cf, dict) or not isinstance(donor_cf, dict):
+        # Legacy bare-int forms must be migrated by the caller before merging.
+        raise ValueError("Cannot merge: one or both devices have a legacy bare-integer librenms_id.")
+
+    winner_entry = winner_cf.get(server_key)
+    if isinstance(winner_entry, int) and not isinstance(winner_entry, bool):
+        winner_entry = {"id": winner_entry}
+    elif isinstance(winner_entry, str):
+        _coerced = coerce_librenms_id(winner_entry)
+        # Fail closed on corrupted stored state: a non-empty string that can't be
+        # parsed must surface, not silently collapse to "no id" (which would let the
+        # winner inherit the donor's id or drop the link). Mirrors the dict-form guard.
+        if _coerced is None and winner_entry.strip():
+            raise ValueError(
+                f"winner '{winner.name}' has an unparseable librenms_id[{server_key!r}] "
+                f"{winner_entry!r} — expected a positive integer or numeric string."
+            )
+        winner_entry = {"id": _coerced} if _coerced else {}
+    elif isinstance(winner_entry, dict):
+        winner_entry = dict(winner_entry)
+    else:
+        winner_entry = {}
+
+    donor_entry = donor_cf.get(server_key)
+    if isinstance(donor_entry, int) and not isinstance(donor_entry, bool):
+        donor_entry = {"id": donor_entry}
+    elif isinstance(donor_entry, str):
+        _coerced = coerce_librenms_id(donor_entry)
+        if _coerced is None and donor_entry.strip():
+            raise ValueError(
+                f"donor '{donor.name}' has an unparseable librenms_id[{server_key!r}] "
+                f"{donor_entry!r} — expected a positive integer or numeric string."
+            )
+        donor_entry = {"id": _coerced} if _coerced else {}
+    elif not isinstance(donor_entry, dict):
+        donor_entry = {}
+
+    donor_id = donor_entry.get("id")
+    donor_oob = donor_entry.get("oob") if isinstance(donor_entry.get("oob"), dict) else None
+
+    # Coerce both IDs before branching so that a malformed but truthy winner_id
+    # (e.g. "abc") does not incorrectly trigger the "demote donor" path.
+    _raw_winner_id = winner_entry.get("id")
+    _raw_donor_id = donor_id
+    # Treat a blank/whitespace string id as "no id" (lenient), matching the top-level
+    # string branch above which collapses empty strings to {}. Only a *non-blank*
+    # unparseable value (e.g. "abc") fails closed below — a blank one must not block
+    # a merge just because it arrived wrapped in dict form.
+    if isinstance(_raw_winner_id, str) and not _raw_winner_id.strip():
+        _raw_winner_id = None
+    if isinstance(_raw_donor_id, str) and not _raw_donor_id.strip():
+        _raw_donor_id = None
+    winner_id = coerce_librenms_id(_raw_winner_id) if _raw_winner_id is not None else None
+    donor_id = coerce_librenms_id(_raw_donor_id) if _raw_donor_id is not None else None
+    if _raw_winner_id is not None and winner_id is None:
+        raise ValueError(
+            f"winner '{winner.name}' has an unparseable librenms_id[{server_key!r}] id "
+            f"{_raw_winner_id!r} — expected a positive integer or numeric string."
+        )
+    if _raw_donor_id is not None and donor_id is None:
+        raise ValueError(
+            f"donor '{donor.name}' has an unparseable librenms_id[{server_key!r}] id "
+            f"{_raw_donor_id!r} — expected a positive integer or numeric string."
+        )
+    winner_oob = winner_entry.get("oob") if isinstance(winner_entry.get("oob"), dict) else None
+
+    if winner_id is None and donor_id is not None:
+        winner_entry["id"] = donor_id
+        summary["host_id_from_donor"] = donor_id
+    elif (
+        winner_id is not None
+        and donor_id is not None
+        and donor_id != winner_id
+        and winner_oob is None
+        and not donor_oob
+    ):
+        # Demote donor's host id into winner's oob slot — but ONLY when the donor has no real
+        # OOB and the donor host id actually differs from the winner's. Equal ids are the same
+        # host linkage (a duplicate mapping), not an OOB controller, so demoting them would
+        # fabricate a fake OOB link on the merged device.
+        # If the donor is shaped like {"id": ..., "oob": {...}}, its actual OOB
+        # controller (inherited by the donor_oob path below) takes precedence over demoting the
+        # donor's host id, otherwise the real OOB link would be lost. Infer type from donor name.
+        match = OOB_TYPE_PATTERN.search(donor.name or "")
+        inferred_type = match.group(1).lower() if match else "oob"
+        demoted = {"id": donor_id, "type": inferred_type}
+        winner_entry["oob"] = demoted
+        summary["donor_id_demoted_to_oob"] = demoted
+        winner_oob = demoted
+
+    if donor_oob and winner_oob is None:
+        # Coerce the donor's oob host id before inheriting it: the helper fails closed on
+        # malformed host ids elsewhere, so don't let a corrupt donor link (e.g. {"id": "abc"})
+        # propagate verbatim into the winner. A blank/whitespace id is treated as "no id"
+        # (lenient) — the same as a blank host id above and the same as an absent oob id —
+        # so only a *non-blank* unparseable value fails closed. A blank id is dropped so the
+        # winner inherits the oob (type, etc.) without carrying a bogus id string.
+        _raw_oob_id = donor_oob.get("id")
+        if isinstance(_raw_oob_id, str) and not _raw_oob_id.strip():
+            _raw_oob_id = None
+        _coerced_oob_id = coerce_librenms_id(_raw_oob_id) if _raw_oob_id is not None else None
+        if _raw_oob_id is not None and _coerced_oob_id is None:
+            raise ValueError(
+                f"donor '{donor.name}' has an unparseable librenms_id[{server_key!r}] oob id "
+                f"{_raw_oob_id!r} — expected a positive integer or numeric string."
+            )
+        inherited_oob = dict(donor_oob)
+        if _coerced_oob_id is not None:
+            inherited_oob["id"] = _coerced_oob_id
+        else:
+            # Blank/absent id → don't carry a bogus value into the winner.
+            inherited_oob.pop("id", None)
+        winner_entry["oob"] = dict(inherited_oob)
+        summary["oob_from_donor"] = dict(inherited_oob)
+
+    winner_cf[server_key] = winner_entry
+    winner.custom_field_data["librenms_id"] = winner_cf
+    return summary
+
+
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
 # Stage-2b "move to winner" actions. NetBox requires each to reference an address assigned to
 # one of THAT device's own interfaces.
@@ -1945,6 +2106,111 @@ def set_device_ip_fk(device, field, ip, *, save=True):
     if save:
         device.save(update_fields=[field])
     return field
+
+
+def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", at: str | None = None) -> None:
+    """
+    Mark *donor* as migrated to the device with primary key *winner_pk*.
+
+    Removes any active ``id`` / ``oob`` keys from ``donor.custom_field_data
+    ['librenms_id'][server_key]`` (so the device is no longer matched by
+    ``find_by_librenms_id``) and writes a ``_migrated_to`` sub-key with the
+    target device pk, server key, and ISO-8601 UTC timestamp.
+
+    Does **not** call ``donor.save()`` — caller is responsible for persisting.
+
+    Args:
+        donor: NetBox Device being absorbed by the winner.
+        winner_pk: Primary key of the winning device.
+        server_key: LibreNMS server key whose link state is being cleared.
+        at: ISO timestamp string. When None, ``datetime.utcnow().isoformat()``
+            with a ``Z`` suffix is used.
+    """
+    from datetime import datetime, timezone
+
+    # bool is a subclass of int (int(True) == 1); reject it and non-positive
+    # ids so a malformed marker can never target the wrong device.
+    if isinstance(winner_pk, bool) or not isinstance(winner_pk, int) or winner_pk <= 0:
+        raise ValueError(f"winner_pk must be a positive integer, got {winner_pk!r}")
+
+    cf_value = donor.custom_field_data.get("librenms_id") or {}
+    if not isinstance(cf_value, dict):
+        cf_value = {}
+    entry = cf_value.get(server_key)
+    if isinstance(entry, int) and not isinstance(entry, bool):
+        entry = {"id": entry}
+    elif not isinstance(entry, dict):
+        entry = {}
+    entry.pop("id", None)
+    entry.pop("oob", None)
+    entry["_migrated_to"] = {
+        "device_id": int(winner_pk),
+        "server_key": server_key,
+        "at": at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    cf_value[server_key] = entry
+    donor.custom_field_data["librenms_id"] = cf_value
+
+
+def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
+    """
+    Read the ``_migrated_to`` marker (Stage 2b) from the device's
+    ``librenms_id[server_key]`` sub-block.
+
+    Returns the marker dict ``{device_id, server_key, at}`` when the donor
+    was previously merged into another NetBox device via
+    :func:`mark_librenms_migrated`, or ``None`` when no marker is present
+    (or the cf is malformed).
+
+    Used by the librenms-sync UI to switch a donor device into "migrated
+    mode": disable sync actions and surface per-row "Move to winner"
+    buttons.
+    """
+    if device is None:
+        return None
+    cf_value = device.cf.get("librenms_id") if hasattr(device, "cf") else None
+    if not isinstance(cf_value, dict):
+        return None
+    entry = cf_value.get(server_key)
+    if not isinstance(entry, dict):
+        return None
+    # A live host or OOB link takes precedence over a stale _migrated_to marker: if the
+    # same entry still resolves via find_by_librenms_id(), leaving the donor in migrated
+    # mode is a contradictory state. Treat the marker as obsolete when an active id/oob
+    # link exists on the entry.
+    if coerce_librenms_id(entry.get("id")) is not None:
+        return None
+    oob = entry.get("oob")
+    if isinstance(oob, dict) and coerce_librenms_id(oob.get("id")) is not None:
+        return None
+    marker = entry.get("_migrated_to")
+    if not isinstance(marker, dict):
+        return None
+    device_id = marker.get("device_id")
+    # bool is a subclass of int; reject it and non-positive ids so migrated-mode
+    # logic never targets a bogus device from a malformed marker.
+    if isinstance(device_id, bool) or not isinstance(device_id, int) or device_id <= 0:
+        return None
+    return marker
+
+
+def build_migrated_context(obj, server_key: str = "default") -> dict:
+    """
+    Donor "migrated mode" context: ``{migrated_to_marker, migrated_to_winner}``.
+
+    Shared by the full sync page and the HTMX tab partials so a merged donor
+    shows the migration UI — and hides ordinary sync actions — consistently on
+    both the initial render and after a tab refresh (the partial-render views
+    build their own context and would otherwise drop the marker).
+    """
+    marker = get_migrated_to_marker(obj, server_key)
+    if not marker:
+        return {"migrated_to_marker": None, "migrated_to_winner": None}
+    from dcim.models import Device
+
+    # device_id is guaranteed a positive int by get_migrated_to_marker().
+    winner = Device.objects.filter(pk=marker["device_id"]).first()
+    return {"migrated_to_marker": marker, "migrated_to_winner": winner}
 
 
 def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):

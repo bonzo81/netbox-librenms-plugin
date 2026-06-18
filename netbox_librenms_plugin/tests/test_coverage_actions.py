@@ -6006,6 +6006,72 @@ class TestAddAsOOBViewPost:
 
 
 @pytest.mark.django_db
+class TestMergeNetBoxDevicesViewOOBTransfer:
+    """MergeNetBoxDevicesView.post: oob_ip may only move to the winner when its
+    underlying IP already sits on a winner interface (the merge does not move
+    interfaces, and the save skips full_clean()).
+
+    Driven against real Device / Interface / IPAddress so the transfer is proven by
+    what actually persists and reloads, not by inspecting ``save(update_fields=...)``
+    on a MagicMock. The real ``merge_librenms_links`` / ``mark_librenms_migrated`` run
+    and the locked rows are genuine ``select_for_update`` re-reads — only the LibreNMS
+    validation pipeline, auth gates, and the row HTML render stay mocked.
+    """
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def _run(self, *, oob_on_winner):
+        """Drive a merge where the donor's oob_ip sits on an interface owned by the
+        winner (``oob_on_winner=True``) or by the donor (``False``).
+        Returns ``(winner, donor, oob_ip)`` with the devices reloaded from the DB."""
+        from dcim.models import Device
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        view = self._make_view()
+
+        winner = make_device("merge-winner", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-donor", librenms_cf={"default": {"id": 10}})
+
+        # The donor carries an oob_ip whose underlying IP is assigned to an interface
+        # owned by whichever device the scenario dictates. save() (not full_clean) lets
+        # us seed the winner-interface case the view is designed to resolve.
+        oob_host = winner if oob_on_winner else donor
+        oob_ip = ip_on(oob_host, "192.0.2.7/32", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+        return Device.objects.get(pk=winner.pk), Device.objects.get(pk=donor.pk), oob_ip
+
+    def test_transfers_when_oob_ip_on_winner_interface(self):
+        winner, donor, oob_ip = self._run(oob_on_winner=True)
+        # The transfer actually persisted: winner now owns the oob_ip, donor cleared.
+        assert winner.oob_ip_id == oob_ip.pk
+        assert donor.oob_ip_id is None
+
+    def test_skips_when_oob_ip_on_donor_interface(self):
+        winner, donor, oob_ip = self._run(oob_on_winner=False)
+        # Left on the donor (its interface owns the IP); winner not given a donor-owned IP.
+        assert donor.oob_ip_id == oob_ip.pk
+        assert winner.oob_ip_id is None
+
+
+@pytest.mark.django_db
 class TestSuggestOOBInterface:
     """_suggest_oob_interface: pre-select an OOB/mgmt-named interface + default new name."""
 
@@ -7183,3 +7249,59 @@ class TestConflictActionsObjectScope:
         sync_entry = Device.objects.get(pk=sync.pk).custom_field_data["librenms_id"]["default"]
         assert sync_entry["id"] == 30
         assert sync_entry["oob"]["id"] == 4343
+
+
+@pytest.mark.django_db
+class TestMergeNetBoxDevicesViewDonorDerivation:
+    """The merge view derives the donor from winner_pk + merge_candidates and
+    ignores the client-posted donor_pk, which a stale/failed inline sync script
+    could otherwise leave equal to winner_pk (a self-merge of moving data).
+
+    Driven against real Devices and the real merge/migration helpers: the role
+    derivation is proven by which device actually ends up with the persisted
+    ``_migrated_to`` marker after reload — not by which MagicMock was handed to a
+    patched ``merge_librenms_links``.
+    """
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
+
+        view = object.__new__(MergeNetBoxDevicesView)
+        view._librenms_api = _make_api()
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        return view
+
+    def test_ignores_posted_donor_pk_equal_to_winner(self):
+        from dcim.models import Device
+        from django.http import HttpResponse
+
+        view = self._make_view()
+
+        winner = make_device("merge-w", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-d", librenms_cf={"default": {"id": 10}})
+
+        # Bogus client state: donor_pk == winner_pk (inline sync script never ran).
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(winner.pk)})
+
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+
+        winner = Device.objects.get(pk=winner.pk)
+        donor = Device.objects.get(pk=donor.pk)
+        # The donor is the *other* merge candidate, never the posted self-pk: it is the
+        # one whose active link was cleared and stamped with a _migrated_to marker
+        # pointing at the winner.
+        donor_entry = donor.custom_field_data["librenms_id"]["default"]
+        assert donor_entry.get("_migrated_to", {}).get("device_id") == winner.pk
+        assert donor_entry.get("id") is None
+        # The winner absorbed the merge and is NOT itself marked migrated; it keeps its
+        # own host id (winner-wins), with the donor's id demoted into the oob slot.
+        winner_entry = winner.custom_field_data["librenms_id"]["default"]
+        assert "_migrated_to" not in winner_entry
+        assert winner_entry["id"] == 20
+        assert winner_entry["oob"]["id"] == 10

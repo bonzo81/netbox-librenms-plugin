@@ -488,6 +488,42 @@ class TestVlanEntryDictGuardInSync:
 class TestVLANPostServerKeyScoping:
     """The refresh POST must scope migrated context (and cache) to the POSTed server_key, not the session-active server, in multi-server setups."""
 
+    def test_post_uses_post_server_key_for_migrated_context(self):
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        obj = MagicMock(pk=1)
+        view.get_object = MagicMock(return_value=obj)
+        view._get_error_context = MagicMock(return_value={})
+        # Seed the session client on _librenms_api and use the REAL librenms_api property so
+        # rebind_api_for_server() actually swaps the client post() uses — a property override
+        # would pin post() to the session client and mask whether the rebind took effect.
+        mock_api = MagicMock(server_key="default")
+        view._librenms_api = mock_api
+        rebound_api = MagicMock(server_key="prod")
+        rebound_api.get_librenms_id.return_value = None  # short-circuit before fetch/cache
+
+        req = MagicMock()
+        req.POST.get.side_effect = lambda k, d=None: {"server_key": "prod"}.get(k, d)
+
+        with (
+            # The POST rebinds the API to the posted server before anything else.
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
+            patch(
+                "netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}
+            ) as mock_bmc,
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+        ):
+            view.post(req, pk=1)
+
+        mock_bmc.assert_called_once_with(obj, "prod")
+        # The id lookup ran on the REBOUND client, never the session one.
+        rebound_api.get_librenms_id.assert_called_once_with(obj)
+        mock_api.get_librenms_id.assert_not_called()
+
     def test_post_scopes_cache_keys_to_post_server_key(self):
         """Drive the request past the short-circuit into cache-key construction: a regression that namespaced the cache under the session server (not the POSTed one) must fail here."""
         from unittest.mock import MagicMock, patch
@@ -513,6 +549,7 @@ class TestVLANPostServerKeyScoping:
 
         with (
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.cache"),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
@@ -565,6 +602,7 @@ class TestVlanRefreshFailureClearsCache:
 
         with (
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
