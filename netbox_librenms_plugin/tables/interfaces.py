@@ -471,12 +471,15 @@ class LibreNMSInterfaceTable(tables.Table):
         if sync_status is None:
             return mark_safe("")
 
-        # Use text-bg-* for the grey "secondary" badge: a bare ``bg-secondary`` sets only the
-        # background, leaving the badge's default low-contrast text → grey-on-grey, unreadable
-        # in NetBox's theme. text-bg-secondary pairs the background with a guaranteed-contrasting
-        # foreground (the other entries already carry explicit text colours).
+        # Every badge must pair a background with a contrasting text colour, in BOTH NetBox
+        # themes. A bare ``bg-*`` utility sets only the background and leaves the badge's default
+        # (muted/inherited) text colour, which is unreadable: ``bg-secondary`` rendered grey-on-
+        # grey, and ``bg-success`` left grey text on green (~1.1:1 in dark mode). Measured WCAG
+        # contrast (light/dark): success text-dark 5.35, warning text-dark 6.88, info text-dark
+        # 4.81, secondary text-bg-secondary 4.63 — all ≥ AA. text-bg-* pairs fg+bg for the darker
+        # greys; an explicit text-dark suffices on the lighter colour fills.
         status_map = {
-            "match": ("bg-success", "Match"),
+            "match": ("bg-success text-dark", "Match"),
             "mismatch": ("bg-warning text-dark", "Mismatch"),
             "missing_nb": ("bg-info text-dark", "Not in NetBox"),
             "missing_lnms": ("text-bg-secondary", "Not in LibreNMS"),

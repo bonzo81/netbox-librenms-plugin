@@ -1801,10 +1801,16 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
 
     1. The 'LibreNMS ID' column (accessor port_id) must stay present — it was inadvertently
        dropped when the Parent/LAG column was added, but it exists on develop and is relied on.
-    2. The 'Not in LibreNMS' relationship badge must use a contrast-safe class: a bare
-       ``bg-secondary`` sets only the background, leaving low-contrast default text
-       (grey-on-grey, unreadable in NetBox's theme).
+    2. Every relationship status badge must pair a background colour with a contrasting text
+       colour. A bare ``bg-*`` utility sets only the background and leaves the badge's default
+       (muted/inherited) text colour — unreadable in NetBox's themes. Measured WCAG contrast
+       confirmed the two offenders: ``bg-secondary`` (grey-on-grey, ~4.6 only after pairing) and
+       ``bg-success`` (grey text on green: ~1.8 light / ~1.1 dark). The safe forms are
+       ``text-bg-*`` (pairs fg+bg) or ``bg-* text-*`` (explicit text colour).
     """
+
+    # The relationship column's status keys; an unknown key exercises the .get() fallback badge.
+    _STATUSES = ["match", "mismatch", "missing_nb", "missing_lnms", "definitely-unknown-status"]
 
     def _table(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
@@ -1813,28 +1819,51 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
         with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
             return LibreNMSInterfaceTable(data=[], device=mock_device, server_key="default")
 
+    def _status_badge_classes(self, table, status):
+        """Render a status's badge in isolation and return its CSS class tokens.
+
+        Passing an empty name and no port_id suppresses the name badge and the sync button, so
+        the only rendered badge is the status badge under test.
+        """
+        import re
+
+        html = str(
+            table._render_relationship_column(
+                lnms_name="",
+                lnms_port_id=None,
+                sync_status=status,
+                record={},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        m = re.search(r'class="badge ([^"]*)"', html)
+        assert m, f"no status badge rendered for {status!r}: {html!r}"
+        return m.group(1).split()
+
     def test_librenms_id_column_present(self):
         table = self._table()
         column_names = [c.name for c in table.columns]
         assert "librenms_id" in column_names, "LibreNMS ID column was dropped from the interface table"
         assert table.columns["librenms_id"].verbose_name == "LibreNMS ID"
 
-    def test_missing_lnms_badge_uses_contrast_safe_class(self):
+    def test_every_status_badge_pairs_background_with_text_colour(self):
+        """A ``bg-*`` colour fill with no companion text colour is the grey-on-grey /
+        grey-on-green readability bug; ``text-bg-*`` is allowed (it pairs both)."""
         table = self._table()
-        html = str(
-            table._render_relationship_column(
-                lnms_name="Po1",
-                lnms_port_id=None,
-                sync_status="missing_lnms",
-                record={},
-                btn_class="lag-sync-btn",
-                data_related_key="data-lag-port-id",
+        for status in self._STATUSES:
+            tokens = self._status_badge_classes(table, status)
+            has_bg_fill = any(t.startswith("bg-") for t in tokens)  # note: text-bg-* starts with "text-"
+            has_text_colour = any(t.startswith("text-") for t in tokens)
+            assert has_text_colour or not has_bg_fill, (
+                f"status {status!r} badge {tokens} sets a background with no contrasting text "
+                "colour (use text-bg-* or add an explicit text-* class)"
             )
-        )
-        # text-bg-secondary pairs the grey background with a contrasting foreground; a bare
-        # bg-secondary (the bug) would render "badge bg-secondary" with no readable text colour.
-        assert "badge text-bg-secondary" in html
-        assert "Not in LibreNMS" in html
+
+    def test_missing_lnms_badge_label_renders(self):
+        table = self._table()
+        tokens = self._status_badge_classes(table, "missing_lnms")
+        assert "text-bg-secondary" in tokens
 
 
 class TestLibreNMSInterfaceTableInit:
