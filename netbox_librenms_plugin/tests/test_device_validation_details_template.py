@@ -65,3 +65,62 @@ class TestDeviceValidationDetailsMergeBadge:
             r'class="(?=[^"]*\bbadge\b)(?=[^"]*\bbg-warning\b)(?=[^"]*\btext-dark\b)[^"]*"',
             html,
         ), "merge badge must pair bg-warning with text-dark on one element"
+
+
+@pytest.mark.django_db
+class TestSerialActionBadges:
+    """The serial-match section must render a dedicated badge for each serial_action. The
+    'oob_already_linked' action (introduced when an OOB-typed import matches a device that already
+    has an OOB controller) must NOT fall through to the generic 'Serial match' badge — users would
+    miss that an OOB is already linked."""
+
+    def _render(self, serial_action):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device("host-1")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": existing,
+                "existing_match_type": "serial",
+                "serial_action": serial_action,
+                "warnings": ["Device 'host-1' already has an OOB controller linked."],
+            },
+            "libre_device": {
+                "device_id": 5,
+                "sysName": "host-1",
+                "hostname": "host-1",
+                "serial": "ABC123",
+                "hardware": "iDRAC9",
+                "os": "idrac",
+                "ip": "10.0.0.1",
+                "location": "lab",
+                "status": True,
+            },
+            "server_key": "default",
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    def test_oob_already_linked_shows_dedicated_badge(self):
+        html = self._render("oob_already_linked")
+        assert "OOB Already Linked" in html
+        # It must not fall through to the generic serial-match badge.
+        assert "Serial match" not in html
+
+    def test_other_serial_action_still_shows_serial_match_badge(self):
+        # A serial_action without its own badge still renders the generic fallback — confirms
+        # the new branch didn't displace the default.
+        html = self._render("some_other_action")
+        assert "Serial match" in html
+        assert "OOB Already Linked" not in html

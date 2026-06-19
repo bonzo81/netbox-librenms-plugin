@@ -834,9 +834,14 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     if local_port_id:
                         interface = lookup_device.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
 
-                    # If not found by librenms_id, try matching by name
-                    if not interface and local_port:
-                        interface = lookup_device.interfaces.filter(name=local_port).first()
+                    # If not found by librenms_id, try the displayed name or the alternate
+                    # LibreNMS field (issue #88) — mirror enrich_local_port's dual-name fallback
+                    # so verify resolves a row whose NetBox interface is named from the field the
+                    # user isn't currently displaying (ifName vs ifDescr).
+                    if not interface:
+                        name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
+                        if name_candidates:
+                            interface = lookup_device.interfaces.filter(name__in=name_candidates).first()
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk

@@ -380,3 +380,45 @@ class TestSingleCableVerifyMisconfiguredDefault:
 
         assert response.status_code == 200
         assert json.loads(response.content)["status"] == "success"
+
+
+@pytest.mark.django_db
+class TestVerifyDualNameFallback:
+    """Issue #88 (verify parity): SingleCableVerifyView.post must resolve a row whose NetBox
+    interface is named from the LibreNMS field the user is NOT currently displaying — using the
+    same dual-name (local_port / local_port_alt) fallback as enrich_local_port. Exercised against
+    a real Device + Interface and the real cache; only the request and LibreNMS API are stubbed."""
+
+    def test_verify_resolves_interface_by_alternate_name(self):
+        from django.core.cache import cache
+
+        from dcim.models import Interface
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-sw")
+        # The NetBox interface is named from the ALTERNATE LibreNMS field (e.g. ifDescr),
+        # which differs from the displayed local_port (ifName).
+        iface = Interface.objects.create(device=device, name="GigabitEthernet0/1", type="1000base-t")
+
+        view = _make_view()
+        # Seed the links cache exactly as the GET path would. local_port_id (555) matches no
+        # interface librenms_id, so resolution must fall back to the name — and only the
+        # alternate name matches.
+        link = {
+            "local_port": "Gi0/1",  # displayed name — does NOT match iface.name
+            "local_port_alt": "GigabitEthernet0/1",  # alternate field — matches iface.name
+            "local_port_id": 555,
+            "remote_device": "",
+            "remote_port": "",
+            "remote_port_id": None,
+            "remote_device_id": None,
+        }
+        cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, 300)
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 555, "server_key": "default"})
+        response = view.post(request)
+        payload = json.loads(response.content)
+
+        # Resolved via the alternate name → local_port rendered as a link to the interface.
+        local_port_html = payload["formatted_row"]["local_port"]
+        assert f"/interfaces/{iface.pk}/" in local_port_html

@@ -541,6 +541,8 @@
           <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
         {% elif validation.serial_action == 'promote_to_host' %}
           <span class="badge bg-info-lt me-1"><i class="mdi mdi-server"></i> Host Detected</span>
+        {% elif validation.serial_action == 'oob_already_linked' %}
+          <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB Already Linked</span>
         {% else %}
           <span class="badge bg-warning-lt me-1"><i class="mdi mdi-barcode"></i> Serial match</span>
         {% endif %}
