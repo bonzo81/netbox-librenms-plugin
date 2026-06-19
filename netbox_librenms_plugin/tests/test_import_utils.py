@@ -1624,6 +1624,56 @@ class TestNameMatchesWithNamingPreferencesLegacy:
         assert result["name_sync_available"] is False
 
 
+@pytest.mark.django_db
+class TestSerialNumberMatchingRealDB:
+    """Real-DB coverage for the serial-match path (issue #101): serial is not unique in NetBox,
+    so the match must run against real rows. Exercises the actual Device.objects.filter(serial=…)
+    queryset rather than a mocked manager with a hand-stubbed slice."""
+
+    @staticmethod
+    def _make_device(name, serial):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-101", slug="acme-101")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-101", slug="dt-101")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-101", slug="role-101")
+        site, _ = Site.objects.get_or_create(name="Site-101", slug="site-101")
+        return Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active", serial=serial)
+
+    def test_duplicate_serials_skip_matching_with_warning(self):
+        """Two real devices share the incoming serial → serial matching is skipped (no arbitrary
+        bind) and a warning is added. Red against the old .first() which bound a random row."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        self._make_device("dup-a-101", "DUP123")
+        self._make_device("dup-b-101", "DUP123")
+
+        result = validate_device_for_import(
+            # device_id matches no NetBox librenms_id, so the flow reaches the serial block.
+            {"device_id": 99999, "hostname": "new-host-101", "serial": "DUP123"},
+            include_vc_detection=False,
+        )
+
+        assert result["existing_device"] is None
+        assert result.get("existing_match_type") != "serial"
+        assert any("share serial" in w for w in result["warnings"])
+
+    def test_unique_serial_still_binds(self):
+        """A single device with the serial still binds via the serial path (guards against the
+        unique guard over-rejecting)."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        dev = self._make_device("solo-101", "SOLO123")
+
+        result = validate_device_for_import(
+            {"device_id": 99998, "hostname": "new-host-101b", "serial": "SOLO123"},
+            include_vc_detection=False,
+        )
+
+        assert result["existing_device"] == dev
+        assert result["existing_match_type"] == "serial"
+
+
 class TestSerialNumberMatching:
     """Test serial number matching in device validation."""
 
@@ -1702,39 +1752,6 @@ class TestSerialNumberMatching:
         assert result["can_import"] is False
         assert result["existing_match_type"] == "serial"
         assert result["existing_device"] == existing
-
-    def test_duplicate_serials_skip_matching_with_warning(self):
-        """Issue #101: when multiple NetBox devices share the incoming serial, serial-based
-        matching must be skipped (no arbitrary .first() bind) and a warning added. The guard's
-        len() check runs on the real list returned by the [:2] slice."""
-        dev_a = MagicMock(name="dev-a", pk=1)
-        dev_b = MagicMock(name="dev-b", pk=2)
-
-        self.mock_vm.objects.filter.return_value.first.return_value = None
-
-        def device_filter(*args, **kwargs):
-            result = MagicMock()
-            if "serial" in kwargs:
-                result.first.return_value = dev_a
-                result.__getitem__.return_value = [dev_a, dev_b]  # two devices share the serial
-            else:
-                result.first.return_value = None
-                result.__getitem__.return_value = []
-            return result
-
-        self.mock_device.objects.filter.side_effect = device_filter
-
-        from netbox_librenms_plugin.import_utils import validate_device_for_import
-
-        result = validate_device_for_import(
-            {"device_id": 1, "hostname": "new-host", "serial": "DUP123"},
-            include_vc_detection=False,
-        )
-
-        # No arbitrary device bound, and the serial path did not claim a match.
-        assert result["existing_device"] is None
-        assert result.get("existing_match_type") != "serial"
-        assert any("share serial" in w for w in result["warnings"])
 
     def test_serial_match_same_hostname_offers_link(self):
         """Serial + hostname match offers link action."""
