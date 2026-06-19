@@ -90,6 +90,48 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "primary"
         assert api.librenms_url == "https://primary.example.com"
 
+    def test_init_stale_auto_selected_server_falls_back(self, mock_librenms_config):
+        """Issue #110: a stale LibreNMSSettings.selected_server (no longer configured) must fall
+        back to the first server rather than hard-fail — it was auto-resolved, not explicitly
+        requested, so the KeyError guard must not fire."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
+        }
+        mock_settings = mock_librenms_config["mock_settings"]
+        mock_settings.objects.first.return_value.selected_server = "gone-server"
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI()  # server_key=None -> auto-resolved from (stale) settings
+        assert api.server_key == "primary"
+
+    def test_init_skips_leading_malformed_server_entry(self, mock_librenms_config):
+        """Issue #110: the first-entry fallback must pick the first *valid* mapping, skipping a
+        malformed (non-dict) leading entry that would otherwise raise at the config read."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "broken": "not-a-dict",
+            "good": {"librenms_url": "https://good.example.com", "api_token": "t"},
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        assert api.server_key == "good"
+        assert api.librenms_url == "https://good.example.com"
+
+    def test_init_all_malformed_server_entries_raise_valueerror(self, mock_librenms_config):
+        """Issue #110: when no configured entry is a valid mapping, raise a clear ValueError
+        instead of crashing on the malformed entry's config read."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"broken": "not-a-dict", "also-bad": 123}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(ValueError):
+            LibreNMSAPI(server_key="default")
+
 
 # =============================================================================
 # Test Class 2: Connection Testing (4 tests)

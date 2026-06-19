@@ -24,6 +24,11 @@ class LibreNMSAPI:
         Args:
             server_key: Key for specific server configuration. If None, uses selected server or default.
         """
+        # Track whether the caller explicitly requested a specific server. A key auto-resolved
+        # from LibreNMSSettings.selected_server is NOT explicit, so a stale stored key falls back
+        # to the first available server rather than hard-failing (issue #110).
+        explicit_server_key = server_key is not None
+
         # If no server_key is provided, try to get the selected server from settings
         if not server_key:
             try:
@@ -46,19 +51,24 @@ class LibreNMSAPI:
         # If a specific (non-default) server_key was requested but not found, raise
         # immediately to avoid silently using the wrong LibreNMS instance.
         if servers_config and isinstance(servers_config, dict) and server_key not in servers_config:
-            if server_key != "default":
+            # Only fail closed for an *explicitly* requested non-default key (tampered or
+            # stale-page input). An auto-resolved/default key falls back instead (issue #110).
+            if explicit_server_key and server_key != "default":
                 available = list(servers_config.keys())
                 raise KeyError(
                     f"Server '{server_key}' not found in LibreNMS plugin configuration. Available servers: {available}"
                 )
-            first_key = next(iter(servers_config), None)
-            if first_key:
-                logger.info(
-                    "Server '%s' not found in config, falling back to '%s'",
-                    server_key,
-                    first_key,
-                )
-                server_key = first_key
+            # Pick the first *valid* mapping; a non-dict entry would otherwise raise later at the
+            # config read. If none are valid, fail with a clear error (issue #110).
+            first_key = next((key for key, config in servers_config.items() if isinstance(config, dict)), None)
+            if first_key is None:
+                raise ValueError("No valid LibreNMS server configuration entries found.")
+            logger.info(
+                "Server '%s' not found in config, falling back to '%s'",
+                server_key,
+                first_key,
+            )
+            server_key = first_key
 
         self.server_key = server_key
 
