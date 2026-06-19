@@ -591,7 +591,7 @@ def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
     return get_plugin_config("netbox_librenms_plugin", "interface_name_field")
 
 
-def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
+def match_librenms_hardware_to_device_type(hardware_name: str, *, preloaded_rules: dict | None = None) -> dict | None:
     """
     Match LibreNMS hardware string to a NetBox DeviceType.
 
@@ -600,6 +600,9 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
 
     Args:
         hardware_name (str): Hardware string from LibreNMS API (e.g., 'C9200L-48P-4X')
+        preloaded_rules: Optional dict from :func:`preload_normalization_rules` for the
+            ``device_type`` scope. When matching many devices in a loop (bulk import), pass it
+            so the device_type NormalizationRule set is fetched once instead of per device.
 
     Returns:
         dict | None: Dictionary containing:
@@ -629,7 +632,7 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
     # LibreNMS hardware string before DeviceTypeMapping lookup"). With no device_type rules
     # configured this returns the input unchanged, so existing exact-match behavior is
     # preserved; when rules exist they clean the string once and all lookups use the result.
-    search_name = apply_normalization_rules(value=hardware_name, scope="device_type")
+    search_name = apply_normalization_rules(value=hardware_name, scope="device_type", preloaded_rules=preloaded_rules)
 
     # Check DeviceTypeMapping table first (when available)
     if _has_device_type_mapping:

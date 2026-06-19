@@ -7,6 +7,8 @@ device retrieval, and device validation functions.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # =============================================================================
 # TestCacheKeyGeneration - 4 tests
 # =============================================================================
@@ -3674,6 +3676,16 @@ class TestDeviceNamingPreferences:
 class TestProcessDeviceFilters:
     """Tests for process_device_filters and related bulk_import utilities."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_norm_preload(self):
+        # bulk_import_devices_shared preloads device_type NormalizationRule once (issue #90);
+        # these are mock-based (no DB), so stub the preload to avoid real DB access.
+        with patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        ):
+            yield
+
     def test_show_disabled_filters_integer_disabled_1(self):
         """show_disabled=False should exclude devices with disabled==1 (int)."""
         from unittest.mock import MagicMock, patch
@@ -4879,6 +4891,14 @@ class TestSyncModuleBayCounter:
 class TestBulkImportCancellation:
     """Test that bulk_import_devices_shared respects RQ and DB cancellation."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_norm_preload(self):
+        with patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        ):
+            yield
+
     def _run_bulk_import(self, mock_rq_job=None, db_status="running", device_ids=None):
         """Helper: run bulk_import with provided mocks, return import call count."""
         from unittest.mock import MagicMock, patch
@@ -4974,6 +4994,14 @@ class TestBulkImportCancellation:
 
 class TestBulkImportVCPermission:
     """Test VC creation behavior during bulk import."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_norm_preload(self):
+        with patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        ):
+            yield
 
     def _make_stack_validation(self):
         from unittest.mock import MagicMock

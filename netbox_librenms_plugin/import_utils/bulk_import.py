@@ -8,7 +8,7 @@ from django.core.cache import cache
 
 from ..import_validation_helpers import apply_role_to_validation, recalculate_validation_status, remove_validation_issue
 from ..librenms_api import LibreNMSAPI
-from ..utils import find_by_librenms_id
+from ..utils import find_by_librenms_id, preload_normalization_rules
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
 from .device_operations import import_single_device, validate_device_for_import
 from .filters import _safe_disabled, get_librenms_devices_for_import
@@ -117,6 +117,10 @@ def bulk_import_devices_shared(
     # Initialize API client once for all devices to avoid repeated config parsing
     api = LibreNMSAPI(server_key=server_key)
 
+    # Preload the device_type NormalizationRule set once so the per-device hardware→device-type
+    # match doesn't re-query it for every device in the loop (issue #90 / N+1 avoidance, #92).
+    device_type_norm_rules = preload_normalization_rules("device_type")
+
     for idx, device_id in enumerate(device_ids, start=1):
         # Check for job cancellation on first iteration and every 5th thereafter.
         if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
@@ -156,6 +160,7 @@ def bulk_import_devices_shared(
                 # LibreNMS inventory so stack members are created even when preview
                 # flags are stale or omitted.
                 include_vc_detection=True,
+                preloaded_device_type_rules=device_type_norm_rules,
             )
 
             vc_data = validation.get("virtual_chassis", {})

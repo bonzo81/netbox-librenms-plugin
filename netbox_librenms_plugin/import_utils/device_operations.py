@@ -135,6 +135,7 @@ def validate_device_for_import(
     force_vc_refresh: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    preloaded_device_type_rules: dict | None = None,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -539,7 +540,7 @@ def validate_device_for_import(
 
             # 3. Validate DeviceType (required)
             hardware = libre_device.get("hardware", "")
-            dt_match = match_librenms_hardware_to_device_type(hardware)
+            dt_match = match_librenms_hardware_to_device_type(hardware, preloaded_rules=preloaded_device_type_rules)
 
             if dt_match is None:
                 result["device_type"]["found"] = False

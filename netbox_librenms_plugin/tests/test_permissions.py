@@ -633,6 +633,18 @@ class TestNetBoxObjectPermissionMixin:
 class TestBulkImportPermissions:
     """Tests for permission checks in bulk import functions."""
 
+    def setup_method(self):
+        # bulk_import_devices_shared preloads device_type NormalizationRule once (issue #90);
+        # these are mock-based (no DB), so stub the preload to avoid real DB access.
+        self._norm_patcher = patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        )
+        self._norm_patcher.start()
+
+    def teardown_method(self):
+        self._norm_patcher.stop()
+
     @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
     @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
     def test_bulk_import_devices_checks_permissions(self, mock_api_class, mock_require):
@@ -873,6 +885,16 @@ class TestSafeRedirectUrl:
 
 class TestBulkImportVCPermission:
     """Tests that bulk import checks virtualchassis permission."""
+
+    def setup_method(self):
+        self._norm_patcher = patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        )
+        self._norm_patcher.start()
+
+    def teardown_method(self):
+        self._norm_patcher.stop()
 
     @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
     @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")

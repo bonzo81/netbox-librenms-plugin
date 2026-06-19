@@ -129,6 +129,16 @@ class TestBulkImportDevices:
 class TestBulkImportDevicesShared:
     """Tests for ``bulk_import_devices_shared``."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_norm_preload(self):
+        """bulk_import_devices_shared preloads device_type NormalizationRule once (issue #90);
+        these are mock-based (no DB), so stub the preload to avoid real DB access."""
+        with patch(
+            "netbox_librenms_plugin.import_utils.bulk_import.preload_normalization_rules",
+            return_value={},
+        ):
+            yield
+
     # ------------------------------------------------------------------
     # Lines 129 & 140 – "else: logger.warning(...)" when job.logger=None
     # ------------------------------------------------------------------

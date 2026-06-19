@@ -167,8 +167,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         """Get port info from LibreNMS with caching to minimize API calls"""
         if port_id not in port_data_cache:
             success, port_data = self.librenms_api.get_port_by_id(port_id)
-            # A truthy success can still carry a malformed payload: port_data=None (\"port\" in
-            # None raises), {\"port\": [\"bad\"]} (a non-dict row that later crashes at
+            # A truthy success can still carry a malformed payload: port_data=None ("port" in
+            # None raises), {"port": ["bad"]} (a non-dict row that later crashes at
             # port_info.get(...)). Validate the shape and cache only a real dict row, else None
             # (issue #111, same class as #100).
             ports = port_data.get("port") if success and isinstance(port_data, dict) else None
