@@ -429,35 +429,29 @@ class LibreNMSInterfaceTable(tables.Table):
 
         lag_status = record.get("lag_sync_status")
         if lag_status is not None:
-            lag_content = self._render_relationship_column(
-                lnms_name=record.get("librenms_lag_name"),
-                lnms_port_id=record.get("librenms_lag_port_id"),
-                sync_status=lag_status,
-                record=record,
-                btn_class="lag-sync-btn",
-                data_related_key="data-lag-port-id",
-            )
             parts.append(
-                format_html(
-                    '<div><span class="text-muted small me-1">LAG</span>{}</div>',
-                    lag_content,
+                self._render_relationship_column(
+                    type_label="LAG",
+                    lnms_name=record.get("librenms_lag_name"),
+                    lnms_port_id=record.get("librenms_lag_port_id"),
+                    sync_status=lag_status,
+                    record=record,
+                    btn_class="lag-sync-btn",
+                    data_related_key="data-lag-port-id",
                 )
             )
 
         parent_status = record.get("parent_sync_status")
         if parent_status is not None:
-            parent_content = self._render_relationship_column(
-                lnms_name=record.get("librenms_parent_name"),
-                lnms_port_id=record.get("librenms_parent_port_id"),
-                sync_status=parent_status,
-                record=record,
-                btn_class="parent-sync-btn",
-                data_related_key="data-parent-port-id",
-            )
             parts.append(
-                format_html(
-                    '<div><span class="text-muted small me-1">Parent</span>{}</div>',
-                    parent_content,
+                self._render_relationship_column(
+                    type_label="Parent",
+                    lnms_name=record.get("librenms_parent_name"),
+                    lnms_port_id=record.get("librenms_parent_port_id"),
+                    sync_status=parent_status,
+                    record=record,
+                    btn_class="parent-sync-btn",
+                    data_related_key="data-parent-port-id",
                 )
             )
 
@@ -466,37 +460,51 @@ class LibreNMSInterfaceTable(tables.Table):
 
         return mark_safe("".join(str(p) for p in parts))
 
-    def _render_relationship_column(self, lnms_name, lnms_port_id, sync_status, record, btn_class, data_related_key):
-        """Shared renderer for LAG and Parent relationship columns."""
+    def _render_relationship_column(
+        self, lnms_name, lnms_port_id, sync_status, record, btn_class, data_related_key, type_label=""
+    ):
+        """Shared renderer for LAG and Parent relationship columns.
+
+        Renders ONE compact pill per relationship line: a Tabler light (``-lt``) badge holding a
+        status icon + the relationship ``type_label`` + the LibreNMS name, with the full status
+        text in the badge ``title``. Status is conveyed by colour + icon rather than a long inline
+        word (e.g. "Not in LibreNMS"), so the column stays glanceable and doesn't clump/wrap to
+        several lines on narrow screens. The ``-lt`` variants ship their own readable text colour
+        in both light and dark themes (and are exempt from the bare-``bg-*`` badge guard).
+        """
         if sync_status is None:
             return mark_safe("")
 
-        # Every badge must pair a background with a contrasting text colour, in BOTH NetBox
-        # themes. A bare ``bg-*`` utility sets only the background and leaves the badge's default
-        # (muted/inherited) text colour, which is unreadable: ``bg-secondary`` rendered grey-on-
-        # grey, and ``bg-success`` left grey text on green (~1.1:1 in dark mode). Measured WCAG
-        # contrast (light/dark): success text-dark 5.35, warning text-dark 6.88, info text-dark
-        # 4.81, secondary text-bg-secondary 4.63 — all ≥ AA. text-bg-* pairs fg+bg for the darker
-        # greys; an explicit text-dark suffices on the lighter colour fills.
+        # (colour, mdi icon, full status text). Colour + icon read at a glance; the text is the
+        # tooltip. mdi-check-circle / mdi-help-circle are already used elsewhere in this table.
         status_map = {
-            "match": ("bg-success text-dark", "Match"),
-            "mismatch": ("bg-warning text-dark", "Mismatch"),
-            "missing_nb": ("bg-info text-dark", "Not in NetBox"),
-            "missing_lnms": ("text-bg-secondary", "Not in LibreNMS"),
+            "match": ("success", "mdi-check-circle", "Match"),
+            "mismatch": ("warning", "mdi-alert-circle", "Mismatch"),
+            "missing_nb": ("info", "mdi-plus-circle", "Not in NetBox"),
+            "missing_lnms": ("secondary", "mdi-database-off", "Not in LibreNMS"),
         }
-        badge_css, badge_label = status_map.get(sync_status, ("text-bg-secondary", sync_status))
+        color, icon, status_text = status_map.get(sync_status, ("secondary", "mdi-help-circle", sync_status))
+        badge_css = f"bg-{color}-lt"
 
-        # format_html() below escapes its args, so it's the single escape point for the name.
+        # format_html() escapes its args, so it's the single escape point for the name.
         # (A manual escape() here was redundant — it returns a SafeString that format_html's
         # conditional_escape passes through, so it didn't double-encode, just obscured intent.)
         display_name = lnms_name or ""
-        status_badge = format_html('<span class="badge {}">{}</span>', badge_css, badge_label)
-        name_badge = (
-            format_html(' <span class="badge border text-body-secondary fw-normal">{}</span>', display_name)
-            if display_name
-            else ""
+        if type_label and display_name:
+            badge_text = format_html("{} {}", type_label, display_name)
+        elif display_name:
+            badge_text = display_name
+        else:
+            badge_text = type_label  # may be "" (e.g. missing_lnms with no name) → icon-only pill
+        title = f"{type_label}: {status_text}" if type_label else status_text
+        badge = format_html(
+            '<span class="badge {} fw-normal d-inline-flex align-items-center gap-1" title="{}">'
+            '<i class="mdi {}"></i>{}</span>',
+            badge_css,
+            title,
+            icon,
+            badge_text,
         )
-        badge = format_html("{}{}", status_badge, name_badge)
 
         # On a migrated donor page the inline sync controls are suppressed: the per-row
         # .lag-sync-btn/.parent-sync-btn POST directly via librenms_sync.js, so leaving them
@@ -536,9 +544,11 @@ class LibreNMSInterfaceTable(tables.Table):
                 object_type,
                 object_id,
             )
-            return format_html("{} {}", badge, btn)
+            # text-nowrap keeps the pill + sync button on one line (no mid-line wrap); lh-sm keeps
+            # the LAG/Parent lines tightly stacked.
+            return format_html('<div class="text-nowrap lh-sm">{} {}</div>', badge, btn)
 
-        return badge
+        return format_html('<div class="text-nowrap lh-sm">{}</div>', badge)
 
     def _compare_mac_addresses(self, librenms_mac, netbox_interface):
         """

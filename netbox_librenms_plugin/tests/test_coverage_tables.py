@@ -1848,22 +1848,105 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
         assert table.columns["librenms_id"].verbose_name == "LibreNMS ID"
 
     def test_every_status_badge_pairs_background_with_text_colour(self):
-        """A ``bg-*`` colour fill with no companion text colour is the grey-on-grey /
-        grey-on-green readability bug; ``text-bg-*`` is allowed (it pairs both)."""
+        """A solid ``bg-*`` colour fill with no companion text colour is the grey-on-grey /
+        grey-on-green readability bug. Readable forms: ``text-bg-*`` (pairs both), ``bg-* text-*``
+        (explicit), or Tabler's ``bg-*-lt`` light variant (ships its own readable text colour in
+        both themes — same exemption the project-wide scan guard uses)."""
         table = self._table()
         for status in self._STATUSES:
             tokens = self._status_badge_classes(table, status)
-            has_bg_fill = any(t.startswith("bg-") for t in tokens)  # note: text-bg-* starts with "text-"
+            # A *-lt token is a known-readable pairing; it isn't a bare solid fill.
+            solid_bg = [t for t in tokens if t.startswith("bg-") and not t.endswith("-lt")]
             has_text_colour = any(t.startswith("text-") for t in tokens)
-            assert has_text_colour or not has_bg_fill, (
-                f"status {status!r} badge {tokens} sets a background with no contrasting text "
-                "colour (use text-bg-* or add an explicit text-* class)"
+            assert has_text_colour or not solid_bg, (
+                f"status {status!r} badge {tokens} sets a solid background with no contrasting "
+                "text colour (use text-bg-*, bg-*-lt, or an explicit text-* class)"
             )
 
     def test_missing_lnms_badge_label_renders(self):
         table = self._table()
         tokens = self._status_badge_classes(table, "missing_lnms")
-        assert "text-bg-secondary" in tokens
+        # The relationship pill uses Tabler's light variant (ships its own readable text colour in
+        # both themes; exempt from the bare-bg badge guard) and a status icon.
+        assert "bg-secondary-lt" in tokens
+
+
+class TestRelationshipBadgeCompactLayout:
+    """The Parent/LAG column must render ONE compact pill per relationship line: the relationship
+    type + LibreNMS name in a single light badge, with the status conveyed by colour + an mdi icon
+    + a title tooltip. The old layout stacked a separate solid status badge AND a bordered name
+    badge (plus a muted prefix), which clumped and wrapped to ~3 lines in a narrow column. Keeping
+    it to one pill is what makes the column glanceable on narrow screens."""
+
+    def _table(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(
+                data=[], device=MagicMock(pk=3, virtual_chassis=None), interface_name_field="ifName"
+            )
+        table.migrated_to_marker = False
+        return table
+
+    def test_named_relationship_renders_single_pill_with_type_name_and_title(self):
+        table = self._table()
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="ae36",
+                lnms_port_id=None,
+                sync_status="missing_nb",
+                record={},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        # Exactly one badge — the old design rendered two (status badge + name badge).
+        assert html.count('class="badge') == 1
+        # Type + name inline in that single pill.
+        assert "LAG" in html
+        assert "ae36" in html
+        # Status conveyed by an icon + the full text in the title (not a long inline word).
+        assert "mdi-plus-circle" in html
+        assert 'title="LAG: Not in NetBox"' in html
+
+    def test_match_pill_uses_light_variant_and_check_icon(self):
+        table = self._table()
+        html = str(
+            table._render_relationship_column(
+                type_label="Parent",
+                lnms_name="lo0",
+                lnms_port_id=None,
+                sync_status="match",
+                record={},
+                btn_class="parent-sync-btn",
+                data_related_key="data-parent-port-id",
+            )
+        )
+        assert "bg-success-lt" in html
+        assert "mdi-check-circle" in html
+        assert 'title="Parent: Match"' in html
+
+    def test_render_parent_stacks_lag_and_parent_as_compact_pills(self):
+        table = self._table()
+        record = {
+            "port_id": 5,
+            "ifName": "eth0",
+            "netbox_interface": None,
+            "lag_sync_status": "missing_nb",
+            "librenms_lag_name": "ae0",
+            "librenms_lag_port_id": 111,
+            "parent_sync_status": "match",
+            "librenms_parent_name": "et-0/0/1",
+            "librenms_parent_port_id": 222,
+        }
+        html = str(table.render_parent(None, record))
+        # One pill per line — two relationships → two badges total (not four).
+        assert html.count('class="badge') == 2
+        assert "LAG" in html
+        assert "Parent" in html
+        # Type label lives inside the pill now, not in a separate muted prefix span.
+        assert "text-muted small" not in html
 
 
 class TestLibreNMSInterfaceTableInit:
