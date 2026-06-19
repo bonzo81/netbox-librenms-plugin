@@ -1495,25 +1495,24 @@ class TestResolveInterfaceByPortId:
         assert err is not None
         assert "ambiguous" in err.lower()
 
-    def test_name_hint_unexpected_error_propagates(self):
-        """A real DB/runtime fault during the name-hint lookup must propagate, not be masked
-        as a silent not-found (the old bare `except Exception` hid these faults)."""
+    def test_unexpected_error_during_resolution_propagates(self):
+        """A real DB/runtime fault while scanning the device's interfaces must propagate, not be
+        masked as a silent not-found. Resolution builds a one-pass index over the interface
+        queryset (_build_interface_index); a fault there must surface, never be swallowed."""
         import pytest
         from unittest.mock import MagicMock, patch
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
-        from dcim.models import Device, Interface
+        from dcim.models import Device
 
         mock_device = MagicMock(spec=Device)
         mock_device.virtual_chassis = None
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls,
-            patch("netbox_librenms_plugin.views.sync.interfaces.get_librenms_device_id", return_value=None),
-        ):
-            mock_intf_cls.objects.filter.return_value = []
-            mock_intf_cls.DoesNotExist = Interface.DoesNotExist
-            mock_intf_cls.MultipleObjectsReturned = Interface.MultipleObjectsReturned
-            mock_intf_cls.objects.get.side_effect = RuntimeError("database is down")
+        # The index build iterates the interface queryset; a DB fault during that scan must bubble.
+        failing_qs = MagicMock()
+        failing_qs.__iter__.side_effect = RuntimeError("database is down")
+
+        with patch("netbox_librenms_plugin.views.sync.interfaces.Interface") as mock_intf_cls:
+            mock_intf_cls.objects.filter.return_value = failing_qs
             with pytest.raises(RuntimeError):
                 _resolve_interface_by_port_id(mock_device, "42", "production", name_hint="lag-1")
 
@@ -1664,3 +1663,92 @@ class TestInterfaceLinkValidationErrorNoStackTrace:
         body = json.loads(resp.content)
         assert "Cannot link Et1.100 to parent Et1" in body["error"]
         assert any(self._SENTINEL in str(c.args) for c in mock_logger.warning.call_args_list)
+
+
+@pytest.mark.django_db
+class TestSyncInterfaceLagViewRealDB:
+    """End-to-end (real DB) coverage for SyncInterfaceLagView.post.
+
+    The HTTP contract is otherwise only exercised with MagicMock interfaces (the no-leak test
+    stubs full_clean), so a regression in the real resolution → validate-before-save → persist
+    chain could pass undetected. These drive the view against real Device/Interface objects:
+    the link is proven by what persists, and the self-LAG rejection by NetBox's real
+    Interface.clean().
+    """
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
+
+        view = object.__new__(SyncInterfaceLagView)
+        view._librenms_api = MagicMock(server_key="default")
+        view.require_all_permissions_json = MagicMock(return_value=None)
+        return view
+
+    @staticmethod
+    def _iface(device, name, port_id, itype="1000base-t"):
+        from netbox_librenms_plugin.tests.conftest import make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = make_interface(device, name, iface_type=itype)
+        set_librenms_device_id(iface, port_id, "default")
+        iface.save()
+        return iface
+
+    def test_links_member_to_aggregate(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("lag-host")
+        member = self._iface(device, "Gi0/1", 10)
+        agg = self._iface(device, "Po1", 20)
+
+        view = self._make_view()
+        req = _make_request({"port_id": "10", "lag_port_id": "20", "server_key": "default"})
+        resp = view.post(req, object_type="device", object_id=device.pk)
+
+        assert resp.status_code == 200
+        member.refresh_from_db()
+        agg.refresh_from_db()
+        # The link actually persisted, and the aggregate was promoted to type=lag.
+        assert member.lag_id == agg.pk
+        assert agg.type == "lag"
+
+    def test_self_lag_rejected_by_real_full_clean(self):
+        import json
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("lag-host-self")
+        iface = self._iface(device, "Po1", 30)
+
+        view = self._make_view()
+        # port_id == lag_port_id resolves member == aggregate (same real interface); NetBox's
+        # real Interface.clean() must reject the self-LAG with a 409 and persist nothing.
+        req = _make_request({"port_id": "30", "lag_port_id": "30", "server_key": "default"})
+        resp = view.post(req, object_type="device", object_id=device.pk)
+
+        assert resp.status_code == 409
+        body = json.loads(resp.content)
+        assert "its own LAG" in body["error"]
+        iface.refresh_from_db()
+        assert iface.lag_id is None
+
+    def test_cross_member_aggregate_rejected(self):
+        """The aggregate port_id resolving onto a *different* VC member must not link across
+        devices — the expected_owner pin (obj = the posted member) rejects it at resolution."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+
+        member1 = make_device("vc-lag-m1")
+        member2 = make_device("vc-lag-m2")
+        make_virtual_chassis("VC-LAG", member1, member2)
+        local = self._iface(member1, "Gi0/1", 40)
+        # The "aggregate" id 50 lives on member2, not member1.
+        self._iface(member2, "Po1", 50)
+
+        view = self._make_view()
+        # Posting against member1: the aggregate resolves onto member2 and must be refused.
+        req = _make_request({"port_id": "40", "lag_port_id": "50", "server_key": "default"})
+        resp = view.post(req, object_type="device", object_id=member1.pk)
+
+        assert resp.status_code in (404, 409)
+        local.refresh_from_db()
+        assert local.lag_id is None

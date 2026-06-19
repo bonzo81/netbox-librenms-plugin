@@ -1796,6 +1796,47 @@ class TestBuildVcAttributes:
 # ===========================================================================
 
 
+class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
+    """Regression guards for two UI fixes on the interface sync table.
+
+    1. The 'LibreNMS ID' column (accessor port_id) must stay present — it was inadvertently
+       dropped when the Parent/LAG column was added, but it exists on develop and is relied on.
+    2. The 'Not in LibreNMS' relationship badge must use a contrast-safe class: a bare
+       ``bg-secondary`` sets only the background, leaving low-contrast default text
+       (grey-on-grey, unreadable in NetBox's theme).
+    """
+
+    def _table(self):
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        mock_device = MagicMock()
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            return LibreNMSInterfaceTable(data=[], device=mock_device, server_key="default")
+
+    def test_librenms_id_column_present(self):
+        table = self._table()
+        column_names = [c.name for c in table.columns]
+        assert "librenms_id" in column_names, "LibreNMS ID column was dropped from the interface table"
+        assert table.columns["librenms_id"].verbose_name == "LibreNMS ID"
+
+    def test_missing_lnms_badge_uses_contrast_safe_class(self):
+        table = self._table()
+        html = str(
+            table._render_relationship_column(
+                lnms_name="Po1",
+                lnms_port_id=None,
+                sync_status="missing_lnms",
+                record={},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        # text-bg-secondary pairs the grey background with a contrasting foreground; a bare
+        # bg-secondary (the bug) would render "badge bg-secondary" with no readable text colour.
+        assert "badge text-bg-secondary" in html
+        assert "Not in LibreNMS" in html
+
+
 class TestLibreNMSInterfaceTableInit:
     """Tests for LibreNMSInterfaceTable.__init__()."""
 

@@ -13,6 +13,7 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     format_mac_address,
     get_interface_name_field,
+    get_librenms_device_id,
     get_missing_vlan_warning,
     get_table_paginate_count,
     get_tagged_vlan_css_class,
@@ -46,6 +47,7 @@ class LibreNMSInterfaceTable(tables.Table):
             "mtu",
             "enabled",
             "description",
+            "librenms_id",
             "parent",
         ]
         attrs = {
@@ -114,6 +116,11 @@ class LibreNMSInterfaceTable(tables.Table):
         accessor="ifAlias",
         verbose_name="Description",
         attrs={"td": {"data-col": "description"}},
+    )
+    librenms_id = tables.Column(
+        accessor="port_id",
+        verbose_name="LibreNMS ID",
+        attrs={"td": {"data-col": "librenms_id"}},
     )
     parent = tables.Column(
         verbose_name="Parent / LAG",
@@ -386,6 +393,30 @@ class LibreNMSInterfaceTable(tables.Table):
         """Render MTU with appropriate styling based on comparison with NetBox"""
         return self._render_field(value, record, "ifMtu", "mtu")
 
+    def render_librenms_id(self, value, record):
+        """Render the LibreNMS port_id, coloured by how it compares to the stored NetBox value.
+
+        Red when the interface doesn't exist in NetBox or carries no librenms_id custom field,
+        orange when the stored id differs from this LibreNMS port_id, green when they match.
+        """
+        if not record.get("exists_in_netbox"):
+            return format_html('<span class="text-danger">{}</span>', value)
+
+        netbox_interface = record.get("netbox_interface")
+        if not netbox_interface:
+            return format_html('<span class="text-danger">{}</span>', value)
+
+        netbox_librenms_id = get_librenms_device_id(netbox_interface, self.server_key, auto_save=False)
+        if netbox_librenms_id is None:
+            return format_html(
+                '<span class="text-danger" title="No librenms_id custom field value found">{}</span>', value
+            )
+        if str(value) != str(netbox_librenms_id):
+            return format_html(
+                '<span class="text-warning" title="Existing LibreNMS ID: {}">{}</span>', netbox_librenms_id, value
+            )
+        return format_html('<span class="text-success">{}</span>', value)
+
     def render_parent(self, value, record):
         """Render combined Parent / LAG relationship column.
 
@@ -440,13 +471,17 @@ class LibreNMSInterfaceTable(tables.Table):
         if sync_status is None:
             return mark_safe("")
 
+        # Use text-bg-* for the grey "secondary" badge: a bare ``bg-secondary`` sets only the
+        # background, leaving the badge's default low-contrast text → grey-on-grey, unreadable
+        # in NetBox's theme. text-bg-secondary pairs the background with a guaranteed-contrasting
+        # foreground (the other entries already carry explicit text colours).
         status_map = {
             "match": ("bg-success", "Match"),
             "mismatch": ("bg-warning text-dark", "Mismatch"),
             "missing_nb": ("bg-info text-dark", "Not in NetBox"),
-            "missing_lnms": ("bg-secondary", "Not in LibreNMS"),
+            "missing_lnms": ("text-bg-secondary", "Not in LibreNMS"),
         }
-        badge_css, badge_label = status_map.get(sync_status, ("bg-secondary", sync_status))
+        badge_css, badge_label = status_map.get(sync_status, ("text-bg-secondary", sync_status))
 
         # format_html() below escapes its args, so it's the single escape point for the name.
         # (A manual escape() here was redundant — it returns a SafeString that format_html's
@@ -728,6 +763,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             "mtu",
             "enabled",
             "description",
+            "librenms_id",
             "parent",
         ]
         attrs = {
@@ -755,6 +791,7 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
             "mtu",
             "enabled",
             "description",
+            "librenms_id",
             # VMInterface supports sub-interface parents (LAG is skipped for VMs), and the
             # relationship sync path resolves VMInterface targets — so the Parent/LAG column
             # must be exposed here too, otherwise the feature is unreachable on VM pages.

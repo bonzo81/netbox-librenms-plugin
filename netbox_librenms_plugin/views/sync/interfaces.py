@@ -227,6 +227,13 @@ class SyncInterfacesView(
             if port.get(interface_name_field) in selected_interfaces:
                 selected_port_ids.add(str(pid))
 
+        # Build the interface lookup index once for the whole batch. Each port_id below
+        # resolves both ends of a relationship; without a shared index every resolution
+        # re-queries obj's interfaces and re-reads their librenms_id custom fields, which is
+        # O(selected × interfaces). Built after sync_selected_interfaces() so newly created
+        # interfaces are included.
+        iface_index = _build_interface_index(obj, server_key)
+
         with transaction.atomic():
             for port_id in selected_port_ids:
                 if port_id not in port_by_id:
@@ -253,7 +260,7 @@ class SyncInterfacesView(
                     lag_name = lag_entry.get(interface_name_field) or lag_entry.get("ifName", "")
 
                     member_iface, err = _resolve_interface_by_port_id(
-                        obj, port_id, server_key, expected_owner=expected_owner
+                        obj, port_id, server_key, expected_owner=expected_owner, index=iface_index
                     )
                     if err:
                         logger.debug("LAG member lookup failed during bulk sync: %s", err)
@@ -263,7 +270,12 @@ class SyncInterfacesView(
                         continue  # VMInterface does not support lag
 
                     agg_iface, err = _resolve_interface_by_port_id(
-                        obj, lag_port_id, server_key, name_hint=lag_name, expected_owner=expected_owner
+                        obj,
+                        lag_port_id,
+                        server_key,
+                        name_hint=lag_name,
+                        expected_owner=expected_owner,
+                        index=iface_index,
                     )
                     if err:
                         logger.debug("LAG aggregate lookup failed during bulk sync: %s", err)
@@ -312,14 +324,19 @@ class SyncInterfacesView(
                     parent_name = parent_entry.get(interface_name_field) or parent_entry.get("ifName", "")
 
                     child_iface, err = _resolve_interface_by_port_id(
-                        obj, port_id, server_key, expected_owner=expected_owner
+                        obj, port_id, server_key, expected_owner=expected_owner, index=iface_index
                     )
                     if err:
                         logger.debug("Sub-iface child lookup failed during bulk sync: %s", err)
                         continue
 
                     parent_iface, err = _resolve_interface_by_port_id(
-                        obj, parent_port_id, server_key, name_hint=parent_name, expected_owner=expected_owner
+                        obj,
+                        parent_port_id,
+                        server_key,
+                        name_hint=parent_name,
+                        expected_owner=expected_owner,
+                        index=iface_index,
                     )
                     if err:
                         logger.debug("Sub-iface parent lookup failed during bulk sync: %s", err)
@@ -807,7 +824,42 @@ def _interface_owner_for_object(obj):
     return (None, obj.pk)
 
 
-def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint: str = "", expected_owner=None):
+def _build_interface_index(obj, server_key):
+    """One-pass index of *obj*'s interfaces (VC-wide for a chassis member) for repeated
+    port_id/name resolution.
+
+    A bulk relationship sync resolves many port_ids against the same interface set; without a
+    shared index each :func:`_resolve_interface_by_port_id` call re-queries the DB and re-reads
+    every interface's ``librenms_id`` custom field — O(selected × interfaces). Building this once
+    collapses that to a single scan.
+
+    Returns ``{"by_lnms_id": {int: [iface, ...]}, "by_name": {name: [iface, ...]}}`` (lists so
+    ambiguity stays detectable), or ``None`` for an unsupported object type.
+    """
+    if isinstance(obj, Device):
+        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
+            iface_qs = Interface.objects.filter(device__in=member_ids)
+        else:
+            iface_qs = Interface.objects.filter(device=obj)
+    elif isinstance(obj, VirtualMachine):
+        iface_qs = VMInterface.objects.filter(virtual_machine=obj)
+    else:
+        return None
+
+    by_lnms_id: dict = {}
+    by_name: dict = {}
+    for iface in iface_qs:
+        stored_id = get_librenms_device_id(iface, server_key, auto_save=False)
+        if stored_id is not None:
+            by_lnms_id.setdefault(stored_id, []).append(iface)
+        by_name.setdefault(iface.name, []).append(iface)
+    return {"by_lnms_id": by_lnms_id, "by_name": by_name}
+
+
+def _resolve_interface_by_port_id(
+    obj, port_id: str, server_key: str, name_hint: str = "", expected_owner=None, index=None
+):
     """Resolve a LibreNMS port_id to a NetBox Interface/VMInterface.
 
     1. Searches obj's interfaces for one whose librenms_id custom field matches port_id.
@@ -819,33 +871,26 @@ def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint:
     whose owner differs is rejected. Because the VC search spans every member, a stale/reused
     librenms_id can otherwise resolve uniquely onto a *different* member than the row was synced
     to; pinning the owner stops a lag/parent write landing on the wrong interface.
+
+    *index* (optional, from :func:`_build_interface_index`): a prebuilt lookup so a bulk caller
+    resolving many port_ids doesn't rebuild it per call. When ``None`` it is built once here, so
+    a standalone call behaves exactly as before (a single scan of obj's interfaces).
     Returns (interface, None) on success or (None, error_str) on failure.
     """
     if not port_id:
         return None, "port_id is required"
 
-    if isinstance(obj, Device):
-        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            member_ids = obj.virtual_chassis.members.values_list("id", flat=True)
-            iface_qs = Interface.objects.filter(device__in=member_ids)
-        else:
-            iface_qs = Interface.objects.filter(device=obj)
-    elif isinstance(obj, VirtualMachine):
-        iface_qs = VMInterface.objects.filter(virtual_machine=obj)
-    else:
-        return None, f"Unsupported object type: {type(obj).__name__}"
+    if index is None:
+        index = _build_interface_index(obj, server_key)
+        if index is None:
+            return None, f"Unsupported object type: {type(obj).__name__}"
 
     target_id = int(port_id) if str(port_id).isdigit() else None
     # Collect every interface in scope whose stored LibreNMS id matches, then fail on
     # ambiguity rather than binding lag/parent to an arbitrary first match. Mirrors the
     # ambiguity-safe behaviour of _resolve_device_interface()/_resolve_vm_interface():
     # two interfaces carrying the same stale librenms_id must surface, not silently pick one.
-    matches = []
-    if target_id is not None:
-        for iface in iface_qs:
-            stored_id = get_librenms_device_id(iface, server_key, auto_save=False)
-            if stored_id is not None and stored_id == target_id:
-                matches.append(iface)
+    matches = list(index["by_lnms_id"].get(target_id, [])) if target_id is not None else []
     if len(matches) == 1:
         iface = matches[0]
         if expected_owner is not None and _interface_owner(iface) != expected_owner:
@@ -855,7 +900,7 @@ def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint:
         return None, f"LibreNMS port_id {port_id} is ambiguous on {obj} (matches multiple interfaces)"
 
     if name_hint:
-        iface, err = _resolve_interface_by_name_hint(obj, name_hint)
+        iface, err = _resolve_interface_by_name_hint(obj, name_hint, index=index)
         if err:
             return None, err
         if iface is not None:
@@ -866,12 +911,20 @@ def _resolve_interface_by_port_id(obj, port_id: str, server_key: str, name_hint:
     return None, f"Interface with LibreNMS port_id {port_id} not found on {obj}"
 
 
-def _resolve_interface_by_name_hint(obj, name_hint):
+def _resolve_interface_by_name_hint(obj, name_hint, index=None):
     """Exact-name fallback for :func:`_resolve_interface_by_port_id`.
 
     Returns ``(iface, None)`` on a unique match, ``(None, None)`` when nothing matches, or
-    ``(None, error_str)`` on an ambiguous name.
+    ``(None, error_str)`` on an ambiguous name. *index* (from :func:`_build_interface_index`)
+    is used when supplied so a bulk caller avoids a per-name DB query.
     """
+    if index is not None:
+        matches = index["by_name"].get(name_hint, [])
+        if not matches:
+            return None, None
+        if len(matches) > 1:
+            return None, f"Interface name '{name_hint}' is ambiguous on {obj}"
+        return matches[0], None
     try:
         if isinstance(obj, Device):
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
