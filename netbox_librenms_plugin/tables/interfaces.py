@@ -178,23 +178,31 @@ class LibreNMSInterfaceTable(tables.Table):
             else:
                 css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches)
             warning = get_missing_vlan_warning(vid, missing_vlans)
-            inline_parts.append(f'<span class="{css}">{vid}({vlan_type}){warning}</span>')
+            # Escape the LibreNMS-sourced vid/vlan_type (XSS, issue #105 class). css is an
+            # internal class name; warning is the static icon HTML from get_missing_vlan_warning,
+            # so it is marked safe rather than escaped.
+            inline_parts.append(
+                format_html('<span class="{}">{}({}){}</span>', css, vid, vlan_type, mark_safe(warning))
+            )
 
-        summary = ", ".join(inline_parts)
+        # inline_parts are already escaped SafeStrings; join them and keep the result safe.
+        summary = mark_safe(", ".join(str(part) for part in inline_parts))
         if len(all_vlans) > MAX_INLINE:
             extra = len(all_vlans) - MAX_INLINE
-            summary += f' <span class="text-muted">+{extra} more</span>'
+            summary = format_html('{} <span class="text-muted">+{} more</span>', summary, extra)
 
-        # Build tooltip showing auto-selected VLAN group per VLAN
+        # Build tooltip showing auto-selected VLAN group per VLAN. Escape the LibreNMS-sourced
+        # vid/vlan_type and group_name; the "&#10;" separator is a literal newline entity for the
+        # title attribute, so join the escaped lines and mark the whole tooltip safe.
         tooltip_lines = []
         for vlan_type, vid in all_vlans:
             if vid in missing_vlans:
-                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → ⚠ Not in NetBox")
+                tooltip_lines.append(format_html("VLAN {}({}) → ⚠ Not in NetBox", vid, vlan_type))
             else:
                 group_info = vlan_group_map.get(vid, {})
                 group_name = group_info.get("group_name", "Global")
-                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → {escape(group_name)}")
-        tooltip_text = "&#10;".join(tooltip_lines)
+                tooltip_lines.append(format_html("VLAN {}({}) → {}", vid, vlan_type, group_name))
+        tooltip_text = mark_safe("&#10;".join(str(line) for line in tooltip_lines))
 
         # Build hidden inputs for per-VLAN group selections (submitted with form)
         hidden_inputs = []
@@ -282,8 +290,8 @@ class LibreNMSInterfaceTable(tables.Table):
 
         return format_html(
             '<span title="{}">{}</span>{}{}',
-            mark_safe(tooltip_text),
-            mark_safe(summary),
+            tooltip_text,
+            summary,
             edit_btn,
             hidden_inputs_html,
         )
