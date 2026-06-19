@@ -30,8 +30,22 @@ def _librenms_id_q(server_key: str, value) -> Q:
 
     Matches both integer and string representations to handle any stored format.
     """
-    if isinstance(value, bool):
-        return Q(pk__isnull=True) & Q(pk__isnull=False)  # match nothing
+    # Match nothing for values that can't be a valid librenms_id. Reject bools (an int subclass)
+    # and any non-int/str type up front: int() would truncate a float like 1.9 to 1 and match the
+    # wrong device/interface — looser than find_by_librenms_id's int/str-only contract (issue
+    # #103). Also reject blank strings and non-positive ids.
+    _match_nothing = Q(pk__isnull=True) & Q(pk__isnull=False)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return _match_nothing
+    if isinstance(value, str) and not value.strip():
+        return _match_nothing
+    try:
+        if int(value) <= 0:
+            return _match_nothing
+    except (TypeError, ValueError):
+        # Non-numeric string: it can't equal a numeric id, but keep the literal match below
+        # rather than failing closed (no behaviour change for that case).
+        pass
 
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": value}) | Q(custom_field_data__librenms_id=value)
     try:

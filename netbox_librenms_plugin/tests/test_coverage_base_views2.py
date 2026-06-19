@@ -106,6 +106,25 @@ class TestLibreNMSIdQ:
         result = _librenms_id_q("default", None)
         assert result is not None
 
+    def test_float_value_returns_match_nothing_q(self):
+        """Issue #103: a float like 1.9 must NOT int()-truncate to 1 and match device id 1.
+        A non-int/str value matches nothing, mirroring find_by_librenms_id's strict contract."""
+        from django.db.models import Q
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+
+        result = _librenms_id_q("default", 1.9)
+        expected = Q(pk__isnull=True) & Q(pk__isnull=False)
+        assert str(result) == str(expected)
+
+    def test_non_positive_int_returns_match_nothing_q(self):
+        """Zero / negative values can't be a valid librenms_id, so they match nothing."""
+        from django.db.models import Q
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+
+        expected = str(Q(pk__isnull=True) & Q(pk__isnull=False))
+        assert str(_librenms_id_q("default", 0)) == expected
+        assert str(_librenms_id_q("default", -5)) == expected
+
 
 # =============================================================================
 # TestGetObjectAndIpAddress  — BaseCableTableView trivial wrappers
