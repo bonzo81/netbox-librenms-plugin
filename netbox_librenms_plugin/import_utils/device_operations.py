@@ -310,9 +310,11 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
 
     block_warnings: list = []
     if oob_type_from_libre and existing_oob is not None:
-        # OOB-typed incoming but existing already has an OOB linked --
-        # inform without blocking. No actionable button in this branch.
-        serial_action_value = "link"
+        # OOB-typed incoming but existing already has an OOB linked -- inform without blocking.
+        # Use a dedicated non-actionable value: "link" would render the generic host-link form
+        # ("Link to LibreNMS" button) in device_validation_details.html, posting an
+        # indistinguishable host-link request instead of leaving this branch informational.
+        serial_action_value = "oob_already_linked"
         block_warnings.append(
             f"Device '{existing_by_serial.name}' already has an OOB controller linked. "
             f"Re-import will update the existing OOB entry."

@@ -630,6 +630,35 @@ class TestApplyMergeCandidates:
         )
         assert "promote_to_host" not in result
 
+    def test_recalculate_status_keeps_merge_block(self):
+        """A later recalculation (e.g. triggered by applying a role/cluster selection) must NOT
+        re-enable importing a merge-candidate row. apply_merge_candidates sets can_import=False
+        without adding to ``issues``, so an unguarded recalculate would recompute can_import=True
+        purely from empty issues and bypass the merge resolution."""
+        from netbox_librenms_plugin.import_validation_helpers import (
+            apply_merge_candidates,
+            recalculate_validation_status,
+        )
+
+        result = self._base_result()
+        # Otherwise fully import-ready: empty issues + all required fields found. The ONLY thing
+        # that should keep this blocked is the merge state.
+        result["issues"] = []
+        result["site"] = {"found": True}
+        result["device_type"] = {"found": True}
+        result["device_role"] = {"found": True}
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge needed",
+        )
+
+        recalculate_validation_status(result, is_vm=False)
+
+        assert result["can_import"] is False
+        assert result["is_ready"] is False
+
     def test_disables_serial_role_choice(self):
         from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
 

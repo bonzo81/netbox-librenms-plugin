@@ -1689,9 +1689,10 @@ class TestOOBDetection:
     # ------------------------------------------------------------------
     # Case 2: Serial match + OOB regex + a DIFFERENT OOB already set → serial_action="link"
     # ------------------------------------------------------------------
-    def test_serial_match_oob_already_linked_falls_back_to_link(self):
+    def test_serial_match_oob_already_linked_is_informational(self):
         """Serial matches, incoming is OOB-typed, but the device already has a (different) OOB
-        linked → inform-only 'link' (re-import updates the existing OOB entry)."""
+        linked → informational 'oob_already_linked' (re-import updates the existing OOB entry).
+        Must NOT be the generic 'link' action, which would render an actionable host-link form."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
         # Stored oob id 888 ≠ incoming 17, so find_by_librenms_id() does NOT match (host 42, oob
@@ -1714,7 +1715,7 @@ class TestOOBDetection:
         }
         result = self._validate(libre_device)
 
-        assert result["serial_action"] == "link"
+        assert result["serial_action"] == "oob_already_linked"
         assert result["oob_candidate"] is None
         assert any("already has an OOB controller linked" in w for w in result["warnings"])
 
@@ -2341,3 +2342,27 @@ class TestDetectSerialMatchRole:
         assert out["promote_to_host"] is None
         assert out["serial_role_choice_available"] is False
         assert any("not linked to LibreNMS" in w for w in out["warnings"])
+
+    def test_oob_already_linked_is_informational_not_generic_link(self):
+        # OOB-typed incoming row, but the existing serial-matched device ALREADY has an OOB
+        # controller linked at this server key. This must be informational only — NOT the
+        # generic "link" action, which renders an actionable host-link form ("Link to LibreNMS")
+        # that would post an indistinguishable host-link request.
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device(
+            "host-1",
+            librenms_cf={"default": {"oob": {"id": 99, "type": "idrac"}}},
+        )
+        libre_device = {
+            "device_id": 7,
+            "os": "",
+            "hardware": "iDRAC9",
+            "hostname": "host-1-idrac",
+            "serial": "ABC123",
+        }
+        out = self._role(device, "host-1-idrac", libre_device)
+
+        assert out["serial_action"] == "oob_already_linked"
+        assert out["serial_action"] != "link"
+        assert any("already has an OOB controller linked" in w for w in out["warnings"])

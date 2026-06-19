@@ -251,6 +251,15 @@ def recalculate_validation_status(validation: dict, is_vm: bool = False) -> None
     Required fields for VMs:
         - cluster
     """
+    # Merge mode is a hard block that does not live in ``issues`` — apply_merge_candidates()
+    # sets can_import=False directly. Without this guard a later mutation (e.g. applying a role
+    # selection, which calls back here) would recompute can_import purely from ``issues`` and
+    # silently re-enable importing a merge-candidate row, bypassing the merge resolution.
+    if validation.get("serial_action") == "merge_netbox_devices" or validation.get("merge_candidates"):
+        validation["can_import"] = False
+        validation["is_ready"] = False
+        return
+
     validation["can_import"] = len(validation["issues"]) == 0
 
     if is_vm:

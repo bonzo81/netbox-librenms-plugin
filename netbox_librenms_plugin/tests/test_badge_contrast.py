@@ -21,7 +21,14 @@ TEMPLATE_ROOT = Path(netbox_librenms_plugin.__file__).parent / "templates"
 # Solid Bootstrap colour fills that need an explicit paired text colour.
 _SOLID_BG = re.compile(r"\bbg-(?:danger|success|warning|info|primary|secondary|dark|light)\b")
 # Any token that establishes a text colour (text-bg-* pairs both; text-dark/white/... is explicit).
-_TEXT_COLOUR = re.compile(r"\btext-(?:bg-\w+|dark|white|light|muted|body\S*|black|[a-z]+)\b")
+# Only real colour utilities count: a bare ``[a-z]+`` tail wrongly accepted layout utilities
+# (text-center, text-uppercase, ...), letting an unreadable bare bg-* badge slip through.
+_TEXT_COLOUR = re.compile(
+    r"\b(?:"
+    r"text-bg-(?:danger|success|warning|info|primary|secondary|dark|light)"
+    r"|text-(?:dark|white|light|muted|black|body(?:-emphasis|-secondary|-tertiary)?)"
+    r")\b"
+)
 _CLASS_ATTR = re.compile(r'class="([^"]*)"')
 
 
@@ -47,3 +54,19 @@ def test_no_bare_solid_colour_badges_in_templates():
         "Bare solid-colour badge(s) found (unreadable grey-on-fill in NetBox themes); "
         "use text-bg-* or add an explicit text-* class:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_text_colour_regex_rejects_layout_utilities():
+    """Only real colour utilities may satisfy the text-colour check. Layout utilities like
+    text-center / text-uppercase must NOT count, or a bare ``bg-*`` badge whose only text-*
+    class is a layout utility would wrongly pass the contrast scan (false negative)."""
+    # Real colour utilities still match.
+    assert _TEXT_COLOUR.search("badge bg-warning text-dark")
+    assert _TEXT_COLOUR.search("badge bg-danger text-white")
+    assert _TEXT_COLOUR.search("text-bg-success")
+    assert _TEXT_COLOUR.search("text-body-secondary")
+    # Layout / non-colour utilities must NOT be treated as a text colour.
+    assert not _TEXT_COLOUR.search("badge bg-warning text-center")
+    assert not _TEXT_COLOUR.search("badge bg-danger text-uppercase")
+    assert not _TEXT_COLOUR.search("text-nowrap")
+    assert not _TEXT_COLOUR.search("text-truncate")

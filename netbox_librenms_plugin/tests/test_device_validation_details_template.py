@@ -53,8 +53,15 @@ class TestDeviceValidationDetailsMergeBadge:
         return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
 
     def test_merge_badge_pairs_background_with_text_colour(self):
+        import re
+
         html = self._render()
         assert "Two NetBox devices" in html
         # The badge must carry an explicit text colour with its bg-warning fill; a bare
         # "bg-warning" (the bug) renders grey-on-yellow, unreadable in both themes.
-        assert "badge bg-warning text-dark" in html
+        # Order-agnostic: require badge + bg-warning + text-dark on the *same* class attribute,
+        # regardless of the order they appear in (an exact-string check is fragile to reordering).
+        assert re.search(
+            r'class="(?=[^"]*\bbadge\b)(?=[^"]*\bbg-warning\b)(?=[^"]*\btext-dark\b)[^"]*"',
+            html,
+        ), "merge badge must pair bg-warning with text-dark on one element"
