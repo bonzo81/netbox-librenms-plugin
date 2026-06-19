@@ -316,6 +316,54 @@ class TestSyncInterfacesViewPost:
         mock_redirect.assert_called_once()
 
 
+class TestSyncInterfacesViewServerKeyAndRedirect:
+    """Issues #107/#108/#109: the POST server_key must be validated against configured servers
+    before it scopes cache/CF lookups, and interface_name_field must be URL-escaped in the
+    post-sync redirect."""
+
+    def _make_view(self, configured_servers):
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = object.__new__(SyncInterfacesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        view.get_required_permissions_for_object_type = MagicMock(return_value=[])
+        mock_api = MagicMock(server_key="default")
+        mock_api.get_available_servers.return_value = configured_servers
+        return view, mock_api
+
+    def _run_no_selection(self, view, mock_api, post_data, name_field="ifName"):
+        """Drive post() down the no-selection redirect path (server_key + redirect_url are set
+        before that), returning the redirect call mock."""
+        with (
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_object_or_404", return_value=MagicMock(pk=1)),
+            patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value=name_field),
+            patch("netbox_librenms_plugin.views.sync.interfaces.messages"),
+            patch("netbox_librenms_plugin.views.sync.interfaces.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
+            patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
+        ):
+            view.post(_make_request(post_data=post_data), "device", 1)
+        return mock_redirect
+
+    def test_unconfigured_server_key_falls_back_to_active(self):
+        view, mock_api = self._make_view({"default": "Default", "secondary": "Secondary"})
+        self._run_no_selection(view, mock_api, {"server_key": "evil-server"})
+        # The forged key is not configured, so it is dropped in favour of the active server.
+        assert view._post_server_key == "default"
+
+    def test_configured_server_key_is_honoured(self):
+        view, mock_api = self._make_view({"default": "Default", "secondary": "Secondary"})
+        self._run_no_selection(view, mock_api, {"server_key": "secondary"})
+        assert view._post_server_key == "secondary"
+
+    def test_interface_name_field_is_url_escaped_in_redirect(self):
+        view, mock_api = self._make_view({"default": "Default"})
+        mock_redirect = self._run_no_selection(view, mock_api, {}, name_field="ifName&injected=1")
+        url = mock_redirect.call_args.args[0]
+        assert "ifName%26injected%3D1" in url
+        assert "ifName&injected=1" not in url
+
+
 # ===========================================================================
 # SyncInterfacesView.sync_interface — Device paths
 # ===========================================================================

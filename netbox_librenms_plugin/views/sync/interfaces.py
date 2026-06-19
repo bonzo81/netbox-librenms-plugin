@@ -65,8 +65,16 @@ class SyncInterfacesView(
         obj = self.get_object(object_type, object_id)
         self.object = obj  # Store for use in sync methods
 
-        # Read server_key from POST so we use the exact server the user was viewing
-        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        # Read server_key from POST so we use the exact server the user was viewing, but only
+        # honour it when it names a configured server: the raw value scopes cache entries and
+        # librenms_id custom-field reads/writes (find_by_librenms_id / set_librenms_device_id),
+        # so a forged/unconfigured key must not address another server's namespace (issues
+        # #108/#109). Fall back to the active server when the POSTed key isn't configured.
+        requested_server_key = request.POST.get("server_key")
+        if requested_server_key and requested_server_key in self.librenms_api.get_available_servers():
+            server_key = requested_server_key
+        else:
+            server_key = self.librenms_api.server_key
         self._post_server_key = server_key
 
         interface_name_field = get_interface_name_field(request)
@@ -76,7 +84,9 @@ class SyncInterfacesView(
 
         redirect_url = (
             reverse(url_name, kwargs={"pk": object_id})
-            + f"?tab=interfaces&interface_name_field={interface_name_field}"
+            # quote_plus the field too: it comes from the request, so unescaped special chars
+            # could corrupt the redirect or inject extra query params (issue #107).
+            + f"?tab=interfaces&interface_name_field={quote_plus(interface_name_field)}"
             + (f"&server_key={quote_plus(server_key)}" if server_key else "")
         )
 
