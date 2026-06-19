@@ -2,12 +2,13 @@
 
 import json
 import logging
+import re
 from urllib.parse import parse_qs, urlparse
 
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, DataError, IntegrityError, transaction
 
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
@@ -85,6 +86,10 @@ def _attach_messages_oob(response, request):
 
 # Actions that require the force checkbox when a device-type mismatch is detected.
 _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_type"})
+
+# Existing-interface names that look like an OOB/management port, used to pre-select the
+# OOB-attach interface suggestion. Compiled once at import; see _suggest_oob_interface().
+_OOB_INTERFACE_NAME_PATTERN = re.compile(r"(idrac|ilo|ipmi|bmc|drac|oob|mgmt|management)", re.IGNORECASE)
 
 # Actions that operate on Device-only fields and cannot be applied to VMs.
 _DEVICE_ONLY_ACTIONS = frozenset({"link", "update", "update_serial", "update_type", "sync_serial", "sync_device_type"})
@@ -194,7 +199,6 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
     are returned via ``_htmx_error_response()`` so modal swap/toast flows
     remain intact.  Otherwise plain ``HttpResponse`` status codes are returned.
     """
-    from django.db import DatabaseError, DataError, IntegrityError
 
     def _err(msg: str, status: int) -> HttpResponse:
         if request is not None and request.META.get("HTTP_HX_REQUEST"):
@@ -232,11 +236,14 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
         logger.exception("Data error saving device pk=%s", getattr(device, "pk", None))
         return _err("Could not save: a field value is invalid (for example, too long).", 400)
     except DatabaseError:
-        # save(update_fields=...) forces an UPDATE; if a concurrent delete removed the
-        # row it affects 0 rows and Django raises DatabaseError ("did not affect any
-        # rows" / Model.NotUpdated). Several callers don't re-lock the row first, so
-        # surface this as a toast rather than a 500. (Must follow the IntegrityError /
-        # DataError handlers above — both subclass DatabaseError.)
+        # Catch-all for any other backend-level failure during the UPDATE (lock timeout,
+        # connection drop, a backend that signals a 0-row forced UPDATE, etc.). Note: a
+        # plain save(update_fields=...) against a concurrently-deleted row does NOT reliably
+        # raise on Django 6.0 — it issues an UPDATE that affects 0 rows silently — so this is
+        # a defensive backstop, not a guaranteed concurrent-delete signal. Several callers
+        # don't re-lock the row first, so surface whatever does surface as a toast rather than
+        # a 500. (Must follow the IntegrityError / DataError handlers above — both subclass
+        # DatabaseError.)
         logger.exception("Database error saving device pk=%s", getattr(device, "pk", None))
         return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
     return None
@@ -1075,13 +1082,10 @@ def _suggest_oob_interface(device, oob_candidate):
     interface — operators attach it to an ``idrac0``-style port deliberately —
     so this is only a suggestion the user can override.
     """
-    import re as _re
-
     oob_type = (oob_candidate.get("type") or "oob").strip().lower() or "oob"
     default_new_name = f"{oob_type}0"
-    pattern = _re.compile(r"(idrac|ilo|ipmi|bmc|drac|oob|mgmt|management)", _re.IGNORECASE)
     for iface in device.interfaces.all():
-        if pattern.search(iface.name or ""):
+        if _OOB_INTERFACE_NAME_PATTERN.search(iface.name or ""):
             return iface.pk, default_new_name
     return None, default_new_name
 
@@ -2588,7 +2592,6 @@ class AddAsOOBView(
         the re-check in :meth:`_attach_oob_ip`.
         """
         from django.core.exceptions import ValidationError
-        from django.db import DataError, IntegrityError
         from dcim.models import Interface
         from utilities.permissions import get_permission_for_model
 
@@ -2647,7 +2650,6 @@ class AddAsOOBView(
         """
         from ipaddress import ip_address as _ip
 
-        from django.db import IntegrityError
         from ipam.models import IPAddress
         from utilities.permissions import get_permission_for_model
 

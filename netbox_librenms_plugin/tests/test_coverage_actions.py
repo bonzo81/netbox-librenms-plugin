@@ -5354,6 +5354,57 @@ class TestAddAsOOBViewPost:
         assert mock_find.call_args.args[1:] == (17, "default")
         mock_get.assert_called_once_with(locked_device, server_key="default", auto_save=False)
 
+    def test_save_failure_rolls_back_created_interface_and_ip(self):
+        """End-to-end: when ``_save_device`` reports failure mid-attach, the real
+        ``transaction.set_rollback(True)`` must discard the Interface AND IPAddress that the
+        OOB-IP sub-flow created earlier in the SAME atomic block — otherwise those rows would
+        commit even though the OOB link/IP never persisted.
+
+        This drives the whole flow against real DB objects: a real Device with no ``oob_ip``,
+        a real ``__new__`` Interface created by ``_resolve_oob_interface``, and a real
+        ``IPAddress`` created + assigned by ``_attach_oob_ip``, all inside the view's real
+        ``transaction.atomic()``. Only ``_save_device`` is patched — to the error response it
+        genuinely returns when the DB rejects the device write (a 0-row/constraint failure we
+        can't force deterministically against the test DB). Removing the ``set_rollback(True)``
+        line makes the created Interface/IPAddress commit and this test go red."""
+        from dcim.models import Device, Interface
+        from django.http import HttpResponse
+        from ipam.models import IPAddress
+
+        view = self._make_view()
+        # Real device, host id 10 linked, no oob_ip yet → the OOB-IP sub-flow runs and creates
+        # a brand-new interface + IP before _save_device is reached.
+        existing_device = make_device("oob-rollback", librenms_cf={"default": {"id": 10}})
+        assert existing_device.oob_ip_id is None
+        request = _make_request(
+            post={
+                "existing_device_id": str(existing_device.pk),
+                "oob_interface_id": "__new__",
+                "oob_new_interface_name": "idrac0",
+            }
+        )
+
+        # Incoming OOB controller id 17 carries an IP → drives the interface/IP creation path.
+        libre_device = {"device_id": 17}
+        validation = {"oob_candidate": {"device": existing_device, "type": "oob", "ip": "10.99.99.9"}}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        err_resp = HttpResponse("save failed", status=400)
+        # Patch ONLY the device persist step; the atomic block, select_for_update, interface +
+        # IP creation, set_device_ip_fk, and set_rollback all run for real.
+        with patch("netbox_librenms_plugin.views.imports.actions._save_device", return_value=err_resp):
+            response = view.post(request, device_id=17)
+
+        # The view returns the save error unchanged…
+        assert response is err_resp
+        # …and the rollback discarded BOTH side-effect rows created in the atomic block.
+        assert not Interface.objects.filter(device=existing_device, name="idrac0").exists()
+        assert not IPAddress.objects.filter(address__net_host="10.99.99.9").exists()
+        # The OOB link was never persisted either (cf reloaded from the DB has no oob sub-block).
+        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
+        assert "oob" not in entry
+
     def test_aborts_when_librenms_id_owned_by_another_device(self):
         """The incoming OOB controller id must not already belong to another NetBox device.
         Re-checked inside the transaction via the real find_by_librenms_id (like
