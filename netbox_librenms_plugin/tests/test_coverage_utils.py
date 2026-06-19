@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestConvertSpeedToKbps:
     """Boundary and type tests for convert_speed_to_kbps."""
@@ -33,7 +35,6 @@ class TestConvertSpeedToKbps:
         assert convert_speed_to_kbps(1_000_000_000) == 1_000_000
 
     def test_string_input_raises_type_error(self):
-        import pytest
         from netbox_librenms_plugin.utils import convert_speed_to_kbps
 
         with pytest.raises(TypeError):
@@ -321,6 +322,9 @@ class TestMatchLibrenmsHardwareImportError:
         assert result["matched"] is False
 
 
+# match_librenms_hardware_to_device_type runs the device_type NormalizationRule query (issue
+# #90); django_db lets that real (empty) query run while the lookups stay mocked below.
+@pytest.mark.django_db
 class TestMatchLibrenmsHardwareDeviceTypeMappingPaths:
     """Tests for DeviceTypeMapping paths (lines 251-261)."""
 
@@ -372,6 +376,59 @@ class TestMatchLibrenmsHardwareDeviceTypeMappingPaths:
         assert result is None  # multiple DeviceTypeMapping matches returns None (ambiguous)
 
 
+@pytest.mark.django_db
+class TestMatchLibrenmsHardwareDeviceTypeNormalization:
+    """Issue #90: the documented ``device_type`` NormalizationRule scope must clean the raw
+    LibreNMS hardware string before the DeviceTypeMapping / part_number / model lookups
+    (docs/usage_tips/mapping_rules.md).
+
+    Real DB: a NormalizationRule rewrites the raw string and a DeviceTypeMapping keyed on the
+    *normalized* value must then match. Without the normalization step the raw string matches
+    nothing — so the first test is a genuine red→green regression."""
+
+    def _make_device_type(self):
+        from dcim.models import DeviceType, Manufacturer
+
+        mfr = Manufacturer.objects.create(name="Cisco-90", slug="cisco-90")
+        return DeviceType.objects.create(manufacturer=mfr, model="C9300-48P", slug="c9300-48p-90")
+
+    def test_device_type_scope_rule_normalizes_before_mapping_lookup(self):
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        dt = self._make_device_type()
+        # Mapping is keyed on the normalized hardware string (model lowercases on save).
+        DeviceTypeMapping.objects.create(librenms_hardware="C9300-48P", netbox_device_type=dt)
+        # A device_type-scoped rule strips the "WS-" prefix the raw LibreNMS string carries.
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+
+        result = match_librenms_hardware_to_device_type("WS-C9300-48P")
+
+        assert result is not None
+        assert result["matched"] is True
+        assert result["device_type"] == dt
+        assert result["match_type"] == "mapping"
+
+    def test_wrong_scope_rule_does_not_affect_device_type_matching(self):
+        """A module_type-scoped rule must NOT normalize device-type lookups: the raw string is
+        used unchanged, so a WS-prefixed string does not match while the bare string does."""
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        dt = self._make_device_type()
+        DeviceTypeMapping.objects.create(librenms_hardware="C9300-48P", netbox_device_type=dt)
+        NormalizationRule.objects.create(
+            scope="module_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+
+        # Bare string matches the mapping directly; the wrong-scope WS- rule is not applied.
+        assert match_librenms_hardware_to_device_type("C9300-48P")["matched"] is True
+        assert match_librenms_hardware_to_device_type("WS-C9300-48P")["matched"] is False
+
+
+@pytest.mark.django_db
 class TestMatchLibrenmsHardwareDeviceTypeMultipleReturned:
     """Tests for DeviceType MultipleObjectsReturned — ambiguity surfaces as None."""
 

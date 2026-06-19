@@ -8,11 +8,17 @@ platform matching, and conversion helper functions.
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # =============================================================================
 # TestDeviceTypeMatching - 5 tests
 # =============================================================================
 
 
+# match_librenms_hardware_to_device_type now runs the device_type NormalizationRule query
+# (issue #90); enabling django_db lets that real (empty) query run while the lookups below
+# stay mocked, so the matching assertions are unaffected.
+@pytest.mark.django_db
 class TestDeviceTypeMatching:
     """Test device type matching logic."""
 

@@ -613,10 +613,17 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
     if not hardware_name or hardware_name == "-":
         return {"matched": False, "device_type": None, "match_type": None}
 
+    # Normalize the raw LibreNMS hardware string per the documented ``device_type``
+    # NormalizationRule scope before matching (docs/usage_tips/mapping_rules.md: "normalizes
+    # LibreNMS hardware string before DeviceTypeMapping lookup"). With no device_type rules
+    # configured this returns the input unchanged, so existing exact-match behavior is
+    # preserved; when rules exist they clean the string once and all lookups use the result.
+    search_name = apply_normalization_rules(value=hardware_name, scope="device_type")
+
     # Check DeviceTypeMapping table first (when available)
     if _has_device_type_mapping:
         try:
-            mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=hardware_name)
+            mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=search_name)
             return {
                 "matched": True,
                 "device_type": mapping.netbox_device_type,
@@ -628,13 +635,13 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
             logger.warning(
                 "Multiple DeviceTypeMapping entries match hardware %r — skipping mapping lookup; "
                 "resolve the ambiguity by removing duplicate mappings.",
-                hardware_name,
+                search_name,
             )
             return None
 
     # Try part number exact match
     try:
-        device_type = DeviceType.objects.get(part_number__iexact=hardware_name)
+        device_type = DeviceType.objects.get(part_number__iexact=search_name)
         return {
             "matched": True,
             "device_type": device_type,
@@ -646,13 +653,13 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
         logger.warning(
             "Multiple DeviceType entries match part_number %r — cannot auto-select; "
             "resolve the ambiguity by ensuring part numbers are unique across manufacturers.",
-            hardware_name,
+            search_name,
         )
         return None
 
     # Try exact model match (case-insensitive)
     try:
-        device_type = DeviceType.objects.get(model__iexact=hardware_name)
+        device_type = DeviceType.objects.get(model__iexact=search_name)
         return {"matched": True, "device_type": device_type, "match_type": "exact"}
     except DeviceType.DoesNotExist:
         pass
@@ -660,7 +667,7 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict | None:
         logger.warning(
             "Multiple DeviceType entries match model %r — cannot auto-select; "
             "resolve the ambiguity by ensuring model names are unique across manufacturers.",
-            hardware_name,
+            search_name,
         )
         return None
 
