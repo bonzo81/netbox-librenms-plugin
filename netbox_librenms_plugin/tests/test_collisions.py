@@ -317,3 +317,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     # Device-supplied hostname is auto-escaped (no raw <script> injected into the modal).
     assert "<script>alpha</script>" not in html
     assert "&lt;script&gt;alpha&lt;/script&gt;" in html
+    # The "Collision" badge must pair its red fill with a text colour: a bare bg-danger leaves
+    # Tabler's muted badge text (grey-on-red), unreadable in both themes.
+    assert "badge bg-danger text-white" in html
+    assert 'badge bg-danger"' not in html

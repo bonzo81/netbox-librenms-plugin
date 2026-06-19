@@ -21,7 +21,7 @@
   {% for group in collisions %}
     <div class="border border-danger rounded-3 p-3 mb-3">
       <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-        <span class="badge bg-danger">Collision</span>
+        <span class="badge bg-danger text-white">Collision</span>
         <span class="text-muted small">NetBox {% if group.nb_model_name == 'VirtualMachine' %}VM{% else %}device{% endif %}:</span>
         {% if group.nb_model_name == 'VirtualMachine' %}
           <a href="{% url 'virtualization:virtualmachine' pk=group.nb_device_pk %}" target="_blank" rel="noopener" class="fw-bold">
