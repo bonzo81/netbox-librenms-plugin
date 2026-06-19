@@ -471,7 +471,12 @@
       <script>
         (function() {
           var donorInput = document.getElementById("merge-donor-{{ libre_device.device_id }}");
-          var radios = document.querySelectorAll('input.merge-winner-radio[name="winner_pk"]');
+          if (!donorInput) return;
+          // Scope to THIS form: a document-wide query would pick up merge-winner radios from
+          // another validation fragment left in the DOM and write the wrong donor_pk, merging
+          // the wrong NetBox device.
+          var form = donorInput.closest("form");
+          var radios = form ? form.querySelectorAll('input.merge-winner-radio[name="winner_pk"]') : [];
           function syncDonor() {
             radios.forEach(function(r) {
               if (r.checked) { donorInput.value = r.dataset.donorPk || ""; }

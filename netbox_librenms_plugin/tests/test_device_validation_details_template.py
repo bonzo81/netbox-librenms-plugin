@@ -66,6 +66,17 @@ class TestDeviceValidationDetailsMergeBadge:
             html,
         ), "merge badge must pair bg-warning with text-dark on one element"
 
+    def test_merge_donor_sync_script_is_scoped_to_its_form(self):
+        """The donor-sync script must scope its winner-radio lookup to the current form, not the
+        whole document. A document-wide query would read merge-winner radios from another
+        validation fragment still in the DOM and write the wrong donor_pk — merging the wrong
+        NetBox device."""
+        html = self._render()
+        # Form-scoped lookup present...
+        assert 'closest("form")' in html
+        # ...and the fragile document-wide winner-radio query is gone.
+        assert "document.querySelectorAll('input.merge-winner-radio" not in html
+
 
 @pytest.mark.django_db
 class TestSerialActionBadges:
