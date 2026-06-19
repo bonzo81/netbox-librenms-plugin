@@ -48,6 +48,17 @@ def _mock_request(path="/plugins/librenms/device/1/cables/"):
     return req
 
 
+def _make_request_json(body_dict):
+    """Mock POST request carrying a JSON body (SingleCableVerifyView reads request.body)."""
+    import json
+
+    req = MagicMock()
+    req.method = "POST"
+    req.body = json.dumps(body_dict).encode()
+    req.META = {"HTTP_X_REQUESTED_WITH": "XMLHttpRequest"}
+    return req
+
+
 def _make_view():
     from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
@@ -130,7 +141,9 @@ class TestGetLinksDataSerial:
         assert result == []
 
     def test_serial_fetch_failure_does_not_append(self):
-        """When sensor fetch fails, no serial rows are added (graceful degradation)."""
+        """When sensor fetch fails, no serial rows are added (graceful degradation), and the
+        failure is flagged so post() can warn the user instead of silently dropping the rows
+        under a success banner (parity with the OOB-fetch-failure warning)."""
         view = _make_view()
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
         view._librenms_api.get_librenms_id.return_value = 12
@@ -147,6 +160,23 @@ class TestGetLinksDataSerial:
         # LLDP succeeded (empty) and the serial fetch failed without adding rows: a successful
         # refresh with zero rows returns [] (no host error recorded), not None.
         assert result == []
+        assert view._serial_links_fetch_failed is True
+
+    def test_serial_fetch_success_does_not_flag_failure(self):
+        """A successful serial fetch must leave the failure flag False so no spurious warning."""
+        view = _make_view()
+        sensors = [_serial_sensor(3, "router-a")]
+        self._base_setup(view, sensors=sensors)
+        obj = _mock_obj(has_csps=True)
+
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+        ):
+            view.get_links_data(obj)
+
+        assert view._serial_links_fetch_failed is False
 
     def test_serial_row_shape(self):
         """Each appended row has the expected keys."""
@@ -466,7 +496,7 @@ class TestEnrichSerialRemote:
         device = MagicMock()
         device.pk = 42
         device.consoleports = MagicMock()
-        device.consoleports.filter.return_value.first.return_value = cp
+        device.consoleports.filter.return_value.order_by.return_value.first.return_value = cp
 
         link = {
             "local_port": "ttyS7",
@@ -523,7 +553,7 @@ class TestEnrichSerialRemote:
         device = MagicMock()
         device.pk = 42
         device.consoleports = MagicMock()
-        device.consoleports.filter.return_value.first.return_value = None  # no uncabled CP
+        device.consoleports.filter.return_value.order_by.return_value.first.return_value = None  # no uncabled CP
 
         link = {
             "remote_device": "prod-router-01",
@@ -538,6 +568,28 @@ class TestEnrichSerialRemote:
 
         assert link["cable_status"] == "Console Port Not Found in NetBox"
         assert "can_create_cable" not in link
+
+    @pytest.mark.django_db
+    def test_uncabled_console_port_pick_is_deterministic_by_name(self):
+        """With several uncabled ConsolePorts, the remote pick is the lowest by name, every run —
+        the Avocent label is only a hint, so the choice must not depend on insertion/DB order."""
+        view = _make_view()
+        # Create CPs out of alphabetical order to prove ordering isn't insertion order.
+        router, _, cps = make_serial_device("router-det", cp_names=["con-z", "con-a", "con-m"])
+
+        link = {
+            "local_port": "ttyS7",
+            "_source": "serial",
+            "remote_device": "router-det",
+            "netbox_local_interface_id": 99,
+            "cable_status": "No Cable",
+        }
+
+        with patch.object(view, "get_device_by_id_or_name", return_value=(router, True, None)):
+            view.enrich_serial_remote(link)
+
+        assert link["remote_port_name"] == "con-a"  # lowest name, deterministic
+        assert link["can_create_cable"] is True
 
     def test_enrich_links_data_calls_enrich_serial_remote_when_no_cable(self):
         """enrich_links_data calls enrich_serial_remote for CSP-found rows with No Cable."""
@@ -761,3 +813,103 @@ class TestHandleSerialCableCreation:
             view.handle_cable_creation(link_data, interface)
 
         mock_serial.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: SingleCableVerifyView must handle serial rows (VC inline verify)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestSingleCableVerifySerial:
+    """A serial row reaching SingleCableVerifyView (the VC-member dropdown fires verify-cable
+    for EVERY row, serial included) must resolve through the serial pipeline — not fall into the
+    Interface lookup path, which would mislabel the row 'Missing Interface' with no Sync action."""
+
+    def _verify_view(self, server_key="default"):
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        view = object.__new__(SingleCableVerifyView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = server_key
+        view.request = MagicMock()
+        return view
+
+    def test_serial_row_resolves_csp_and_remote_consoleport(self):
+        from django.core.cache import cache
+
+        acs, csps, _ = make_serial_device("acs-verify", csp_names=["ttyS7"])
+        router, _, cps = make_serial_device("router-z", cp_names=["console"])
+        csp = csps[0]
+
+        link = {
+            "local_port": "ttyS7",
+            "local_port_id": f"serial:{csp.pk}-sensor",
+            "_source": "serial",
+            "remote_device": "router-z",
+            "remote_port": None,
+            "remote_device_id": None,
+            "device_id": acs.id,
+            "is_configured": True,
+            "sensor_id": 1007,
+            "sensor_index_int": 7,
+        }
+
+        view = self._verify_view()
+        cache_key = view.get_cache_key(acs, "links", "default")
+        cache.set(cache_key, {"links": [link]}, timeout=300)
+
+        request = _make_request_json(
+            {"device_id": acs.id, "local_port_id": link["local_port_id"], "server_key": "default"}
+        )
+        resp = view.post(request)
+        import json as _json
+
+        payload = _json.loads(resp.content)
+        row = payload["formatted_row"]
+
+        # Local port resolves to the ConsoleServerPort, carrying the Serial badge.
+        assert "ttyS7" in row["local_port"]
+        assert "Serial" in row["local_port"]
+        assert (
+            f"/dcim/console-server-ports/{csp.pk}/" in row["local_port"]
+            or "consoleserverport" in row["local_port"].lower()
+        )
+        # Remote resolves to router-z's uncabled ConsolePort, and a Sync action is offered.
+        assert "router-z" in row["remote_device"]
+        assert "console" in row["remote_port"]
+        assert "No Cable" in row["cable_status"]
+        assert "Sync Cable" in row["actions"]
+
+    def test_serial_row_with_existing_cable_offers_no_sync(self):
+        from django.core.cache import cache
+
+        acs, csps, _ = make_serial_device("acs-verify2", csp_names=["ttyS9"])
+        router, _, cps = make_serial_device("router-y", cp_names=["console"])
+        csp = csps[0]
+        cable_together(csp, cps[0])  # already cabled
+
+        link = {
+            "local_port": "ttyS9",
+            "local_port_id": f"serial:{csp.pk}-sensor",
+            "_source": "serial",
+            "remote_device": "router-y",
+            "remote_port": None,
+            "remote_device_id": None,
+            "device_id": acs.id,
+            "is_configured": True,
+            "sensor_id": 1009,
+            "sensor_index_int": 9,
+        }
+
+        view = self._verify_view()
+        cache.set(view.get_cache_key(acs, "links", "default"), {"links": [link]}, timeout=300)
+
+        request = _make_request_json(
+            {"device_id": acs.id, "local_port_id": link["local_port_id"], "server_key": "default"}
+        )
+        import json as _json
+
+        row = _json.loads(view.post(request).content)["formatted_row"]
+        assert "Cable Found" in row["cable_status"]
+        assert "Sync Cable" not in row["actions"]

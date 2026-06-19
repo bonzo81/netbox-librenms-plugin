@@ -426,6 +426,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         server_key = server_key or self.librenms_api.server_key
         # Reset per-call so a prior request's OOB failure doesn't leak into this one.
         self._oob_links_fetch_failed = False
+        # Same for a serial-sensor fetch failure: flag it so post() can warn rather than
+        # silently dropping serial rows under a success banner (parity with OOB).
+        self._serial_links_fetch_failed = False
         # Distinguish a real LibreNMS fetch failure (auth/network/server) from a device
         # that simply has no links, so the caller can surface the actual error instead of
         # always saying "No links found". Reset per-call to avoid leaking a prior error.
@@ -499,7 +502,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
             serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(self.librenms_id)
-            if serial_success and serial_sensors:
+            if not serial_success:
+                # Don't silently drop serial rows on a fetch failure — flag it so post() can warn
+                # the user (this method has no request to message on). Mirrors the OOB branch.
+                self._serial_links_fetch_failed = True
+                logger.warning(
+                    "Serial port sensor fetch failed for device %s: %s",
+                    self.librenms_id,
+                    serial_sensors,
+                )
+            elif serial_sensors:
                 links_data.extend(map_sensors_to_serial_links(serial_sensors, device_id=obj.id))
 
         # Distinguish a *successful* zero-row refresh ([] — flows through to the success path in
@@ -747,7 +759,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
         link["netbox_remote_device_id"] = device.pk
 
-        uncabled_cp = device.consoleports.filter(cable__isnull=True).first()
+        # Order explicitly so the picked port is deterministic (the label is only a hint and
+        # the user confirms before sync) and stable regardless of the model's default ordering.
+        uncabled_cp = device.consoleports.filter(cable__isnull=True).order_by("name").first()
         if uncabled_cp:
             link["netbox_remote_interface_id"] = uncabled_cp.pk
             link["remote_port_name"] = uncabled_cp.name
@@ -1023,6 +1037,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 "Cables refreshed, but OOB controller links fetch failed; "
                 "showing host cables only. See server logs for details.",
             )
+        if getattr(self, "_serial_links_fetch_failed", False):
+            messages.warning(
+                request,
+                "Cables refreshed, but serial port sensor fetch failed; "
+                "serial console rows may be missing. See server logs for details.",
+            )
         return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
 
@@ -1033,6 +1053,67 @@ class SingleCableVerifyView(BaseCableTableView):
     # verify views). Without it any user with mere plugin-view rights could POST an arbitrary
     # device id and read back that device's rendered cable/topology rows.
     required_object_permissions = {"POST": [("view", Device)]}
+
+    def _format_serial_verify_row(self, request, selected_device, link_data, local_port_id, server_key):
+        """Build the verify-cable formatted_row for a serial ConsoleServerPort row.
+
+        Mirrors the serial path of enrich_links_data (resolve CSP -> cable status -> remote
+        ConsolePort) and renders the same Serial badge + Sync form as the initial table render,
+        with LibreNMS-sourced labels HTML-escaped.
+        """
+        self.enrich_local_port(link_data, selected_device, server_key=server_key)
+        self.check_serial_cable_status(link_data)
+        if link_data.get("netbox_local_interface_id") and link_data.get("cable_status") == "No Cable":
+            self.enrich_serial_remote(link_data)
+
+        # Serial badge mirrors tables/cables.py render_local_port.
+        serial_badge = ' <span class="badge bg-teal text-white ms-1" title="Serial console port">Serial</span>'
+        safe_local = escape(link_data.get("local_port", ""))
+        if link_data.get("local_port_url"):
+            local_html = f'<a href="{link_data["local_port_url"]}">{safe_local}</a>{serial_badge}'
+        else:
+            local_html = f"{safe_local}{serial_badge}"
+
+        safe_remote_device = escape(link_data.get("remote_device", ""))
+        if link_data.get("remote_device_url"):
+            remote_device_html = f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
+        else:
+            remote_device_html = safe_remote_device
+
+        safe_remote_port = escape(link_data.get("remote_port_name", "") or "")
+        if link_data.get("remote_port_url"):
+            remote_port_html = f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
+        else:
+            remote_port_html = safe_remote_port
+
+        safe_status = escape(link_data.get("cable_status", "Missing Ports"))
+        if link_data.get("cable_url"):
+            status_html = f'<a href="{link_data["cable_url"]}">{safe_status}</a>'
+        else:
+            status_html = safe_status
+
+        actions = ""
+        if link_data.get("can_create_cable"):
+            csrf_token = get_token(request)
+            server_key_input = (
+                f'<input type="hidden" name="server_key" value="{escape(str(server_key))}">' if server_key else ""
+            )
+            actions = f"""
+                <form method="post" action="{reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[selected_device.id])}">
+                    <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
+                    <input type="hidden" name="select" value="{escape(str(local_port_id))}">
+                    {server_key_input}
+                    <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
+                </form>
+            """
+
+        return {
+            "local_port": local_html,
+            "remote_port": remote_port_html,
+            "remote_device": remote_device_html,
+            "cable_status": status_html,
+            "actions": actions,
+        }
 
     def post(self, request):  # noqa: C901
         data, err = parse_request_json(request)
@@ -1104,6 +1185,17 @@ class SingleCableVerifyView(BaseCableTableView):
                     # Strip derived fields from cached data to avoid stale
                     # IDs/URLs when NetBox objects are deleted after caching.
                     link_data = {k: v for k, v in link_data.items() if k in _RAW_LINK_KEYS}
+
+                    # Serial rows map ConsoleServerPort -> ConsolePort, not Interface -> Interface.
+                    # The VC-member dropdown fires verify-cable for EVERY row (serial included), so
+                    # route serial rows through the serial enrichment pipeline here; otherwise they
+                    # fall into the Interface-lookup path below and get mislabeled "Missing
+                    # Interface" with no Sync action.
+                    if link_data.get("_source") == "serial":
+                        formatted_row = self._format_serial_verify_row(
+                            request, selected_device, link_data, local_port_id, server_key
+                        )
+                        return JsonResponse({"status": "success", "formatted_row": formatted_row})
 
                     # The verify response returns formatted_row HTML directly (it does not pass
                     # through LibreNMSCableTable.render_local_port), so re-apply the OOB badge

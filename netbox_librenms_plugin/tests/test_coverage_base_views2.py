@@ -982,6 +982,52 @@ class TestCablePartialSnapshotNotCached:
         assert len(self._links_cache_sets(oob_failed=False, links_error=None, librenms_id=42)) == 1
 
 
+class TestCablePostSerialFetchWarning:
+    """post() must warn when the serial-port sensor fetch failed: serial rows are otherwise
+    silently omitted under a green 'refreshed successfully' banner (parity with the OOB
+    warning), making a transient LibreNMS failure indistinguishable from 'no serial ports'.
+    """
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        view.partial_template_name = "x.html"
+        view._librenms_api = MagicMock(server_key="default")
+        view.get_object = MagicMock(return_value=MagicMock(pk=1))
+        view.rebind_api_for_server = MagicMock(return_value="default")
+        return view
+
+    def _run(self, *, serial_failed):
+        view = self._make_view()
+        request = MagicMock()
+        request.POST.get.return_value = "default"
+
+        def _prep(*a, **k):
+            # Host fetch fine; mirror get_links_data flagging only the serial-sensor failure.
+            view._links_fetch_error = None
+            view.librenms_id = 42
+            view._serial_links_fetch_failed = serial_failed
+            return {"object": MagicMock(), "table": MagicMock(), "server_key": "default"}
+
+        view._prepare_context = MagicMock(side_effect=_prep)
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_msgs,
+            patch("netbox_librenms_plugin.views.base.cables_view.render"),
+            patch("netbox_librenms_plugin.views.base.cables_view.build_migrated_context", return_value={}),
+        ):
+            view.post(request, pk=1)
+        return [c.args[1] for c in mock_msgs.warning.call_args_list]
+
+    def test_warns_on_serial_fetch_failure(self):
+        warn_texts = self._run(serial_failed=True)
+        assert any("serial" in t.lower() for t in warn_texts)
+
+    def test_no_serial_warning_when_fetch_succeeds(self):
+        warn_texts = self._run(serial_failed=False)
+        assert not any("serial" in t.lower() for t in warn_texts)
+
+
 # =============================================================================
 # TestGetTableOverride  — BaseCableTableView.get_table (lines 302-305)
 # =============================================================================

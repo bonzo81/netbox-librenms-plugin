@@ -1786,17 +1786,25 @@ class LibreNMSAPI:
 
     def get_serial_port_sensors(self, device_id: int) -> tuple[bool, list | str]:
         """
-        Fetch serial-port sensor records for a device from LibreNMS.
+        Return serial-port sensor records for a single device from LibreNMS.
 
-        Uses ``/api/v0/resources/sensors`` (instance-wide endpoint) and
-        filters client-side by ``device_id``.  The per-device
-        ``/api/v0/devices/{id}/sensors`` route is known to 500 on some
-        servers; the resources route is more reliable.
+        Why this fetches the *instance-wide* sensor table and filters client-side,
+        rather than a per-device call: LibreNMS offers no usable per-device route for
+        these sensors.
 
-        Only sensors whose ``sensor_type`` belongs to the serial-port
-        sensor-type set (``acsSerialPortTable`` for Avocent) are returned.
-        Callers should further pass the list to
-        ``serial_utils.map_sensors_to_serial_links()``.
+        * ``/api/v0/resources/sensors`` takes no parameters (it is documented as
+          "Input: None") — it always returns every sensor on the instance.
+        * ``/api/v0/devices/{id}/sensors`` is known to 500 on some servers.
+        * ``/api/v0/devices/{id}/health/state`` (the per-device path) returns only
+          ``sensor_id`` + ``desc`` — it omits ``sensor_index``, which we need to derive
+          the physical port number. Recovering it would require an N+1 fan-out
+          (``/health/state/{sensor_id}`` per sensor — 49 calls for a 48-port Avocent).
+
+        So the instance-wide table is the cheapest correct source. To keep a
+        multi-device cable refresh from re-pulling that whole table once per device,
+        the serial-typed subset (tiny — only Avocent serial sensors survive the
+        ``sensor_type`` filter) is cached per server for ``cache_timeout`` seconds.
+        Each call then filters the cached subset down to ``device_id``.
 
         Route: /api/v0/resources/sensors
 
@@ -1805,6 +1813,31 @@ class LibreNMSAPI:
 
         Returns:
             tuple: (success: bool, data: list of sensor dicts or error string)
+        """
+        cache_key = f"librenms_serial_sensors_{self.server_key}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            all_serial_sensors = cached
+        else:
+            success, all_serial_sensors = self._fetch_serial_port_sensors()
+            if not success:
+                # all_serial_sensors is the error string here; never cache a failure so a
+                # transient error doesn't poison serial sync until the TTL elapses.
+                return False, all_serial_sensors
+            cache.set(cache_key, all_serial_sensors, timeout=self.cache_timeout)
+
+        device_sensors = [s for s in all_serial_sensors if str(s.get("device_id")) == str(device_id)]
+        return True, device_sensors
+
+    def _fetch_serial_port_sensors(self) -> tuple[bool, list | str]:
+        """
+        Fetch the instance-wide sensor table and return only serial-port sensors.
+
+        Returns the Avocent serial-typed subset across ALL devices (the public
+        :meth:`get_serial_port_sensors` filters that by device and handles caching).
+
+        Returns:
+            tuple: (success: bool, data: list of serial sensor dicts or error string)
         """
         from netbox_librenms_plugin.serial_utils import AVOCENT_SENSOR_TYPES
 
@@ -1831,18 +1864,14 @@ class LibreNMSAPI:
                     return False, result.get("message") or "Unexpected response format: missing sensor list"
                 if not isinstance(all_sensors, list):
                     return False, result.get("message") or "Unexpected response format: missing sensor list"
-                # get_serial_port_sensors is an external boundary: a list payload doesn't
-                # guarantee every item is a dict. Skip non-dict rows so one malformed entry can't
-                # raise AttributeError on s.get() and escape as an unhandled exception instead of
-                # the usual (success, data) contract.
-                device_sensors = [
-                    s
-                    for s in all_sensors
-                    if isinstance(s, dict)
-                    and str(s.get("device_id")) == str(device_id)
-                    and s.get("sensor_type") in AVOCENT_SENSOR_TYPES
+                # This is an external boundary: a list payload doesn't guarantee every item is a
+                # dict. Skip non-dict rows so one malformed entry can't raise AttributeError on
+                # s.get() and escape as an unhandled exception instead of the (success, data)
+                # contract.
+                serial_sensors = [
+                    s for s in all_sensors if isinstance(s, dict) and s.get("sensor_type") in AVOCENT_SENSOR_TYPES
                 ]
-                return True, device_sensors
+                return True, serial_sensors
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"
             return False, "Unexpected response format"

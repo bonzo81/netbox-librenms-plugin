@@ -3138,6 +3138,16 @@ class TestResolvePortRelationships:
 class TestGetSerialPortSensors:
     """Cover response-shape branches in get_serial_port_sensors()."""
 
+    @pytest.fixture(autouse=True)
+    def _clear_serial_sensor_cache(self):
+        """The instance-wide sensor fetch is cached per server_key; clear between tests so a
+        prior test's cached payload can't bleed into the next one's mocked response."""
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
     def _make_sensor(self, device_id, sensor_type="acsSerialPortTable", port_num=7):
         return {
             "sensor_id": 1000 + port_num,
@@ -3250,3 +3260,37 @@ class TestGetSerialPortSensors:
 
         assert success is False
         assert "refused" in msg or "error" in msg.lower()
+
+    def test_second_device_lookup_reuses_cached_instance_fetch(self, mock_librenms_api, mock_response_factory):
+        """The /resources/sensors route is instance-wide (LibreNMS exposes no per-device filter),
+        so two device lookups within the cache TTL must reuse a single HTTP fetch rather than
+        re-pulling the whole sensor table per device, while each still gets only its own rows."""
+        import unittest.mock as mock
+
+        sensors = [self._make_sensor(12, port_num=7), self._make_sensor(99, port_num=3)]
+        mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp) as mock_get:
+            ok1, data1 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+            ok2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=99)
+
+        assert mock_get.call_count == 1  # instance-wide table fetched once, not per device
+        assert ok1 is True and [s["device_id"] for s in data1] == [12]
+        assert ok2 is True and [s["device_id"] for s in data2] == [99]
+
+    def test_failed_fetch_is_not_cached(self, mock_librenms_api, mock_response_factory):
+        """A failed fetch must not populate the cache: a subsequent call has to retry the HTTP
+        request (otherwise a transient error would poison serial sync until the TTL elapsed)."""
+        import unittest.mock as mock
+
+        good = [self._make_sensor(12, port_num=7)]
+        err_resp = mock_response_factory(status_code=200, json_data={"status": "error", "message": "boom"})
+        ok_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": good})
+        with mock.patch(
+            "netbox_librenms_plugin.librenms_api.requests.get", side_effect=[err_resp, ok_resp]
+        ) as mock_get:
+            ok1, msg1 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+            ok2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert ok1 is False and "boom" in msg1
+        assert mock_get.call_count == 2  # error wasn't cached, so the second call re-fetched
+        assert ok2 is True and [s["device_id"] for s in data2] == [12]
