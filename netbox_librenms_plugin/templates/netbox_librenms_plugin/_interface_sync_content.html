@@ -305,7 +305,8 @@
                                 <tr>
                                     <th>
                                         <input type="checkbox" id="select-all-netbox-interfaces"
-                                            class="form-check-input">
+                                            class="form-check-input"
+                                            aria-label="Select all NetBox-only interfaces">
                                     </th>
                                     <th>Interface Name</th>
                                     <th>Type</th>
@@ -318,7 +319,8 @@
                                 <tr>
                                     <td>
                                         <input type="checkbox" name="interface_ids" value="{{ interface.id }}"
-                                            class="form-check-input netbox-interface-checkbox">
+                                            class="form-check-input netbox-interface-checkbox"
+                                            aria-label="Select interface {{ interface.name }}">
                                     </td>
                                     <td>
                                         <a href="{{ interface.url }}" target="_blank">{{ interface.name }}</a>
