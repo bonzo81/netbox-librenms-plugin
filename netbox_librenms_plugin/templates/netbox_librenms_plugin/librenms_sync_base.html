@@ -577,7 +577,7 @@
                                 <div class="d-flex align-items-center">
                                     <span>{{ platform_info.librenms_os }}</span>
                                     {% if not platform_info.platform_exists and platform_info.librenms_os and platform_info.librenms_os != "-" %}
-                                        <span class="badge bg-warning bg-opacity-75 ms-2" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
+                                        <span class="badge bg-warning bg-opacity-75 text-dark ms-2" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
                                             <i class="mdi mdi-alert"></i> Not in NetBox
                                         </span>
                                     {% endif %}
