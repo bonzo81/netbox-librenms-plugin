@@ -14,6 +14,8 @@ All tests follow strict project conventions:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # =============================================================================
 # Helpers
@@ -965,6 +967,33 @@ class TestIpAddressViewMethods:
         view._librenms_api.server_key = "default"
         view.model = MagicMock()
         return view
+
+    @pytest.mark.parametrize(
+        "payload",
+        [None, {"port": []}, {"port": ["bad"]}, "not-a-dict", {"port": "x"}],
+    )
+    def test_get_port_info_caches_none_for_malformed_payload(self, payload):
+        """Issue #111: a truthy success with a malformed get_port_by_id payload must cache None
+        without raising (None -> 'port' in None TypeError; ['bad'] -> non-dict row that later
+        crashes at port_info.get())."""
+        view = self._make_view()
+        view._librenms_api.get_port_by_id.return_value = (True, payload)
+        cache = {}
+
+        result = view._get_port_info(7, cache, "ifName")
+
+        assert result is None
+        assert cache[7] is None
+
+    def test_get_port_info_caches_first_dict_row(self):
+        """A well-formed payload caches the first port dict."""
+        view = self._make_view()
+        row = {"ifName": "eth0", "port_id": 7}
+        view._librenms_api.get_port_by_id.return_value = (True, {"port": [row]})
+        cache = {}
+
+        assert view._get_port_info(7, cache, "ifName") == row
+        assert cache[7] == row
 
     def test_get_object_calls_get_object_or_404(self):
         """get_object delegates to get_object_or_404 with the view's model."""
