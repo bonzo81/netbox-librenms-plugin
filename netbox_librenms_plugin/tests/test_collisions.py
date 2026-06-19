@@ -1,5 +1,7 @@
 """Unit tests for ``netbox_librenms_plugin.import_utils.collisions``."""
 
+import pytest
+
 from netbox_librenms_plugin.import_utils.collisions import detect_bulk_collisions
 
 
@@ -233,3 +235,85 @@ def test_collision_payload_carries_model_name_for_link_targeting():
     assert len(groups) == 1
     assert groups[0]["nb_device_pk"] == 77
     assert groups[0]["nb_model_name"] == "VirtualMachine"
+
+
+@pytest.mark.django_db
+def test_real_validator_output_feeds_detector_end_to_end():
+    """End-to-end contract test: the REAL ``validate_device_for_import`` output must carry
+    the exact keys ``detect_bulk_collisions`` reads.
+
+    The unit tests above hand-build the ``existing_device`` key, and the view-level test
+    stubs the validator — so neither would catch the validator renaming/moving that key
+    (collision detection would silently never fire while every test stayed green). Here two
+    LibreNMS rows resolve to the SAME real NetBox device by hostname, run through the real
+    validator (real ORM name-match), and the real detector must report one collision."""
+    from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    nb_device = make_device("srv-collide-e2e")
+
+    # Two distinct LibreNMS devices whose name resolves to the one existing NetBox device.
+    libre_a = {"device_id": 5001, "sysName": "srv-collide-e2e", "hostname": "srv-collide-e2e"}
+    libre_b = {"device_id": 5002, "sysName": "srv-collide-e2e", "hostname": "srv-collide-e2e"}
+
+    devices = []
+    for libre in (libre_a, libre_b):
+        validation = validate_device_for_import(libre, include_vc_detection=False, use_sysname=True)
+        # Sanity: the real validator matched our device by hostname (the key the detector reads).
+        assert validation["existing_device"] is not None
+        assert validation["existing_device"].pk == nb_device.pk
+        devices.append({"device_id": libre["device_id"], "device_name": libre["sysName"], "validation": validation})
+
+    groups = detect_bulk_collisions(devices)
+    assert len(groups) == 1
+    assert groups[0]["nb_device_pk"] == nb_device.pk
+    assert groups[0]["nb_model_name"] == "Device"
+    assert {r["device_id"] for r in groups[0]["librenms_rows"]} == {5001, 5002}
+
+
+def test_collision_template_renders_correct_link_targets_and_escapes():
+    """The collision template must actually render: link to the right object type per
+    ``nb_model_name`` and auto-escape device-supplied names.
+
+    The view-level test mocks ``render`` (asserts only the template name), so a typo in the
+    VM ``{% url %}`` or a lost auto-escape would ship undetected. Render the real template
+    and assert the Device group emits a dcim:device URL, the VM group a
+    virtualization:virtualmachine URL, and a script-y hostname is HTML-escaped."""
+    from django.template.loader import render_to_string
+    from django.urls import reverse
+
+    collisions = [
+        {
+            "nb_device_pk": 42,
+            "nb_device_name": "srv-collide",
+            "nb_model_name": "Device",
+            "librenms_rows": [
+                {"device_id": 1, "hostname": "<script>alpha</script>", "role": "host"},
+                {"device_id": 2, "hostname": "beta", "role": "oob"},
+            ],
+        },
+        {
+            "nb_device_pk": 7,
+            "nb_device_name": "vm-collide",
+            "nb_model_name": "VirtualMachine",
+            "librenms_rows": [
+                {"device_id": 3, "hostname": "gamma", "role": "merge_host_named"},
+                {"device_id": 4, "hostname": "delta", "role": "merge_oob_named"},
+            ],
+        },
+    ]
+    html = render_to_string(
+        "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+        {"collisions": collisions, "device_count": 2},
+    )
+
+    # Each group links to the correct object type — a VM collision must not get a device URL.
+    assert reverse("dcim:device", kwargs={"pk": 42}) in html
+    assert reverse("virtualization:virtualmachine", kwargs={"pk": 7}) in html
+    # The device names / rows render.
+    assert "srv-collide" in html
+    assert "vm-collide" in html
+    assert "beta" in html
+    # Device-supplied hostname is auto-escaped (no raw <script> injected into the modal).
+    assert "<script>alpha</script>" not in html
+    assert "&lt;script&gt;alpha&lt;/script&gt;" in html
