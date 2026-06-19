@@ -13,6 +13,17 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 logger = logging.getLogger(__name__)
 
 
+def is_list_of_dicts(value) -> bool:
+    """Return True only when *value* is a list whose every element is a dict.
+
+    Used to validate LibreNMS payloads at the API boundary: a ``success=True`` response can
+    still carry a malformed-but-truthy body (a string, a list of scalars, etc.), and blindly
+    dereferencing it turns a refresh into a 500 instead of the graceful error/fallback path.
+    An empty list is considered valid (a device legitimately with no rows).
+    """
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+
 _VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
 
 

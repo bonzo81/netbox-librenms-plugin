@@ -255,7 +255,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         if self.librenms_id:
             success, device_info = self.librenms_api.get_device_info(self.librenms_id)
-            if success and device_info:
+            # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
+            # device_info.get(...) calls below; fall back to the default details block instead
+            # of trusting success=True alone (issue #100).
+            if success and isinstance(device_info, dict):
                 # Get NetBox device details
                 netbox_ip = str(obj.primary_ip.address.ip).lower() if obj.primary_ip else None
                 netbox_name = obj.name

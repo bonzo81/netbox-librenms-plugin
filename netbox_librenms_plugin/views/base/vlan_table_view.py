@@ -6,6 +6,7 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
+from netbox_librenms_plugin.utils import is_list_of_dicts
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -62,6 +63,13 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         success, vlans_data = self.librenms_api.get_device_vlans(self.librenms_id)
         if not success:
             return False, f"Failed to fetch VLANs: {vlans_data}"
+
+        # A success=True response can still carry a malformed-but-truthy payload (string, list
+        # of scalars, etc.); caching it would later 500 in compare_vlans() on vlan.get(...).
+        # Reject anything that isn't a list of dict rows before caching (issue #100). An empty
+        # list is valid (a device with no VLANs).
+        if not is_list_of_dicts(vlans_data):
+            return False, "Unexpected response from LibreNMS (malformed VLAN payload)."
 
         # Cache VLANs
         server_key = self.librenms_api.server_key

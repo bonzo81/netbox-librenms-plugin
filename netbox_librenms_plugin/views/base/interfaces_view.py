@@ -7,6 +7,7 @@ from django.views import View
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_virtual_chassis_member,
+    is_list_of_dicts,
     normalize_librenms_port_id,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -120,8 +121,15 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             messages.error(request, librenms_data)
             return redirect(self.get_redirect_url(obj))
 
+        # A success=True response can still carry a malformed-but-truthy body (string/list/
+        # dict-with-non-list "ports"); dereferencing it would 500 the refresh. Fail closed like
+        # the not-success path instead (issue #100). An empty ports list stays valid.
+        ports = librenms_data.get("ports", []) if isinstance(librenms_data, dict) else None
+        if not is_list_of_dicts(ports):
+            messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
+            return redirect(self.get_redirect_url(obj))
+
         # Enrich ports with VLAN data for trunk ports
-        ports = librenms_data.get("ports", [])
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
         librenms_data["ports"] = enriched_ports
 
