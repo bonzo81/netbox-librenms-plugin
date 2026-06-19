@@ -443,7 +443,18 @@ def validate_device_for_import(
             if not result["existing_device"]:
                 serial = libre_device.get("serial") or ""
                 if serial and serial != "-" and not import_as_vm:
-                    existing_by_serial = Device.objects.filter(serial=serial).first()
+                    # Serial is not unique in NetBox, so .first() would bind an arbitrary row
+                    # and the downstream serial/OOB/merge flow would derive its guidance from a
+                    # random device. Require a unique match before binding, mirroring the
+                    # merge-peer [:2] guard (issue #101).
+                    serial_matches = list(Device.objects.filter(serial=serial)[:2])
+                    if len(serial_matches) > 1:
+                        result["warnings"].append(
+                            f"Multiple NetBox devices share serial '{serial}'; serial-based matching skipped."
+                        )
+                        existing_by_serial = None
+                    else:
+                        existing_by_serial = serial_matches[0] if serial_matches else None
                     if existing_by_serial:
                         logger.info(f"Found existing device by serial: {existing_by_serial.name} (serial={serial})")
                         result["existing_device"] = existing_by_serial

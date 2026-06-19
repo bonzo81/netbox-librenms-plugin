@@ -1679,6 +1679,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -1696,6 +1701,39 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "serial"
         assert result["existing_device"] == existing
 
+    def test_duplicate_serials_skip_matching_with_warning(self):
+        """Issue #101: when multiple NetBox devices share the incoming serial, serial-based
+        matching must be skipped (no arbitrary .first() bind) and a warning added. The guard's
+        len() check runs on the real list returned by the [:2] slice."""
+        dev_a = MagicMock(name="dev-a", pk=1)
+        dev_b = MagicMock(name="dev-b", pk=2)
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(*args, **kwargs):
+            result = MagicMock()
+            if "serial" in kwargs:
+                result.first.return_value = dev_a
+                result.__getitem__.return_value = [dev_a, dev_b]  # two devices share the serial
+            else:
+                result.first.return_value = None
+                result.__getitem__.return_value = []
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        result = validate_device_for_import(
+            {"device_id": 1, "hostname": "new-host", "serial": "DUP123"},
+            include_vc_detection=False,
+        )
+
+        # No arbitrary device bound, and the serial path did not claim a match.
+        assert result["existing_device"] is None
+        assert result.get("existing_match_type") != "serial"
+        assert any("share serial" in w for w in result["warnings"])
+
     def test_serial_match_same_hostname_offers_link(self):
         """Serial + hostname match offers link action."""
         existing = MagicMock()
@@ -1706,6 +1744,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -1733,6 +1776,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -1760,6 +1808,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             if "name__iexact" in kwargs:
                 result.first.return_value = existing
             elif "serial" in kwargs:
@@ -1840,6 +1893,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             if "name__iexact" in kwargs:
                 result.first.return_value = hostname_device
             elif "serial" in kwargs:
@@ -1871,6 +1929,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
@@ -1915,6 +1978,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
@@ -1961,6 +2029,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
@@ -2008,6 +2081,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -2061,6 +2139,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -2112,6 +2195,11 @@ class TestSerialNumberMatching:
 
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             if "serial" in kwargs:
                 result.first.return_value = existing
             else:
@@ -2204,6 +2292,11 @@ class TestNameMatchesWithNamingPreferences:
     def _setup_librenms_id_filter(self, existing):
         def device_filter(*args, **kwargs):
             result = MagicMock()
+            # Support the unique-serial guard's [:2] slice: derive the slice from the
+            # .first() stub so a single match -> [match], no match -> [] (issue #101).
+            result.__getitem__.side_effect = lambda _s: (
+                [result.first.return_value] if result.first.return_value is not None else []
+            )
             q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
                 k.startswith("custom_field_data__librenms_id") for k in kwargs
             )
