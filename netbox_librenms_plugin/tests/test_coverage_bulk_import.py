@@ -942,7 +942,10 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation)  # must not raise
 
         mock_logger.error.assert_called_once()
-        assert "99" in mock_logger.error.call_args[0][0]
+        # Inspect every positional arg, not just the format string, so this still passes if the
+        # production call switches to parameterized logging (logger.error("... %s", pk)) — the
+        # id would then land in a separate arg (issue #98).
+        assert any("99" in str(a) for a in mock_logger.error.call_args.args)
 
     # ------------------------------------------------------------------
     # Line 373: no existing_device, no libre_device → early return
