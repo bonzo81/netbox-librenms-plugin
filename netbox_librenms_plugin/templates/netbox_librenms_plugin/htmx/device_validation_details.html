@@ -406,7 +406,7 @@
     {% if validation.serial_action == 'merge_netbox_devices' %}
       {# Stage 2: two NetBox devices appear to represent the same physical box. #}
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
-        <span class="badge bg-warning me-1"><i class="mdi mdi-merge"></i> Two NetBox devices</span>
+        <span class="badge bg-warning text-dark me-1"><i class="mdi mdi-merge"></i> Two NetBox devices</span>
         <span class="text-muted ms-1">
           — A hostname match and a chassis-serial match resolved to two different NetBox
           devices. Pick which one to keep; the other will be marked as merged.
