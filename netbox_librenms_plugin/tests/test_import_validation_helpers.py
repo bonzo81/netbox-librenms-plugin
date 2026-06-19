@@ -642,3 +642,42 @@ class TestApplyMergeCandidates:
             warning="merge needed",
         )
         assert result["serial_role_choice_available"] is False
+
+    def test_previously_ready_result_clears_all_stale_importable_state(self):
+        """Regression for issue #85: a result that an earlier validation stage already marked
+        importable (hostname-first row processing) carries is_ready=True alongside oob_candidate,
+        promote_to_host, and serial_role_choice_available simultaneously. The merge pass must
+        clear every one of those stale "importable" signals in a single call — otherwise the row
+        renders as importable while merge mode blocks it, leaving contradictory UI state.
+
+        The per-field tests above each seed a single stale field; this exercises the real-world
+        combination so a regression that clears some-but-not-all fields is caught.
+        """
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["is_ready"] = True
+        result["can_import"] = True
+        result["oob_candidate"] = {"device": object(), "type": "idrac", "version": None, "ip": None}
+        result["promote_to_host"] = {
+            "existing_libre_id": 7,
+            "existing_oob_type": "idrac",
+            "existing_device": object(),
+        }
+        result["serial_role_choice_available"] = True
+
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "router-01", "librenms_link": {"host_id": 10}},
+            oob_named={"pk": 2, "name": "router-01-idrac", "librenms_link": None},
+            warning="Two devices likely represent one physical box",
+        )
+
+        # Every stale importable signal must be reset by the single merge pass.
+        assert result["is_ready"] is False
+        assert result["can_import"] is False
+        assert result["oob_candidate"] is None
+        assert "promote_to_host" not in result
+        assert result["serial_role_choice_available"] is False
+        # And the merge path is now the single source of truth.
+        assert result["serial_action"] == "merge_netbox_devices"
