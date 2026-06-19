@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _make_request(post=None, get=None, headers=None, user_is_superuser=False):
     """Build a mock request object with QueryDict-like POST/GET."""
@@ -4094,3 +4096,84 @@ class TestBulkImportEdgePaths:
                                     view.post(request)
 
         mock_redirect.assert_called()
+
+
+@pytest.mark.django_db
+class TestAddDeviceTypeMappingNoSecondRoundTrip:
+    """Issue #66: AddDeviceTypeMappingView.post must reuse the LibreNMS device it already fetched
+    for the modal/row refresh, never issuing a second LibreNMS round-trip after the DB write.
+
+    This drives the real view end-to-end: real Django cache, a real DeviceTypeMapping write,
+    real validate_device_for_import + template render. Only the true external boundaries are
+    mocked — the LibreNMS HTTP fetch (get_librenms_device_by_id) and the auth gates (covered by
+    their own tests). The discriminator is that the HTTP boundary is never called after the write;
+    the previous cache-clear path forced a fresh lookup that a transient LibreNMS outage could
+    downgrade to a stale/"not found" refresh.
+    """
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView
+
+        view = object.__new__(AddDeviceTypeMappingView)
+        view._librenms_api = _make_api()
+        return view
+
+    def _make_device_type(self):
+        from dcim.models import DeviceType, Manufacturer
+
+        mfr = Manufacturer.objects.create(name="Cisco-66", slug="cisco-66")
+        return DeviceType.objects.create(manufacturer=mfr, model="C9300-66", slug="c9300-66")
+
+    def test_post_reuses_cached_device_no_second_librenms_call(self):
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        device_id = 4242
+        dt = self._make_device_type()
+        view = self._make_view()
+
+        # Pre-seed the cache exactly as the table load would (so the first fetch is a cache hit).
+        libre_device = {
+            "device_id": device_id,
+            "hardware": "WS-C9300-66",
+            "sysName": "switch-66",
+            "hostname": "switch-66",
+            "os": "ios",
+            "serial": "SN66",
+        }
+        cache_key = get_import_device_cache_key(device_id, "default")
+        cache.set(cache_key, libre_device, timeout=300)
+
+        User = get_user_model()
+        user = User.objects.create_user(username="u66", password="x")
+        user.is_superuser = True
+        user.save()
+
+        request = RequestFactory().post(
+            f"/device-import/add-device-type-mapping/{device_id}/",
+            data={"device_type_id": str(dt.pk)},
+        )
+        request.user = user
+
+        # Mock ONLY the LibreNMS HTTP boundary; have it raise if ever called after the cache hit,
+        # so a second round-trip would be unmistakable. Also stub the auth gates and VC detection.
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_device_by_id") as mock_http,
+            patch.object(view, "require_write_permission", return_value=None),
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch.object(view, "_should_enable_vc_detection", return_value=False),
+        ):
+            mock_http.return_value = None  # simulate LibreNMS unavailable on any fresh fetch
+            response = view.post(request, device_id=device_id)
+
+        # The mapping was actually written to the DB...
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="ws-c9300-66").exists()
+        # ...the refresh succeeded without ever touching the LibreNMS HTTP boundary...
+        assert mock_http.call_count == 0
+        # ...and the cached device is still present (repopulated, not cleared).
+        assert cache.get(cache_key) is not None
+        assert response.status_code == 200

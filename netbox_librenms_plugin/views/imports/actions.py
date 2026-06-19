@@ -230,15 +230,37 @@ class DeviceImportHelperMixin:
             Tuple of (libre_device, validation, selections)
             Returns (None, None, selections) if device not found
         """
-        selections = extract_device_selections(request, device_id)
-        cluster_id = selections["cluster_id"]
-        is_vm = bool(cluster_id)
-
         # Try to use cached device data from table load (eliminates redundant API calls)
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
         if not libre_device:
-            return None, None, selections
+            return None, None, extract_device_selections(request, device_id)
+
+        validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
+        return libre_device, validation, selections
+
+    def validate_and_apply_selections(self, device_id: int, request, libre_device: dict) -> tuple[dict, dict]:
+        """
+        Validate an already-fetched LibreNMS device and apply user selections.
+
+        Split out of :meth:`get_validated_device_with_selections` so callers that already hold
+        the LibreNMS device dict (e.g. ``AddDeviceTypeMappingView.post`` right after a mapping
+        write) can re-validate without a second LibreNMS round-trip (issue #66). Re-validation
+        still reflects NetBox-side changes — a freshly created ``DeviceTypeMapping``, role, etc.
+        — because :func:`validate_device_for_import` reads those from the database, not from the
+        cached ``libre_device``.
+
+        Args:
+            device_id: LibreNMS device ID
+            request: Django request object
+            libre_device: Already-fetched LibreNMS device dict
+
+        Returns:
+            Tuple of (validation, selections)
+        """
+        selections = extract_device_selections(request, device_id)
+        cluster_id = selections["cluster_id"]
+        is_vm = bool(cluster_id)
 
         # Determine if we should enable VC detection for this request
         # This checks: user preference, cache status, and VM vs Device
@@ -263,7 +285,7 @@ class DeviceImportHelperMixin:
         # Apply user selections (cluster, role, rack) to validation
         _apply_user_selections_to_validation(validation, selections, is_vm)
 
-        return libre_device, validation, selections
+        return validation, selections
 
     def render_device_row(self, request, libre_device: dict, validation: dict, selections: dict):
         """
@@ -1548,14 +1570,20 @@ class AddDeviceTypeMappingView(
             logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
             return _htmx_error_response("Error saving mapping. Please try again.")
 
-        # Clear cached LibreNMS device data so re-validation picks up the new mapping
+        # Repopulate (rather than clear) the cache with the LibreNMS device we already fetched
+        # at the top of this request. Re-validation reads the new mapping from the NetBox DB, so
+        # the cached LibreNMS payload stays correct; keeping it means the modal/row refresh below
+        # never issues a second LibreNMS round-trip — and a transient LibreNMS outage after the
+        # commit can no longer downgrade the refresh to a stale/"not found" state (issue #66).
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-        cache.delete(cache_key)
+        cache.set(cache_key, libre_device, timeout=self.librenms_api.cache_timeout)
 
         # Re-render the modal content as an OOB swap so it updates in place.
         # The inner views render via Django templates (auto-escaped), so the
         # decoded content is already safe HTML; wrap with format_html + mark_safe
         # to compose the OOB envelope without introducing new escape boundaries.
+        # The cache repopulation above keeps DeviceValidationDetailsView.get's
+        # fetch_device_with_cache a cache hit, so no extra LibreNMS call is made.
         detail_view = DeviceValidationDetailsView()
         detail_view._librenms_api = self._librenms_api
         modal_html = detail_view.get(request, device_id).content.decode("utf-8")
@@ -1566,7 +1594,8 @@ class AddDeviceTypeMappingView(
 
         # Re-validate and include the background table row as a second OOB swap so the
         # row reflects the new mapping immediately without a secondary JS-triggered request.
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        # Reuse the in-memory libre_device directly (no re-fetch) via validate_and_apply_selections.
+        validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
         if libre_device is not None and validation is not None:
             row_response = self.render_device_row(request, libre_device, validation, selections)
             row_html = row_response.content.decode("utf-8")
