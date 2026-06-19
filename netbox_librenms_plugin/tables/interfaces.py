@@ -355,29 +355,31 @@ class LibreNMSInterfaceTable(tables.Table):
     def render_librenms_id(self, value, record):
         """Render the 'librenms_id' field with appropriate styling based on comparison with NetBox."""
 
+        # Same XSS guard as _render_field: value/netbox_librenms_id originate outside NetBox, so
+        # use format_html to auto-escape both the body and the title attribute (issue #105).
         if not record.get("exists_in_netbox"):
-            return mark_safe(f'<span class="text-danger">{value}</span>')
+            return format_html('<span class="text-danger">{}</span>', value)
 
         netbox_interface = record.get("netbox_interface")
         if not netbox_interface:
-            return mark_safe(f'<span class="text-danger">{value}</span>')
+            return format_html('<span class="text-danger">{}</span>', value)
 
         netbox_librenms_id = get_librenms_device_id(netbox_interface, self.server_key, auto_save=False)
 
         if netbox_librenms_id is None:
-            return mark_safe(
-                f'<span class="text-danger" title="No librenms_id custom field value found">{value}</span>'
+            return format_html(
+                '<span class="text-danger" title="No librenms_id custom field value found">{}</span>', value
             )
 
         # Compare the IDs
         if str(value) != str(netbox_librenms_id):
             # IDs do not match
-            return mark_safe(
-                f'<span class="text-warning" title="Existing LibreNMS ID: {netbox_librenms_id}">{value}</span>'
+            return format_html(
+                '<span class="text-warning" title="Existing LibreNMS ID: {}">{}</span>', netbox_librenms_id, value
             )
         else:
             # IDs match
-            return mark_safe(f'<span class="text-success">{value}</span>')
+            return format_html('<span class="text-success">{}</span>', value)
 
     def _compare_mac_addresses(self, librenms_mac, netbox_interface):
         """
@@ -399,17 +401,20 @@ class LibreNMSInterfaceTable(tables.Table):
     def _render_field(self, value, record, librenms_key, netbox_key):
         """Render a field value with appropriate styling based on the comparison with NetBox."""
 
+        # value is an untrusted LibreNMS field (ifName, description, MAC, …). Use format_html so
+        # it is auto-escaped — a device reporting e.g. ifName="<img src=x onerror=alert(1)>" must
+        # not render as live HTML (stored XSS, issue #105). The class names stay literal.
         if not record.get("exists_in_netbox"):
-            return mark_safe(f'<span class="text-danger">{value}</span>')
+            return format_html('<span class="text-danger">{}</span>', value)
 
         netbox_interface = record.get("netbox_interface")
         if not netbox_interface:
-            return mark_safe(f'<span class="text-danger">{value}</span>')
+            return format_html('<span class="text-danger">{}</span>', value)
 
         if librenms_key == "ifPhysAddress":
             mac_matches = self._compare_mac_addresses(value, netbox_interface)
             css_class = "text-success" if mac_matches else "text-warning"
-            return mark_safe(f'<span class="{css_class}">{value}</span>')
+            return format_html('<span class="{}">{}</span>', css_class, value)
 
         netbox_value = getattr(netbox_interface, netbox_key, None)
         librenms_value = record.get(librenms_key)
@@ -418,9 +423,9 @@ class LibreNMSInterfaceTable(tables.Table):
             librenms_value = convert_speed_to_kbps(librenms_value)
 
         if librenms_value != netbox_value:
-            return mark_safe(f'<span class="text-warning">{value}</span>')
+            return format_html('<span class="text-warning">{}</span>', value)
 
-        return mark_safe(f'<span class="text-success">{value}</span>')
+        return format_html('<span class="text-success">{}</span>', value)
 
     def render_type(self, value, record):
         """Render interface type with appropriate styling based on comparison with NetBox"""

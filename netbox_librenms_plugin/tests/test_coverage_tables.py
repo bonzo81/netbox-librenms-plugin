@@ -2647,3 +2647,31 @@ class TestRenderVlansTaggedVlansIteration:
 
         assert "200" in result
         assert "300" in result
+
+
+class TestInterfaceTableXSSEscaping:
+    """Issue #105: _render_field / render_librenms_id must escape untrusted LibreNMS values
+    (ifName, description, MAC, …) instead of rendering them as live HTML (stored XSS)."""
+
+    XSS = "<img src=x onerror=alert(1)>"
+
+    def test_render_field_escapes_value_when_not_in_netbox(self):
+        table = _make_interface_table()
+        rendered = str(table._render_field(self.XSS, {"exists_in_netbox": False}, "ifName", "name"))
+        assert "<img" not in rendered
+        assert "&lt;img" in rendered
+
+    def test_render_field_escapes_value_on_mismatch(self):
+        table = _make_interface_table()
+        nb = MagicMock()
+        nb.name = "eth0"
+        record = {"exists_in_netbox": True, "netbox_interface": nb, "ifName": self.XSS}
+        rendered = str(table._render_field(self.XSS, record, "ifName", "name"))
+        assert "<img" not in rendered
+        assert "&lt;img" in rendered
+
+    def test_render_librenms_id_escapes_value(self):
+        table = _make_interface_table()
+        rendered = str(table.render_librenms_id(self.XSS, {"exists_in_netbox": False}))
+        assert "<img" not in rendered
+        assert "&lt;img" in rendered
