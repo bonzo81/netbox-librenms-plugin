@@ -181,8 +181,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 self._links_fetch_error = "Unexpected response from LibreNMS (expected an object)."
 
         interface_name_field = get_interface_name_field(getattr(self, "request", None))
+        # The alternate LibreNMS name field: when the user displays ifName, a NetBox
+        # interface may still be named from ifDescr (and vice versa). Carrying the alternate
+        # name lets enrich_local_port fall back to either field (issue #88).
+        alt_name_field = "ifDescr" if interface_name_field == "ifName" else "ifName"
         ports_data = self.get_ports_data(lookup_device, server_key=server_key)
         local_ports_map = {}
+        local_ports_alt_map = {}
         ports = ports_data.get("ports", []) if isinstance(ports_data, dict) else []
         for port in ports if isinstance(ports, list) else []:
             # A malformed LibreNMS/cache payload can carry non-dict rows (strings/nulls);
@@ -197,6 +202,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             if port_name is None:
                 continue
             local_ports_map[port_id] = port_name
+            # Only record an alternate that differs from the displayed name (no point matching
+            # the same string twice).
+            alt_name = port.get(alt_name_field)
+            if alt_name and alt_name != port_name:
+                local_ports_alt_map[port_id] = alt_name
 
         # Only consume links when the LLDP fetch was OK. A dict-shaped body can still carry a
         # malformed "links" (null/object); treat that as no links (and record the error)
@@ -211,7 +221,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         for link in links:
             if not isinstance(link, dict):
                 continue
-            local_port_name = local_ports_map.get(str(link.get("local_port_id")))
+            link_local_port_id = str(link.get("local_port_id"))
+            local_port_name = local_ports_map.get(link_local_port_id)
             if local_port_name is None:
                 # Fall back to the LibreNMS-reported local_port name so name-based
                 # resolution still works when the ports map misses or ports fetch failed.
@@ -219,6 +230,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             links_data.append(
                 {
                     "local_port": local_port_name,
+                    "local_port_alt": local_ports_alt_map.get(link_local_port_id),
                     "local_port_id": link.get("local_port_id"),
                     "remote_port": link.get("remote_port"),
                     "remote_device": link.get("remote_hostname"),
@@ -246,6 +258,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 # interface_name_field as the main device so names are consistent.
                 oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob["id"])
                 oob_local_ports_map = {}
+                oob_local_ports_alt_map = {}
                 if oob_ports_success and isinstance(oob_ports_data, dict):
                     oob_ports = oob_ports_data.get("ports")
                     for port in oob_ports if isinstance(oob_ports, list) else []:
@@ -260,6 +273,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                         if port_name is None:
                             continue
                         oob_local_ports_map[str(raw_port_id)] = port_name
+                        # Same alternate-field fallback as the main branch (issue #88).
+                        alt_name = port.get(alt_name_field)
+                        if alt_name and alt_name != port_name:
+                            oob_local_ports_alt_map[str(raw_port_id)] = alt_name
 
                 # Same malformed-payload guard as the main branch: oob_data is a dict here,
                 # but its "links" can still be null/object. Treat that as an OOB fetch failure
@@ -285,9 +302,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                         oob_local_port = oob_local_ports_map.get(str(oob_port_id)) if oob_port_id else None
                         if oob_local_port is None:
                             oob_local_port = link.get("local_port")
+                        oob_local_port_alt = oob_local_ports_alt_map.get(str(oob_port_id)) if oob_port_id else None
                         links_data.append(
                             {
                                 "local_port": oob_local_port,
+                                "local_port_alt": oob_local_port_alt,
                                 "local_port_id": oob_port_id,
                                 "remote_port": link.get("remote_port"),
                                 "remote_device": link.get("remote_hostname"),
@@ -382,6 +401,15 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             if server_key is None:
                 server_key = self._render_server_key()
 
+            # Name fallback is field-agnostic: a NetBox interface may be named from the
+            # LibreNMS field the user is *not* currently displaying (issue #88 — e.g. the
+            # interface carries the ifDescr value while interface_name_field selects ifName).
+            # Match the displayed name plus the alternate field captured at fetch time,
+            # mirroring the dual ifName/ifDescr fallback in
+            # interfaces_view._enrich_port_with_lag_parent. The stable librenms_id match below
+            # still wins when present; this only widens the fragile name fallback.
+            name_candidates = [n for n in (local_port, link.get("local_port_alt")) if n]
+
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(obj, local_port)
 
@@ -392,7 +420,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
                     # Only if librenms_id match fails, try matching by name
                     if not interface:
-                        interface = chassis_member.interfaces.filter(name=local_port).first()
+                        interface = chassis_member.interfaces.filter(name__in=name_candidates).first()
             else:
                 # First try to find interface by librenms_id
                 if local_port_id:
@@ -400,7 +428,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
                 # Only if librenms_id match fails, try matching by name
                 if not interface:
-                    interface = obj.interfaces.filter(name=local_port).first()
+                    interface = obj.interfaces.filter(name__in=name_candidates).first()
 
             if interface:
                 link["local_port_url"] = reverse("dcim:interface", args=[interface.pk])
@@ -564,6 +592,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             # deleted and cause DoesNotExist in check_cable_status().
             _raw_keys = {
                 "local_port",
+                "local_port_alt",
                 "local_port_id",
                 "remote_port",
                 "remote_device",
@@ -763,6 +792,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     # IDs/URLs when NetBox objects are deleted after caching.
                     _raw_keys = {
                         "local_port",
+                        "local_port_alt",
                         "local_port_id",
                         "remote_port",
                         "remote_device",

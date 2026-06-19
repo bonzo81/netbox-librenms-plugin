@@ -449,6 +449,67 @@ class TestBaseCableTableViewGetLinksData:
         view._librenms_api.get_device_links.assert_any_call(oob_mock["id"])
         view._librenms_api.get_ports.assert_called_once_with(oob_mock["id"])
 
+    def test_get_links_data_carries_alternate_name_field(self):
+        """Issue #88: each link carries local_port_alt (the LibreNMS field NOT being
+        displayed) so enrich_local_port can fall back to a NetBox interface named from the
+        other field. Verified for both the main device and the OOB controller."""
+        view = self._make_view()
+
+        main_links = {
+            "links": [
+                {
+                    "local_port_id": 10,
+                    "remote_hostname": "peer-a",
+                    "remote_port": "Gi0/1",
+                    "remote_port_id": 20,
+                    "remote_device_id": 5,
+                }
+            ]
+        }
+        oob_links = {
+            "links": [
+                {
+                    "local_port_id": 99,
+                    "local_port": "eth0",
+                    "remote_hostname": "peer-b",
+                    "remote_port": "Gi0/2",
+                    "remote_port_id": 21,
+                    "remote_device_id": 6,
+                }
+            ]
+        }
+
+        view._librenms_api.get_device_links.side_effect = [
+            (True, main_links),
+            (True, oob_links),
+        ]
+        # OOB port 99 carries both names; with ifName displayed the alt is the ifDescr.
+        view._librenms_api.get_ports.return_value = (
+            True,
+            {"ports": [{"port_id": 99, "ifName": "eth0", "ifDescr": "Management0"}]},
+        )
+        # Main port 10 carries both names too.
+        main_ports = {"ports": [{"port_id": 10, "ifName": "Gi0/0", "ifDescr": "GigabitEthernet0/0"}]}
+        obj = _mock_obj()
+        oob_mock = {"id": 7}
+
+        with (
+            patch.object(view, "get_ports_data", return_value=main_ports),
+            # User is displaying ifName, so the alternate captured must be ifDescr.
+            patch("netbox_librenms_plugin.views.base.cables_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=oob_mock),
+        ):
+            result = view.get_links_data(obj)
+
+        main_entry = next(r for r in result if r["_source"] == "main")
+        assert main_entry["local_port"] == "Gi0/0"
+        assert main_entry["local_port_alt"] == "GigabitEthernet0/0"
+
+        oob_entry = next(r for r in result if r["_source"] == "oob")
+        assert oob_entry["local_port"] == "eth0"
+        assert oob_entry["local_port_alt"] == "Management0"
+
     def test_get_links_data_oob_falls_back_to_raw_name_on_port_fetch_failure(self):
         """When OOB port fetch fails, falls back to raw local_port from LLDP data."""
         view = self._make_view()
@@ -674,6 +735,31 @@ class TestBaseCableTableViewEnrichLocalPort:
         iface = make_interface(obj, "Gi0/1")  # no librenms_id seeded
 
         link = {"local_port": "Gi0/1", "local_port_id": 20}  # id 20 matches nothing
+        view.enrich_local_port(link, obj)
+
+        assert link["netbox_local_interface_id"] == iface.pk
+        assert link["local_port_url"].endswith(f"/dcim/interfaces/{iface.pk}/")
+
+    def test_name_fallback_matches_alternate_interface_name_field(self):
+        """Issue #88: when the NetBox interface name matches the *non-selected* LibreNMS
+        field (e.g. it carries the ifDescr value while the user displays ifName), the name
+        fallback must still resolve it — mirroring the dual ifName/ifDescr fallback in
+        interfaces_view._enrich_port_with_lag_parent.
+
+        The interface carries no stored librenms_id, so the stable-id match cannot fire and
+        only the name fallback can match. The displayed local_port ("Gi0/1", the selected
+        ifName) does not match the interface name; the alternate ("GigabitEthernet0/1", the
+        ifDescr the interface was named from) does.
+        """
+        view = self._make_view()
+        obj = make_device("cable-dev-altname")
+        iface = make_interface(obj, "GigabitEthernet0/1")  # named from ifDescr, no librenms_id
+
+        link = {
+            "local_port": "Gi0/1",  # selected field (ifName) — no NB interface by this name
+            "local_port_alt": "GigabitEthernet0/1",  # other field (ifDescr) — matches the NB interface
+            "local_port_id": 999,  # matches no stored librenms_id
+        }
         view.enrich_local_port(link, obj)
 
         assert link["netbox_local_interface_id"] == iface.pk
