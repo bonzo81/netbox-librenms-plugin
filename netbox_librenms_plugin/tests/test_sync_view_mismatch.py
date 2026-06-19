@@ -364,6 +364,24 @@ class TestBuildAllServerMappings:
         assert entry["is_active"] is True
         assert entry["device_url"] == "https://librenms.example.com/device/device=42/"
 
+    def test_whitespace_padded_string_id_is_included(self, mock_netbox_device, mock_plugins_config_single_server):
+        """Issue #99: a per-server id stored as a whitespace-padded string (" 42 ") resolves
+        fine elsewhere (int() strips whitespace) but str.isdigit() wrongly rejected it here,
+        hiding a valid link from the mappings UI. It must now appear, coerced to 42."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {"librenms_id": {"production": " 42 "}}
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
+            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["server_key"] == "production"
+        assert result[0]["device_id"] == 42
+
     def test_orphaned_server_is_not_configured(self, mock_netbox_device, mock_plugins_config_empty_servers):
         from unittest.mock import patch
 

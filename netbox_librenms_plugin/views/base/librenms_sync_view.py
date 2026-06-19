@@ -189,14 +189,19 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         result = []
         for sk, did in cf_value.items():
-            # Validate device ID — accept int or digit-string, skip bool/None/junk.
+            # Validate device ID consistently with the int()-based coercion used everywhere
+            # else for librenms_id: int() strips surrounding whitespace, so a value written as
+            # " 42 " (hand-edited, or from a path that doesn't normalize) resolves fine in the
+            # rest of the app but str.isdigit() wrongly rejected it here, hiding a valid link
+            # from the per-server mappings UI (issue #99). Reject bool/None/non-numeric and
+            # non-positive ids.
             if isinstance(did, bool) or did is None:
                 continue
-            if isinstance(did, str):
-                if not did.isdigit():
-                    continue
+            try:
                 did = int(did)
-            elif not isinstance(did, int):
+            except (TypeError, ValueError):
+                continue
+            if did <= 0:
                 continue
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —
