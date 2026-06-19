@@ -6070,6 +6070,66 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         assert donor.oob_ip_id == oob_ip.pk
         assert winner.oob_ip_id is None
 
+    def test_save_failure_rolls_back_donor_oob_release_and_marker(self):
+        """Forced persist failure mid-merge must roll back the donor's already-executed save.
+
+        The view saves the donor first — releasing its ``oob_ip`` (a UNIQUE OneToOne) and
+        stamping the ``_migrated_to`` marker — then saves the winner to claim the IP. If the
+        winner save fails, the ``except`` block must mark the transaction rollback-only;
+        otherwise the donor is left with no ``oob_ip`` AND no winner holding it (an orphaned
+        address) plus a ``_migrated_to`` marker for a merge that never completed.
+
+        Driven against real rows: only the *second* Device.save (the winner's) is forced to
+        raise, so the donor's real release is genuinely on disk inside the savepoint before the
+        rollback. Removing ``set_rollback(True)`` leaves the donor's release/marker committed and
+        this test goes red."""
+        from dcim.models import Device
+        from django.db import IntegrityError
+        from django.http import HttpResponse
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        view = self._make_view()
+        winner = make_device("merge-winner-fail", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-donor-fail", librenms_cf={"default": {"id": 10}})
+        # oob_ip on a winner-owned interface → the transfer path runs (oob_ip in update_fields).
+        oob_ip = ip_on(winner, "192.0.2.8/32", "mgmt0")
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        # Force the SECOND Device.save (the winner's, per the donor-then-winner order) to fail,
+        # so the donor's release is already written inside the savepoint when rollback fires.
+        real_save = Device.save
+        save_calls = []
+
+        def flaky_save(self, *args, **kwargs):
+            save_calls.append(self.pk)
+            if len(save_calls) == 2:
+                raise IntegrityError("forced winner save failure")
+            return real_save(self, *args, **kwargs)
+
+        with patch.object(Device, "save", flaky_save):
+            resp = view.post(request, device_id=99)
+
+        # Surfaced as the HTMX OOB error toast (200 + HX-Reswap:none), not a 500.
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"Unable to save" in resp.content
+        # The donor's save (release + marker) was rolled back: it still owns the oob_ip, the
+        # winner never claimed it, and no migration marker was stamped.
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.oob_ip_id == oob_ip.pk
+        assert winner.oob_ip_id is None
+        entry = donor.custom_field_data["librenms_id"]["default"]
+        assert entry == {"id": 10}
+        assert "_migrated_to" not in entry
+
 
 @pytest.mark.django_db
 class TestSuggestOOBInterface:

@@ -787,18 +787,41 @@ class TestSetDeviceIpFk:
 class TestSyncTabUrl:
     """_sync_tab_url builds the donor device sync URL with tab + server_key."""
 
-    def test_includes_tab_and_server_key(self):
+    def test_includes_tab_and_configured_server_key(self):
         from django.urls import reverse
 
         from netbox_librenms_plugin.views.sync.migrate import _sync_tab_url
 
         base = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[7])
-        assert _sync_tab_url(7, "ipaddresses", "siteB") == f"{base}?tab=ipaddresses&server_key=siteB"
+        # Only reflect a server_key that matches a configured server (allowlist re-source).
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"siteB": "Site B"},
+        ):
+            assert _sync_tab_url(7, "ipaddresses", "siteB") == f"{base}?tab=ipaddresses&server_key=siteB"
 
-    def test_quotes_server_key(self):
+    def test_quotes_configured_server_key(self):
         from netbox_librenms_plugin.views.sync.migrate import _sync_tab_url
 
-        assert "server_key=a+b%2Fc" in _sync_tab_url(7, "interfaces", "a b/c")
+        # quote_plus still applies to a configured key (defense-in-depth against odd chars).
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"a b/c": "Weird"},
+        ):
+            assert "server_key=a+b%2Fc" in _sync_tab_url(7, "interfaces", "a b/c")
+
+    def test_omits_unconfigured_server_key(self):
+        # A stale/tampered key that isn't a configured server is dropped, not reflected into
+        # the redirect target. Mirrors device_fields._sync_redirect's allowlist guard.
+        from netbox_librenms_plugin.views.sync.migrate import _sync_tab_url
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"default": "Default Server"},
+        ):
+            url = _sync_tab_url(7, "interfaces", "siteB")
+        assert url.endswith("?tab=interfaces")
+        assert "server_key=" not in url
 
     def test_omits_server_key_when_empty(self):
         from netbox_librenms_plugin.views.sync.migrate import _sync_tab_url
@@ -868,6 +891,11 @@ class TestNonHtmxFallbackRedirect:
             patch(
                 "netbox_librenms_plugin.views.sync.migrate._resolve_winner_for_donor",
                 return_value=(None, None),
+            ),
+            # siteB must be a configured server for the fallback URL to reflect it (allowlist).
+            patch(
+                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+                return_value={"siteB": "Site B"},
             ),
         ):
             resp = view.post(req, pk=5)

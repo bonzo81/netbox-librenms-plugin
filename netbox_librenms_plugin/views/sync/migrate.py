@@ -103,7 +103,13 @@ def _sync_tab_url(device_pk, tab, server_key):
     """
     url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device_pk])}?tab={tab}"
     if server_key:
-        url += f"&server_key={quote_plus(server_key)}"
+        # Re-source the key from the trusted config rather than reflecting the raw POST value:
+        # only append it when it matches a configured server (a stale/tampered key resolves to
+        # nothing and is dropped). Mirrors device_fields._sync_redirect's allowlist guard.
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        if server_key in LibreNMSAPI.get_available_servers():
+            url += f"&server_key={quote_plus(server_key)}"
     return url
 
 

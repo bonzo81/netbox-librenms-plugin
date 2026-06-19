@@ -3105,15 +3105,13 @@ class PromoteToHostView(
         if validated_existing.pk != existing_device.pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match validation result")
 
-        new_host_id = libre_device.get("device_id")
-        if isinstance(new_host_id, bool):
+        from netbox_librenms_plugin.utils import coerce_librenms_id
+
+        # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
+        # non-numeric strings, zero/negatives) in one place — same guard used elsewhere.
+        new_host_id = coerce_librenms_id(libre_device.get("device_id"))
+        if new_host_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id")
-        try:
-            new_host_id = int(new_host_id)
-        except (TypeError, ValueError):
-            return _htmx_error_response("Invalid or missing LibreNMS device_id")
-        if new_host_id <= 0:
-            return _htmx_error_response("Invalid LibreNMS device_id")
 
         existing_libre_id = promote.get("existing_libre_id")
         try:
@@ -3153,7 +3151,6 @@ class PromoteToHostView(
 
             from netbox_librenms_plugin.utils import (
                 AmbiguousLibreNMSIdError,
-                coerce_librenms_id,
                 find_by_librenms_id,
                 get_librenms_device_id,
                 get_librenms_oob,

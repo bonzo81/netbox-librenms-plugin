@@ -2123,8 +2123,9 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
         donor: NetBox Device being absorbed by the winner.
         winner_pk: Primary key of the winning device.
         server_key: LibreNMS server key whose link state is being cleared.
-        at: ISO timestamp string. When None, ``datetime.utcnow().isoformat()``
-            with a ``Z`` suffix is used.
+        at: ISO timestamp string. When None, a timezone-aware UTC timestamp
+            (``datetime.now(timezone.utc)`` formatted as ``YYYY-MM-DDTHH:MM:SSZ``)
+            is used.
     """
     from datetime import datetime, timezone
 
