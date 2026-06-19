@@ -75,6 +75,11 @@ class LibreNMSAPI:
         if servers_config and isinstance(servers_config, dict) and server_key in servers_config:
             # Multi-server configuration
             config = servers_config[server_key]
+            # The fallback above only guards the key-not-found case; a present-but-malformed
+            # entry (e.g. {"default": "not-a-dict"}) would otherwise raise an opaque TypeError
+            # at the key reads below. Fail with a clear configuration error instead (issue #110).
+            if not isinstance(config, dict):
+                raise ValueError(f"Invalid LibreNMS server configuration for '{server_key}': expected a mapping.")
             self.librenms_url = config["librenms_url"]
             self.api_token = config["api_token"]
             self.cache_timeout = config.get("cache_timeout", 300)

@@ -78,7 +78,8 @@ class TestTryChassisDeviceTypeMatch:
 
         call_count = [0]
 
-        def match_side_effect(value):
+        def match_side_effect(value, **kwargs):
+            # **kwargs accepts the preloaded_rules the chassis fallback now threads through (#90 N+1).
             call_count[0] += 1
             if value == "Unrecognized":
                 return {"matched": False}

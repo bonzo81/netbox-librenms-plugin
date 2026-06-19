@@ -132,6 +132,20 @@ class TestLibreNMSAPIInit:
         with pytest.raises(ValueError):
             LibreNMSAPI(server_key="default")
 
+    def test_init_selected_key_malformed_raises_valueerror_not_typeerror(self, mock_librenms_config):
+        """Issue #110: an explicitly requested key that *exists* but maps to a non-dict must raise a
+        clear ValueError, not an opaque TypeError from indexing the string at the config read.
+
+        The not-found fallback only guards the missing-key case; this exercises the present-but-
+        malformed branch."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {"broken": "not-a-dict"}
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(ValueError, match="expected a mapping"):
+            LibreNMSAPI(server_key="broken")
+
 
 # =============================================================================
 # Test Class 2: Connection Testing (4 tests)

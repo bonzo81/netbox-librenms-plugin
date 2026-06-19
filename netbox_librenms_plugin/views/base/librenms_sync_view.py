@@ -197,9 +197,15 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             # non-positive ids.
             if isinstance(did, bool) or did is None:
                 continue
-            try:
-                did = int(did)
-            except (TypeError, ValueError):
+            # Only str/int are valid stored shapes; coercing a float here would silently
+            # truncate (1.9 → 1) and surface a link to the wrong device. This mirrors
+            # get_librenms_device_id() in utils.py, which rejects non-str/int before int() (#99).
+            if isinstance(did, str):
+                try:
+                    did = int(did)
+                except (TypeError, ValueError):
+                    continue
+            elif not isinstance(did, int):
                 continue
             if did <= 0:
                 continue

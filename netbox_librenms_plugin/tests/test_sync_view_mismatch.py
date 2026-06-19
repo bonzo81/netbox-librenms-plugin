@@ -382,6 +382,24 @@ class TestBuildAllServerMappings:
         assert result[0]["server_key"] == "production"
         assert result[0]["device_id"] == 42
 
+    def test_float_id_is_rejected_not_truncated(self, mock_netbox_device, mock_plugins_config_single_server):
+        """Issue #99: a float id must be rejected, never silently truncated. Coercing 1.9 → 1 with
+        a bare int() would surface a mapping to the *wrong* device, diverging from
+        get_librenms_device_id()'s str/int-only contract. The valid sibling entry still resolves."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {"librenms_id": {"production": 42, "staging": 1.9}}
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
+            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+
+        assert result is not None
+        # Only the valid int entry survives; the float is dropped, not coerced to 1.
+        assert [e["server_key"] for e in result] == ["production"]
+        assert all(e["device_id"] != 1 for e in result)
+
     def test_orphaned_server_is_not_configured(self, mock_netbox_device, mock_plugins_config_empty_servers):
         from unittest.mock import patch
 

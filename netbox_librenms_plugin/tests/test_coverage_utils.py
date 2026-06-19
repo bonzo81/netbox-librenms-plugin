@@ -427,6 +427,47 @@ class TestMatchLibrenmsHardwareDeviceTypeNormalization:
         assert match_librenms_hardware_to_device_type("C9300-48P")["matched"] is True
         assert match_librenms_hardware_to_device_type("WS-C9300-48P")["matched"] is False
 
+
+@pytest.mark.django_db
+class TestChassisFallbackHonorsPreloadedRules:
+    """Issue #90 / N+1: the chassis inventory fallback (_try_chassis_device_type_match) must
+    thread the preloaded device_type rules into its own match call. Otherwise an unmatched
+    hardware string in a bulk import still triggers a per-device NormalizationRule query through
+    the fallback, partially reintroducing the N+1 cost the preload was meant to remove."""
+
+    def test_chassis_fallback_uses_preloaded_rules_no_per_call_query(self):
+        from unittest.mock import MagicMock
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from dcim.models import DeviceType, Manufacturer
+        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+        from netbox_librenms_plugin.utils import preload_normalization_rules
+
+        mfr = Manufacturer.objects.create(name="Cisco-chassis", slug="cisco-chassis")
+        dt = DeviceType.objects.create(manufacturer=mfr, model="C9300-48P", slug="c9300-48p-chassis")
+        DeviceTypeMapping.objects.create(librenms_hardware="C9300-48P", netbox_device_type=dt)
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+        preloaded = preload_normalization_rules("device_type")
+
+        # api is a true external boundary (LibreNMS HTTP): stub only the inventory call.
+        api = MagicMock()
+        api.get_inventory_filtered.return_value = (True, [{"entPhysicalName": "WS-C9300-48P"}])
+
+        with CaptureQueriesContext(connection) as ctx:
+            result = _try_chassis_device_type_match(api, 123, preloaded_device_type_rules=preloaded)
+
+        assert result is not None
+        assert result["matched"] is True
+        assert result["device_type"] == dt
+        assert result["match_type"] == "chassis"
+        # The preloaded rules must reach the inner matcher, so no NormalizationRule query fires here.
+        assert not any("normalizationrule" in q["sql"].lower() for q in ctx.captured_queries)
+
     def test_preloaded_rules_skip_the_per_call_normalization_query(self):
         """Perf (issue #90 / N+1): passing preloaded_rules must avoid the per-call device_type
         NormalizationRule query — the bulk-import loop preloads it once instead of per device."""

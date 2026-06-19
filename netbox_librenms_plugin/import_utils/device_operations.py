@@ -29,7 +29,7 @@ from .virtual_chassis import (
 logger = logging.getLogger(__name__)
 
 
-def _try_chassis_device_type_match(api, device_id):
+def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: dict | None = None):
     """
     Attempt device type matching using chassis inventory fields.
 
@@ -56,7 +56,9 @@ def _try_chassis_device_type_match(api, device_id):
             for field in ("entPhysicalName", "entPhysicalModelName"):
                 value = item.get(field) or ""
                 if value and value not in skip_values:
-                    chassis_match = match_librenms_hardware_to_device_type(value)
+                    chassis_match = match_librenms_hardware_to_device_type(
+                        value, preloaded_rules=preloaded_device_type_rules
+                    )
                     if chassis_match is None:
                         continue
                     if chassis_match["matched"]:
@@ -556,7 +558,9 @@ def validate_device_for_import(
                 if not dt_match["matched"] and api:
                     device_id = libre_device.get("device_id")
                     if device_id:
-                        chassis_match = _try_chassis_device_type_match(api, device_id)
+                        chassis_match = _try_chassis_device_type_match(
+                            api, device_id, preloaded_device_type_rules=preloaded_device_type_rules
+                        )
                         if chassis_match and chassis_match["matched"]:
                             dt_match = chassis_match
 
