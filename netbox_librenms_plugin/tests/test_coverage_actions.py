@@ -2299,6 +2299,9 @@ class TestBulkImportConfirmViewVMRole:
             "status": "importable",
             "resolved_name": "vm01",
             "virtual_chassis": {},
+            # is_vm is recomputed from import_as_vm; set it so the VM cluster path actually runs
+            # (the prior weak assertion masked that this branch was never exercised).
+            "import_as_vm": True,
         }
         mock_cluster = MagicMock()
         mock_role = MagicMock()
@@ -2321,7 +2324,10 @@ class TestBulkImportConfirmViewVMRole:
                         ):
                             with patch(
                                 "netbox_librenms_plugin.views.imports.actions.fetch_model_by_id",
-                                side_effect=[mock_role, mock_cluster, MagicMock()],
+                                # Issue #112: key the stub by the submitted id (cluster_id=1,
+                                # role_id=2), not call order — so a wrong-id fetch returns the
+                                # wrong mock and the swap asserts below fail.
+                                side_effect=lambda _model, id_: {"1": mock_cluster, "2": mock_role}.get(str(id_)),
                             ):
                                 with patch(
                                     "netbox_librenms_plugin.views.imports.actions.apply_cluster_to_validation"
@@ -2335,8 +2341,10 @@ class TestBulkImportConfirmViewVMRole:
                                         ):
                                             response = view.post(request)
 
-        # Cluster and role should have been applied
-        assert mock_apply_c.called or mock_apply_r.called or response is not None
+        assert response is not None
+        # The cluster (id 1) and role (id 2) each reached the correct apply_* helper.
+        assert mock_apply_c.call_args.args[1] is mock_cluster
+        assert mock_apply_r.call_args.args[1] is mock_role
 
     def test_device_with_role_and_rack_applies_both(self):
         """Lines 390, 393: Device with role + rack applies both."""
@@ -2373,19 +2381,25 @@ class TestBulkImportConfirmViewVMRole:
                         ):
                             with patch(
                                 "netbox_librenms_plugin.views.imports.actions.fetch_model_by_id",
-                                side_effect=[mock_role, mock_rack],
+                                # Issue #112: key by submitted id (role_id=1, rack_id=2), not call order.
+                                side_effect=lambda _model, id_: {"1": mock_role, "2": mock_rack}.get(str(id_)),
                             ):
                                 with patch(
                                     "netbox_librenms_plugin.views.imports.actions.apply_role_to_validation"
                                 ) as mock_apply_r:
-                                    with patch("netbox_librenms_plugin.views.imports.actions.apply_rack_to_validation"):
+                                    with patch(
+                                        "netbox_librenms_plugin.views.imports.actions.apply_rack_to_validation"
+                                    ) as mock_apply_rack:
                                         with patch(
                                             "netbox_librenms_plugin.views.imports.actions.render",
                                             return_value=MagicMock(status_code=200),
                                         ):
                                             response = view.post(request)
 
-        assert mock_apply_r.called or response is not None
+        assert response is not None
+        # The role (id 1) and rack (id 2) each reached the correct apply_* helper.
+        assert mock_apply_r.call_args.args[1] is mock_role
+        assert mock_apply_rack.call_args.args[1] is mock_rack
 
 
 class TestSaveDevicePath:
