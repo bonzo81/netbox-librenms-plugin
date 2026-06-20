@@ -524,7 +524,10 @@ class LibreNMSInterfaceTable(tables.Table):
             elif row_object_id:
                 object_id = row_object_id
             elif self.device is not None and getattr(self.device, "virtual_chassis", None):
-                member = get_virtual_chassis_member(self.device, record.get(self.interface_name_field))
+                # record name can be None; get_virtual_chassis_member -> re.match() would raise on
+                # a None value while rendering a missing relationship button. Coerce to "".
+                interface_name = record.get(self.interface_name_field) or ""
+                member = get_virtual_chassis_member(self.device, interface_name)
                 object_id = (member or self.device).pk
             else:
                 object_id = self.device.pk if self.device else ""

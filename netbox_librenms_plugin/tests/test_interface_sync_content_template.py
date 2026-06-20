@@ -126,7 +126,8 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "Delete Selected Interfaces" in html
 
     def test_migrated_warning_describes_move_not_delete(self):
-        # In migrated (move) mode WITH a resolved winner, the modal warning must not threaten deletion.
+        # In migrated (move) mode WITH a resolved winner, the modal warning must describe transferring
+        # interfaces to the winner, not permanently deleting them.
         from netbox_librenms_plugin.tests.conftest import make_device
 
         html = self._render(
@@ -134,7 +135,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             netbox_only=[{"id": 1, "name": "eth-only"}],
             winner=make_device("iface-warn-winner"),
         )
-        assert "Moving an interface reassigns it" in html
+        assert "to transfer that interface" in html
         assert "permanently remove them from NetBox" not in html
 
     def test_migrated_warning_handles_missing_winner(self):
@@ -150,7 +151,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
     def test_normal_warning_describes_delete(self):
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
         assert "permanently remove them from NetBox" in html
-        assert "Moving an interface reassigns it" not in html
+        assert "to transfer that interface" not in html
 
     def test_delete_checkboxes_have_accessible_names(self):
         # The select-all and per-row checkboxes must carry aria-labels for screen-reader users.

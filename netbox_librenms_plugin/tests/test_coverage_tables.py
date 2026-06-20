@@ -1847,6 +1847,34 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
         assert "librenms_id" in column_names, "LibreNMS ID column was dropped from the interface table"
         assert table.columns["librenms_id"].verbose_name == "LibreNMS ID"
 
+    def test_vc_fallback_coerces_missing_interface_name(self):
+        """The VC member fallback must coerce a missing interface name to "" before calling
+        get_virtual_chassis_member (which re.match()es it), so a record with no name doesn't raise
+        TypeError while rendering the relationship button."""
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
+        device = MagicMock()
+        device.virtual_chassis = MagicMock()  # truthy → VC fallback branch
+        device.pk = 5
+        with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
+            table = LibreNMSInterfaceTable(data=[], device=device, server_key="default")
+        table.migrated_to_marker = None  # not a migrated donor → inline sync controls render
+
+        with patch("netbox_librenms_plugin.tables.interfaces.get_virtual_chassis_member", return_value=device) as gvcm:
+            # missing_nb + truthy port id reaches object_id resolution; record has no
+            # netbox_interface / selected_object_id / "ifName" → name resolves to None → coerced "".
+            table._render_relationship_column(
+                lnms_name="eth0",
+                lnms_port_id=5,
+                sync_status="missing_nb",
+                record={},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+
+        gvcm.assert_called_once()
+        assert gvcm.call_args.args[1] == ""
+
     def test_every_status_badge_pairs_background_with_text_colour(self):
         """A solid ``bg-*`` colour fill with no companion text colour is the grey-on-grey /
         grey-on-green readability bug. Readable forms: ``text-bg-*`` (pairs both), ``bg-* text-*``
