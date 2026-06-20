@@ -1413,6 +1413,10 @@ class TestBaseInterfaceTableViewBasics:
         mock_migrated.assert_called_once_with(obj, "ghost")
         ctx = mock_render.call_args.args[2]
         assert ctx["migrated_to_marker"] == {"device_id": 7}
+        # The stale-key render must also disable live IP sync state: ip_sync.server_key is None
+        # so the template can't expose the stale key back to the live-sync controls. Without this
+        # the test would pass even if a stale key leaked into the live-sync context.
+        assert ctx["ip_sync"]["server_key"] is None
         assert result == "rendered"
 
     def test_get_select_related_field_for_vm(self):

@@ -83,6 +83,18 @@ class TestGetMigratedToMarker:
             )
             assert get_migrated_to_marker(donor, "default") is None
 
+    def test_returns_none_when_marker_server_key_mismatches_entry(self):
+        # The marker lives under cf["default"] but its own stamped server_key says "edgelondon"
+        # (malformed or copied across server sub-blocks). Reject it so a stray marker can't force
+        # the donor into migrated mode for the "default" server it does not belong to.
+        from netbox_librenms_plugin.utils import get_migrated_to_marker
+
+        donor = _make_migrate_device(
+            "mig-keymismatch",
+            {"default": {"_migrated_to": {"device_id": 42, "server_key": "edgelondon"}}},
+        )
+        assert get_migrated_to_marker(donor, "default") is None
+
 
 @pytest.mark.django_db
 class TestBuildMigratedContext:

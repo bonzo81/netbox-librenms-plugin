@@ -243,3 +243,10 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         # ...but never with an empty server_key payload.
         assert '"server_key": ""' not in html
         assert 'hx-vals=\'{"server_key": ""}\'' not in html
+        # Scope to the move button's own opening tag: with no marker server_key it must omit the
+        # hx-vals attribute ENTIRELY (the checks above would still pass if it rendered any other
+        # non-empty hx-vals), so the POST falls back to the active/default server.
+        move_idx = html.index("mdi-transfer-right")
+        btn_start = html.rindex("<button", 0, move_idx)
+        move_button_tag = html[btn_start : html.index(">", btn_start)]
+        assert "hx-vals" not in move_button_tag

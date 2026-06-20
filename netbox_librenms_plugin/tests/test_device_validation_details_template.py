@@ -80,6 +80,61 @@ class TestDeviceValidationDetailsMergeBadge:
         # ...and the fragile document-wide winner-radio query is gone.
         assert "document.querySelectorAll('input.merge-winner-radio" not in html
 
+    def test_merge_candidate_oob_only_link_is_not_labelled_unlinked(self):
+        """A merge candidate linked as OOB-only (oob_id set, host_id empty) must be labelled as OOB-linked, not mislabelled 'not linked to LibreNMS'."""
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("merge-oob-winner")
+        donor = make_device("merge-oob-donor")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": winner,
+                "serial_action": "merge_netbox_devices",
+                "merge_candidates": {
+                    # host_named is linked to LibreNMS only as an OOB controller (no host_id).
+                    "host_named": {
+                        "pk": winner.pk,
+                        "name": winner.name,
+                        "librenms_link": {"host_id": None, "oob_id": 77, "oob_type": "iDRAC"},
+                    },
+                    "oob_named": {
+                        "pk": donor.pk,
+                        "name": donor.name,
+                        "librenms_link": {"host_id": None, "oob_id": None},
+                    },
+                },
+            },
+            "libre_device": {
+                "device_id": 5,
+                "sysName": "merge-oob-winner",
+                "hostname": "merge-oob-winner",
+                "serial": "ABC123",
+                "hardware": "Model-X",
+                "os": "ios",
+                "ip": "10.0.0.1",
+                "location": "lab",
+                "status": True,
+            },
+            "server_key": "default",
+            "existing_device_model_name": "device",
+            "existing_device_url": winner.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        html = render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+        # The OOB-only candidate must surface its OOB linkage, not fall through to "not linked".
+        assert "currently linked to LibreNMS as OOB #77" in html
+        assert "(iDRAC)" in html
+
 
 @pytest.mark.django_db
 class TestSerialActionBadges:

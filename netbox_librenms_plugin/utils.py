@@ -2190,6 +2190,12 @@ def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
     marker = entry.get("_migrated_to")
     if not isinstance(marker, dict):
         return None
+    # The marker is namespaced under cf[server_key] and mark_librenms_migrated() always
+    # stamps its own server_key. Reject a marker whose stamped server_key doesn't match the
+    # entry it lives under (malformed or copied across server sub-blocks) so a stray marker
+    # can't force the donor into migrated mode for the wrong server.
+    if marker.get("server_key") != server_key:
+        return None
     device_id = marker.get("device_id")
     # bool is a subclass of int; reject it and non-positive ids so migrated-mode
     # logic never targets a bogus device from a malformed marker.

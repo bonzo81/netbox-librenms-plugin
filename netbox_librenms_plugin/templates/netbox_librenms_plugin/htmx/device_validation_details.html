@@ -448,7 +448,7 @@
             <label class="form-check-label" for="merge-winner-host-{{ libre_device.device_id }}">
               <span class="badge bg-primary-lt me-1">Host name match</span>
               <strong>{{ host.name }}</strong>
-              <span class="text-muted">— matches LibreNMS hostname{% if host.librenms_link.host_id %}, currently linked to LibreNMS device #{{ host.librenms_link.host_id }}{% if host.librenms_link.oob_id %} (OOB #{{ host.librenms_link.oob_id }}{% if host.librenms_link.oob_type %}, {{ host.librenms_link.oob_type }}{% endif %}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
+              <span class="text-muted">— matches LibreNMS hostname{% if host.librenms_link.host_id %}, currently linked to LibreNMS device #{{ host.librenms_link.host_id }}{% if host.librenms_link.oob_id %} (OOB #{{ host.librenms_link.oob_id }}{% if host.librenms_link.oob_type %}, {{ host.librenms_link.oob_type }}{% endif %}){% endif %}{% elif host.librenms_link.oob_id %}, currently linked to LibreNMS as OOB #{{ host.librenms_link.oob_id }}{% if host.librenms_link.oob_type %} ({{ host.librenms_link.oob_type }}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
             </label>
           </div>
           <div class="form-check mb-1">
@@ -459,7 +459,7 @@
             <label class="form-check-label" for="merge-winner-oob-{{ libre_device.device_id }}">
               <span class="badge bg-purple text-white me-1">Serial match (OOB)</span>
               <strong>{{ oob.name }}</strong>
-              <span class="text-muted">— matches chassis serial{% if oob.librenms_link.host_id %}, currently linked to LibreNMS device #{{ oob.librenms_link.host_id }}{% if oob.librenms_link.oob_id %} (OOB #{{ oob.librenms_link.oob_id }}{% if oob.librenms_link.oob_type %}, {{ oob.librenms_link.oob_type }}{% endif %}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
+              <span class="text-muted">— matches chassis serial{% if oob.librenms_link.host_id %}, currently linked to LibreNMS device #{{ oob.librenms_link.host_id }}{% if oob.librenms_link.oob_id %} (OOB #{{ oob.librenms_link.oob_id }}{% if oob.librenms_link.oob_type %}, {{ oob.librenms_link.oob_type }}{% endif %}){% endif %}{% elif oob.librenms_link.oob_id %}, currently linked to LibreNMS as OOB #{{ oob.librenms_link.oob_id }}{% if oob.librenms_link.oob_type %} ({{ oob.librenms_link.oob_type }}){% endif %}{% else %}, not linked to LibreNMS{% endif %}</span>
             </label>
           </div>
           {% endwith %}
