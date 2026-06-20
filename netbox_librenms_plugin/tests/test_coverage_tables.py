@@ -1467,6 +1467,43 @@ class TestDeviceImportTableRenderActions:
         assert "Linked as host (paired OOB: LibreNMS #99, &lt;idrac&gt;)" in result
         assert "<idrac>" not in result
 
+    def test_malformed_paired_oob_id_does_not_render_host_state(self):
+        """A malformed paired oob_id coerces to None and must NOT render the paired-host state with
+        a bogus 'LibreNMS #bad' title — it should fall through to the generic details button."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 56
+
+        record = {
+            "device_id": 3,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"host_id": 42, "oob_id": "bad", "oob_type": "idrac"},
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=3, record=record))
+
+        assert "Linked as host" not in result
+        assert "#bad" not in result
+
 
 # ===========================================================================
 # DeviceImportTable._build_validation_details_url tests

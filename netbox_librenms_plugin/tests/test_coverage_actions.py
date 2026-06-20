@@ -573,10 +573,20 @@ class TestAttachMessagesOob:
 
     @staticmethod
     def _storage(items):
-        """A messages-storage stand-in that is iterable and accepts .used = False."""
-        storage = MagicMock()
-        storage.__iter__ = lambda self: iter(items)
-        return storage
+        """A messages-storage stand-in with a REAL __iter__. Assigning __iter__ to a MagicMock
+        instance doesn't override the iter() protocol (special methods resolve on the class), so
+        the .used round-trip assertion would never actually exercise consumption/restoration."""
+
+        class _Storage:
+            def __init__(self, values):
+                self.used = False
+                self._values = values
+
+            def __iter__(self):
+                self.used = True
+                return iter(self._values)
+
+        return _Storage(items)
 
     def test_appends_rendered_messages_to_bytes_content(self):
         from django.http import HttpResponse

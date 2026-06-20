@@ -489,6 +489,12 @@ class DeviceImportTable(tables.Table):
                 # pair. Matches the coercion used by the refresh path / find_by_librenms_id.
                 return coerce_librenms_id(value)
 
+            # Coerce both pair ids once. A malformed id becomes None, so the host/OOB pair branches
+            # below require a *valid* id before rendering a paired state — otherwise a bogus value
+            # (e.g. "bad") would slip past the `!= host` check and print "LibreNMS #bad".
+            paired_oob_id_int = _coerce_pair_id(paired_oob_id) if paired_oob_id is not None else None
+            paired_host_id_int = _coerce_pair_id(paired_host_id) if paired_host_id is not None else None
+
             if is_oob_candidate:
                 btn_class = "btn-outline-purple"
                 btn_icon = "mdi-chip"
@@ -502,7 +508,6 @@ class DeviceImportTable(tables.Table):
                 # Use the same strict coercion as the host-half branch (rejects bool/float) so the
                 # OOB-linked and host-half titles share one ID contract — a malformed paired id
                 # isn't shown as a bogus "LibreNMS #1".
-                paired_host_id_int = _coerce_pair_id(paired_host_id) if paired_host_id is not None else None
                 if paired_host_id_int is not None:
                     btn_title = f"Linked as OOB controller (paired host: LibreNMS #{paired_host_id_int})"
                 else:
@@ -519,8 +524,8 @@ class DeviceImportTable(tables.Table):
                 btn_title = "View conflict details"
             elif (
                 match_type == "librenms_id"
-                and paired_oob_id is not None
-                and _coerce_pair_id(paired_oob_id) != _coerce_pair_id(paired_host_id)
+                and paired_oob_id_int is not None
+                and paired_oob_id_int != paired_host_id_int
             ):
                 # This LibreNMS row is the host half of an existing host/OOB
                 # pair. Render it with the same info-tinted styling as the OOB
@@ -536,12 +541,9 @@ class DeviceImportTable(tables.Table):
                 # (librenms_id.<server>.oob.type) and is only string-type-checked,
                 # not sanitised, on the read path. Escape before interpolating
                 # into the title attribute to prevent stored XSS.
-                # paired_oob_id may be a string-digit from older serialization;
-                # coerce to int so display is clean.
-                _oob_id_fmt = (
-                    _coerce_pair_id(paired_oob_id) if _coerce_pair_id(paired_oob_id) is not None else paired_oob_id
-                )
-                btn_title = f"Linked as host (paired OOB: LibreNMS #{escape(str(_oob_id_fmt))}, {escape(paired_oob_type or '')})"
+                # paired_oob_id_int is the strictly-coerced value (guaranteed not None by the
+                # branch condition), so the title can never print a malformed raw id.
+                btn_title = f"Linked as host (paired OOB: LibreNMS #{escape(str(paired_oob_id_int))}, {escape(paired_oob_type or '')})"
             elif has_name_sync or has_sync_needed:
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-information-outline"

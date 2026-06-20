@@ -143,10 +143,11 @@ def make_module_type_with_bays(model, *, manufacturer=None, bay_names=()):
     if manufacturer is None:
         _shared_infra()
         manufacturer = Manufacturer.objects.get(slug="test-mfr")
-    mt, created = ModuleType.objects.get_or_create(manufacturer=manufacturer, model=model)
-    if created:
-        for bn in bay_names:
-            ModuleBayTemplate.objects.create(module_type=mt, name=bn)
+    # Additive: reusing the same model with new bay_names must add the missing templates rather
+    # than silently skip them (the create-only guard made tests order-dependent).
+    mt, _ = ModuleType.objects.get_or_create(manufacturer=manufacturer, model=model)
+    for bn in bay_names:
+        ModuleBayTemplate.objects.get_or_create(module_type=mt, name=bn)
     return mt
 
 
