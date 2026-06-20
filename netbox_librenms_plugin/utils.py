@@ -188,7 +188,12 @@ def get_virtual_chassis_members(device: Device) -> list:
     members = getattr(vc, "members", None) if vc is not None else None
     if members is None or not hasattr(members, "all"):
         return [device]
-    return list(members.all())
+    try:
+        return list(members.all())
+    except Exception:
+        # Non-enumerable / broken membership: fall back to the documented [device] rather than
+        # letting the enumeration error bubble out of this centralizing helper.
+        return [device]
 
 
 def get_vc_member_positions(device: Device) -> set[int]:

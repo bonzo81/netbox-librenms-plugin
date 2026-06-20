@@ -29,22 +29,26 @@ _TEXT_COLOUR = re.compile(
     r"|text-(?:dark|white|light|muted|black|body(?:-emphasis|-secondary|-tertiary)?)"
     r")\b"
 )
-_CLASS_ATTR = re.compile(r'class="([^"]*)"')
+# Match both quote styles and class attributes that span multiple lines — a single-line,
+# double-quote-only regex let single-quoted or wrapped `class=...` badges evade the scan.
+_CLASS_ATTR = re.compile(r"""class\s*=\s*(['"])(.*?)\1""", re.DOTALL)
 
 
 def _bare_badge_offenders():
     offenders = []
     for path in TEMPLATE_ROOT.rglob("*.html"):
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            for cls in _CLASS_ATTR.findall(line):
-                if "badge" not in cls.split():
-                    continue
-                if "-lt" in cls:  # Tabler light variant ships a readable text colour
-                    continue
-                if "text-bg-" in cls:  # pairs fg+bg
-                    continue
-                if _SOLID_BG.search(cls) and not _TEXT_COLOUR.search(cls):
-                    offenders.append(f'{path.name}:{lineno}  class="{cls}"')
+        text = path.read_text()
+        for m in _CLASS_ATTR.finditer(text):
+            cls = " ".join(m.group(2).split())  # collapse multiline / runs of whitespace
+            lineno = text.count("\n", 0, m.start()) + 1
+            if "badge" not in cls.split():
+                continue
+            if "-lt" in cls:  # Tabler light variant ships a readable text colour
+                continue
+            if "text-bg-" in cls:  # pairs fg+bg
+                continue
+            if _SOLID_BG.search(cls) and not _TEXT_COLOUR.search(cls):
+                offenders.append(f'{path.name}:{lineno}  class="{cls}"')
     return offenders
 
 
@@ -70,3 +74,18 @@ def test_text_colour_regex_rejects_layout_utilities():
     assert not _TEXT_COLOUR.search("badge bg-danger text-uppercase")
     assert not _TEXT_COLOUR.search("text-nowrap")
     assert not _TEXT_COLOUR.search("text-truncate")
+
+
+def test_class_attr_parses_single_quoted_and_multiline_attributes():
+    """The class scanner must see single-quoted and line-wrapped class attributes, or a bare
+    solid-colour badge written that way would evade the contrast guard (false negative)."""
+    # Single-quoted attribute.
+    single = """<span class='badge bg-danger'>x</span>"""
+    assert [m.group(2) for m in _CLASS_ATTR.finditer(single)] == ["badge bg-danger"]
+    # Multiline / wrapped attribute → collapses to one class string with the badge tokens.
+    multiline = '<span\n  class="badge\n         bg-warning">x</span>'
+    classes = [" ".join(m.group(2).split()) for m in _CLASS_ATTR.finditer(multiline)]
+    assert "badge bg-warning" in classes
+    # And such a bare badge would be flagged by the offender logic (no paired text colour).
+    cls = "badge bg-danger"
+    assert _SOLID_BG.search(cls) and not _TEXT_COLOUR.search(cls)

@@ -172,7 +172,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             # Capture the real fetch failure so that when there's ultimately nothing to show,
             # post() can surface the actual LibreNMS error instead of a generic "No links found".
             if not success:
-                self._links_fetch_error = data.get("error") if isinstance(data, dict) else str(data)
+                # A failed fetch may carry the detail under "error" OR "message"; capture either,
+                # else post() loses the real reason and can cache an empty "successful" refresh
+                # over the existing cable snapshot.
+                self._links_fetch_error = (
+                    (data.get("error") or data.get("message") or str(data)) if isinstance(data, dict) else str(data)
+                )
             elif isinstance(data, dict):
                 self._links_fetch_error = (
                     data.get("message") or data.get("error") or "Unexpected response from LibreNMS"

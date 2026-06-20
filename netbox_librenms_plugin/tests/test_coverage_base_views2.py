@@ -507,6 +507,35 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         assert result is None
         assert view._oob_links_fetch_failed is True
 
+    def test_failed_host_fetch_records_message_only_error(self):
+        """A failed host links fetch may carry its detail under "message" (no "error" key). It must
+        still be recorded in _links_fetch_error — otherwise post() loses the reason and can cache
+        an empty "successful" refresh over the existing cable snapshot."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False
+        view._librenms_api.get_librenms_id.return_value = 42  # host mapping present
+
+        # Host fetch fails with a message-only body.
+        view._librenms_api.get_device_links.return_value = (False, {"message": "Device is down"})
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=obj,
+            ),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
+        ):
+            view.get_links_data(obj)
+
+        assert view._links_fetch_error == "Device is down"
+
 
 # =============================================================================
 # TestGetDeviceByIdOrNameEdgeCases  — MultipleObjectsReturned, FQDN fallback
