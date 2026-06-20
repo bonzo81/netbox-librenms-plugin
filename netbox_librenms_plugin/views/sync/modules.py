@@ -36,18 +36,28 @@ logger = logging.getLogger(__name__)
 
 
 def _modules_redirect_response(request, sync_url, server_key=None):
-    """Return a redirect response that works for both classic and HTMX form posts.
+    """
+    Return a redirect response that works for both classic and HTMX form posts.
 
     For HTMX requests (those carrying ``HX-Request: true``) we return an empty
-    200 response with an ``HX-Redirect`` header so the browser performs a full
-    navigation that picks up Django messages and refreshes the modules table.
-    For non-HTMX requests we return a normal Django redirect.
+    response with an ``HX-Redirect`` header so the browser performs a full navigation
+    that picks up Django messages and refreshes the modules table. For non-HTMX
+    requests we return a normal Django redirect.
 
-    These module sync actions are server-scoped, so the follow-up page must stay on the
-    server whose cache namespace this request just mutated/read. The active ``server_key`` is
-    propagated as a ``?server_key=`` query param; when not passed explicitly it is read from
-    the request (POST then GET) so every redirect site keeps the server context without each
-    caller having to thread it through.
+    These module sync actions are server-scoped, so the follow-up page must stay on
+    the server whose cache namespace this request just mutated/read. The active
+    ``server_key`` is propagated as a ``?server_key=`` query param; when not passed
+    explicitly it is read from the request (POST then GET) so every redirect site
+    keeps the server context without each caller having to thread it through.
+
+    Args:
+        request: The current HTTP request (HTMX header + server_key source).
+        sync_url (str): The base sync URL to redirect to.
+        server_key: The active LibreNMS server key; read from the request when None.
+
+    Returns:
+        HttpResponse: An HTMX ``HX-Redirect`` response, or a Django redirect for a
+            classic post.
     """
     if server_key is None:
         server_key = request.POST.get("server_key") or request.GET.get("server_key") or ""
@@ -283,12 +293,21 @@ def _adopt_existing_template_interfaces(device, module):
 
 
 def _module_interface_update_message(bind_result, location):
-    """Compose the success message for a bound module-interface update.
+    """
+    Compose the success message for a bound module-interface update.
 
     A single ``post`` can both bind the primary LibreNMS-identified interface
     (``interface``/``port_id`` present) and adopt standalone template interfaces
     (``adopted_count``). When both happen, report both so the primary bind isn't
     silently hidden behind the adoption tally.
+
+    Args:
+        bind_result (dict): The bind outcome, read for ``interface`` and
+            ``adopted_count``.
+        location (str): A human-readable location for the bound interface(s).
+
+    Returns:
+        str: The composed success message.
     """
     interface_name = bind_result.get("interface")
     adopted_count = bind_result.get("adopted_count") or 0
@@ -1052,18 +1071,28 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
     @staticmethod
     def _candidate_bays_for_item(bays, parent_module_id):
-        """Return the name→bay dict to match an inventory item against.
+        """
+        Return the name→bay dict to match an inventory item against.
 
-        - When the item traces to an installed parent module, scope to that module's child
-          bays (so duplicate bay names resolve to the right parent).
-        - Otherwise match against the SAME combined set the table uses (``all_bays``):
-          device-level bays plus every module-scoped bay, device bays winning on a name
-          collision. This is essential for items whose matched bay is module-scoped but
-          whose hierarchy does not resolve a parent module — the common case being a
-          synthetic transceiver rendered as a top-level row whose ``Transceiver N/M`` bay
-          lives under an installed line card (those bays are module-scoped, never top-level).
-          Without it, bulk install skips such a row as "no matching bay" even though the
-          table matched it and a single install (which trusts the table's bay) succeeds.
+        When the item traces to an installed parent module, scope to that module's
+        child bays (so duplicate bay names resolve to the right parent). Otherwise
+        match against the SAME combined set the table uses (``all_bays``): device-level
+        bays plus every module-scoped bay, device bays winning on a name collision.
+        That combined fallback is essential for items whose matched bay is
+        module-scoped but whose hierarchy does not resolve a parent module — the common
+        case being a synthetic transceiver rendered as a top-level row whose
+        ``Transceiver N/M`` bay lives under an installed line card (those bays are
+        module-scoped, never top-level). Without it, bulk install skips such a row as
+        "no matching bay" even though the table matched it and a single install (which
+        trusts the table's bay) succeeds.
+
+        Args:
+            bays: The candidate module bays for the device.
+            parent_module_id: The installed parent module id, or falsy to use the
+                combined device + module-scoped set.
+
+        Returns:
+            dict: A ``name -> bay`` mapping to match the inventory item against.
         """
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 

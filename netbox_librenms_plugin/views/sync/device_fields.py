@@ -558,15 +558,29 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
     @staticmethod
     def _sync_redirect(request, pk, fallback_server_key=None):
-        """Redirect to the device sync tab, preserving the POST-scoped server_key so a
-        multi-server user returns to the same server tab instead of the default one. When the
-        form omits server_key, fall back to *fallback_server_key* (the active API server) so the
-        redirect doesn't drop a non-default server context the action actually ran against.
+        """
+        Redirect to the device sync tab, preserving the POST-scoped server_key.
 
-        The server_key is reflected only when it matches a configured server, and the final
-        redirect is gated by Django's ``url_has_allowed_host_and_scheme`` with the sink inside
-        the validated branch — the open-redirect barrier CodeQL recognises for py/url-redirection
-        (CWE-601). Mirrors :func:`mixins._safe_redirect_response`.
+        A multi-server user returns to the same server tab instead of the default
+        one. When the form omits server_key, fall back to *fallback_server_key* (the
+        active API server) so the redirect doesn't drop a non-default server context
+        the action actually ran against.
+
+        The server_key is reflected only when it matches a configured server, and the
+        final redirect is gated by Django's ``url_has_allowed_host_and_scheme`` with
+        the sink inside the validated branch — the open-redirect barrier CodeQL
+        recognises for py/url-redirection (CWE-601). Mirrors
+        :func:`mixins._safe_redirect_response`.
+
+        Args:
+            request: The current HTTP request (source of the ``server_key`` POST).
+            pk: The device primary key the sync tab is reversed for.
+            fallback_server_key: The active API server key used when the form omits
+                ``server_key``.
+
+        Returns:
+            HttpResponseRedirect: A redirect to the sync tab, with the validated
+                ``server_key`` query param when one matches a configured server.
         """
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 

@@ -56,14 +56,21 @@ def _attach_messages_oob(response, request):
     Append a single OOB-swap toast container to an HTMX response.
 
     NetBox's standard ``inc/messages.html`` renders a
-    ``<div id="django-messages" hx-swap-oob="true">`` with one Bootstrap toast
-    per pending Django message. Including this snippet inside per-row partials
-    causes problems on multi-row OOB responses because each render emits a
-    matching ``id="django-messages"`` div and the LAST swap (typically empty
-    once messages have been consumed by an earlier render) wipes the toasts.
+    ``<div id="django-messages" hx-swap-oob="true">`` with one Bootstrap toast per
+    pending Django message. Including this snippet inside per-row partials causes
+    problems on multi-row OOB responses because each render emits a matching
+    ``id="django-messages"`` div and the LAST swap (typically empty once messages
+    have been consumed by an earlier render) wipes the toasts.
 
-    Centralising the include here guarantees a single render per HTMX response
-    so toasts always make it to NetBox's afterSettle ``initMessages()`` hook.
+    Centralising the include here guarantees a single render per HTMX response so
+    toasts always make it to NetBox's afterSettle ``initMessages()`` hook.
+
+    Args:
+        response: The HTMX response whose content the toast container is appended to.
+        request: The current HTTP request (source of pending Django messages).
+
+    Returns:
+        The response, unchanged when it has no byte content or nothing is queued.
     """
     if response is None or not hasattr(response, "content"):
         return response
@@ -181,23 +188,30 @@ def _htmx_error_response(message: str) -> HttpResponse:
 
 
 def _save_device(device, update_fields: list[str] | None = None, request=None) -> HttpResponse | None:
-    """Persist a Device row, returning an HttpResponse on failure or None on success.
+    """
+    Persist a Device row, returning an HttpResponse on failure or None on success.
 
     When ``update_fields`` is provided, the call uses ``save(update_fields=...)``
-    which (a) issues a narrower UPDATE that only writes those columns and
-    (b) bypasses ``full_clean()``.  This is the correct mode when the
-    caller mutates only a known small set of fields and the device row
-    may carry pre-existing inconsistencies on *other* fields (e.g. a
-    legacy ``face`` value left behind after a rack was cleared).
-    Validating those untouched fields would block legitimate updates.
+    which issues a narrower UPDATE that only writes those columns and bypasses
+    ``full_clean()``. This is the correct mode when the caller mutates only a known
+    small set of fields and the device row may carry pre-existing inconsistencies on
+    *other* fields (e.g. a legacy ``face`` value left behind after a rack was
+    cleared); validating those untouched fields would block legitimate updates.
 
-    When ``update_fields`` is ``None`` (the default), the legacy behaviour
-    is preserved: ``full_clean()`` runs against the entire row before
-    ``save()`` writes every column.
+    When ``update_fields`` is ``None`` (the default), the legacy behaviour is
+    preserved: ``full_clean()`` runs against the entire row before ``save()`` writes
+    every column.
 
-    When ``request`` is provided and the request is an HTMX request, errors
-    are returned via ``_htmx_error_response()`` so modal swap/toast flows
-    remain intact.  Otherwise plain ``HttpResponse`` status codes are returned.
+    Args:
+        device: The NetBox Device to persist.
+        update_fields (list[str] | None): The columns to write; None runs
+            ``full_clean()`` and saves the whole row.
+        request: The current HTTP request; when it is an HTMX request, errors are
+            returned via ``_htmx_error_response()`` so modal swap/toast flows remain
+            intact, otherwise plain ``HttpResponse`` status codes are used.
+
+    Returns:
+        HttpResponse | None: An error response on failure, or None on success.
     """
 
     def _err(msg: str, status: int) -> HttpResponse:
@@ -387,16 +401,27 @@ class DeviceImportHelperMixin:
         )
 
     def post_commit_refresh_fallback(self, request, hx_trigger, deferred_messages=()):
-        """Safe HTMX response when a *committed* import mutation can't reload its row.
+        """
+        Safe HTMX response when a *committed* import mutation can't reload its row.
 
-        The OOB-attach / promote / merge handlers commit their DB mutation, clear the cached
-        import row, then re-read LibreNMS to re-render the row. If that follow-up read fails
-        (LibreNMS briefly unreachable, the cache was just cleared) the mutation has still
-        succeeded — returning an HTMX *error* would tell the user the action failed and invite
-        a retry against already-mutated state. Instead surface the outcome (any deferred
-        messages plus a refresh hint) and return 200 with the same client trigger the success
-        path uses, so the UI converges (modal refresh / close + visible toast) rather than
-        reporting a false failure.
+        The OOB-attach / promote / merge handlers commit their DB mutation, clear the
+        cached import row, then re-read LibreNMS to re-render the row. If that
+        follow-up read fails (LibreNMS briefly unreachable, the cache was just
+        cleared) the mutation has still succeeded — returning an HTMX *error* would
+        tell the user the action failed and invite a retry against already-mutated
+        state. Instead surface the outcome (any deferred messages plus a refresh hint)
+        and return 200 with the same client trigger the success path uses, so the UI
+        converges (modal refresh / close + visible toast) rather than reporting a
+        false failure.
+
+        Args:
+            request: The current HTTP request.
+            hx_trigger: The ``HX-Trigger`` value to send (matching the success path).
+            deferred_messages: Iterable of ``(level, text)`` messages to surface.
+
+        Returns:
+            HttpResponse: A 200 response with the OOB toast container attached and
+                ``HX-Reswap: none`` so the empty body doesn't blank the modal/row.
         """
         for level, text in deferred_messages:
             messages.add_message(request, level, text)
@@ -1071,16 +1096,24 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
 
 def _suggest_oob_interface(device, oob_candidate):
-    """Return ``(suggested_interface_id, default_new_name)`` for an OOB IP.
+    """
+    Suggest an interface (and default new-interface name) for an OOB IP.
 
-    NetBox requires ``oob_ip`` be assigned to one of the device's interfaces,
-    so the OOB-attach form lets the user pick (or create) one. This pre-selects
-    the existing interface whose name looks like an OOB/management port
-    (idrac/ilo/ipmi/bmc/drac/oob/mgmt), or ``None`` if there's no obvious match,
-    and derives a sensible default name for a new interface from the OOB type
-    (e.g. ``idrac0``). The OOB IP is frequently *not* physically on the matched
-    interface — operators attach it to an ``idrac0``-style port deliberately —
-    so this is only a suggestion the user can override.
+    NetBox requires ``oob_ip`` be assigned to one of the device's interfaces, so the
+    OOB-attach form lets the user pick (or create) one. This pre-selects the existing
+    interface whose name looks like an OOB/management port
+    (idrac/ilo/ipmi/bmc/drac/oob/mgmt), and derives a sensible default name for a new
+    interface from the OOB type (e.g. ``idrac0``). The OOB IP is frequently *not*
+    physically on the matched interface — operators attach it to an ``idrac0``-style
+    port deliberately — so this is only a suggestion the user can override.
+
+    Args:
+        device: The NetBox device the OOB IP will be attached to.
+        oob_candidate (dict): The OOB-controller candidate, read for its ``type``.
+
+    Returns:
+        tuple: ``(suggested_interface_id, default_new_name)``; the id is None when no
+            interface name obviously matches.
     """
     oob_type = (oob_candidate.get("type") or "oob").strip().lower() or "oob"
     default_new_name = f"{oob_type}0"
@@ -2480,18 +2513,30 @@ class AddAsOOBView(
 
     @staticmethod
     def _missing_oob_ip_permissions(request, ip_str, device=None):
-        """Return a warning string naming missing perms for the OOB-IP set, or None.
+        """
+        Return a warning string naming missing perms for the OOB-IP set, or None.
 
         The OOB-attach view authorizes ``("change", Device)`` at the top, but the
-        IP-set sub-flow can additionally create an :class:`Interface` (when the
-        user picks ``__new__``), create an :class:`IPAddress` (no record for the
-        host yet), or re-home an existing one. Check the model perms the requested
-        operation actually needs so a caller with only Device-change rights can't
-        mutate Interface/IPAddress through this view.
+        IP-set sub-flow can additionally create an :class:`Interface` (when the user
+        picks ``__new__``), create an :class:`IPAddress` (no record for the host yet),
+        or re-home an existing one. Check the model perms the requested operation
+        actually needs so a caller with only Device-change rights can't mutate
+        Interface/IPAddress through this view.
 
         A malformed *ip_str* short-circuits to an invalid-IP warning: the
-        ``address__net_host`` preflight below would raise on it, and _attach_oob_ip()
-        would reject it anyway, so surface the same non-attachable outcome here.
+        ``address__net_host`` preflight below would raise on it, and
+        _attach_oob_ip() would reject it anyway, so surface the same non-attachable
+        outcome here.
+
+        Args:
+            request: The current HTTP request (source of the interface selection).
+            ip_str (str): The OOB IP address to attach.
+            device: The target device, used to check whether a named interface
+                already exists.
+
+        Returns:
+            str | None: A warning naming the missing permission(s) or invalid IP, or
+                None when no extra permission is needed.
         """
         from ipaddress import ip_address as _ip
 
@@ -2575,21 +2620,27 @@ class AddAsOOBView(
 
     @staticmethod
     def _resolve_oob_interface(request, device):
-        """Resolve (or create) the interface the OOB IP should attach to.
+        """
+        Resolve (or create) the interface the OOB IP should attach to.
 
-        Reads ``oob_interface_id`` from the OOB-attach form: an interface PK, or
-        the sentinel ``"__new__"`` to create one named ``oob_new_interface_name``.
-
-        Returns ``(interface, None)`` on success, ``(None, None)`` when the user made
-        no selection (linkage proceeds without setting ``oob_ip``), or
-        ``(None, "permission_add")`` when creating a new interface is required but the
-        user lacks Interface ``add``.
+        Reads ``oob_interface_id`` from the OOB-attach form: an interface PK, or the
+        sentinel ``"__new__"`` to create one named ``oob_new_interface_name``.
 
         The caller runs inside ``transaction.atomic()``. The add-vs-reuse permission
         decision can only be made from the locked row: the unlocked pre-flight in
-        ``_missing_oob_ip_permissions`` can race a concurrent delete and wave through a
-        change-Device-only user, so re-verify ``add`` here before creating. Symmetric to
-        the re-check in :meth:`_attach_oob_ip`.
+        ``_missing_oob_ip_permissions`` can race a concurrent delete and wave through
+        a change-Device-only user, so re-verify ``add`` here before creating.
+        Symmetric to the re-check in :meth:`_attach_oob_ip`.
+
+        Args:
+            request: The current HTTP request (source of the interface selection).
+            device: The device the interface belongs to.
+
+        Returns:
+            tuple: ``(interface, None)`` on success, ``(None, None)`` when no
+                selection was made, ``(None, "permission_add")`` when creating is
+                required but the user lacks Interface ``add``, or
+                ``(None, "invalid_name")`` for a malformed new name.
         """
         from django.core.exceptions import ValidationError
         from dcim.models import Interface
@@ -2637,16 +2688,23 @@ class AddAsOOBView(
 
     @staticmethod
     def _attach_oob_ip(request, ip_str, interface):
-        """Resolve the OOB :class:`IPAddress` for *ip_str* assigned to *interface*.
+        """
+        Resolve the OOB :class:`IPAddress` for *ip_str* assigned to *interface*.
 
-        Returns ``(ip, None)`` on success, or ``(None, reason)`` where *reason* is
-        one of ``"invalid"``, ``"conflict"`` (already on another device / create
-        race), or ``"permission"``.
+        Reuses an existing record for the host (matched via ``net_host`` so any prefix
+        length is accepted) and re-homes it to *interface*, unless it is already
+        assigned to a *different* device's object. Otherwise creates a ``/32`` (IPv4)
+        or ``/128`` (IPv6).
 
-        Reuses an existing record for the host (matched via ``net_host`` so any
-        prefix length is accepted) and re-homes it to *interface*, unless it is
-        already assigned to a *different* device's object. Otherwise creates a
-        ``/32`` (IPv4) or ``/128`` (IPv6).
+        Args:
+            request: The current HTTP request (used for permission checks).
+            ip_str (str): The OOB IP address to resolve.
+            interface: The interface the address should be assigned to.
+
+        Returns:
+            tuple: ``(ip, None)`` on success, or ``(None, reason)`` where *reason* is
+                ``"invalid"``, ``"conflict"`` (already on another device / create
+                race), or ``"permission"``.
         """
         from ipaddress import ip_address as _ip
 
