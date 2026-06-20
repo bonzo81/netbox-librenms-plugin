@@ -604,9 +604,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         if link.get("_source") == "oob":
             return
         if local_port := link.get("local_port"):
-            # Serial rows map to ConsoleServerPort, not Interface
+            # Serial rows map to ConsoleServerPort, not Interface. Resolve the CSP on the
+            # LibreNMS sync device, not the viewed obj/selected_device: get_links_data builds
+            # serial rows from get_librenms_sync_device(obj), so on a VC-member page the CSP
+            # lives on the priority member — querying obj would drop the row to "Console Server
+            # Port Not Found" and lose its Sync Cable action.
             if link.get("_source") == "serial":
-                csp = obj.consoleserverports.filter(name=local_port).first()
+                if server_key is None:
+                    server_key = self.librenms_api.server_key
+                sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+                csp = sync_device.consoleserverports.filter(name=local_port).first()
                 if csp:
                     link["local_port_url"] = reverse("dcim:consoleserverport", args=[csp.pk])
                     link["netbox_local_interface_id"] = csp.pk

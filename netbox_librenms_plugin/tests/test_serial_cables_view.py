@@ -271,6 +271,24 @@ class TestEnrichLocalPortSerial:
         assert "local_port_url" not in link
         assert "netbox_local_interface_id" not in link
 
+    def test_csp_resolved_on_sync_device_not_viewed_obj(self):
+        """On a VC-member page the CSP lives on the resolved sync device; enrich_local_port must resolve it there, not on the viewed obj (which would drop the row to 'Console Server Port Not Found')."""
+        view = _make_view()
+        # The viewed member has NO CSP; the sync device (priority member) owns it.
+        viewed, _, _ = make_serial_device("ser-enrich-viewed")
+        sync_device, (csp,), _ = make_serial_device("ser-enrich-sync", csp_names=["ttyS5"])
+
+        link = {"local_port": "ttyS5", "local_port_id": "serial:1005", "_source": "serial"}
+        with patch(
+            "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+            return_value=sync_device,
+        ):
+            view.enrich_local_port(link, viewed)
+
+        # Resolved against the sync device, not the viewed obj.
+        assert link["netbox_local_interface_id"] == csp.pk
+        assert str(csp.pk) in link["local_port_url"]
+
 
 # ---------------------------------------------------------------------------
 # check_serial_cable_status
