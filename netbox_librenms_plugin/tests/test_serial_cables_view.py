@@ -122,6 +122,31 @@ class TestGetLinksDataSerial:
         port_names = {r["local_port"] for r in serial_rows}
         assert port_names == {"ttyS3", "ttyS7"}
 
+    def test_serial_gate_uses_sync_device_csps_on_vc(self):
+        """On a VC-member page the viewed obj may lack ConsoleServerPorts while the resolved sync
+        device owns them. The serial gate must check lookup_device (the sync device) — the sensor
+        fetch is already scoped to it — so the rows still append instead of being skipped."""
+        view = _make_view()
+        sensors = [_serial_sensor(3, "router-a")]
+        self._base_setup(view, sensors=sensors)
+        obj = _mock_obj(pk=1, has_csps=False)  # viewed VC member: NO CSPs
+        obj.virtual_chassis = MagicMock()  # VC page
+        sync_device = _mock_obj(pk=99, has_csps=True)  # resolved sync device: HAS CSPs
+
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=sync_device,
+            ),
+            patch.object(view, "get_ports_data", return_value={"ports": []}),
+        ):
+            result = view.get_links_data(obj)
+
+        serial_rows = [r for r in result if r.get("_source") == "serial"]
+        assert len(serial_rows) == 1  # gate passed via the sync device's CSPs
+        view._librenms_api.get_serial_port_sensors.assert_called_once()
+
     def test_no_serial_rows_when_no_csps(self):
         """Serial fetch is skipped entirely when device has no ConsoleServerPorts."""
         view = _make_view()

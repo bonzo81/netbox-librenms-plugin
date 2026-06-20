@@ -497,8 +497,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             links_data, lookup_device, server_key, interface_name_field, alt_name_field
         )
 
-        # Append serial console-server port rows if the device has any CSPs.
-        if hasattr(obj, "consoleserverports") and obj.consoleserverports.exists():
+        # Append serial console-server port rows if the device has any CSPs. Gate on lookup_device
+        # (the resolved sync device), not obj: on a VC-member page the viewed obj may lack CSPs
+        # while the sync device owns them — the sensor fetch above is already scoped to that device.
+        if hasattr(lookup_device, "consoleserverports") and lookup_device.consoleserverports.exists():
             from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
             serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(self.librenms_id)
@@ -512,7 +514,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     serial_sensors,
                 )
             elif serial_sensors:
-                links_data.extend(map_sensors_to_serial_links(serial_sensors, device_id=obj.id))
+                links_data.extend(map_sensors_to_serial_links(serial_sensors, device_id=lookup_device.id))
 
         # Distinguish a *successful* zero-row refresh ([] — flows through to the success path in
         # _prepare_context(), where an OOB-fetch warning can still be surfaced) from a genuine

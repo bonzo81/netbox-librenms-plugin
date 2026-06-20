@@ -81,6 +81,9 @@ class TestBaseCableTableViewGetLinksData:
         # fails closed on a non-int/bool/zero value); a bare MagicMock return would coerce to None and
         # take the OOB-only "no host mapping" branch. Return a real id so the host-fetch path runs.
         view._librenms_api.get_librenms_id.return_value = 42
+        # The serial console-server-port block gates on the resolved sync device; give the sensor
+        # fetch a real (success, []) tuple so a serial-irrelevant test never trips the unpack.
+        view._librenms_api.get_serial_port_sensors.return_value = (True, [])
         return view
 
     def test_get_links_data_returns_none_on_api_error(self):
