@@ -119,9 +119,7 @@ class TestSyncCablesViewNoSelection:
 @pytest.mark.django_db
 class TestSyncCablesViewSuccessPath:
     def test_valid_cable_created(self):
-        """A real Cable is created between two real Interfaces (verified via the interfaces'
-        cable FKs). Only the cached LibreNMS link payload + messages/redirect/reverse/librenms_api
-        boundaries are mocked; the real Cable.objects.create + duplicate check run."""
+        """A real Cable is created between two real Interfaces (verified via the interfaces' cable FKs)."""
         from dcim.models import Cable
 
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -925,8 +923,7 @@ class TestSyncIPAddressesViewPermissionDenied:
 
 class TestSyncIPAddressesViewUnknownServerKey:
     def test_unknown_server_key_errors_without_500(self):
-        """A stale/tampered POST server_key must surface a user-facing error +
-        redirect, not raise (LibreNMSAPI raises KeyError for unknown keys)."""
+        """A stale/tampered POST server_key must surface a user-facing error + redirect, not raise (LibreNMSAPI raises KeyError for unknown keys)."""
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
         view = object.__new__(SyncIPAddressesView)
@@ -1031,13 +1028,7 @@ class TestSyncIPAddressesGetManagementIp:
 
 @pytest.mark.django_db
 class TestSyncIPAddressesViewIPWrites:
-    """SyncIPAddressesView create/update/unchanged against real IPAddress rows.
-
-    Real Device + Interface (carrying a real librenms_id port-id CF) + IPAddress; the interface
-    is re-resolved from current NetBox state and the IP is created / re-homed / left unchanged
-    via the real ORM (verified by reload). Only the cached LibreNMS payload and the
-    messages/redirect/reverse/librenms_api boundaries are mocked.
-    """
+    """SyncIPAddressesView create/update/unchanged against real IPAddress rows."""
 
     def _view(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1301,15 +1292,7 @@ class TestSyncIPAddressesViewVMInterface:
 
 @pytest.mark.django_db
 class TestSyncIPAddressesViewInterfaceResolution:
-    """The sync re-resolves the target interface against current NetBox state
-    rather than trusting the cached ``interface_url`` (which goes stale when an
-    interface is synced after the IP rows were cached).
-
-    Driven against real Device / Interface / IPAddress: the interface maps are built from real
-    interfaces carrying real librenms_id port-id custom fields, and the stale-url regression
-    creates a real IPAddress assigned to the re-resolved interface — not a patched IPAddress
-    manager whose ``create`` kwargs are merely asserted.
-    """
+    """The sync re-resolves the target interface against current NetBox state rather than trusting the cached ``interface_url`` (which goes stale when an interface is synced after the IP rows were cached)."""
 
     def _view(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1365,9 +1348,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_name["eth0"].pk == eth0.pk
 
     def test_build_interface_maps_marks_duplicate_port_id_ambiguous(self):
-        """Two interfaces sharing the same stored port id must mark that id ambiguous
-        (None) rather than silently keeping the last one — so the IP isn't bound to an
-        arbitrary interface."""
+        """Two interfaces sharing the same stored port id must mark that id ambiguous (None) rather than silently keeping the last one — so the IP isn't bound to an arbitrary interface."""
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
         view = self._view()
@@ -1385,8 +1366,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert set(by_name) == {"eth0", "eth1"}
 
     def test_match_interface_fails_safe_on_ambiguous_port_id(self):
-        """An ambiguous port id (None value) must return None and NOT fall through to a
-        name match for the same id, which could bind the address just as wrongly."""
+        """An ambiguous port id (None value) must return None and NOT fall through to a name match for the same id, which could bind the address just as wrongly."""
         dev = make_device("ipres-failsafe")
         named = make_interface(dev, "eth0")
         result = self._view()._match_interface(
@@ -1397,10 +1377,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert result is None
 
     def test_stale_interface_url_still_assigns_after_interface_synced(self):
-        """Regression: cached row was enriched before the interface existed
-        (``interface_url`` is None), but the interface has since been synced.
-        The IP must be assigned to it without a manual cache refresh — and a real
-        IPAddress is created and bound to the re-resolved interface."""
+        """Regression: cached row was enriched before the interface existed (``interface_url`` is None), but the interface has since been synced."""
         from ipam.models import IPAddress
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1453,9 +1430,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         return vc, members
 
     def test_build_interface_maps_indexes_all_vc_members(self):
-        """LibreNMS treats a VC as one logical device, so a member's IP can resolve to an
-        interface on ANOTHER member: _build_interface_maps(viewed_member) must index every
-        member's interfaces, keyed by their stored LibreNMS port id."""
+        """LibreNMS treats a VC as one logical device, so a member's IP can resolve to an interface on ANOTHER member: _build_interface_maps(viewed_member) must index every member's interfaces, keyed by their stored LibreNMS port id."""
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
         _vc, members = self._make_vc("ipres-vc", [1, 2])
@@ -1476,10 +1451,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_name["Ethernet2"].pk == i2.pk
 
     def test_primary_ip_not_set_from_sibling_vc_member_interface(self):
-        """Because _build_interface_maps indexes every VC member, a synced IP can resolve to a
-        SIBLING member's interface. The primary-IP auto-match must NOT point obj.primary_ip at an
-        address on another device's interface — save() skips full_clean, so it would persist an
-        invalid primary. The row is recorded as primary_no_interface instead."""
+        """Because _build_interface_maps indexes every VC member, a synced IP can resolve to a SIBLING member's interface."""
         from ipam.models import IPAddress
 
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1520,8 +1492,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert results["primary_no_interface"] == ["10.0.0.1"]
 
     def test_build_interface_maps_marks_cross_member_duplicate_name_ambiguous(self):
-        """A name shared by interfaces on two VC members can't silently rebind the address —
-        mark it ambiguous (None), the same fail-safe as a duplicate port id."""
+        """A name shared by interfaces on two VC members can't silently rebind the address — mark it ambiguous (None), the same fail-safe as a duplicate port id."""
         _vc, members = self._make_vc("ipres-vcdup", [1, 2])
         make_interface(members[1], "Ethernet1")
         make_interface(members[2], "Ethernet1")  # same name on another member
@@ -1531,8 +1502,7 @@ class TestSyncIPAddressesViewInterfaceResolution:
         assert by_name["Ethernet1"] is None  # ambiguous across members → fail safe
 
     def test_build_interface_maps_non_vc_device_only_its_own_interfaces(self):
-        """A standalone (non-VC) device must index only its own interfaces — not another
-        device's same-named interface."""
+        """A standalone (non-VC) device must index only its own interfaces — not another device's same-named interface."""
         dev = make_device("ipres-standalone")
         other = make_device("ipres-other")
         own = make_interface(dev, "Ethernet1")
@@ -1644,9 +1614,7 @@ class TestSyncVLANsViewCacheMiss:
 
 @pytest.mark.django_db
 class TestSyncVLANsViewCreateVLAN:
-    """SyncVLANsView create path against a real VLAN row (only the cached LibreNMS data and the
-    messages/redirect/reverse framework seams are mocked; the real get_or_create + transaction
-    run and the created VLAN is reloaded from the DB)."""
+    """SyncVLANsView create path against a real VLAN row (only the cached LibreNMS data and the messages/redirect/reverse framework seams are mocked; the real get_or_create + transaction run and the created VLAN is reloaded from the DB)."""
 
     def _run(self, vlans):
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView

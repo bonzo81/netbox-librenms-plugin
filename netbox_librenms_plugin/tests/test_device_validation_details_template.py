@@ -69,10 +69,7 @@ class TestDeviceValidationDetailsMergeBadge:
 
 @pytest.mark.django_db
 class TestSerialActionBadges:
-    """The serial-match section must render a dedicated badge for each serial_action. The
-    'oob_already_linked' action (introduced when an OOB-typed import matches a device that already
-    has an OOB controller) must NOT fall through to the generic 'Serial match' badge — users would
-    miss that an OOB is already linked."""
+    """The serial-match section must render a dedicated badge for each serial_action."""
 
     def _render(self, serial_action):
         from django.contrib.auth.models import AnonymousUser
@@ -128,9 +125,7 @@ class TestSerialActionBadges:
 
 @pytest.mark.django_db
 class TestExistingLinkStateText:
-    """The 'Exists as …' status line must reflect the existing device's LibreNMS link state for
-    both serial- and hostname-matches: a host link, an OOB-only link, or genuinely unlinked. A
-    device linked only as an OOB controller must not be mislabelled 'not linked to LibreNMS'."""
+    """The 'Exists as …' status line must reflect the existing device's LibreNMS link state for both serial- and hostname-matches: a host link, an OOB-only link, or genuinely unlinked."""
 
     def _render(self, *, match_type, link):
         from django.contrib.auth.models import AnonymousUser

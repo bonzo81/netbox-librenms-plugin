@@ -431,8 +431,7 @@ class TestCreatePlatformFullClean:
 
 
 class TestNormalizeOOBTypeCimc:
-    """The docs advertise CIMC as a supported OOB controller family, so
-    normalize_oob_type() must recognise it (and it must be in OOB_TYPES)."""
+    """The docs advertise CIMC as a supported OOB controller family, so normalize_oob_type() must recognise it (and it must be in OOB_TYPES)."""
 
     def test_cimc_in_canonical_types(self):
         from netbox_librenms_plugin.constants import OOB_TYPES
@@ -451,9 +450,7 @@ class TestNormalizeOOBTypeCimc:
         assert normalize_oob_type("ubuntu", "") is None
 
     def test_prefix_inside_unrelated_word_does_not_match(self):
-        """Whole-token matching: 'drac' inside 'dracut' (and 'ipmi' inside 'ipmitool')
-        must NOT classify a normal device as an OOB controller. Numeric suffixes like
-        iDRAC9 / drac9 must still match."""
+        """Whole-token matching: 'drac' inside 'dracut' (and 'ipmi' inside 'ipmitool') must NOT classify a normal device as an OOB controller."""
         from netbox_librenms_plugin.constants import normalize_oob_type
 
         assert normalize_oob_type("dracut", "") is None
@@ -463,8 +460,7 @@ class TestNormalizeOOBTypeCimc:
 
 
 class TestNormalizeOOBTypePrefersVendorSpecific:
-    """A vendor-specific match must win over the generic 'oob' token, even when the
-    generic token appears earlier (e.g. os='oob', hardware='iDRAC9')."""
+    """A vendor-specific match must win over the generic 'oob' token, even when the generic token appears earlier (e.g."""
 
     def test_generic_oob_in_os_does_not_mask_specific_hardware(self):
         from netbox_librenms_plugin.constants import normalize_oob_type

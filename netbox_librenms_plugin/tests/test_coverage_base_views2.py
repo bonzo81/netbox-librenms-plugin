@@ -26,11 +26,7 @@ def _seed_lib_id(iface, value, server_key="default"):
 
 
 def _vc_with_member(vc_name, master_name, member_name, member_pos=1):
-    """Create a real VirtualChassis with a master (pos 9) and one member at *member_pos*.
-
-    Returns (master, member). ``get_virtual_chassis_member`` maps a port like
-    ``Gi<member_pos>/...`` to *member*.
-    """
+    """Create a real VirtualChassis with a master (pos 9) and one member at *member_pos*."""
     from dcim.models import VirtualChassis
 
     vc = VirtualChassis.objects.create(name=vc_name)
@@ -51,11 +47,7 @@ def _vc_with_member(vc_name, master_name, member_name, member_pos=1):
 
 
 def _q_leaves(q):
-    """Flatten a Django Q into a set of (lookup, value) leaf tuples.
-
-    Lets tests assert the predicates a Q composes without coupling to Q's string
-    representation (quote/order formatting), which is a framework internal.
-    """
+    """Flatten a Django Q into a set of (lookup, value) leaf tuples."""
     from django.db.models import Q
 
     leaves = set()
@@ -166,8 +158,7 @@ class TestLibreNMSIdQ:
         assert str(result) != str(base_only)
 
     def test_dict_form_paths_included(self):
-        """Dict-form devices ({server_key: {"id": N, "oob": {...}}}) must resolve too:
-        the Q must query the __id and __oob__id JSON paths, not just the scalar path."""
+        """Dict-form devices ({server_key: {"id": N, "oob": {...}}}) must resolve too: the Q must query the __id and __oob__id JSON paths, not just the scalar path."""
         from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
 
         leaves = _q_leaves(_librenms_id_q("default", 42))
@@ -369,9 +360,7 @@ class TestGetLinksDataPortNameNone:
 
 
 class TestGetLinksDataOobOnlyEmptyRefresh:
-    """OOB-only mapping (no host librenms_id) with a valid empty OOB result must return []
-    — not None — so _prepare_context() can overwrite the cache with the empty snapshot
-    rather than skip it and leave stale OOB rows behind after a genuine empty refresh."""
+    """OOB-only mapping (no host librenms_id) with a valid empty OOB result must return [] — not None — so _prepare_context() can overwrite the cache with the empty snapshot rather than skip it and leave stale OOB rows behind after a genuine empty refresh."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -426,11 +415,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         assert view.librenms_id is None
 
     def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):
-        """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded. If the OOB
-        controller fetch itself fails, the refresh collects zero rows too — but treating that
-        as a successful empty refresh would overwrite the cache with [] and drop the very OOB
-        rows we couldn't re-fetch. So a failed OOB fetch on an OOB-only mapping must return
-        None (failure), letting _prepare_context() keep the prior snapshot."""
+        """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded."""
         view = self._make_view()
         obj = _mock_obj()
         obj.consoleserverports.exists.return_value = False
@@ -468,10 +453,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         assert view._oob_links_fetch_failed is True
 
     def test_oob_only_malformed_links_payload_returns_none(self):
-        """OOB fetch SUCCEEDS but returns a malformed links payload (links not a list). This used
-        to early-return links_data ([]) from inside the OOB block, bypassing the final failure
-        classification — so an OOB-only device cleared its cached rows on a degraded payload. The
-        malformed branch must now fall through so the final guard returns None (failure)."""
+        """OOB fetch SUCCEEDS but returns a malformed links payload (links not a list)."""
         view = self._make_view()
         obj = _mock_obj()
         obj.consoleserverports.exists.return_value = False
@@ -508,9 +490,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         assert view._oob_links_fetch_failed is True
 
     def test_failed_host_fetch_records_message_only_error(self):
-        """A failed host links fetch may carry its detail under "message" (no "error" key). It must
-        still be recorded in _links_fetch_error — otherwise post() loses the reason and can cache
-        an empty "successful" refresh over the existing cable snapshot."""
+        """A failed host links fetch may carry its detail under "message" (no "error" key)."""
         view = self._make_view()
         obj = _mock_obj()
         obj.consoleserverports.exists.return_value = False
@@ -703,11 +683,7 @@ class TestEnrichRemotePort:
 
 @pytest.mark.django_db
 class TestProcessRemoteDevice:
-    """Real-DB tests for process_remote_device found=True and found=False paths.
-
-    The real get_device_by_id_or_name + enrich_remote_port run end-to-end against
-    real Device rows, so the orchestration is exercised through the actual sub-calls
-    rather than stubbed return tuples."""
+    """Real-DB tests for process_remote_device found=True and found=False paths."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -756,9 +732,7 @@ class TestProcessRemoteDevice:
 
 
 class TestCablePostHostFetchWarning:
-    """post() must warn when the host LLDP fetch failed but OOB/serial rows still made the
-    refresh look successful — otherwise host cables are silently omitted under a success banner.
-    A host failure is expected (and not warned) for an OOB-only device (librenms_id is None)."""
+    """post() must warn when the host LLDP fetch failed but OOB/serial rows still made the refresh look successful — otherwise host cables are silently omitted under a success banner."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -1364,9 +1338,7 @@ class TestPrepareContextInterfaceNameFieldNone:
 
         assert result is None
     def test_fetch_fresh_malformed_ip_payload_returns_none(self):
-        """A success flag with a non-list get_ip_addresses() payload (or a list with non-dict
-        entries) must be treated as a fetch failure — return None before enrichment so post()
-        neither renders an empty table under a success banner nor caches the empty snapshot."""
+        """A success flag with a non-list get_ip_addresses() payload (or a list with non-dict entries) must be treated as a fetch failure — return None before enrichment so post() neither renders an empty table under a success banner nor caches the empty snapshot."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1386,10 +1358,7 @@ class TestPrepareContextInterfaceNameFieldNone:
         mock_cache.set.assert_not_called()  # never cache the empty snapshot as complete
 
     def test_fetch_fresh_dict_row_missing_ip_fields_returns_none(self):
-        """A dict row that passes the container-shape check but lacks the address/prefix and
-        port_id fields _create_base_ip_entry() reads would KeyError mid-enrichment and 500 the
-        fresh-refresh path. The per-row schema guard must reject it → return None before the
-        live mgmt-ip lookup and enrichment ever run."""
+        """A dict row that passes the container-shape check but lacks the address/prefix and port_id fields _create_base_ip_entry() reads would KeyError mid-enrichment and 500 the fresh-refresh path."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1410,8 +1379,7 @@ class TestPrepareContextInterfaceNameFieldNone:
         mock_cache.set.assert_not_called()
 
     def test_cached_render_reuses_cached_ports_without_live_calls(self):
-        """A warm-cache render must enrich from the cached ports_by_id map and never call
-        get_port_by_id(), so the IP tab keeps working when LibreNMS is unavailable."""
+        """A warm-cache render must enrich from the cached ports_by_id map and never call get_port_by_id(), so the IP tab keeps working when LibreNMS is unavailable."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1451,9 +1419,7 @@ class TestPrepareContextInterfaceNameFieldNone:
         assert enriched_rows[0]["interface_name"] == "Gi0/1"
 
     def test_cache_hit_backfills_missing_ports_by_id(self):
-        """A pre-upgrade cache entry without ports_by_id: enrich rebuilds the port map via
-        live get_port_by_id(), and we backfill it into cache under the *remaining* TTL so
-        subsequent warm renders stop re-hitting LibreNMS until the entry would have expired."""
+        """A pre-upgrade cache entry without ports_by_id: enrich rebuilds the port map via live get_port_by_id(), and we backfill it into cache under the *remaining* TTL so subsequent warm renders stop re-hitting LibreNMS until the entry would have expired."""
         view = self._make_view()
         view._librenms_api.cache_timeout = 300
         view._librenms_api.get_port_by_id.return_value = (True, {"port": [{"ifName": "Gi0/1"}]})

@@ -247,8 +247,7 @@ class TestFindInCacheFailsClosed:
 
 
 class TestNumericIDValidation:
-    """post() must reject a non-numeric device_id/vrf_id with a clean 400 rather than let
-    the value reach the ORM and surface as a generic 500."""
+    """post() must reject a non-numeric device_id/vrf_id with a clean 400 rather than let the value reach the ORM and surface as a generic 500."""
 
     def test_non_numeric_object_id_returns_400(self):
         view = _make_view()

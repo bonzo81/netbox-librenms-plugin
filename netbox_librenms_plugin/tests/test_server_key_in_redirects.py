@@ -26,12 +26,7 @@ def _scoped_python_files():
 
 
 def test_every_tab_url_propagates_server_key():
-    """Each ``?tab=`` URL builder must reference ``server_key`` in the same statement window.
-
-    The append is either inline (``... + (f"&server_key={...}" if server_key else "")``) or on
-    one of the next couple of lines (``url = ...?tab=...`` then ``if server_key: url += ...``),
-    so a small forward window covers the real patterns without masking a genuine omission.
-    """
+    """Each ``?tab=`` URL builder must reference ``server_key`` in the same statement window."""
     offenders = []
     views_root = Path(views_pkg.__file__).parent
     for path in _scoped_python_files():

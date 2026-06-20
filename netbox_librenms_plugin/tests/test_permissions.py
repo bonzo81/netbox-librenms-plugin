@@ -25,16 +25,14 @@ class TestLibreNMSPermissionMixin:
         assert mixin.has_write_permission() is False
 
     def test_has_write_permission_no_request_fails_closed(self):
-        """Without self.request (invoked outside dispatch), has_write_permission()
-        returns False instead of raising AttributeError on self.request.user."""
+        """Without self.request (invoked outside dispatch), has_write_permission() returns False instead of raising AttributeError on self.request.user."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
         mixin = LibreNMSPermissionMixin()  # no .request assigned
         assert mixin.has_write_permission() is False
 
     def test_require_write_permission_no_request_returns_403(self):
-        """The write-permission denial path must short-circuit to a 403 when there is
-        no request, rather than crash in messages.error()/_safe_redirect_response()."""
+        """The write-permission denial path must short-circuit to a 403 when there is no request, rather than crash in messages.error()/_safe_redirect_response()."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
         mixin = LibreNMSPermissionMixin()  # no .request assigned
@@ -412,8 +410,7 @@ class TestNetBoxObjectPermissionMixin:
         assert response is None
 
     def test_require_object_permissions_fails_closed_without_request(self):
-        """When the view is invoked outside dispatch() (no self.request), the denial
-        path must return a 403 rather than crash dereferencing self.request."""
+        """When the view is invoked outside dispatch() (no self.request), the denial path must return a 403 rather than crash dereferencing self.request."""
         from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
 
         mixin = NetBoxObjectPermissionMixin()  # no .request assigned
@@ -861,8 +858,7 @@ class TestSafeRedirectUrl:
         assert result == "/current/page/"
 
     def test_non_get_with_no_referrer_falls_back_to_slash(self):
-        """On a non-GET request (request.path is likely POST-only), a missing/rejected
-        referrer falls back to a GET-safe "/" rather than the POST-only path."""
+        """On a non-GET request (request.path is likely POST-only), a missing/rejected referrer falls back to a GET-safe "/" rather than the POST-only path."""
         from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
 
         request = MagicMock()
@@ -899,8 +895,7 @@ class TestSafeRedirectUrl:
         assert result == "/original/page/"
 
     def test_write_permission_denied_rejects_external_referrer(self):
-        """Write permission denial with external referrer falls back to a GET-safe "/"
-        (request is a non-GET MagicMock, so request.path — often POST-only — is avoided)."""
+        """Write permission denial with external referrer falls back to a GET-safe "/" (request is a non-GET MagicMock, so request.path — often POST-only — is avoided)."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
         mixin = LibreNMSPermissionMixin()
@@ -921,8 +916,7 @@ class TestSafeRedirectUrl:
         mock_redirect.assert_called_once_with("/netbox/")
 
     def test_htmx_rejects_external_referrer(self):
-        """HTMX request with external referrer uses a GET-safe "/" fallback in HX-Redirect
-        (non-GET MagicMock request, so the POST-only request.path is avoided)."""
+        """HTMX request with external referrer uses a GET-safe "/" fallback in HX-Redirect (non-GET MagicMock request, so the POST-only request.path is avoided)."""
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
         mixin = LibreNMSPermissionMixin()

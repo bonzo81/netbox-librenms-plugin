@@ -76,16 +76,14 @@ class TestLibreNMSModuleTable:
         assert "Card" in result_str
 
     def test_render_name_depth_zero_oob_badge_renders(self):
-        """Depth-0 OOB row must render the badge without raising (the badge was
-        built with a no-arg format_html that raised TypeError)."""
+        """Depth-0 OOB row must render the badge without raising (the badge was built with a no-arg format_html that raised TypeError)."""
         table = self._make_table()
         result_str = str(table.render_name("Card", {"depth": 0, "_source": "oob"}))
         assert "Card" in result_str
         assert "OOB" in result_str
 
     def test_render_name_nested_oob_badge_inside_padded_container(self):
-        """OOB badge must sit inside the padded <span> so it stays indented on
-        nested rows (was rendering at column 0, outside the container)."""
+        """OOB badge must sit inside the padded <span> so it stays indented on nested rows (was rendering at column 0, outside the container)."""
         table = self._make_table()
         result_str = str(table.render_name("Card", {"depth": 2, "_source": "oob"}))
         assert "OOB" in result_str

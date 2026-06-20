@@ -1068,13 +1068,7 @@ class TestSyncInterfacesViewPost:
 
 @pytest.mark.django_db
 class TestSyncInterfacesViewSyncInterface:
-    """Real-DB tests for SyncInterfacesView.sync_interface target resolution.
-
-    The interface is created via the real ``Interface/VMInterface.objects.get_or_create``
-    on the resolved device/VM, and the VC-member-selection branch runs against a real
-    VirtualChassis. ``update_interface_attributes``/``_sync_interface_vlans`` (separately
-    covered downstream methods) stay patched so each test isolates the routing decision.
-    """
+    """Real-DB tests for SyncInterfacesView.sync_interface target resolution."""
 
     def _patches(self, view):
         return (
@@ -1638,11 +1632,7 @@ class TestSyncIPAddressesViewGetIpTabUrl:
         assert "myserver" in url
 
     def test_unbound_api_misconfigured_default_degrades_without_500(self):
-        """On the failed-rebind redirect path _librenms_api is unbound, so get_ip_tab_url resolves
-        the active/default server via the librenms_api property (the redirect must carry the
-        resolved server_key — see test_unknown_server_key_errors_without_500). But if even the
-        default is misconfigured and the property raises, the helper must degrade to a bare tab URL
-        rather than 500."""
+        """On the failed-rebind redirect path _librenms_api is unbound, so get_ip_tab_url resolves the active/default server via the librenms_api property (the redirect must carry the resolved server_key — see test_unknown_server_key_errors_without_500)."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1731,15 +1721,7 @@ class TestSyncIPAddressesViewPost:
 @pytest.mark.django_db
 @pytest.mark.django_db
 class TestSyncIPAddressesViewProcessIpSync:
-    """Real-DB tests for SyncIPAddressesView.process_ip_sync.
-
-    Drives the real interface-matching (``_build_interface_maps`` indexing real
-    interfaces by their librenms_id custom field and by name) and the real
-    IPAddress create/update/skip. Only the toggle (``resolve_set_primary_ip``) and
-    the VRF selection (form input) are stubbed — both are request-side seams. The
-    duplicate-name ambiguity case is built across real VC members because NetBox
-    forbids two same-named interfaces on a single device, which the old mock faked.
-    """
+    """Real-DB tests for SyncIPAddressesView.process_ip_sync."""
 
     def _setup_view(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1806,8 +1788,7 @@ class TestSyncIPAddressesViewProcessIpSync:
         assert "10.0.0.1" in results["unchanged"]
 
     def test_no_matching_interface_skips_without_writing(self):
-        """No NetBox interface matches the row → skip (no create/update). The old behaviour
-        created an unassigned/global IP or nulled an existing binding (data loss)."""
+        """No NetBox interface matches the row → skip (no create/update)."""
         from ipam.models import IPAddress
 
         view = self._setup_view()
@@ -1848,8 +1829,7 @@ class TestSyncIPAddressesViewProcessIpSync:
         assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == vmiface
 
     def test_ambiguous_port_id_skips_without_binding(self):
-        """Two current interfaces carry the same stored LibreNMS port id → the row must skip
-        (fail-safe) rather than bind the IP to an arbitrary interface."""
+        """Two current interfaces carry the same stored LibreNMS port id → the row must skip (fail-safe) rather than bind the IP to an arbitrary interface."""
         from ipam.models import IPAddress
 
         view = self._setup_view()
@@ -1866,9 +1846,7 @@ class TestSyncIPAddressesViewProcessIpSync:
         assert not IPAddress.objects.filter(address="10.0.0.1/24").exists()
 
     def test_ambiguous_interface_name_skips_without_binding(self):
-        """Two interfaces share a name across VC members and carry no stored port id → the name
-        match is ambiguous (None) → skip. NetBox forbids duplicate names on a single device, so
-        this is reproduced with a real two-member virtual chassis (the old mock faked it on one obj)."""
+        """Two interfaces share a name across VC members and carry no stored port id → the name match is ambiguous (None) → skip."""
         from dcim.models import VirtualChassis
         from ipam.models import IPAddress
 
@@ -2444,13 +2422,7 @@ class TestSyncVLANsViewPost:
 
 @pytest.mark.django_db
 class TestSyncVLANsViewHandleCreateVlans:
-    """Real-DB tests for SyncVLANsView._handle_create_vlans.
-
-    VLAN/VLANGroup writes hit the real ORM (and its unique-by-(vid, group)
-    get_or_create), so persistence and the update-vs-skip decision are verified by
-    reloading rows. ``cache`` (the LibreNMS-fetched VLAN snapshot), ``messages`` and
-    ``_redirect`` stay mocked — they're framework/data-source seams, not the DB write.
-    """
+    """Real-DB tests for SyncVLANsView._handle_create_vlans."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
@@ -2667,9 +2639,7 @@ class TestSyncIPAddressesViewSetPrimaryIp:
         assert obj.primary_ip6_id == ip_obj.pk
 
     def _run_process(self, view, cached, *, mgmt_ip, set_primary=True):
-        """Drive process_ip_sync against a REAL Device + interface so _build_interface_maps()
-        takes the production Device branch. The IP is created for real (no IPAddress mock) so the
-        primary-IP set actually persists onto the device's own interface (what NetBox requires)."""
+        """Drive process_ip_sync against a REAL Device + interface so _build_interface_maps() takes the production Device branch."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
         selected = ["10.0.0.1"]

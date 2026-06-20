@@ -85,9 +85,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result is None
 
     def test_get_links_data_records_fetch_error_for_caller(self):
-        """A real fetch failure must record _links_fetch_error so the caller can surface the
-        actual error instead of the generic 'No links found' message; a no-links result
-        (empty list) must leave it None."""
+        """A real fetch failure must record _links_fetch_error so the caller can surface the actual error instead of the generic 'No links found' message; a no-links result (empty list) must leave it None."""
         view = self._make_view()
         obj = _mock_obj()
 
@@ -98,9 +96,7 @@ class TestBaseCableTableViewGetLinksData:
         assert view._links_fetch_error == "auth failed"
 
     def test_get_links_data_treats_non_dict_payload_as_failure(self):
-        """get_device_links() returns the raw JSON body, so a 200 can yield a list/null/
-        scalar. That must be treated as a fetch failure, not fall through to data.get('links')
-        and raise a 500."""
+        """get_device_links() returns the raw JSON body, so a 200 can yield a list/null/ scalar."""
         view = self._make_view()
         obj = _mock_obj()
 
@@ -112,8 +108,7 @@ class TestBaseCableTableViewGetLinksData:
             assert view._links_fetch_error is not None
 
     def test_get_links_data_treats_dict_with_malformed_links_as_failure(self):
-        """A dict body whose 'links' is null/object (not a list) must also be a fetch
-        failure — otherwise `for link in links` crashes or iterates dict keys."""
+        """A dict body whose 'links' is null/object (not a list) must also be a fetch failure — otherwise `for link in links` crashes or iterates dict keys."""
         view = self._make_view()
         obj = _mock_obj()
 
@@ -134,9 +129,7 @@ class TestBaseCableTableViewGetLinksData:
         assert view._links_fetch_error is None
 
     def test_prepare_context_keeps_empty_links_when_oob_fetch_failed(self):
-        """An empty host-link list with a failed OOB fetch must NOT collapse to None:
-        _prepare_context(fetch_fresh=True) must return a context so post() can show the
-        OOB warning, instead of mislabeling it 'No links found'."""
+        """An empty host-link list with a failed OOB fetch must NOT collapse to None: _prepare_context(fetch_fresh=True) must return a context so post() can show the OOB warning, instead of mislabeling it 'No links found'."""
         view = self._make_view()
         view._librenms_api.cache_timeout = 300
         obj = _mock_obj()
@@ -160,9 +153,7 @@ class TestBaseCableTableViewGetLinksData:
         assert view._oob_links_fetch_failed is True
 
     def test_get_links_data_treats_status_error_payload_as_failure(self):
-        """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...}
-        must be treated as a fetch failure (with its message), not silently fall through
-        to 'No links found'."""
+        """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...} must be treated as a fetch failure (with its message), not silently fall through to 'No links found'."""
         view = self._make_view()
         obj = _mock_obj()
         view._librenms_api.get_device_links.return_value = (True, {"status": "error", "message": "device unreachable"})
@@ -207,9 +198,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result[0]["remote_device"] == "switch-b"
 
     def test_get_links_data_oob_only_device_still_renders_oob_rows(self):
-        """An OOB-only sync device has no host LibreNMS id (get_librenms_id -> None), so the host
-        links fetch fails. That must NOT abort the method (return None) before the OOB merge —
-        otherwise OOB-only devices render zero cable rows. The OOB rows must still come back."""
+        """An OOB-only sync device has no host LibreNMS id (get_librenms_id -> None), so the host links fetch fails."""
         view = self._make_view()
         # Clear the seeded host id so the fixture unambiguously represents the OOB-only
         # scenario (get_links_data reassigns self.librenms_id from get_librenms_id() at use,
@@ -255,9 +244,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result[0]["local_port"] == "console0"
 
     def test_get_links_data_successful_empty_returns_list_not_none(self):
-        """A successful refresh with zero rows must return [] (not None) so _prepare_context()
-        flows it through the success path instead of mislabeling it 'No links found'. None is
-        reserved for a genuine fetch failure."""
+        """A successful refresh with zero rows must return [] (not None) so _prepare_context() flows it through the success path instead of mislabeling it 'No links found'."""
         view = self._make_view()
         obj = _mock_obj()
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
@@ -273,9 +260,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result is not None
 
     def test_get_links_data_host_success_oob_failure_empty_returns_list(self):
-        """Host LLDP succeeds with zero links but the OOB controller fetch fails: must return []
-        (with _oob_links_fetch_failed set) so post() can surface the OOB warning — not None,
-        which would be mislabeled 'No links found' and drop the warning."""
+        """Host LLDP succeeds with zero links but the OOB controller fetch fails: must return [] (with _oob_links_fetch_failed set) so post() can surface the OOB warning — not None, which would be mislabeled 'No links found' and drop the warning."""
         view = self._make_view()
         obj = _mock_obj()
         view._librenms_api.get_device_links.side_effect = [
@@ -318,9 +303,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result is not None
 
     def test_get_links_data_malformed_port_rows_skipped(self):
-        """Non-dict rows in the ports payload (e.g. strings/None from a corrupt cache or
-        LibreNMS response) must be skipped, not dereferenced — otherwise port.get() raises
-        AttributeError and the cables refresh 500s. The valid dict row still resolves."""
+        """Non-dict rows in the ports payload (e.g."""
         view = self._make_view()
 
         links_data = {"links": [{"local_port_id": 10, "remote_hostname": "sw", "remote_port": "Gi0/1"}]}
@@ -346,8 +329,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result[0]["local_port"] == "Gi0/0"
 
     def test_get_links_data_oob_malformed_port_rows_skipped(self):
-        """The OOB ports loop must also skip non-dict rows so a malformed OOB ports payload
-        cannot 500 the refresh; the valid OOB port still maps to its name."""
+        """The OOB ports loop must also skip non-dict rows so a malformed OOB ports payload cannot 500 the refresh; the valid OOB port still maps to its name."""
         view = self._make_view()
 
         main_links = {"links": []}
@@ -450,9 +432,7 @@ class TestBaseCableTableViewGetLinksData:
         view._librenms_api.get_ports.assert_called_once_with(oob_mock["id"])
 
     def test_get_links_data_carries_alternate_name_field(self):
-        """Issue #88: each link carries local_port_alt (the LibreNMS field NOT being
-        displayed) so enrich_local_port can fall back to a NetBox interface named from the
-        other field. Verified for both the main device and the OOB controller."""
+        """Issue #88: each link carries local_port_alt (the LibreNMS field NOT being displayed) so enrich_local_port can fall back to a NetBox interface named from the other field."""
         view = self._make_view()
 
         main_links = {
@@ -554,9 +534,7 @@ class TestBaseCableTableViewGetLinksData:
         view._librenms_api.get_ports.assert_called_once_with(oob_mock["id"])
 
     def test_get_links_data_oob_status_error_payload_is_failure(self):
-        """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...}
-        from the OOB controller must flag _oob_links_fetch_failed and append no OOB rows
-        (the warning path in post()), not silently drop them."""
+        """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...} from the OOB controller must flag _oob_links_fetch_failed and append no OOB rows (the warning path in post()), not silently drop them."""
         view = self._make_view()
         view._librenms_api.get_device_links.side_effect = [
             (True, {"links": []}),  # main: no links
@@ -579,8 +557,7 @@ class TestBaseCableTableViewGetLinksData:
         view._librenms_api.get_ports.assert_not_called()
 
     def test_get_links_data_oob_malformed_links_is_failure(self):
-        """A dict OOB body whose 'links' is null/object (not a list) must flag
-        _oob_links_fetch_failed and append no OOB rows, not crash on iteration."""
+        """A dict OOB body whose 'links' is null/object (not a list) must flag _oob_links_fetch_failed and append no OOB rows, not crash on iteration."""
         view = self._make_view()
         view._librenms_api.get_device_links.side_effect = [
             (True, {"links": [{"local_port_id": 1, "remote_hostname": "sw1"}]}),  # main: one link
@@ -605,12 +582,7 @@ class TestBaseCableTableViewGetLinksData:
 
 @pytest.mark.django_db
 class TestBaseCableTableViewGetDeviceByIdOrName:
-    """Real-DB tests for BaseCableTableView.get_device_by_id_or_name.
-
-    Exercises the actual ``_librenms_id_q`` JSON-field query and the name/short-name
-    fallbacks against real Device rows, so a regression in the query construction or
-    fallback ordering surfaces here (a MagicMock'd ``Device.objects.get`` could not).
-    """
+    """Real-DB tests for BaseCableTableView.get_device_by_id_or_name."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -690,12 +662,7 @@ class TestBaseCableTableViewGetDeviceByIdOrName:
 
 @pytest.mark.django_db
 class TestBaseCableTableViewEnrichLocalPort:
-    """Real-DB tests for BaseCableTableView.enrich_local_port.
-
-    Builds real Device/Interface rows so the actual ``interfaces.filter(...)`` queries
-    (librenms_id-first, then name fallback) and the real ``reverse('dcim:interface')``
-    run — a MagicMock'd ``interfaces.filter`` only re-asserts the test's own ordering.
-    """
+    """Real-DB tests for BaseCableTableView.enrich_local_port."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -741,16 +708,7 @@ class TestBaseCableTableViewEnrichLocalPort:
         assert link["local_port_url"].endswith(f"/dcim/interfaces/{iface.pk}/")
 
     def test_name_fallback_matches_alternate_interface_name_field(self):
-        """Issue #88: when the NetBox interface name matches the *non-selected* LibreNMS
-        field (e.g. it carries the ifDescr value while the user displays ifName), the name
-        fallback must still resolve it — mirroring the dual ifName/ifDescr fallback in
-        interfaces_view._enrich_port_with_lag_parent.
-
-        The interface carries no stored librenms_id, so the stable-id match cannot fire and
-        only the name fallback can match. The displayed local_port ("Gi0/1", the selected
-        ifName) does not match the interface name; the alternate ("GigabitEthernet0/1", the
-        ifDescr the interface was named from) does.
-        """
+        """Issue #88: when the NetBox interface name matches the *non-selected* LibreNMS field (e.g."""
         view = self._make_view()
         obj = make_device("cable-dev-altname")
         iface = make_interface(obj, "GigabitEthernet0/1")  # named from ifDescr, no librenms_id
@@ -801,12 +759,7 @@ class TestBaseCableTableViewEnrichLocalPort:
 
 
 class TestBaseCableTableViewCheckCableStatus:
-    """Tests for BaseCableTableView.check_cable_status.
-
-    The cable-presence branches run against real Interface/Cable rows (the missing-id
-    branches need no DB and stay plain); a real Cable exercises the actual
-    ``local_interface.cable or remote_interface.cable`` resolution and ``reverse('dcim:cable')``.
-    """
+    """Tests for BaseCableTableView.check_cable_status."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -1240,8 +1193,7 @@ class TestBaseInterfaceTableViewBasics:
         assert result is None
 
     def test_post_rebinds_api_to_posted_server_before_fetch(self):
-        """The POST must rebind the API to the posted server BEFORE get_librenms_id/get_ports,
-        so live fetches and cache writes target the same server (no cross-server cache write)."""
+        """The POST must rebind the API to the posted server BEFORE get_librenms_id/get_ports, so live fetches and cache writes target the same server (no cross-server cache write)."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
@@ -1281,8 +1233,7 @@ class TestBaseInterfaceTableViewBasics:
         mock_redirect.assert_called_once()
 
     def test_post_stale_server_key_redirects(self):
-        """A posted server_key that no longer resolves (build returns None) → error + redirect,
-        not an unhandled 500."""
+        """A posted server_key that no longer resolves (build returns None) → error + redirect, not an unhandled 500."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
@@ -1366,9 +1317,7 @@ class TestBaseInterfaceTableViewPost:
         return view
 
     def test_post_no_librenms_id_redirects_with_error(self):
-        """When librenms_id not found, error message and redirect — and the stale ports
-        snapshot is cleared FIRST, so a failed refresh on a previously-synced device can't
-        leave old interface data for the redirected tab or downstream sync to consume."""
+        """When librenms_id not found, error message and redirect — and the stale ports snapshot is cleared FIRST, so a failed refresh on a previously-synced device can't leave old interface data for the redirected tab or downstream sync to consume."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1434,9 +1383,7 @@ class TestBaseInterfaceTableViewPost:
         mock_cache.set.assert_not_called()
 
     def test_post_malformed_main_ports_payload_treated_as_failure(self):
-        """A truthy success with a malformed MAIN ports payload (ports not a list of dicts) must
-        fail closed — warn + failure-redirect, no degraded snapshot cached — mirroring the OOB
-        branch. The old cache was already deleted up front, so this can't 500 on .get()/enrichment."""
+        """A truthy success with a malformed MAIN ports payload (ports not a list of dicts) must fail closed — warn + failure-redirect, no degraded snapshot cached — mirroring the OOB branch."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1466,10 +1413,7 @@ class TestBaseInterfaceTableViewPost:
         mock_cache.set.assert_not_called()
 
     def test_post_malformed_main_ports_non_dict_row_treated_as_failure(self):
-        """The docstring sibling above only covers a non-list ports payload. A list that *contains*
-        a non-dict row ({"ports": [42]}) is the other malformed shape — it must also fail closed
-        (warn + failure-redirect, no degraded snapshot cached), matching the OOB-branch coverage
-        and the `all(isinstance(port, dict) ...)` guard in interfaces_view.post()."""
+        """The docstring sibling above only covers a non-list ports payload."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1499,12 +1443,7 @@ class TestBaseInterfaceTableViewPost:
         mock_cache.set.assert_not_called()
 
     def test_failure_redirect_gated_by_open_redirect_barrier(self):
-        """The appended server_key is POST-derived, so the failure redirect MUST gate the
-        candidate URL through url_has_allowed_host_and_scheme (the CodeQL py/url-redirection
-        barrier). This test fails if that barrier is removed: it would no longer be consulted,
-        and the tainted server_key would reach redirect() unchecked — exactly the open-redirect
-        regression CodeQL flagged. With the validator forced to reject, the redirect must fall
-        back to the bare reverse() URL (no server_key)."""
+        """The appended server_key is POST-derived, so the failure redirect MUST gate the candidate URL through url_has_allowed_host_and_scheme (the CodeQL py/url-redirection barrier)."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1541,8 +1480,7 @@ class TestBaseInterfaceTableViewPost:
         mock_redirect.assert_called_once_with("/device/1/")
 
     def test_post_clears_stale_cache_before_fetch(self):
-        """A refresh drops the previous ports snapshot before fetching, so a later
-        failure can't leave stale data behind."""
+        """A refresh drops the previous ports snapshot before fetching, so a later failure can't leave stale data behind."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1582,9 +1520,7 @@ class TestBaseInterfaceTableViewPost:
         mock_cache.set.assert_called()
 
     def test_post_oob_fetch_failure_caches_incomplete_snapshot(self):
-        """When the linked OOB controller's ports fetch fails, the host-only snapshot is
-        cached tagged oob_incomplete (not deleted) so downstream verify/apply keep a
-        backing snapshot and the incomplete state can be surfaced."""
+        """When the linked OOB controller's ports fetch fails, the host-only snapshot is cached tagged oob_incomplete (not deleted) so downstream verify/apply keep a backing snapshot and the incomplete state can be surfaced."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1623,9 +1559,7 @@ class TestBaseInterfaceTableViewPost:
         mock_messages.warning.assert_called()
 
     def test_post_oob_malformed_but_successful_payload_treated_as_incomplete(self):
-        """get_ports is an external boundary: oob_success=True does not guarantee a dict with a
-        list of dict rows. A malformed-but-truthy OOB payload must follow the host-only warning
-        path (oob_incomplete), not 500 on .get()/the _source loop."""
+        """get_ports is an external boundary: oob_success=True does not guarantee a dict with a list of dict rows."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()
@@ -1804,9 +1738,7 @@ class TestBaseInterfaceTableViewGetContextData:
         assert ctx["oob_incomplete"] is False
 
     def test_get_context_data_survives_cache_backend_without_ttl(self):
-        """cache.ttl() is Redis-specific and not part of the Django cache API. On a backend that
-        lacks it (DB/file/locmem), get_context_data must fall back to no expiry, not raise
-        AttributeError mid-render."""
+        """cache.ttl() is Redis-specific and not part of the Django cache API."""
         view = self._make_view()
         obj = _mock_obj()
         obj.virtual_chassis = None
@@ -1844,8 +1776,7 @@ class TestBaseInterfaceTableViewGetContextData:
         assert ctx["cache_expiry"] is None
 
     def test_oob_incomplete_flag_surfaced_from_cache(self):
-        """A cached snapshot tagged oob_incomplete surfaces the flag in context so the
-        template can warn that OOB rows are missing."""
+        """A cached snapshot tagged oob_incomplete surfaces the flag in context so the template can warn that OOB rows are missing."""
         view = self._make_view()
         obj = _mock_obj()
         obj.virtual_chassis = None
@@ -2783,13 +2714,7 @@ class TestBaseIPAddressTableViewPost:
 
 @pytest.mark.django_db
 class TestBaseIPAddressTableViewPrefetchNetboxData:
-    """Real-DB tests for BaseIPAddressTableView._prefetch_netbox_data.
-
-    Builds a real Device + Interface (with a librenms_id custom field) and a real
-    IPAddress so the actual ``get_librenms_device_id`` resolution and the
-    ``IPAddress.objects.select_related(...)`` query run end-to-end. A MagicMock'd
-    interface would let a regression in the per-server id scoping slip through.
-    """
+    """Real-DB tests for BaseIPAddressTableView._prefetch_netbox_data."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
@@ -2817,9 +2742,7 @@ class TestBaseIPAddressTableViewPrefetchNetboxData:
         assert result["device"] is obj
 
     def test_duplicate_librenms_id_is_dropped_from_map(self):
-        """Two interfaces sharing a server-scoped librenms_id are ambiguous — the id must be
-        dropped from the lookup map so IP binding falls back to (unambiguous) name matching
-        instead of binding to whichever interface was iterated last."""
+        """Two interfaces sharing a server-scoped librenms_id are ambiguous — the id must be dropped from the lookup map so IP binding falls back to (unambiguous) name matching instead of binding to whichever interface was iterated last."""
         view = self._make_view()
         obj = make_device("prefetch-dup-dev")
         a = make_interface(obj, "Gi0/1")
@@ -3190,8 +3113,7 @@ class TestBaseIPAddressTableViewFlagManagementIp:
         assert view._resolve_management_ip() == ""
 
     def test_resolve_blank_when_mgmt_ip_not_a_string(self):
-        """A malformed-but-dict-shaped payload (e.g. {"ip": 123}) must fall back to "" rather
-        than raising AttributeError on .strip() and 500-ing the fresh refresh."""
+        """A malformed-but-dict-shaped payload (e.g."""
         view = self._make_view()
         view._librenms_api.get_device_info.return_value = (True, {"ip": 123})
         assert view._resolve_management_ip() == ""

@@ -125,11 +125,7 @@ class TestLibreNMSAPIInit:
             LibreNMSAPI(server_key="nonexistent")
 
     def test_init_legacy_mode_binds_single_server_for_non_default_key(self, mock_librenms_config):
-        """Legacy single-server mode has only the implicit 'default' server, bound to the single
-        configured URL/token. An explicit non-default key must NOT raise here: the stricter
-        unknown-key contract is multi-server-only (a configured ``servers`` dict). In legacy mode
-        the one server is bound and view-layer validation handles cache/CF scoping. Regression
-        guard for the removed legacy-mode KeyError."""
+        """Legacy single-server mode has only the implicit 'default' server, bound to the single configured URL/token."""
         mock_config = mock_librenms_config["mock_config"]
 
         def config_side_effect(plugin, key, default=None):
@@ -269,8 +265,7 @@ class TestLibreNMSAPIInit:
         assert "bad" not in servers
         assert "tokenless" not in servers
     def test_init_non_mapping_server_config_raises_valueerror(self, mock_librenms_config):
-        """A structurally invalid (non-mapping) server entry must raise ValueError, not
-        leak a TypeError from the dict access — so build_librenms_api falls back to None."""
+        """A structurally invalid (non-mapping) server entry must raise ValueError, not leak a TypeError from the dict access — so build_librenms_api falls back to None."""
         mock_config = mock_librenms_config["mock_config"]
         mock_config.return_value = {"badserver": None}
 
@@ -282,8 +277,7 @@ class TestLibreNMSAPIInit:
         assert build_librenms_api("badserver") is None
 
     def test_get_available_servers_skips_malformed_entry(self, mock_librenms_config):
-        """A non-mapping server entry (e.g. {"prod": None}) must be skipped, not crash the
-        server selector with AttributeError on config.get() — mirrors the __init__ guard."""
+        """A non-mapping server entry (e.g."""
         mock_config = mock_librenms_config["mock_config"]
         mock_config.return_value = {"good": {"display_name": "Good"}, "bad": None}
 

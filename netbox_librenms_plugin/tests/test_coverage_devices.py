@@ -627,10 +627,7 @@ class TestSingleModuleVerifyView:
         )
 
     def test_post_threads_active_server_key_into_row_builder(self):
-        """On a non-default LibreNMS server, the POST server_key must reach the row builder.
-        _build_member_contexts falls back to the default librenms_api.server_key when
-        _active_server_key is unset, which would recompute interface binding against the
-        wrong server and disagree with the main modules tab."""
+        """On a non-default LibreNMS server, the POST server_key must reach the row builder."""
         import json
 
         view = self._make_view()

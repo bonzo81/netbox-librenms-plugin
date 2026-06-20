@@ -169,8 +169,7 @@ class TestUpdateDeviceNameView:
         mock_msg.success.assert_called_once()
 
     def test_save_validation_error_real_duplicate_name_is_rolled_back(self):
-        """A real duplicate name (same site) makes full_clean() raise ValidationError; the view
-        restores the old name and persists nothing."""
+        """A real duplicate name (same site) makes full_clean() raise ValidationError; the view restores the old name and persists nothing."""
         from dcim.models import Device
 
         view = self._view()
@@ -193,9 +192,7 @@ class TestUpdateDeviceNameView:
         assert Device.objects.get(pk=dev.pk).name == "orig-name"  # unchanged
 
     def test_save_integrity_error_restores_name(self):
-        """If save() raises IntegrityError (past full_clean), the in-memory name is restored and
-        an error is surfaced. The IntegrityError is injected (a race that's hard to trigger
-        naturally) but full_clean runs for real on a real Device."""
+        """If save() raises IntegrityError (past full_clean), the in-memory name is restored and an error is surfaced."""
         from django.db import IntegrityError
 
         view = self._view()
@@ -761,10 +758,7 @@ class TestCreateAndAssignPlatformView:
         assert "required" in mock_msg.error.call_args[0][1].lower()
 
     def test_platform_already_exists_is_reused_and_assigned(self):
-        """Existing platform is reused (not re-created) and assigned to the device.
-
-        Real Platform + Device through the real select_for_update / full_clean / save path;
-        reloaded from the DB. No duplicate Platform row is created."""
+        """Existing platform is reused (not re-created) and assigned to the device."""
         from dcim.models import Device, Platform
 
         view = self._view()
@@ -812,8 +806,7 @@ class TestCreateAndAssignPlatformView:
         mock_msg.success.assert_called_once()
 
     def test_mapping_existing_points_to_different_platform_warns(self):
-        """An existing OS mapping that targets a DIFFERENT platform must not be reported as
-        'already exists' — surface a warning and don't create a new mapping."""
+        """An existing OS mapping that targets a DIFFERENT platform must not be reported as 'already exists' — surface a warning and don't create a new mapping."""
         view = self._view()
         req = _make_request({"platform_name": "ios", "manufacturer": "", "librenms_os": "ios", "create_mapping": "1"})
 
@@ -1046,8 +1039,7 @@ class TestCreateAndAssignPlatformView:
         mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_integrity_error_reuses_concurrently_created_platform(self):
-        """IntegrityError on create, but the same-named platform now exists (a concurrent
-        insert won the race): reuse it and assign — no error, no rollback."""
+        """IntegrityError on create, but the same-named platform now exists (a concurrent insert won the race): reuse it and assign — no error, no rollback."""
         from django.db import IntegrityError
 
         view = self._view()
@@ -1188,9 +1180,7 @@ class TestCreateAndAssignPlatformView:
         mock_mapping_cls.assert_not_called()
 
     def test_mapping_skipped_when_lacking_add_perm_at_write(self):
-        """TOCTOU guard: a mapping existed at the preflight gate (so add wasn't required) but
-        was deleted before the write. The write-site permission re-check must skip the create
-        rather than bypass the permission — and warn the user."""
+        """TOCTOU guard: a mapping existed at the preflight gate (so add wasn't required) but was deleted before the write."""
         view, req, mock_platform_cls, mock_platform_instance, mock_device_cls, mock_locked = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
@@ -1228,10 +1218,7 @@ class TestCreateAndAssignPlatformView:
         mock_locked.save.assert_called_once()
 
     def test_required_object_permissions_never_include_platformmapping_upfront(self):
-        """Even when create_mapping is on, an OS is supplied, and no mapping exists yet, the
-        upfront POST gate must NOT require ('add', PlatformMapping): assigning the platform is
-        the primary action and must not be blocked for a user who can't create mappings. The
-        optional mapping write is gated at its own site (skip-with-warning) instead."""
+        """Even when create_mapping is on, an OS is supplied, and no mapping exists yet, the upfront POST gate must NOT require ('add', PlatformMapping): assigning the platform is the primary action and must not be blocked for a user who can't create mappings."""
         view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
@@ -1265,8 +1252,7 @@ class TestCreateAndAssignPlatformView:
         )
 
     def test_required_object_permissions_exclude_platformmapping_when_mapping_exists(self):
-        """create_mapping on but a mapping for the OS already exists → no mapping write
-        occurs, so ('add', PlatformMapping) must NOT be required (don't block the assign)."""
+        """create_mapping on but a mapping for the OS already exists → no mapping write occurs, so ('add', PlatformMapping) must NOT be required (don't block the assign)."""
         view, req, mock_platform_cls, _, mock_device_cls, _ = self._success_patches(
             platform_name="Cisco IOS", librenms_os="ios", create_mapping="1"
         )
@@ -1888,11 +1874,7 @@ class TestRemoveServerMappingViewPost:
         mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_success_removes_mapping(self):
-        """Happy path: an UNCONFIGURED server's mapping is removed; last entry → cf None.
-
-        Real Device + the real select_for_update / full_clean / save path; the persisted
-        custom_field_data is reloaded from the DB. 'orphan' is not a configured server in the
-        test config, so the protection guard allows removal."""
+        """Happy path: an UNCONFIGURED server's mapping is removed; last entry → cf None."""
         from dcim.models import Device
 
         view = self._view()
@@ -1971,8 +1953,7 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         assert isinstance(url, str) and "server_key" not in url
 
     def test_sync_url_propagates_known_server_key(self):
-        """A POST-scoped server_key that matches a configured server is preserved so
-        multi-server users return to the server they were working in."""
+        """A POST-scoped server_key that matches a configured server is preserved so multi-server users return to the server they were working in."""
         view = self._view()
         view.request = MagicMock()
         view.request.POST = {"server_key": "prod"}
@@ -1989,10 +1970,7 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         assert "server_key=prod" in url
 
     def test_sync_url_stale_post_key_falls_back_to_active_server(self):
-        """A POST server_key that is no longer configured (stale page / removed server) must not
-        drop the server context: it doesn't match the allowlist, so the redirect falls back to the
-        active/default server the action ran against (here the bound _librenms_api='default'),
-        re-validated through the allowlist — instead of emitting a bare URL."""
+        """A POST server_key that is no longer configured (stale page / removed server) must not drop the server context: it doesn't match the allowlist, so the redirect falls back to the active/default server the action ran against (here the bound _librenms_api='default'), re-validated through the allowlist — instead of emitting a bare URL."""
         view = self._view()  # _view() binds _librenms_api = MagicMock(server_key="default")
         view.request = MagicMock()
         view.request.POST = {"server_key": "ghost"}  # unconfigured / stale
@@ -2010,8 +1988,7 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         assert "ghost" not in url
 
     def test_sync_url_drops_unknown_server_key(self):
-        """An unconfigured/spoofed server_key is not reflected into the redirect URL
-        (allowlist guard — open-redirect safe)."""
+        """An unconfigured/spoofed server_key is not reflected into the redirect URL (allowlist guard — open-redirect safe)."""
         view = self._view()
         view.request = MagicMock()
         view.request.POST = {"server_key": "//evil.com/steal"}
@@ -2029,10 +2006,7 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         assert "server_key" not in url
 
     def test_sync_url_unbound_api_misconfigured_default_degrades_without_500(self):
-        """On a redirect after a failed rebind, _librenms_api is unbound (None) and the request
-        carries no server_key. The fallback resolves the default server via the librenms_api
-        property, but if even the default is misconfigured (property construction raises) the
-        helper must degrade to a bare URL rather than 500."""
+        """On a redirect after a failed rebind, _librenms_api is unbound (None) and the request carries no server_key."""
         view = self._view()
         view._librenms_api = None
         view.request = MagicMock()
@@ -2048,10 +2022,7 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         assert "server_key" not in url
 
     def test_sync_url_drops_server_key_when_url_validation_fails(self):
-        """Even for an allowlisted server_key, if url_has_allowed_host_and_scheme rejects the
-        candidate (the CodeQL open-redirect barrier), fall back to the bare URL. Mocking the
-        validator to False exercises that reject branch explicitly rather than relying on
-        Django's internals to accept the relative candidate."""
+        """Even for an allowlisted server_key, if url_has_allowed_host_and_scheme rejects the candidate (the CodeQL open-redirect barrier), fall back to the bare URL."""
         view = self._view()
         view.request = MagicMock()
         view.request.POST = {"server_key": "prod"}
@@ -2504,11 +2475,7 @@ class TestConvertLegacyLibreNMSIdViewPost:
         mock_txn.set_rollback.assert_called_once_with(True)
 
     def test_success_integer_cf_value(self):
-        """Happy path, legacy int cf_value: the real migrate + save converts it to the dict form.
-
-        Real Device through the real select_for_update / find_by_librenms_id conflict check /
-        migrate_legacy_librenms_id / full_clean / save; reloaded from the DB. No POSTed
-        server_key, so rebind_api_for_server reuses the mock API (server_key 'default')."""
+        """Happy path, legacy int cf_value: the real migrate + save converts it to the dict form."""
         from dcim.models import Device
 
         view = self._view()
@@ -2704,8 +2671,7 @@ class TestCreatePlatformFullClean:
         mock_messages.error.assert_called_once()
         assert "could not be created" in mock_messages.error.call_args[0][1]
 class TestSyncRedirectServerKeyValidation:
-    """_sync_redirect must only reflect a server_key that matches a configured server,
-    so untrusted request input can't be steered into the redirect URL (open-redirect)."""
+    """_sync_redirect must only reflect a server_key that matches a configured server, so untrusted request input can't be steered into the redirect URL (open-redirect)."""
 
     def test_valid_server_key_is_reflected(self):
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
@@ -2739,8 +2705,7 @@ class TestSyncRedirectServerKeyValidation:
         assert "server_key" not in url
 
     def test_falls_back_to_active_server_when_form_omits_key(self):
-        """When the form omits server_key, _sync_redirect reflects the active API server
-        (passed as fallback) so a multi-server user isn't dropped onto the default tab."""
+        """When the form omits server_key, _sync_redirect reflects the active API server (passed as fallback) so a multi-server user isn't dropped onto the default tab."""
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
 
         req = _make_request(post_data={})  # no server_key in POST
@@ -2756,9 +2721,7 @@ class TestSyncRedirectServerKeyValidation:
         assert "server_key=prod" in url
 
     def test_valid_server_key_is_dropped_when_redirect_url_fails_validation(self):
-        """Even an allowlisted server_key must be dropped if the resulting redirect URL fails
-        url_has_allowed_host_and_scheme — mirrors the _sync_url guard (open-redirect barrier),
-        so a regression that reflected a known key into a rejected URL is caught here too."""
+        """Even an allowlisted server_key must be dropped if the resulting redirect URL fails url_has_allowed_host_and_scheme — mirrors the _sync_url guard (open-redirect barrier), so a regression that reflected a known key into a rejected URL is caught here too."""
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
 
         req = _make_request(post_data={"server_key": "prod"})

@@ -227,8 +227,7 @@ class TestSyncInterfacesViewGetCachedPortsData:
 
 
 class TestInterfaceContextOOBRows:
-    """get_context_data must not let OOB-controller rows hide / falsely-match
-    main-device interfaces in the netbox-only reconciliation set."""
+    """get_context_data must not let OOB-controller rows hide / falsely-match main-device interfaces in the netbox-only reconciliation set."""
 
     def _make_view(self, cached_ports):
         from dcim.models import Device
@@ -274,10 +273,7 @@ class TestInterfaceContextOOBRows:
         assert "idrac0" in names  # OOB row must not suppress the main-device interface
 
     def test_fresh_data_renders_without_reading_cache(self):
-        """On the OOB-ports-fetch-failure path the (partial) cache is deleted, so
-        get_context_data must render from the in-memory fresh_data snapshot instead of
-        reading the now-empty cache — otherwise the table renders empty under a
-        "showing host interfaces" banner."""
+        """On the OOB-ports-fetch-failure path the (partial) cache is deleted, so get_context_data must render from the in-memory fresh_data snapshot instead of reading the now-empty cache — otherwise the table renders empty under a "showing host interfaces" banner."""
         view, fresh = self._make_view({"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]})
         obj = MagicMock(id=1, name="host1")
         obj.virtual_chassis = None
@@ -339,9 +335,7 @@ class TestSyncInterfacesViewPost:
         mock_redirect.assert_called_once()
 
     def test_sync_selected_interfaces_skips_oob_rows(self):
-        """OOB-controller rows are merged into the host list only for context and are never
-        routed to a real device. A main+OOB interface-name collision (both 'eth0') must sync
-        only the main row, or the OOB row would overwrite the host interface with its port_id."""
+        """OOB-controller rows are merged into the host list only for context and are never routed to a real device."""
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
@@ -452,8 +446,7 @@ class TestSyncInterfacesViewPost:
         mock_redirect.assert_called_once()
 
     def test_post_surfaces_skipped_conflicts_warning(self):
-        """When an interface is skipped (port_id owned by another device), post() surfaces
-        a warning naming it — not just a log line."""
+        """When an interface is skipped (port_id owned by another device), post() surfaces a warning naming it — not just a log line."""
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
@@ -564,8 +557,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
 
     @pytest.mark.django_db
     def test_device_interface_created(self):
-        """End-to-end: sync_interface creates a real Interface on a real Device and persists the
-        synced attributes (the real get_or_create + update_interface_attributes + save run)."""
+        """End-to-end: sync_interface creates a real Interface on a real Device and persists the synced attributes (the real get_or_create + update_interface_attributes + save run)."""
         from dcim.models import Interface
 
         view = self._make_view()
@@ -592,8 +584,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert iface.type  # a real NetBox type was resolved from ifType (non-empty)
 
     def test_foreign_port_id_skip_is_recorded(self):
-        """When the resolver returns None (port_id belongs to another device), the row is
-        skipped and its name recorded in _skipped_conflicts for the post() summary."""
+        """When the resolver returns None (port_id belongs to another device), the row is skipped and its name recorded in _skipped_conflicts for the post() summary."""
         from dcim.models import Device
 
         view = self._make_view()
@@ -987,8 +978,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         return view
 
     def test_basic_attributes_set(self):
-        """Real Interface: the LibreNMS→NetBox field mapping is applied and persisted; the real
-        convert_speed_to_kbps runs (bps→kbps). Verified by reloading the row."""
+        """Real Interface: the LibreNMS→NetBox field mapping is applied and persisted; the real convert_speed_to_kbps runs (bps→kbps)."""
         from dcim.models import Interface
 
         view = self._make_view()

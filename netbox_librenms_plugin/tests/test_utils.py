@@ -12,10 +12,7 @@ import pytest
 
 
 def _two_member_vc(name, cf_first, cf_second):
-    """Create a real VirtualChassis with two members (vc_position 1 then 2), seeding each
-    member's ``librenms_id`` custom field with *cf_first* / *cf_second* (use ``_UNSET`` /
-    skip by passing None to leave it empty). Returns (first, second); ``first`` is the
-    member iterated first by ``members.all()`` so selection-precedence is testable."""
+    """Create a real VirtualChassis with two members (vc_position 1 then 2), seeding each member's ``librenms_id`` custom field with *cf_first* / *cf_second* (use ``_UNSET`` / skip by passing None to leave it empty)."""
     from dcim.models import VirtualChassis
 
     from netbox_librenms_plugin.tests.conftest import make_device
@@ -421,8 +418,7 @@ class TestVirtualChassisHelpers:
 
     @pytest.mark.django_db
     def test_get_virtual_chassis_members_real_vc(self):
-        """get_virtual_chassis_members returns every member Device for a VC device (from either
-        member's perspective) and just [device] for a standalone one."""
+        """get_virtual_chassis_members returns every member Device for a VC device (from either member's perspective) and just [device] for a standalone one."""
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -447,8 +443,7 @@ class TestVirtualChassisHelpers:
         assert {d.pk for d in get_virtual_chassis_members(m2)} == {m1.pk, m2.pk}
 
     def test_get_virtual_chassis_members_returns_device_on_enumeration_error(self):
-        """Non-enumerable / broken VC membership must fall back to the documented [device], not let
-        the enumeration error bubble out of this centralizing helper."""
+        """Non-enumerable / broken VC membership must fall back to the documented [device], not let the enumeration error bubble out of this centralizing helper."""
         from unittest.mock import MagicMock
 
         from netbox_librenms_plugin.utils import get_virtual_chassis_members
@@ -1529,9 +1524,7 @@ class TestPredictModuleInterfaceRenameSignalGuard:
 
 @pytest.mark.django_db
 class TestSetDeviceIpFkFamily:
-    """set_device_ip_fk() must enforce the IP family that NetBox's Device.clean() requires for
-    primary_ip4/primary_ip6, since the helper persists via save(update_fields=...) which bypasses
-    full_clean(). oob_ip is family-agnostic. (Real DB: the family comes from the actual address.)"""
+    """set_device_ip_fk() must enforce the IP family that NetBox's Device.clean() requires for primary_ip4/primary_ip6, since the helper persists via save(update_fields=...) which bypasses full_clean()."""
 
     def test_primary_ip4_rejects_ipv6_address(self):
         from netbox_librenms_plugin.tests.conftest import ip_on, make_device

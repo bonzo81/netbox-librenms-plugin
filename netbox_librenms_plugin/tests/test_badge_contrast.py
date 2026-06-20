@@ -61,9 +61,7 @@ def test_no_bare_solid_colour_badges_in_templates():
 
 
 def test_text_colour_regex_rejects_layout_utilities():
-    """Only real colour utilities may satisfy the text-colour check. Layout utilities like
-    text-center / text-uppercase must NOT count, or a bare ``bg-*`` badge whose only text-*
-    class is a layout utility would wrongly pass the contrast scan (false negative)."""
+    """Only real colour utilities may satisfy the text-colour check."""
     # Real colour utilities still match.
     assert _TEXT_COLOUR.search("badge bg-warning text-dark")
     assert _TEXT_COLOUR.search("badge bg-danger text-white")
@@ -77,8 +75,7 @@ def test_text_colour_regex_rejects_layout_utilities():
 
 
 def test_class_attr_parses_single_quoted_and_multiline_attributes():
-    """The class scanner must see single-quoted and line-wrapped class attributes, or a bare
-    solid-colour badge written that way would evade the contrast guard (false negative)."""
+    """The class scanner must see single-quoted and line-wrapped class attributes, or a bare solid-colour badge written that way would evade the contrast guard (false negative)."""
     # Single-quoted attribute.
     single = """<span class='badge bg-danger'>x</span>"""
     assert [m.group(2) for m in _CLASS_ATTR.finditer(single)] == ["badge bg-danger"]

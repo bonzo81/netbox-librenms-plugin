@@ -73,8 +73,7 @@ class TestGetLibreNMSDeviceId:
         assert get_librenms_device_id(_dev("not-an-int-or-dict"), "default") is None
 
     def test_legacy_string_int_returned_for_any_server_key_and_persists(self):
-        """A bare string integer ('42') is coerced, returned for any server_key, and the
-        auto-save path normalises it back to an int in the DB (real save, verified by reload)."""
+        """A bare string integer ('42') is coerced, returned for any server_key, and the auto-save path normalises it back to an int in the DB (real save, verified by reload)."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.utils import get_librenms_device_id
@@ -109,12 +108,7 @@ class TestFindByLibreNMSId:
     """Tests for find_by_librenms_id() against real Device rows and JSON-field queries."""
 
     def test_finds_each_storage_shape(self):
-        """Every supported storage shape (namespaced scalar, string scalar, dict-with-id,
-        oob sub-id, legacy bare int/string) is actually resolvable by a real query.
-
-        This replaces the old Q-children introspection: instead of asserting the predicate
-        tuples exist, it proves each predicate path matches a real row in the DB.
-        """
+        """Every supported storage shape (namespaced scalar, string scalar, dict-with-id, oob sub-id, legacy bare int/string) is actually resolvable by a real query."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.utils import find_by_librenms_id
@@ -211,10 +205,7 @@ class TestFindByLibreNMSId:
             find_by_librenms_id(Device, 42, "default")
 
     def test_float_input_rejected_without_querying(self):
-        """A positive float bypasses the int-only coerce contract → reject before the ORM.
-
-        Kept on a mock model so the "no DB hit on bad input" guard is directly assertable
-        (a real model would return None whether or not a query ran)."""
+        """A positive float bypasses the int-only coerce contract → reject before the ORM."""
         from netbox_librenms_plugin.utils import find_by_librenms_id
 
         mock_model = MagicMock()
@@ -265,10 +256,7 @@ class TestMigrateLegacyLibreNMSId:
         assert dev.custom_field_data["librenms_id"] is True  # unchanged
 
     def test_does_not_save(self):
-        """migrate_legacy_librenms_id must NOT persist — caller is responsible.
-
-        Verified for real: after migrating in memory, the DB row still holds the
-        un-migrated bare integer."""
+        """migrate_legacy_librenms_id must NOT persist — caller is responsible."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
@@ -414,9 +402,7 @@ class TestMigrateLegacyRejectsNonPositive:
 
 @pytest.mark.django_db
 class TestOOBHelpers:
-    """Tests for get_librenms_oob, set_librenms_oob, clear_librenms_oob, and the
-    dict-with-id behaviour of get/set_librenms_device_id and find_by_librenms_id.
-    """
+    """Tests for get_librenms_oob, set_librenms_oob, clear_librenms_oob, and the dict-with-id behaviour of get/set_librenms_device_id and find_by_librenms_id."""
 
     # ── get_librenms_device_id: dict-with-id form ─────────────────────────────
 

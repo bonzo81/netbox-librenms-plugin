@@ -1146,8 +1146,7 @@ class TestDeviceValidation:
     @patch("netbox_librenms_plugin.import_utils.device_operations.Rack")
     @patch("netbox_librenms_plugin.import_utils.device_operations.Site")
     def test_librenms_id_matched_vm_populates_link(self, *mocks):
-        """A VM matched by librenms_id surfaces its LibreNMS linkage so it isn't shown
-        as unlinked."""
+        """A VM matched by librenms_id surfaces its LibreNMS linkage so it isn't shown as unlinked."""
         mock_vm = mocks[-1]
         mock_device = mocks[-2]
         existing_vm = MagicMock()
@@ -1843,21 +1842,7 @@ class TestSerialNumberMatching:
         assert "not linked to LibreNMS" in result["warnings"][0]
 
     def test_serial_match_diff_hostname_defaults_to_oob_candidate(self):
-        """Serial matches but hostname differs → default action is `oob_candidate`,
-        with the host/OOB role-choice toggle NOT offered (serial_role_choice_available
-        is False) because there is no existing LibreNMS link to promote from.
-
-        Previously this returned `hostname_differs`. With the role-toggle work
-        (see device_validation_details.html + device_operations.py refactor),
-        when an existing NetBox device matches by serial but the names differ
-        AND neither host nor OOB role is conclusively chosen by the heuristic,
-        the `oob_candidate` data block is populated and the default action is
-        `oob_candidate` (least destructive).
-
-        `promote_to_host` is only populated when the existing device already
-        carries an OOB link (so there is a host_id to inherit); without an
-        existing LibreNMS link, only `oob_candidate` is surfaced.
-        """
+        """Serial matches but hostname differs → default action is `oob_candidate`, with the host/OOB role-choice toggle NOT offered (serial_role_choice_available is False) because there is no existing LibreNMS link to promote from."""
         existing = MagicMock()
         existing.name = "old-hostname"
         existing.serial = "ABC123"
@@ -2767,8 +2752,7 @@ class TestDeviceConflictActionView:
         return request
 
     def test_unknown_server_key_returns_error_without_500(self):
-        """A stale/tampered POST server_key must surface a graceful HTMX error,
-        not raise (build_librenms_api → None when the key is unknown)."""
+        """A stale/tampered POST server_key must surface a graceful HTMX error, not raise (build_librenms_api → None when the key is unknown)."""
         view = self._create_view()
         request = self._create_request("link", 42)
         request.POST["server_key"] = "ghost"
@@ -6253,9 +6237,7 @@ class TestBulkImportColdCacheBackfill:
         # Import decisions must run against live data, so the short device-info cache is bypassed.
         api.get_device_info.assert_called_once_with(123, use_cache=False)
 class TestDeviceValidationDetailsTemplate:
-    """The 'Full Sync Page' link in the import-validation panel must carry the active
-    server_key so it opens on the same LibreNMS instance the user is validating against,
-    not the session/default server."""
+    """The 'Full Sync Page' link in the import-validation panel must carry the active server_key so it opens on the same LibreNMS instance the user is validating against, not the session/default server."""
 
     def _source(self):
         from django.template.loader import get_template

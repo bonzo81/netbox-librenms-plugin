@@ -92,8 +92,7 @@ class TestSaveDevice:
         assert result is None
 
     def test_update_fields_dataerror_returns_400_not_500(self):
-        """save(update_fields=...) skips full_clean; an overlong value from LibreNMS
-        raises DataError at the DB layer and must become a 400 toast, not a 500."""
+        """save(update_fields=...) skips full_clean; an overlong value from LibreNMS raises DataError at the DB layer and must become a 400 toast, not a 500."""
         from django.db import DataError
 
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -114,8 +113,7 @@ class TestSaveDevice:
         assert b"character varying" not in response.content.lower()
 
     def test_update_fields_databaseerror_returns_409_not_500(self):
-        """save(update_fields=...) forces an UPDATE; a concurrent delete makes it affect 0
-        rows and raises DatabaseError. That must become a 409 toast, not an unhandled 500."""
+        """save(update_fields=...) forces an UPDATE; a concurrent delete makes it affect 0 rows and raises DatabaseError."""
         from django.db import DatabaseError
 
         from netbox_librenms_plugin.views.imports.actions import _save_device
@@ -257,15 +255,7 @@ class TestResolveVCDetectionEnabled:
 
 
 class TestBulkImportConfirmView:
-    """BulkImportConfirmView.post — the preview/confirm render step.
-
-    Device fetching is driven through the REAL ``fetch_device_with_cache`` (our 3-tier
-    cache/lookup), mocking only ``api.get_device_info`` — the actual LibreNMS HTTP boundary.
-    Earlier these stubbed ``fetch_device_with_cache`` itself, bypassing the cache-key
-    computation, the Django-cache read/write, and the ``get_librenms_device_by_id`` parsing.
-    ``validate_device_for_import`` (its own real-DB tests) and ``render`` (template boundary)
-    remain mocked so each test stays focused on the view's selection/VC-flag plumbing.
-    """
+    """BulkImportConfirmView.post — the preview/confirm render step."""
 
     @pytest.fixture(autouse=True)
     def _clear_django_cache(self):
@@ -526,9 +516,7 @@ class TestDeviceImportHelperMixin:
         assert "device_import_row.html" in mock_render.call_args[0][1]
 
     def test_post_commit_refresh_fallback_returns_200_not_error(self):
-        """A committed mutation whose post-commit row reload fails must NOT report failure:
-        surface the deferred messages + a refresh hint and return 200 with the success
-        trigger, so the user doesn't retry an action that already succeeded."""
+        """A committed mutation whose post-commit row reload fails must NOT report failure: surface the deferred messages + a refresh hint and return 200 with the success trigger, so the user doesn't retry an action that already succeeded."""
         from django.contrib import messages as dj_messages
 
         view = self._make_mixin_view()
@@ -573,9 +561,7 @@ class TestAttachMessagesOob:
 
     @staticmethod
     def _storage(items):
-        """A messages-storage stand-in with a REAL __iter__. Assigning __iter__ to a MagicMock
-        instance doesn't override the iter() protocol (special methods resolve on the class), so
-        the .used round-trip assertion would never actually exercise consumption/restoration."""
+        """A messages-storage stand-in with a REAL __iter__."""
 
         class _Storage:
             def __init__(self, values):
@@ -611,8 +597,7 @@ class TestAttachMessagesOob:
         assert result.content.startswith(b"<tr>row html</tr>")
 
     def test_skips_oob_swap_when_no_messages_queued(self):
-        """No pending messages → don't append an empty OOB container that would
-        wipe toasts already visible from an earlier action."""
+        """No pending messages → don't append an empty OOB container that would wipe toasts already visible from an earlier action."""
         from django.http import HttpResponse
 
         from netbox_librenms_plugin.views.imports.actions import _attach_messages_oob
@@ -978,15 +963,7 @@ class TestDeviceRackUpdateView:
 
 @pytest.mark.django_db
 class TestDeviceConflictActionView:
-    """DeviceConflictActionView.post — input guards + real-DB lookup paths.
-
-    The DB-touching cases (device-not-found, unknown-action) run against a real Device:
-    the existing-device pk is resolved through the real ``Device.objects.get`` lookup, so a
-    miss is a genuine ORM miss rather than a stubbed manager raising. Auth gates and the
-    LibreNMS validation pipeline (``get_validated_device_with_selections``) stay mocked —
-    those are external boundaries. The early input guards short-circuit before any DB access,
-    so they remain light unit tests.
-    """
+    """DeviceConflictActionView.post — input guards + real-DB lookup paths."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -1293,8 +1270,7 @@ class TestBulkImportDevicesViewErrorPaths:
         assert response.status_code == 400
 
     def test_post_no_devices_selected_full_page_redirects_with_message(self):
-        """Empty device_ids on a non-HTMX POST queues an error message and redirects to the
-        import page, rather than serving a bare 400 body as a full page."""
+        """Empty device_ids on a non-HTMX POST queues an error message and redirects to the import page, rather than serving a bare 400 body as a full page."""
         view = self._make_view()
         request = _make_request(post={})  # no HX-Request header
         request.POST.getlist = MagicMock(return_value=[])
@@ -1506,16 +1482,7 @@ class TestDeviceRoleClusterRackViews:
 
 @pytest.mark.django_db
 class TestDeviceConflictActionLinkAction:
-    """DeviceConflictActionView 'link' action against a real Device.
-
-    The whole write path — the real ``find_by_librenms_id`` conflict re-check under
-    ``select_for_update``, ``set_librenms_device_id``, and ``_save_device`` inside a real
-    ``transaction.atomic`` — runs for real, and the persisted state is reloaded from the DB.
-    The earlier version patched every one of those, so the only thing it could assert was
-    that ``render_device_row`` was called; the link itself never happened. Mocked: the auth
-    gates, the LibreNMS validation pipeline (``get_validated_device_with_selections``), the
-    hostname resolver (its own tests), and the HTML row render (template/table boundary).
-    """
+    """DeviceConflictActionView 'link' action against a real Device."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -1555,8 +1522,7 @@ class TestDeviceConflictActionLinkAction:
         assert reloaded.name == "router01-linked"
 
     def test_link_action_blocked_by_librenms_id_conflict(self):
-        """If another device already owns the incoming LibreNMS id, the link is refused and
-        nothing is persisted — driven by the real find_by_librenms_id conflict check."""
+        """If another device already owns the incoming LibreNMS id, the link is refused and nothing is persisted — driven by the real find_by_librenms_id conflict check."""
         from dcim.models import Device
         from django.http import HttpResponse
 
@@ -1644,8 +1610,7 @@ class TestBulkImportConfirmViewPost:
         return view
 
     def test_no_devices_selected_renders_alert(self):
-        """Empty device_ids returns the alert as HTMX modal content (200, not 400, so
-        htmx swaps it into #htmx-modal-content)."""
+        """Empty device_ids returns the alert as HTMX modal content (200, not 400, so htmx swaps it into #htmx-modal-content)."""
         view = self._make_view()
         request = _make_request(post={})
         request.POST.getlist = MagicMock(return_value=[])
@@ -1780,8 +1745,7 @@ class TestDeviceVCDetailsViewAdditional:
         return view
 
     def test_device_not_found_in_librenms_returns_200_html_fragment(self):
-        """Device not found in LibreNMS: HTMX fragment must come back 200 (a 4xx makes HTMX skip
-        the swap), with the inline alert in the body."""
+        """Device not found in LibreNMS: HTMX fragment must come back 200 (a 4xx makes HTMX skip the swap), with the inline alert in the body."""
         view = self._make_view()
         request = _make_request()
 
@@ -1811,15 +1775,7 @@ class TestDeviceVCDetailsViewAdditional:
 
 @pytest.mark.django_db
 class TestDeviceConflictActionMigrateLibreNMSId:
-    """DeviceConflictActionView migrate_librenms_id action against a real VirtualMachine.
-
-    The migrate path converts a legacy bare-int librenms_id to the per-server dict form and
-    persists it under a real ``select_for_update`` lock. Previously every collaborator was
-    mocked (transaction, migrate_legacy_librenms_id, find_by_librenms_id, the locked re-read)
-    so the conversion never ran; now they run for real against a VM and the migrated
-    custom_field_data is reloaded from the DB. Only auth, the LibreNMS validation pipeline,
-    and the row render stay mocked.
-    """
+    """DeviceConflictActionView migrate_librenms_id action against a real VirtualMachine."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -2283,14 +2239,7 @@ class TestDeviceConflictActionMorePaths:
 
 @pytest.mark.django_db
 class TestDeviceConflictUpdateAction:
-    """DeviceConflictActionView 'update' action against a real Device.
-
-    The 'update' action sets the name + serial and links the LibreNMS id in one
-    transaction. Previously every write collaborator was mocked (so only render-was-called
-    could be asserted); now they run for real and the persisted name/serial/librenms_id are
-    reloaded from the DB. Only auth, the LibreNMS validation pipeline, the hostname resolver,
-    and the row render stay mocked.
-    """
+    """DeviceConflictActionView 'update' action against a real Device."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -3221,12 +3170,7 @@ class TestMoreSaveErrorPaths:
 
 @pytest.mark.django_db
 class TestSyncSerialAction:
-    """DeviceConflictActionView 'sync_serial' action against a real Device.
-
-    Real Device + the real transaction/select_for_update/conflict-check/_save_device path;
-    the persisted serial is reloaded from the DB. Only auth and the LibreNMS validation
-    pipeline are mocked.
-    """
+    """DeviceConflictActionView 'sync_serial' action against a real Device."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -3685,10 +3629,7 @@ class TestBulkImportConfirmPartialExpiry:
         return view
 
     def test_one_expired_one_valid_device_still_renders(self):
-        """One selected device is fetched, the other has expired from cache. Because any
-        fetched device is unconditionally appended to ``devices``, the post() still renders
-        the valid device (200) rather than erroring — the ``if not devices`` 400 branches
-        are only reached when *every* selected device is missing."""
+        """One selected device is fetched, the other has expired from cache."""
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
@@ -5046,23 +4987,10 @@ class TestImportActionRebindGuard:
 
         assert response.status_code != 500
 class TestAddAsOOBViewGenericSentinel:
-    """AddAsOOBView must not return HTTP 400 when oob_candidate.type == "oob".
-
-    Regression for the bug where the detection layer produced type="oob" as a
-    sentinel (hostname mismatch, no OOB keywords in names) but set_librenms_oob
-    rejected "oob" with ValueError, causing every non-keyword device to fail.
-
-    Per testing conventions the submit-path behavior is tested at the utility
-    layer (set_librenms_oob) rather than by driving the full view.
-    """
+    """AddAsOOBView must not return HTTP 400 when oob_candidate.type == "oob"."""
 
     def test_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
-        """set_librenms_oob must not raise ValueError for oob_type='oob'.
-
-        This is the direct root cause: AddAsOOBView calls
-        set_librenms_oob(..., oob_type=oob_candidate["type"]) where the
-        candidate type may be the detection-layer sentinel "oob".
-        """
+        """set_librenms_oob must not raise ValueError for oob_type='oob'."""
         from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
 
         obj = MagicMock()
@@ -5077,8 +5005,7 @@ class TestAddAsOOBViewGenericSentinel:
         assert result["type"] == "oob"
 
     def test_legacy_bare_int_librenms_id_promoted_on_oob_attach(self):
-        """A device whose librenms_id is still the legacy bare int must NOT silently no-op:
-        set_librenms_oob promotes it to the per-server dict and attaches the OOB block."""
+        """A device whose librenms_id is still the legacy bare int must NOT silently no-op: set_librenms_oob promotes it to the per-server dict and attaches the OOB block."""
         from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
 
         obj = MagicMock()
@@ -5094,10 +5021,7 @@ class TestAddAsOOBViewGenericSentinel:
         assert get_librenms_oob(obj, "default") == {"id": 55, "type": "idrac"}
 
     def test_sentinel_from_detection_layer_flows_to_storage(self):
-        """The three-layer fallback in device_operations produces oob_type='oob'
-        when neither the LibreNMS OS field nor either device name contains an OOB
-        keyword. That value must store without error.
-        """
+        """The three-layer fallback in device_operations produces oob_type='oob' when neither the LibreNMS OS field nor either device name contains an OOB keyword."""
         from netbox_librenms_plugin.utils import set_librenms_oob
 
         # Simulate: oob_type_from_libre=None, _detect_oob_type_from_name(...)=None
@@ -5116,12 +5040,7 @@ class TestAddAsOOBViewGenericSentinel:
 
 
 class TestSetLibreNMSOOBGenericSentinel:
-    """set_librenms_oob must accept the generic "oob" sentinel oob_type.
-
-    Regression for the sentinel bug surfaced via the promote path: when the existing
-    device's name has no OOB keyword, the resolved oob_type falls back to the generic
-    "oob" (device_operations.py ~line 574), which set_librenms_oob previously rejected.
-    """
+    """set_librenms_oob must accept the generic "oob" sentinel oob_type."""
 
     def test_promote_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
         """Promote path: set_librenms_oob with oob_type='oob' must not raise."""
@@ -5143,15 +5062,7 @@ class TestSetLibreNMSOOBGenericSentinel:
 
 @pytest.mark.django_db
 class TestAddAsOOBViewPost:
-    """View-level tests for AddAsOOBView.post() — HTTP interface + OOB sentinel regression.
-
-    The DB-driven paths run against real Devices: the concurrency guards
-    (``get_librenms_oob`` / ``get_librenms_device_id`` / ``find_by_librenms_id``) and the
-    ``set_librenms_oob`` linkage execute for real and the result is reloaded from the DB,
-    so a guard that reads the wrong cf shape can no longer pass on a synthesized MagicMock.
-    Only the LibreNMS validation pipeline, auth gates, and row HTML render stay mocked.
-    The early-return input guards and the forced save-error rollback wiring remain unit
-    tests (no DB state to exercise / forced-error boundary)."""
+    """View-level tests for AddAsOOBView.post() — HTTP interface + OOB sentinel regression."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
@@ -5191,8 +5102,7 @@ class TestAddAsOOBViewPost:
         assert response.status_code == 403
 
     def test_invalid_existing_device_id_returns_htmx_error(self):
-        """POST with a non-integer existing_device_id returns HTMX error — the failure is
-        the int() conversion, which raises before any ORM lookup, so the manager is never hit."""
+        """POST with a non-integer existing_device_id returns HTMX error — the failure is the int() conversion, which raises before any ORM lookup, so the manager is never hit."""
         view = self._make_view()
         request = _make_request(post={"existing_device_id": "not-a-number"})
 
@@ -5209,8 +5119,7 @@ class TestAddAsOOBViewPost:
         mock_device.objects.get.assert_not_called()
 
     def test_device_does_not_exist_returns_htmx_error(self):
-        """POST with an existing_device_id that isn't in the DB returns HTMX error — driven by
-        a real ORM miss on an absent pk, not a stubbed manager raising DoesNotExist."""
+        """POST with an existing_device_id that isn't in the DB returns HTMX error — driven by a real ORM miss on an absent pk, not a stubbed manager raising DoesNotExist."""
         view = self._make_view()
         request = _make_request(post={"existing_device_id": "987654321"})
 
@@ -5281,12 +5190,7 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
 
     def test_happy_path_oob_sentinel_links_and_refreshes(self):
-        """End-to-end happy path with type=='oob': the real concurrency guards and
-        ``set_librenms_oob`` run, the link is persisted via the real ``_save_device`` /
-        ``transaction.atomic`` + ``select_for_update`` path, and a non-error
-        validationRefresh response is returned. Driven against a real Device under a
-        NON-default server namespace so a hardcoded "default" anywhere would fail; the
-        persisted custom_field_data is reloaded from the DB to prove the mapping committed."""
+        """End-to-end happy path with type=='oob': the real concurrency guards and ``set_librenms_oob`` run, the link is persisted via the real ``_save_device`` / ``transaction.atomic`` + ``select_for_update`` path, and a non-error validationRefresh response is returned."""
         from dcim.models import Device
         from django.http import HttpResponse
 
@@ -5320,9 +5224,7 @@ class TestAddAsOOBViewPost:
         assert entry["oob"] == {"id": 17, "type": "oob"}
 
     def test_save_device_error_marks_transaction_rollback(self):
-        """_save_device returns an error response (it doesn't raise), so the view must mark
-        the transaction rollback-only before returning — otherwise any Interface/IPAddress
-        created earlier in the atomic block by the OOB-attach would commit."""
+        """_save_device returns an error response (it doesn't raise), so the view must mark the transaction rollback-only before returning — otherwise any Interface/IPAddress created earlier in the atomic block by the OOB-attach would commit."""
         from django.http import HttpResponse
 
         view = self._make_view()
@@ -5365,18 +5267,7 @@ class TestAddAsOOBViewPost:
         mock_get.assert_called_once_with(locked_device, server_key="default", auto_save=False)
 
     def test_save_failure_rolls_back_created_interface_and_ip(self):
-        """End-to-end: when ``_save_device`` reports failure mid-attach, the real
-        ``transaction.set_rollback(True)`` must discard the Interface AND IPAddress that the
-        OOB-IP sub-flow created earlier in the SAME atomic block — otherwise those rows would
-        commit even though the OOB link/IP never persisted.
-
-        This drives the whole flow against real DB objects: a real Device with no ``oob_ip``,
-        a real ``__new__`` Interface created by ``_resolve_oob_interface``, and a real
-        ``IPAddress`` created + assigned by ``_attach_oob_ip``, all inside the view's real
-        ``transaction.atomic()``. Only ``_save_device`` is patched — to the error response it
-        genuinely returns when the DB rejects the device write (a 0-row/constraint failure we
-        can't force deterministically against the test DB). Removing the ``set_rollback(True)``
-        line makes the created Interface/IPAddress commit and this test go red."""
+        """End-to-end: when ``_save_device`` reports failure mid-attach, the real ``transaction.set_rollback(True)`` must discard the Interface AND IPAddress that the OOB-IP sub-flow created earlier in the SAME atomic block — otherwise those rows would commit even though the OOB link/IP never persisted."""
         from dcim.models import Device, Interface
         from django.http import HttpResponse
         from ipam.models import IPAddress
@@ -5416,9 +5307,7 @@ class TestAddAsOOBViewPost:
         assert "oob" not in entry
 
     def test_aborts_when_librenms_id_owned_by_another_device(self):
-        """The incoming OOB controller id must not already belong to another NetBox device.
-        Re-checked inside the transaction via the real find_by_librenms_id (like
-        PromoteToHostView) so one LibreNMS device can't be pointed at two NetBox devices."""
+        """The incoming OOB controller id must not already belong to another NetBox device."""
         from dcim.models import Device
 
         view = self._make_view()
@@ -5441,10 +5330,7 @@ class TestAddAsOOBViewPost:
         assert "oob" not in Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"]["default"]
 
     def test_aborts_when_incoming_id_is_own_host_id(self):
-        """A concurrent re-link could make this device's host id equal the incoming OOB id;
-        attaching it as OOB would store the same id in both slots (self host/OOB conflict).
-        The lock-time guard (real get_librenms_device_id over the device's own cf) must reject
-        it before set_librenms_oob runs."""
+        """A concurrent re-link could make this device's host id equal the incoming OOB id; attaching it as OOB would store the same id in both slots (self host/OOB conflict)."""
         from dcim.models import Device
 
         view = self._make_view()
@@ -5466,10 +5352,7 @@ class TestAddAsOOBViewPost:
         assert entry == {"id": 17}
 
     def test_aborts_when_locked_oob_type_changed_concurrently(self):
-        """Same OOB id already linked, but a concurrent re-detection stored a different
-        type. The stale modal must not silently overwrite the newer type — the real guard
-        (get_librenms_oob over the device's own cf) compares type as well as id (both are
-        canonical OOB_TYPES tokens)."""
+        """Same OOB id already linked, but a concurrent re-detection stored a different type."""
         from dcim.models import Device
 
         view = self._make_view()
@@ -5497,11 +5380,7 @@ class TestAddAsOOBViewPost:
 
 @pytest.mark.django_db
 class TestSuggestOOBInterface:
-    """_suggest_oob_interface: pre-select an OOB/mgmt-named interface + default new name.
-
-    Driven against a real device with real interfaces so the name-pattern match runs over the
-    actual ``device.interfaces.all()`` queryset, not a list of MagicMocks.
-    """
+    """_suggest_oob_interface: pre-select an OOB/mgmt-named interface + default new name."""
 
     def test_picks_idrac_named_interface(self):
         from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
@@ -5533,13 +5412,7 @@ class TestSuggestOOBInterface:
 
 @pytest.mark.django_db
 class TestResolveOOBInterface:
-    """AddAsOOBView._resolve_oob_interface: select existing / create new / none.
-
-    Real Device + Interface so the select_for_update lock, the (device, name) reuse lookup, the
-    real Interface create + ``full_clean`` validation, and the not-created assertions are all
-    exercised end to end. The permission check (``request.user.has_perm``) is the one mocked
-    boundary — auth is an external concern, and the mock request grants perms by default.
-    """
+    """AddAsOOBView._resolve_oob_interface: select existing / create new / none."""
 
     def _view(self):
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
@@ -5581,8 +5454,7 @@ class TestResolveOOBInterface:
         assert Interface.objects.filter(device=dev, name="idrac0").exists()
 
     def test_create_new_interface_invalid_name_returns_reason(self):
-        """A name far over the length limit fails real ``full_clean`` → reason 'invalid_name'
-        (surfaced as a warning), not a 500, and nothing is persisted."""
+        """A name far over the length limit fails real ``full_clean`` → reason 'invalid_name' (surfaced as a warning), not a 500, and nothing is persisted."""
         from django.db import transaction
 
         from dcim.models import Interface
@@ -5598,8 +5470,7 @@ class TestResolveOOBInterface:
         assert not Interface.objects.filter(device=dev, name=long_name).exists()
 
     def test_new_reuses_existing_locked_interface(self):
-        """An interface with the requested (device, name) already exists → it is reused, no
-        create, regardless of the 'add' permission."""
+        """An interface with the requested (device, name) already exists → it is reused, no create, regardless of the 'add' permission."""
         from django.db import transaction
 
         view = self._view()
@@ -5613,8 +5484,7 @@ class TestResolveOOBInterface:
         assert result_iface.pk == existing.pk and reason is None
 
     def test_create_without_add_perm_returns_permission_add(self):
-        """No existing row + user lacks Interface 'add' → the write-time re-check refuses the
-        create rather than silently creating it."""
+        """No existing row + user lacks Interface 'add' → the write-time re-check refuses the create rather than silently creating it."""
         from django.db import transaction
 
         from dcim.models import Interface
@@ -5637,13 +5507,7 @@ class TestResolveOOBInterface:
 
 @pytest.mark.django_db
 class TestAttachOOBIp:
-    """AddAsOOBView._attach_oob_ip: reuse/re-home or create an interface-assigned IP.
-
-    Real Interface + IPAddress so the ``address__net_host`` lookup, the ownership / ambiguity
-    checks, the re-home save and the ``/32`` create all run against the ORM. Auth
-    (``request.user.has_perm``) is the only mocked boundary; the mock request grants perms by
-    default and the denial tests deny a single perm to pin the specific check.
-    """
+    """AddAsOOBView._attach_oob_ip: reuse/re-home or create an interface-assigned IP."""
 
     def _view(self):
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
@@ -5697,8 +5561,7 @@ class TestAttachOOBIp:
         assert ip is None and reason == "conflict"
 
     def test_ambiguous_match_returns_conflict(self):
-        """Two IPAddress rows share the host IP (net_host ignores prefix length): refuse rather
-        than re-home the wrong one by DB ordering."""
+        """Two IPAddress rows share the host IP (net_host ignores prefix length): refuse rather than re-home the wrong one by DB ordering."""
         from django.db import transaction
 
         from ipam.models import IPAddress
@@ -5731,8 +5594,7 @@ class TestAttachOOBIp:
         assert existing.assigned_object is None  # not re-homed
 
     def test_create_denied_without_add_permission(self):
-        """TOCTOU backstop on the create path: the locked create re-verifies 'add' and refuses
-        an add-lacking user rather than creating the IP."""
+        """TOCTOU backstop on the create path: the locked create re-verifies 'add' and refuses an add-lacking user rather than creating the IP."""
         from django.db import transaction
 
         from ipam.models import IPAddress
@@ -5748,10 +5610,7 @@ class TestAttachOOBIp:
         assert not IPAddress.objects.filter(address__net_host="10.0.0.9").exists()
 
     def test_locks_candidate_row_with_select_for_update(self):
-        """The candidate IPAddress row must be locked (load-bearing TOCTOU mitigation).
-
-        This one stays a focused mock: ``select_for_update`` is a concurrency primitive that a
-        single-threaded real test can't observe, so we assert it is invoked on the lookup."""
+        """The candidate IPAddress row must be locked (load-bearing TOCTOU mitigation)."""
         view = self._view()
         iface = MagicMock(device_id=1)
         existing = MagicMock()
@@ -5763,8 +5622,7 @@ class TestAttachOOBIp:
 
 
 class TestMissingOOBIpPermissions:
-    """AddAsOOBView._missing_oob_ip_permissions: the IP-set sub-flow must require
-    Interface/IPAddress perms, not just the top-level ('change', Device)."""
+    """AddAsOOBView._missing_oob_ip_permissions: the IP-set sub-flow must require Interface/IPAddress perms, not just the top-level ('change', Device)."""
 
     def _view(self):
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
@@ -5790,8 +5648,7 @@ class TestMissingOOBIpPermissions:
         assert msg is not None and "add_interface" in msg
 
     def test_invalid_ip_short_circuits_before_net_host_lookup(self):
-        """A malformed IP must return an invalid-IP warning without hitting the
-        address__net_host queryset (which would raise on it)."""
+        """A malformed IP must return an invalid-IP warning without hitting the address__net_host queryset (which would raise on it)."""
         view = self._view()
         req = _make_request(post={"oob_interface_id": "5"})
         req.user.has_perm.return_value = True
@@ -5802,9 +5659,7 @@ class TestMissingOOBIpPermissions:
         mock_objects.filter.assert_not_called()
 
     def test_no_interface_target_skips_ip_permission_check(self):
-        """No interface selected (empty, or '__new__' without a name) => _resolve_oob_interface
-        sets no interface and oob_ip is never written, so no IPAddress add/change perm should be
-        demanded. Returning a warning here would block the intended 'choose an interface' flow."""
+        """No interface selected (empty, or '__new__' without a name) => _resolve_oob_interface sets no interface and oob_ip is never written, so no IPAddress add/change perm should be demanded."""
         view = self._view()
         for post in ({}, {"oob_interface_id": ""}, {"oob_interface_id": "__new__", "oob_new_interface_name": ""}):
             req = _make_request(post=post)
@@ -5816,9 +5671,7 @@ class TestMissingOOBIpPermissions:
                 mock_objects.filter.assert_not_called()
 
     def test_new_interface_name_that_already_exists_does_not_require_add(self):
-        """__new__ + an existing interface name is reused by _resolve_oob_interface,
-        so no Interface write happens — 'add_interface' must NOT be required even for a
-        user who only has change-Device + add_ipaddress."""
+        """__new__ + an existing interface name is reused by _resolve_oob_interface, so no Interface write happens — 'add_interface' must NOT be required even for a user who only has change-Device + add_ipaddress."""
         view = self._view()
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
         req.user.has_perm.side_effect = lambda p: "add_interface" not in p  # deny only add_interface
@@ -5857,8 +5710,7 @@ class TestMissingOOBIpPermissions:
         assert msg is not None and "change_ipaddress" in msg
 
     def test_no_change_ipaddress_when_already_on_selected_interface(self):
-        """IP already assigned to the chosen interface → _attach_oob_ip does not save,
-        so change_ipaddress must not be required (least privilege)."""
+        """IP already assigned to the chosen interface → _attach_oob_ip does not save, so change_ipaddress must not be required (least privilege)."""
         view = self._view()
         req = _make_request(post={"oob_interface_id": "5"})
         # User has every perm EXCEPT change_ipaddress.
@@ -5870,8 +5722,7 @@ class TestMissingOOBIpPermissions:
             assert view._missing_oob_ip_permissions(req, "10.0.0.9") is None
 
     def test_ambiguous_match_requires_change_despite_selected_interface(self):
-        """Multiple rows share the host IP: the write path refuses, so the preflight must
-        NOT take the already-on-selected-interface shortcut — it requires change_ipaddress."""
+        """Multiple rows share the host IP: the write path refuses, so the preflight must NOT take the already-on-selected-interface shortcut — it requires change_ipaddress."""
         view = self._view()
         req = _make_request(post={"oob_interface_id": "5"})
         req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
@@ -5884,8 +5735,7 @@ class TestMissingOOBIpPermissions:
 
 
 class TestCreatePlatformFromImportManufacturer:
-    """CreatePlatformFromImportView must reject a stale/tampered manufacturer id instead of
-    silently creating a Platform with no manufacturer."""
+    """CreatePlatformFromImportView must reject a stale/tampered manufacturer id instead of silently creating a Platform with no manufacturer."""
 
     def _view(self):
         from netbox_librenms_plugin.views.imports.actions import CreatePlatformFromImportView
@@ -5931,8 +5781,7 @@ class TestCreatePlatformFromImportManufacturer:
 
 
 class TestOOBInterfaceSelectTemplate:
-    """The OOB interface picker toggles the "new name" input via a script block
-    (extracted from an inline onchange) so it works under CSP and is maintainable."""
+    """The OOB interface picker toggles the "new name" input via a script block (extracted from an inline onchange) so it works under CSP and is maintainable."""
 
     def _render(self):
         from django.template.loader import render_to_string
@@ -5958,9 +5807,7 @@ class TestOOBInterfaceSelectTemplate:
         assert 'getElementById("oob-iface-7")' in html
 
     def test_initializes_create_state_on_load(self):
-        """The script must sync the "new name" input once on load (not only on change), so
-        the input matches the rendered selection even if it differs from the server-side
-        display logic (e.g. a stale/missing suggested option)."""
+        """The script must sync the "new name" input once on load (not only on change), so the input matches the rendered selection even if it differs from the server-side display logic (e.g."""
         html = self._render()
         assert "function syncCreateState()" in html
         # Bound to change AND invoked immediately so initial state is authoritative.

@@ -1310,8 +1310,7 @@ class TestDeviceImportTableRenderActions:
         assert "Add as OOB controller" in result
 
     def test_existing_oob_linked_shows_linked_oob_button_with_paired_host(self):
-        """existing_match_type == 'librenms_oob' renders the info "Linked as OOB controller"
-        button and surfaces the paired host id in the title."""
+        """existing_match_type == 'librenms_oob' renders the info "Linked as OOB controller" button and surfaces the paired host id in the title."""
         from dcim.models import Device
         from virtualization.models import VirtualMachine
 
@@ -1348,9 +1347,7 @@ class TestDeviceImportTableRenderActions:
         assert "Linked as OOB controller (paired host: LibreNMS #42)" in result
 
     def test_existing_oob_linked_malformed_paired_host_id_omitted(self):
-        """A malformed paired host_id (bool/float) must use the strict coercion the host-half
-        branch uses, not int(): a boolean True must NOT render a bogus 'LibreNMS #1' — the title
-        falls back to the plain 'Linked as OOB controller'."""
+        """A malformed paired host_id (bool/float) must use the strict coercion the host-half branch uses, not int(): a boolean True must NOT render a bogus 'LibreNMS #1' — the title falls back to the plain 'Linked as OOB controller'."""
         from dcim.models import Device
         from virtualization.models import VirtualMachine
 
@@ -1387,10 +1384,7 @@ class TestDeviceImportTableRenderActions:
         assert "paired host: LibreNMS #" not in result
 
     def test_existing_librenms_link_non_dict_does_not_crash_render(self):
-        """A malformed ``existing_librenms_link`` that isn't a dict (e.g. a string) must not crash
-        the actions-column render for the whole page. It should be treated as no link — the plain
-        'Linked as OOB controller' title, no paired-host number. Pre-fix this raised AttributeError
-        on ``.get('oob_id')``."""
+        """A malformed ``existing_librenms_link`` that isn't a dict (e.g."""
         from dcim.models import Device
         from virtualization.models import VirtualMachine
 
@@ -1426,8 +1420,7 @@ class TestDeviceImportTableRenderActions:
         assert "paired host: LibreNMS #" not in result
 
     def test_existing_paired_host_shows_host_button(self):
-        """A librenms_id match whose link carries an oob_id distinct from the host id renders
-        the info "Host" button (the host half of a host/OOB pair), escaping the oob type."""
+        """A librenms_id match whose link carries an oob_id distinct from the host id renders the info "Host" button (the host half of a host/OOB pair), escaping the oob type."""
         from dcim.models import Device
         from virtualization.models import VirtualMachine
 
@@ -1468,8 +1461,7 @@ class TestDeviceImportTableRenderActions:
         assert "<idrac>" not in result
 
     def test_malformed_paired_oob_id_does_not_render_host_state(self):
-        """A malformed paired oob_id coerces to None and must NOT render the paired-host state with
-        a bogus 'LibreNMS #bad' title — it should fall through to the generic details button."""
+        """A malformed paired oob_id coerces to None and must NOT render the paired-host state with a bogus 'LibreNMS #bad' title — it should fall through to the generic details button."""
         from dcim.models import Device
         from virtualization.models import VirtualMachine
 
@@ -1670,10 +1662,7 @@ class TestLibreNMSInterfaceTableInit:
         assert table.prefix == "interfaces_"
 
     def test_ipaddress_table_sets_tab_and_prefix(self):
-        """The IP table must set tab='ipaddresses' so the paginator links (?tab={{ table.tab }})
-        keep the user on the IP Addresses tab, and prefix='ipaddresses_' so its per-page param is
-        namespaced (configure() passes self.prefix to get_table_paginate_count) rather than shared
-        with the generic one. Mirrors test_tab_and_prefix_set for LibreNMSInterfaceTable."""
+        """The IP table must set tab='ipaddresses' so the paginator links (?tab={{ table.tab }}) keep the user on the IP Addresses tab, and prefix='ipaddresses_' so its per-page param is namespaced (configure() passes self.prefix to get_table_paginate_count) rather than shared with the generic one."""
         from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 
         table = IPAddressTable([])

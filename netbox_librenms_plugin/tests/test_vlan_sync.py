@@ -486,13 +486,10 @@ class TestVlanEntryDictGuardInSync:
 
 
 class TestVLANPostServerKeyScoping:
-    """The refresh POST must scope migrated context (and cache) to the POSTed
-    server_key, not the session-active server, in multi-server setups."""
+    """The refresh POST must scope migrated context (and cache) to the POSTed server_key, not the session-active server, in multi-server setups."""
 
     def test_post_scopes_cache_keys_to_post_server_key(self):
-        """Drive the request past the short-circuit into cache-key construction: a
-        regression that namespaced the cache under the session server (not the POSTed
-        one) must fail here. The previous test bails before any fetch/cache work."""
+        """Drive the request past the short-circuit into cache-key construction: a regression that namespaced the cache under the session server (not the POSTed one) must fail here."""
         from unittest.mock import MagicMock, patch
 
         from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
@@ -539,9 +536,7 @@ class TestVLANPostServerKeyScoping:
 
 
 class TestVlanRefreshFailureClearsCache:
-    """A failed VLAN refresh must evict the server-scoped snapshot. Otherwise a refresh that
-    fails after a previous success (mapping removed / fetch error) leaves the prior VLAN table
-    cached, and the next GET renders stale comparison data the user can act on."""
+    """A failed VLAN refresh must evict the server-scoped snapshot."""
 
     def _view(self):
         from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
@@ -593,9 +588,7 @@ class TestVlanRefreshFailureClearsCache:
 
 
 class TestVLANErrorContextServerKey:
-    """_get_error_context must preserve an explicit server_key=None (stale-server branch)
-    rather than falling back to the session server — otherwise the fragment re-renders on
-    a different, still-configured server and a retry syncs against the wrong instance."""
+    """_get_error_context must preserve an explicit server_key=None (stale-server branch) rather than falling back to the session server — otherwise the fragment re-renders on a different, still-configured server and a retry syncs against the wrong instance."""
 
     def _view(self):
         from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
@@ -623,15 +616,7 @@ class TestVLANErrorContextServerKey:
 
 @pytest.mark.django_db
 class TestVlanSyncContentTemplateMigratedMode:
-    """Render the real _vlan_sync_content.html template both ways.
-
-    In migrated mode the form is replaced by a plain <div> (a migrated donor must not be able to
-    POST a VLAN sync). But the VLAN table stays interactive in migrated mode, and its verify JS
-    (librenms_sync.js verify-vlan-group / verify-vlan-sync-group) reads
-    document.querySelector('[name=csrfmiddlewaretoken]').value and posts server_key — so CSRF +
-    server_key must render in BOTH modes (matching the cable-sync template). Only the form-submit
-    ``action`` input is form-only and stays gated to the <form> branch.
-    """
+    """Render the real _vlan_sync_content.html template both ways."""
 
     def _render(self, *, migrated, server_key="default"):
         from django.template.loader import render_to_string

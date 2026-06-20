@@ -384,10 +384,7 @@ class TestSingleCableVerifyMisconfiguredDefault:
 
 @pytest.mark.django_db
 class TestVerifyDualNameFallback:
-    """Issue #88 (verify parity): SingleCableVerifyView.post must resolve a row whose NetBox
-    interface is named from the LibreNMS field the user is NOT currently displaying — using the
-    same dual-name (local_port / local_port_alt) fallback as enrich_local_port. Exercised against
-    a real Device + Interface and the real cache; only the request and LibreNMS API are stubbed."""
+    """Issue #88 (verify parity): SingleCableVerifyView.post must resolve a row whose NetBox interface is named from the LibreNMS field the user is NOT currently displaying — using the same dual-name (local_port / local_port_alt) fallback as enrich_local_port."""
 
     def test_verify_resolves_interface_by_alternate_name(self):
         from django.core.cache import cache

@@ -49,9 +49,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
         assert m._librenms_api is new_api  # rebound
 
     def test_returns_resolved_key_not_raw_post_value(self):
-        """build_librenms_api may normalize the posted key (e.g. "default" → a configured
-        name); the resolved api.server_key must be returned so cache/OOB scoping stays aligned
-        with the server actually fetched from."""
+        """build_librenms_api may normalize the posted key (e.g."""
         m = self._mixin("default")
         resolved_api = MagicMock(server_key="primary")
         with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=resolved_api):
@@ -68,8 +66,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
         assert m._librenms_api is original
 
     def test_empty_key_no_cached_api_builds_default(self):
-        """No POSTed key and no cached client → build the default via build_librenms_api(None),
-        cache it, and return its key — never touching the LibreNMSAPI() property directly."""
+        """No POSTed key and no cached client → build the default via build_librenms_api(None), cache it, and return its key — never touching the LibreNMSAPI() property directly."""
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
         m = object.__new__(LibreNMSAPIMixin)
@@ -81,8 +78,7 @@ class TestLibreNMSAPIMixinRebindApiForServer:
         assert m._librenms_api is default_api  # cached for reuse
 
     def test_empty_key_misconfigured_default_returns_none(self):
-        """No POSTed key, no cached client, and the default server is misconfigured
-        (build_librenms_api returns None) → fail closed with None instead of raising."""
+        """No POSTed key, no cached client, and the default server is misconfigured (build_librenms_api returns None) → fail closed with None instead of raising."""
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
 
         m = object.__new__(LibreNMSAPIMixin)

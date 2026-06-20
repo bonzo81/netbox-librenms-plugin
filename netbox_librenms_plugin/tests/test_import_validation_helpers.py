@@ -399,8 +399,7 @@ class TestApplyOobDetectionResult:
         assert result["serial_action"] == "oob_candidate"
 
     def test_clears_stale_merge_candidates(self):
-        """Non-merge path must drop merge-only state so a reused dict can't keep
-        stale merge UI data from a prior evaluation."""
+        """Non-merge path must drop merge-only state so a reused dict can't keep stale merge UI data from a prior evaluation."""
         from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
 
         result = self._base_result()
@@ -558,9 +557,7 @@ class TestApplyMergeCandidates:
         assert result["can_import"] is False
 
     def test_sets_is_ready_false(self):
-        """Merge mode blocks import, so a stale is_ready=True (e.g. left over from hostname-first
-        row processing) must be cleared in lockstep with can_import — otherwise the row carries
-        contradictory state (is_ready=True while merge blocks import)."""
+        """Merge mode blocks import, so a stale is_ready=True (e.g."""
         from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
 
         result = self._base_result()
@@ -631,10 +628,7 @@ class TestApplyMergeCandidates:
         assert "promote_to_host" not in result
 
     def test_recalculate_status_keeps_merge_block(self):
-        """A later recalculation (e.g. triggered by applying a role/cluster selection) must NOT
-        re-enable importing a merge-candidate row. apply_merge_candidates sets can_import=False
-        without adding to ``issues``, so an unguarded recalculate would recompute can_import=True
-        purely from empty issues and bypass the merge resolution."""
+        """A later recalculation (e.g."""
         from netbox_librenms_plugin.import_validation_helpers import (
             apply_merge_candidates,
             recalculate_validation_status,
@@ -673,15 +667,7 @@ class TestApplyMergeCandidates:
         assert result["serial_role_choice_available"] is False
 
     def test_previously_ready_result_clears_all_stale_importable_state(self):
-        """Regression for issue #85: a result that an earlier validation stage already marked
-        importable (hostname-first row processing) carries is_ready=True alongside oob_candidate,
-        promote_to_host, and serial_role_choice_available simultaneously. The merge pass must
-        clear every one of those stale "importable" signals in a single call — otherwise the row
-        renders as importable while merge mode blocks it, leaving contradictory UI state.
-
-        The per-field tests above each seed a single stale field; this exercises the real-world
-        combination so a regression that clears some-but-not-all fields is caught.
-        """
+        """Regression for issue #85: a result that an earlier validation stage already marked importable (hostname-first row processing) carries is_ready=True alongside oob_candidate, promote_to_host, and serial_role_choice_available simultaneously."""
         from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
 
         result = self._base_result()

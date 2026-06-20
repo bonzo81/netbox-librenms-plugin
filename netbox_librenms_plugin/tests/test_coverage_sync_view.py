@@ -529,8 +529,7 @@ class TestBuildAllServerMappings:
         assert result[0]["is_oob_only"] is False
 
     def test_oob_only_entry_surfaced_with_oob_id(self):
-        """An OOB-only entry ({"oob": {...}} with no host id) must still surface so the
-        user can see/remove it; it falls back to the OOB controller's id and is flagged."""
+        """An OOB-only entry ({"oob": {...}} with no host id) must still surface so the user can see/remove it; it falls back to the OOB controller's id and is flagged."""
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
         obj = MagicMock()

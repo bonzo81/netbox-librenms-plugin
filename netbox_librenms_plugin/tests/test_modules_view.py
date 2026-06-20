@@ -43,8 +43,7 @@ class TestMergeTransceiverDataPortIdentity:
     """Transceiver merge should preserve stable port identity metadata."""
 
     def test_malformed_transceiver_payload_returns_error_without_crashing(self):
-        """A truthy success with a non-list payload (or a list of non-dicts) must surface as an
-        error string — not 500 on txr.get(...) — so the caller skips the cache and warns."""
+        """A truthy success with a non-list payload (or a list of non-dicts) must surface as an error string — not 500 on txr.get(...) — so the caller skips the cache and warns."""
         view = _make_view()
         view.librenms_id = 100
         seed = [{"entPhysicalIndex": 1, "entPhysicalName": "Gi0/1"}]
@@ -299,9 +298,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
 
     def test_post_treats_non_list_inventory_as_fetch_failure(self):
-        """get_device_inventory is an external boundary: a success flag with a non-list
-        payload (e.g. a dict on a malformed response) must be handled as a fetch failure —
-        cache cleared + error message — not crash the iterate/mutate that assumes a list."""
+        """get_device_inventory is an external boundary: a success flag with a non-list payload (e.g."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -330,9 +327,7 @@ class TestMergeTransceiverDataPortIdentity:
         view._librenms_api.get_ports.assert_not_called()
 
     def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self):
-        """A list payload that carries non-dict entries (e.g. [None], ["bad"]) is malformed:
-        the `item["_source"] = ...` mutation loop below assumes dicts, so a bad element must
-        be treated as a fetch failure, not crash the refresh with a 500."""
+        """A list payload that carries non-dict entries (e.g."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -357,10 +352,7 @@ class TestMergeTransceiverDataPortIdentity:
         view._librenms_api.get_ports.assert_not_called()  # bad inventory short-circuits before ports fetch
 
     def test_get_context_data_rejects_malformed_cached_inventory(self):
-        """post() now fails closed on malformed inventory before caching, but a stale pre-fix
-        cache entry like {"inventory": [None]} can still be read. get_context_data() must mirror
-        the list-of-dicts guard: drop the stale entry and return a no-table context rather than
-        passing [None] to _build_context(), which crashes on item.get(...)."""
+        """post() now fails closed on malformed inventory before caching, but a stale pre-fix cache entry like {"inventory": [None]} can still be read."""
         view = _make_view()
         obj = MagicMock()
         view._get_sync_device = MagicMock(return_value=obj)
@@ -426,10 +418,7 @@ class TestMergeTransceiverDataPortIdentity:
         mock_messages.success.assert_not_called()
 
     def test_post_treats_malformed_ports_payload_as_fetch_failure(self):
-        """get_ports() returning success with a dict whose "ports" is missing/None (or carries
-        non-dict entries) makes port-id enrichment silently no-op. That degraded snapshot must
-        NOT be cached as complete — it has to clear the cache and warn, like a hard ports
-        failure — otherwise interface matching stays incomplete until TTL/manual refresh."""
+        """get_ports() returning success with a dict whose "ports" is missing/None (or carries non-dict entries) makes port-id enrichment silently no-op."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -466,9 +455,7 @@ class TestMergeTransceiverDataPortIdentity:
         mock_messages.success.assert_not_called()
 
     def test_post_skips_cache_on_oob_inventory_failure(self):
-        """When the OOB inventory fetch fails, the main-only snapshot must NOT be cached
-        under the current oob fingerprint — otherwise get_context_data() accepts it as
-        complete and the OOB rows (and warning) vanish until TTL/manual refresh."""
+        """When the OOB inventory fetch fails, the main-only snapshot must NOT be cached under the current oob fingerprint — otherwise get_context_data() accepts it as complete and the OOB rows (and warning) vanish until TTL/manual refresh."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -508,9 +495,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert "777" not in warn_msg and "999" not in warn_msg and "OOB id" not in warn_msg
 
     def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self):
-        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so
-        a success flag with non-dict elements (e.g. [None]) is malformed and must be treated
-        the same as a failed OOB fetch — warning + no partial snapshot cached — not a 500."""
+        """The OOB inventory merge offsets indices and sets item["_source"] on every entry, so a success flag with non-dict elements (e.g."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -546,8 +531,7 @@ class TestMergeTransceiverDataPortIdentity:
         mock_messages.success.assert_not_called()
 
     def test_post_skips_cache_on_transceiver_failure(self):
-        """A transceiver-enrichment failure drops the synthetic transceiver rows, so the
-        truncated inventory must NOT be cached — same reasoning as the OOB-failure case."""
+        """A transceiver-enrichment failure drops the synthetic transceiver rows, so the truncated inventory must NOT be cached — same reasoning as the OOB-failure case."""
         view = _make_view()
         view.model = MagicMock()
         obj = MagicMock()
@@ -691,19 +675,7 @@ def _linecard_inventory():
 
 
 def _build_linecard_device(*, with_cvr6=False):
-    """Real-DB equivalent of ``_bay_setup()`` + ``_module_types()``.
-
-    Builds a device whose *installed modules* create the nested ModuleBay hierarchy that
-    ``_get_module_bays`` reads back — so the bay-matching algorithm runs against real bays,
-    real installed Modules (real serials/types) and real ``ModuleType`` indexing instead of
-    MagicMock stand-ins. Mirrors the prod-lab03-sw4 scenario:
-
-        Slot 3  ← linecard WS-X4908 (S_LINECARD)
-          X2 Port 2 ← CVR-X2-SFP (FDO_CVR2)
-            SFP 1 ← GLC-TE (MTC213403BB)
-            SFP 2 ← (empty)
-          X2 Port 4 ← (empty)
-    """
+    """Real-DB equivalent of ``_bay_setup()`` + ``_module_types()``."""
     from netbox_librenms_plugin.tests.conftest import (
         install_module,
         make_device_with_module_bays,
@@ -724,8 +696,7 @@ def _build_linecard_device(*, with_cvr6=False):
 
 
 def _run_build_context_real(view, inventory_data, device):
-    """Drive ``_build_context`` against a REAL device — real ``_get_module_bays`` /
-    ``_get_module_types`` and the real bay-matching algorithm; only ``get_table`` is captured."""
+    """Drive ``_build_context`` against a REAL device — real ``_get_module_bays`` / ``_get_module_types`` and the real bay-matching algorithm; only ``get_table`` is captured."""
     rows_store = _captured_table_view(view)
     view._build_context(MagicMock(), device, inventory_data)
     return rows_store.get("rows", [])
@@ -993,12 +964,7 @@ def _prod_inventory_ws_x4908():
 
 
 def _build_prod_ws4908_device(*, cvr_installed=True):
-    """Real-DB equivalent of ``_prod_bay_setup_ws_x4908``: a prod-lab03-sw4-shaped device.
-
-    Slot 3 ← linecard WS-X4908-10GE (S_LINECARD)
-      X2 Port 1..8  (X2 Port 2 ← CVR-X2-SFP S_CVR2 when *cvr_installed*)
-        SFP 1, SFP 2  (none installed)
-    """
+    """Real-DB equivalent of ``_prod_bay_setup_ws_x4908``: a prod-lab03-sw4-shaped device."""
     from netbox_librenms_plugin.tests.conftest import (
         install_module,
         make_device_with_module_bays,
@@ -1023,16 +989,7 @@ def _build_prod_ws4908_device(*, cvr_installed=True):
 
 @pytest.mark.django_db
 class TestProdShapeWS4908Matching:
-    """
-    Bay matching against real production data shape from a Cisco WS-X4908-10GE.
-
-    Distinct from `TestBayDepthScopeWithUninstalledParent`, whose synthetic
-    container names match bay names directly without exercising the contrib
-    regex paths.  This class loads the contrib YAML into real ModuleBayMapping rows and
-    asserts each level of the chain — linecard regex, X2 slot regex, and CVR-internal
-    positional fallback — actually does what the contrib mappings claim, end-to-end
-    through real ``load_bay_mappings()`` and real installed-module bays.
-    """
+    """Bay matching against real production data shape from a Cisco WS-X4908-10GE."""
 
     def _build_rows(self, cvr_installed=True):
         from netbox_librenms_plugin.tests.conftest import load_contrib_bay_mappings
@@ -1717,9 +1674,7 @@ class TestBuildRowSerialMismatch:
         assert row.get("can_replace")
 
     def test_oob_row_short_circuits_before_host_matching(self):
-        """An OOB-controller item whose model/name WOULD match a host bay+type must not be
-        compared against the host: it short-circuits to a neutral read-only row (status 'OOB',
-        '-' bay/type, no action flags) before any bay/type/status resolution runs."""
+        """An OOB-controller item whose model/name WOULD match a host bay+type must not be compared against the host: it short-circuits to a neutral read-only row (status 'OOB', '-' bay/type, no action flags) before any bay/type/status resolution runs."""
         view = self._view()
         # This bay+type would produce a "Serial Mismatch"/"Installed" match for a host row,
         # so a regression that drops the early return would surface a host status here.
@@ -1759,9 +1714,7 @@ class TestBuildRowSerialMismatch:
             assert key not in row
 
     def test_oob_row_with_integrating_ancestor_still_reports_oob(self):
-        """An OOB item that also looks like an integrated-child duplicate must stay 'OOB', not
-        flip to 'Integrated'. The OOB short-circuit runs BEFORE the integrated-child check, so
-        a controller-fed row never loses its OOB status (the ancestor lookup is never reached)."""
+        """An OOB item that also looks like an integrated-child duplicate must stay 'OOB', not flip to 'Integrated'."""
         view = self._view()
         oob_item = self._make_item(serial="NS225161205")
         oob_item["_source"] = "oob"
@@ -3673,8 +3626,7 @@ class TestMatchedInterfaceLinking:
         assert row["matched_interface_confidence"] == "high"
 
     def test_attach_interface_match_skips_oob_rows(self):
-        """OOB-sourced rows must not name-match the main device's interfaces —
-        only the main device's interfaces are indexed in the context."""
+        """OOB-sourced rows must not name-match the main device's interfaces — only the main device's interfaces are indexed in the context."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         iface = MagicMock()
@@ -4729,8 +4681,7 @@ class TestRenderActionsPortIdentityFields:
 
 
 class TestGetContextDataOOBCacheFingerprint:
-    """get_context_data must invalidate cached inventory when the linked OOB
-    controller changes (re-link / unlink), not only when the main id changes."""
+    """get_context_data must invalidate cached inventory when the linked OOB controller changes (re-link / unlink), not only when the main id changes."""
 
     def test_invalidates_when_oob_relinked(self):
         from unittest.mock import MagicMock, patch

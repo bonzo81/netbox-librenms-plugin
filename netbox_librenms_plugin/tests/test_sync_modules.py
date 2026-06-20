@@ -533,14 +533,7 @@ class TestRenderNameDepth:
 
 
 class TestCandidateBaysForItem:
-    """InstallBranchView._candidate_bays_for_item selects the bay set to match against.
-
-    Regression: bulk install (_install_single) skipped module-scoped 'Transceiver N/M' bays
-    as 'no matching bay' for orphan synthetic transceiver rows, because the no-parent branch
-    used top-level bays only — while the table matches against the combined all_bays set and
-    a single install succeeds. The helper must mirror the table's all_bays for the no-parent
-    case so bulk install stays consistent with what the user sees and with single install.
-    """
+    """InstallBranchView._candidate_bays_for_item selects the bay set to match against."""
 
     @staticmethod
     def _b(name, module_id=None, pk=None):
@@ -1968,10 +1961,7 @@ class TestSingleInstallInterfaceBinding:
         assert response is not None
 
     def test_update_module_interface_view_keeps_bind_when_adoption_raises(self):
-        """A committed primary bind must not be downgraded to 'failed' if the (separately
-        executed) template-adoption step raises afterward: the interface is bound regardless,
-        so the user gets the success toast plus a warning that adoption failed — not a
-        misleading failure that makes a retry look like a fresh conflict."""
+        """A committed primary bind must not be downgraded to 'failed' if the (separately executed) template-adoption step raises afterward: the interface is bound regardless, so the user gets the success toast plus a warning that adoption failed — not a misleading failure that makes a retry look like a fresh conflict."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         view = object.__new__(UpdateModuleInterfaceView)
@@ -2030,9 +2020,7 @@ class TestSingleInstallInterfaceBinding:
         assert response is not None
 
     def test_update_module_interface_view_no_server_key_does_not_fake_adoption_success(self):
-        """A primary identity exists (bind_item resolved) but server_key is blank, so the bind
-        is never attempted. That must NOT fall through to the adoption-only success path —
-        otherwise the row reports success while its primary port_id was never associated."""
+        """A primary identity exists (bind_item resolved) but server_key is blank, so the bind is never attempted."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         view = object.__new__(UpdateModuleInterfaceView)
@@ -2077,11 +2065,7 @@ class TestSingleInstallInterfaceBinding:
         assert response is not None
 
     def test_update_module_interface_view_adopts_templates_even_when_port_bind_is_a_noop(self):
-        """Regression: the port_id bind and template adoption are complementary, not
-        either/or. When the LibreNMS-identified interface is already bound, the bind
-        returns 'bound' (a no-op) — adoption must STILL run so standalone template
-        interfaces (e.g. breakout children) get adopted and the row's 'Update Interface'
-        affordance clears instead of persisting after a 'success' toast."""
+        """Regression: the port_id bind and template adoption are complementary, not either/or."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         view = object.__new__(UpdateModuleInterfaceView)
@@ -2134,8 +2118,7 @@ class TestSingleInstallInterfaceBinding:
         assert response is not None
 
     def test_update_module_interface_view_skips_adoption_on_bind_conflict(self):
-        """A hard bind conflict must NOT trigger template adoption — we don't mutate past
-        an unresolved problem (e.g. an ambiguous/foreign port_id)."""
+        """A hard bind conflict must NOT trigger template adoption — we don't mutate past an unresolved problem (e.g."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         view = object.__new__(UpdateModuleInterfaceView)
@@ -4390,8 +4373,7 @@ class TestModulesRedirectResponse:
         assert response["HX-Redirect"] == "/sync/?tab=modules#librenms-module-table"
 
     def test_explicit_server_key_is_appended(self):
-        """A server-scoped action must keep the active server_key in the follow-up URL so the
-        user returns to the same cache namespace this request mutated/read."""
+        """A server-scoped action must keep the active server_key in the follow-up URL so the user returns to the same cache namespace this request mutated/read."""
         from unittest.mock import MagicMock, patch
 
         from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
@@ -4404,8 +4386,7 @@ class TestModulesRedirectResponse:
         mock_redirect.assert_called_once_with("/sync/?tab=modules&server_key=prod+server#librenms-module-table")
 
     def test_server_key_read_from_post_when_not_passed(self):
-        """Bare call sites (in views that don't compute a resolved key) still propagate the
-        server context — the helper reads server_key from the request itself."""
+        """Bare call sites (in views that don't compute a resolved key) still propagate the server context — the helper reads server_key from the request itself."""
         from unittest.mock import MagicMock, patch
 
         from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
@@ -5254,19 +5235,11 @@ class TestAddBayTemplateViewRegexMapping:
 
 
 class TestVCNormalizationReportView:
-    """VCNormalizationReportView returns 400 when there's nothing to report, HTML when there is.
-
-    The two detector-dependent paths are driven against a real VC member with a real Module so
-    the real detect_vc_normalization_noop runs end-to-end through the view (and the real
-    build_vc_normalization_report renders the real diagnostic) — not a stubbed return. A
-    NetBox InterfaceTemplate whose name carries no {module}/{vc_position} token instantiates
-    verbatim, so the vendor-shaped name is produced for real. The early-return guards
-    (missing / non-numeric module_id) stay unit tests."""
+    """VCNormalizationReportView returns 400 when there's nothing to report, HTML when there is."""
 
     @staticmethod
     def _vc_member_with_module(template_name, *, members=4, vc_position=3, manufacturer="Nokia", model="7250-IXR"):
-        """Build a real VC, return its *vc_position* member with a real Module installed whose
-        single InterfaceTemplate instantiates to *template_name* verbatim."""
+        """Build a real VC, return its *vc_position* member with a real Module installed whose single InterfaceTemplate instantiates to *template_name* verbatim."""
         from dcim.models import (
             InterfaceTemplate,
             Manufacturer,
@@ -5317,8 +5290,7 @@ class TestVCNormalizationReportView:
 
     @pytest.mark.django_db
     def test_get_returns_400_when_no_noop_detected(self):
-        """A module whose instantiated template name matches the VC member-position regex
-        means rewriting works → the real detector returns None → 400 'nothing to report'."""
+        """A module whose instantiated template name matches the VC member-position regex means rewriting works → the real detector returns None → 400 'nothing to report'."""
         from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
 
         view = object.__new__(VCNormalizationReportView)
@@ -5335,8 +5307,7 @@ class TestVCNormalizationReportView:
 
     @pytest.mark.django_db
     def test_get_renders_template_when_noop_detected(self):
-        """A Nokia-shaped name that the regex can't rewrite → the real detector returns a
-        diagnostic, and the real build_vc_normalization_report renders it through the view."""
+        """A Nokia-shaped name that the regex can't rewrite → the real detector returns a diagnostic, and the real build_vc_normalization_report renders it through the view."""
         from netbox_librenms_plugin.views.sync.modules import VCNormalizationReportView
 
         view = object.__new__(VCNormalizationReportView)
@@ -5692,10 +5663,7 @@ class TestModuleInterfaceUpdateMessage:
 
 
 class TestReplaceModuleRedirectServerKey:
-    """ReplaceModuleView computes `server_key = POST or self.librenms_api.server_key`, so its
-    redirects must pass that computed key — otherwise the helper falls back to POST/GET only and
-    drops the active-server context when the POST field is absent, landing on a blank/default
-    modules tab and reading/mutating a different cache namespace."""
+    """ReplaceModuleView computes `server_key = POST or self.librenms_api.server_key`, so its redirects must pass that computed key — otherwise the helper falls back to POST/GET only and drops the active-server context when the POST field is absent, landing on a blank/default modules tab and reading/mutating a different cache namespace."""
 
     def _run_missing_module_id(self):
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView

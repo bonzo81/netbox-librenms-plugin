@@ -77,10 +77,7 @@ def make_vm(name, cluster=None):
 
 
 def make_serial_device(name, *, csp_names=(), cp_names=()):
-    """Create a real Device with optional ConsoleServerPorts / ConsolePorts.
-
-    Returns ``(device, console_server_ports, console_ports)``.
-    """
+    """Create a real Device with optional ConsoleServerPorts / ConsolePorts."""
     from dcim.models import ConsolePort, ConsoleServerPort
 
     dev = make_device(name)
@@ -132,12 +129,7 @@ def make_module_bay(device, name):
 
 
 def make_module_type_with_bays(model, *, manufacturer=None, bay_names=()):
-    """get_or_create a real ModuleType and (when first created) attach ModuleBayTemplates.
-
-    Installing a Module of this type then auto-instantiates one module-scoped ModuleBay per
-    template (NetBox 4.x nested-module support), which is exactly the structure
-    ``_get_module_bays`` reads back.
-    """
+    """get_or_create a real ModuleType and (when first created) attach ModuleBayTemplates."""
     from dcim.models import Manufacturer, ModuleBayTemplate, ModuleType
 
     if manufacturer is None:
@@ -152,10 +144,7 @@ def make_module_type_with_bays(model, *, manufacturer=None, bay_names=()):
 
 
 def make_device_with_module_bays(name, bay_names, *, manufacturer=None, serial=""):
-    """Create a real Device on a dedicated DeviceType carrying device-level ModuleBayTemplates.
-
-    The device-level ModuleBays auto-instantiate on Device creation. Returns the Device.
-    """
+    """Create a real Device on a dedicated DeviceType carrying device-level ModuleBayTemplates."""
     from dcim.models import Device, DeviceType, ModuleBayTemplate
 
     site, _, role = _shared_infra()
@@ -171,11 +160,7 @@ def make_device_with_module_bays(name, bay_names, *, manufacturer=None, serial="
 
 
 def load_contrib_bay_mappings():
-    """Create real ModuleBayMapping rows from contrib/module_bay_mappings.yaml.
-
-    Lets bay-matching tests exercise the real ``load_bay_mappings()`` (DB-backed) + regex
-    resolution against the shipped contrib mappings, instead of patching the loader.
-    """
+    """Create real ModuleBayMapping rows from contrib/module_bay_mappings.yaml."""
     from pathlib import Path
 
     import yaml
@@ -197,14 +182,7 @@ def load_contrib_bay_mappings():
 
 
 def install_module(device, bay_name, model, *, serial="", child_bays=(), manufacturer=None, parent_module=None):
-    """Install a real Module of type *model* into *device*'s ModuleBay named *bay_name*.
-
-    The ModuleType is created (with *child_bays* ModuleBayTemplates) if needed, so installing
-    the module auto-creates its module-scoped child bays. Returns the created Module.
-
-    When the same bay name exists under more than one parent module (e.g. "SFP 1" under two
-    converters), pass *parent_module* to disambiguate which module's bay to install into.
-    """
+    """Install a real Module of type *model* into *device*'s ModuleBay named *bay_name*."""
     from dcim.models import Module, ModuleBay
 
     mt = make_module_type_with_bays(model, manufacturer=manufacturer, bay_names=child_bays)
@@ -222,12 +200,7 @@ def ip_on(device, address, ifname, *, iface_type="1000base-t"):
 
 
 def delete_keeping_pk(obj):
-    """Delete the row via the queryset so the in-memory instance keeps its pk.
-
-    ``Model.delete()`` nulls ``instance.pk``; tests that simulate "object vanished since
-    caching" need the cached instance to retain its original pk, so the delete goes through
-    the manager rather than the instance.
-    """
+    """Delete the row via the queryset so the in-memory instance keeps its pk."""
     type(obj).objects.filter(pk=obj.pk).delete()
 
 
