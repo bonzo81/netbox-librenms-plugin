@@ -241,19 +241,19 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """
         Build Stage 2b "donor migrated mode" context.
 
-        Returns a dict with:
-        * ``migrated_to_marker`` — the marker dict (``{device_id, server_key, at}``)
-          when this device was previously merged into another via
-          :func:`mark_librenms_migrated`, else ``None``.
-        * ``migrated_to_winner`` — the winner :class:`Device` instance (or
-          ``None`` if it has been deleted since the marker was written).
+        When ``migrated_to_marker`` is set, all sync action buttons should be hidden
+        and per-row "Move to winner" actions should be shown instead. Delegates to
+        :func:`utils.build_migrated_context` so the full page and the HTMX tab partials
+        share one implementation.
 
-        When ``migrated_to_marker`` is set, all sync action buttons should
-        be hidden and per-row "Move to winner" actions should be shown
-        instead.
+        Args:
+            obj: The donor device to build migrated-mode context for.
+            server_key: The LibreNMS server key the marker is namespaced under.
 
-        Delegates to :func:`utils.build_migrated_context` so the full page and
-        the HTMX tab partials share one implementation.
+        Returns:
+            dict: ``{migrated_to_marker, migrated_to_winner}`` — the marker dict
+                ``{device_id, server_key, at}`` (or None), and the winner
+                :class:`Device` (or None if deleted since the marker was written).
         """
         from netbox_librenms_plugin.utils import build_migrated_context
 

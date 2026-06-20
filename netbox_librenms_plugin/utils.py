@@ -2155,17 +2155,20 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
 
 def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
     """
-    Read the ``_migrated_to`` marker (Stage 2b) from the device's
-    ``librenms_id[server_key]`` sub-block.
+    Read the ``_migrated_to`` marker (Stage 2b) from a device's librenms_id block.
 
-    Returns the marker dict ``{device_id, server_key, at}`` when the donor
-    was previously merged into another NetBox device via
-    :func:`mark_librenms_migrated`, or ``None`` when no marker is present
-    (or the cf is malformed).
+    Used by the librenms-sync UI to switch a donor device into "migrated mode":
+    disable sync actions and surface per-row "Move to winner" buttons. A live host or
+    OOB link takes precedence over a stale marker.
 
-    Used by the librenms-sync UI to switch a donor device into "migrated
-    mode": disable sync actions and surface per-row "Move to winner"
-    buttons.
+    Args:
+        device: The donor device whose ``librenms_id[server_key]`` sub-block is read.
+        server_key (str): The LibreNMS server key the marker is namespaced under.
+
+    Returns:
+        dict | None: The marker dict ``{device_id, server_key, at}`` when the donor
+            was previously merged via :func:`mark_librenms_migrated`, or None when no
+            valid marker is present (missing, malformed, or superseded by a live link).
     """
     if device is None:
         return None
@@ -2197,12 +2200,20 @@ def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
 
 def build_migrated_context(obj, server_key: str = "default") -> dict:
     """
-    Donor "migrated mode" context: ``{migrated_to_marker, migrated_to_winner}``.
+    Build the donor "migrated mode" template context.
 
-    Shared by the full sync page and the HTMX tab partials so a merged donor
-    shows the migration UI — and hides ordinary sync actions — consistently on
-    both the initial render and after a tab refresh (the partial-render views
-    build their own context and would otherwise drop the marker).
+    Shared by the full sync page and the HTMX tab partials so a merged donor shows the
+    migration UI — and hides ordinary sync actions — consistently on both the initial
+    render and after a tab refresh (the partial-render views build their own context
+    and would otherwise drop the marker).
+
+    Args:
+        obj: The donor device to build migrated-mode context for.
+        server_key (str): The LibreNMS server key the marker is namespaced under.
+
+    Returns:
+        dict: ``{migrated_to_marker, migrated_to_winner}``; both None when the device
+            is not in migrated mode.
     """
     marker = get_migrated_to_marker(obj, server_key)
     if not marker:

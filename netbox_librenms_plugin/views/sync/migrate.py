@@ -38,16 +38,19 @@ logger = logging.getLogger(__name__)
 
 def _resolve_winner_for_donor(donor, server_key="default"):
     """
-    Return ``(winner, marker)`` for *donor*.
-
-    - ``(None, None)`` when no ``_migrated_to`` marker is present.
-    - ``(None, marker)`` when the marker exists but the winner device has
-      been deleted, the ``device_id`` in the marker is invalid/unparseable, or
-      the marker points back at the donor itself (so callers can distinguish
-      "no marker" from "stale marker").
-    - ``(winner, marker)`` when the marker is valid and the winner exists.
+    Resolve the migration winner device recorded on a donor.
 
     ``marker`` is the dict written by :func:`mark_librenms_migrated`.
+
+    Args:
+        donor: The donor device whose ``_migrated_to`` marker is read.
+        server_key (str): The LibreNMS server key the marker is namespaced under.
+
+    Returns:
+        tuple: ``(winner, marker)`` when the marker is valid and the winner exists;
+            ``(None, None)`` when no marker is present; ``(None, marker)`` when the
+            marker is stale (winner deleted, unparseable ``device_id``, or
+            self-pointing) so callers can distinguish "no marker" from "stale marker".
     """
     marker = get_migrated_to_marker(donor, server_key)
     if not marker:
@@ -74,14 +77,24 @@ def _resolve_winner_for_donor(donor, server_key="default"):
 
 
 def _server_key_from_request(request, default_factory=None):
-    """Extract the LibreNMS server key from the POST body (form field).
+    """
+    Extract the LibreNMS server key from the POST body (form field).
 
     Pass ``default_factory=lambda: self.librenms_api.server_key`` from views that
-    have API access so the fallback matches the active server's namespace rather
-    than the literal ``"default"``. The factory is a callable (not the resolved
-    value) so the API — and the DB lookup it performs — is only touched when the
-    POST body omits ``server_key``; the common path where the form supplies the
-    key never instantiates the API.
+    have API access so the fallback matches the active server's namespace rather than
+    the literal ``"default"``. The factory is a callable (not the resolved value) so
+    the API — and the DB lookup it performs — is only touched when the POST body omits
+    ``server_key``; the common path where the form supplies the key never instantiates
+    the API.
+
+    Args:
+        request: The current HTTP request (its POST body is read).
+        default_factory: Optional callable returning the fallback server key when the
+            POST body omits ``server_key``.
+
+    Returns:
+        str: The resolved server key, or ``"default"`` when neither the POST body nor
+            the factory supplies one.
     """
     sk = request.POST.get("server_key")
     if isinstance(sk, str) and sk:
@@ -94,12 +107,22 @@ def _server_key_from_request(request, default_factory=None):
 
 
 def _sync_tab_url(device_pk, tab, server_key):
-    """Build the device's LibreNMS sync URL for *tab*, preserving *server_key*.
+    """
+    Build the device's LibreNMS sync URL for a tab, preserving server_key.
 
-    Used as the non-HTMX fallback target when a plain POST carries no usable
-    Referer: without this the redirect would drop the active sync tab and server
-    context, bouncing the user to the bare app root instead of the donor's
-    "Migrated to ..." view they acted from.
+    Used as the non-HTMX fallback target when a plain POST carries no usable Referer:
+    without this the redirect would drop the active sync tab and server context,
+    bouncing the user to the bare app root instead of the donor's "Migrated to ..."
+    view they acted from.
+
+    Args:
+        device_pk: The device primary key the sync URL is built for.
+        tab (str): The sync tab to land on.
+        server_key (str): The active server key; appended only when it matches a
+            configured server (a stale/tampered key is dropped).
+
+    Returns:
+        str: The sync URL with ``tab`` (and a validated ``server_key``) query params.
     """
     url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device_pk])}?tab={tab}"
     if server_key:
@@ -115,17 +138,21 @@ def _sync_tab_url(device_pk, tab, server_key):
 
 def _safe_referer(request, fallback=None):
     """
-    Return the request's ``Referer`` only when it points back at this
-    site, otherwise *fallback* (or the app mount path).
+    Return the request's validated ``Referer``, or a safe fallback.
 
-    ``Referer`` is a client-controlled header, so it must be validated
-    against the current host before being used as a redirect target —
-    trusting it blindly is an open-redirect vector.
+    ``Referer`` is a client-controlled header, so it must be validated against the
+    current host before being used as a redirect target — trusting it blindly is an
+    open-redirect vector.
 
-    *fallback* is an internal, server-built URL (see :func:`_sync_tab_url`); it is
-    used as-is so a missing Referer still lands on the right sync tab/server. When
-    no fallback is supplied, fall back to the app mount path (not literal ``"/"``)
-    so prefixed deployments land on the NetBox app root rather than the site root.
+    Args:
+        request: The current HTTP request whose ``Referer`` is validated.
+        fallback: An internal, server-built URL (see :func:`_sync_tab_url`) used as-is
+            when the Referer is missing/untrusted. When None, the app mount path is
+            used (not literal ``"/"``) so prefixed deployments land on the NetBox app
+            root rather than the site root.
+
+    Returns:
+        str: The validated Referer, or *fallback* / the app mount path.
     """
     referer = request.META.get("HTTP_REFERER")
     if referer and url_has_allowed_host_and_scheme(
@@ -139,12 +166,23 @@ def _safe_referer(request, fallback=None):
 
 def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallback_url=None):
     """
-    Common HTMX response: queue a Django messages flash and emit the
-    ``HX-Refresh`` header so the sync page re-renders with the row gone.
+    Build the common HTMX (or redirect) response after a successful move.
 
-    For non-HTMX requests, queue the message and redirect to the validated
-    Referer, falling back to *fallback_url* (the donor's sync tab) so the
-    server/tab context survives a missing Referer.
+    Queues a Django messages flash and emits the ``HX-Refresh`` header so the sync
+    page re-renders with the row gone. For non-HTMX requests, queues the message and
+    redirects to the validated Referer, falling back to *fallback_url* (the donor's
+    sync tab) so the server/tab context survives a missing Referer.
+
+    Args:
+        request: The current HTTP request.
+        message (str): The flash message to queue.
+        level: The Django messages level (default ``messages.SUCCESS``).
+        status (int): The HTTP status for the HTMX response.
+        fallback_url: The non-HTMX redirect fallback (the donor's sync tab).
+
+    Returns:
+        HttpResponse: An ``HX-Refresh`` response for HTMX requests, or a redirect to
+            the validated Referer / fallback otherwise.
     """
     messages.add_message(request, level, message)
     if request.headers.get("HX-Request"):
@@ -153,19 +191,29 @@ def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallba
 
 
 def _reconcile_donor_device_ip_fks(donor, winner):
-    """Keep the donor valid after a move re-homes an interface/IP onto the winner.
+    """
+    Keep the donor valid after a move re-homes an interface/IP onto the winner.
 
-    NetBox requires ``Device.primary_ip4``/``primary_ip6``/``oob_ip`` to reference an address
-    assigned to one of that device's *own* interfaces. Moving an interface (with its addresses)
-    or an IP to the winner can leave one of those donor FKs pointing at an address now living on
-    a winner-owned interface — an invalid state that surfaces the next time the donor is
-    full_clean()'d. For each such dangling FK, transfer the designation to the winner when its
-    slot is free, otherwise clear it on the donor. Only the touched FK column is saved
-    (``update_fields``) so we don't trip ``full_clean()`` on pre-existing unrelated
-    inconsistencies, mirroring :class:`TransferDeviceIPView`.
+    NetBox requires ``Device.primary_ip4``/``primary_ip6``/``oob_ip`` to reference an
+    address assigned to one of that device's *own* interfaces. Moving an interface
+    (with its addresses) or an IP to the winner can leave one of those donor FKs
+    pointing at an address now living on a winner-owned interface — an invalid state
+    that surfaces the next time the donor is full_clean()'d. For each such dangling FK,
+    transfer the designation to the winner when its slot is free, otherwise clear it on
+    the donor. Only the touched FK column is saved (``update_fields``) so we don't trip
+    ``full_clean()`` on pre-existing unrelated inconsistencies, mirroring
+    :class:`TransferDeviceIPView`.
 
-    Must run inside the caller's ``transaction.atomic()`` with both devices already locked.
-    Returns human-readable notes describing what was reconciled (for the response message).
+    Must run inside the caller's ``transaction.atomic()`` with both devices already
+    locked.
+
+    Args:
+        donor: The donor device whose dangling IP FKs are reconciled.
+        winner: The device that received the moved interface/IP.
+
+    Returns:
+        list: Human-readable notes describing what was reconciled (for the response
+            message).
     """
     notes = []
     for field, human in (
@@ -224,8 +272,14 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
 
     def _gate(self, request):
         """
-        Plugin-write + object-perm gate.  Returns a response on failure
-        (which the caller must return verbatim) or ``None`` on success.
+        Apply the plugin-write + object-perm gate.
+
+        Args:
+            request: The current HTTP request being authorized.
+
+        Returns:
+            A response on failure (which the caller must return verbatim), or None on
+            success.
         """
         resp = self.require_all_permissions("POST")
         if resp is not None:
@@ -236,15 +290,20 @@ class _BaseMoveToWinnerView(LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObj
         """
         Return an error response.
 
-        For HTMX requests: returns HTTP 200 with an out-of-band swap into
-        ``#django-messages`` so the toast renders through NetBox's Bootstrap
-        pipeline.  ``HX-Reswap: none`` prevents the primary swap target from
-        being overwritten.  The ``status`` parameter is not used for HTMX
-        responses — errors are always signalled via the OOB toast, not the
-        status code.
+        For HTMX requests this returns HTTP 200 with an out-of-band swap into
+        ``#django-messages`` so the toast renders through NetBox's Bootstrap pipeline;
+        ``HX-Reswap: none`` prevents the primary swap target from being overwritten.
+        For non-HTMX requests it adds a Django error message and redirects to the
+        validated Referer or the app mount path.
 
-        For non-HTMX requests: adds a Django error message and redirects to
-        the validated Referer or '/'.
+        Args:
+            request: The current HTTP request.
+            msg (str): The error message to surface.
+            status (int): The HTTP status for non-HTMX responses; ignored for HTMX
+                responses, where errors are always signalled via the OOB toast.
+
+        Returns:
+            HttpResponse: The OOB-toast response (HTMX) or a redirect (non-HTMX).
         """
         if request.headers.get("HX-Request"):
             toast_html = format_html(
