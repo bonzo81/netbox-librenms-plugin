@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "name": "cisco-lag-and-subinterface",
+  "description": "Single Cisco device: one Port-channel LAG member and one numeric sub-interface, resolved from port_stack.",
+  "meta": {
+    "os": "ios",
+    "vendor": "cisco",
+    "topology": "single"
+  },
+  "device_id": 1002,
+  "responses": {
+    "GET /api/v0/devices/1002": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 1002,
+          "hostname": "device-rtr01",
+          "sysName": "device-rtr01",
+          "hardware": "ISR4351",
+          "os": "ios",
+          "serial": "SN-ee33ff",
+          "ip": "192.0.2.12",
+          "version": "16.9.4"
+        }
+      ]
+    },
+    "GET /api/v0/devices/1002/ports": {
+      "status": "ok",
+      "ports": [
+        {
+          "port_id": 301,
+          "ifName": "Port-channel1",
+          "ifDescr": "Port-channel1",
+          "ifType": "ieee8023adLag",
+          "ifSpeed": 2000000000,
+          "ifAdminStatus": "up",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:00:03:01",
+          "ifMtu": 1500
+        },
+        {
+          "port_id": 302,
+          "ifName": "GigabitEthernet0/0/1",
+          "ifDescr": "GigabitEthernet0/0/1",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 1000000000,
+          "ifAdminStatus": "up",
+          "ifAlias": "lag-member",
+          "ifPhysAddress": "02:00:00:00:03:02",
+          "ifMtu": 1500
+        },
+        {
+          "port_id": 304,
+          "ifName": "GigabitEthernet0/0/2",
+          "ifDescr": "GigabitEthernet0/0/2",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 1000000000,
+          "ifAdminStatus": "up",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:00:03:04",
+          "ifMtu": 1500
+        },
+        {
+          "port_id": 305,
+          "ifName": "GigabitEthernet0/0/2.200",
+          "ifDescr": "GigabitEthernet0/0/2.200",
+          "ifType": "l2vlan",
+          "ifSpeed": 1000000000,
+          "ifAdminStatus": "up",
+          "ifAlias": "vlan200",
+          "ifPhysAddress": "02:00:00:00:03:04",
+          "ifMtu": 1500
+        }
+      ]
+    },
+    "GET /api/v0/devices/1002/port_stack": {
+      "status": "ok",
+      "mappings": [
+        {
+          "high_port_id": 302,
+          "low_port_id": 301
+        },
+        {
+          "high_port_id": 304,
+          "low_port_id": 305
+        }
+      ]
+    }
+  },
+  "expected": {
+    "lag_members": {
+      "302": "301"
+    },
+    "sub_interfaces": {
+      "305": "304"
+    }
+  }
+}

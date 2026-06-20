@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "name": "cisco-stackwise-3member",
+  "description": "Cisco StackWise, 3 chassis members under a stack-class root, 1-based positions.",
+  "meta": {
+    "os": "ios",
+    "vendor": "cisco",
+    "topology": "stackwise"
+  },
+  "device_id": 1000,
+  "responses": {
+    "GET /api/v0/devices/1000": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 1000,
+          "hostname": "device-stack01",
+          "sysName": "device-stack01",
+          "hardware": "WS-C3750X-48P",
+          "os": "ios",
+          "serial": "SN-a1b2c3",
+          "ip": "192.0.2.10",
+          "version": "15.2(4)E7"
+        }
+      ]
+    },
+    "GET /api/v0/inventory/1000?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 1,
+          "entPhysicalClass": "stack",
+          "entPhysicalName": "StackSub-0/0",
+          "entPhysicalDescr": "Cisco StackWise",
+          "entPhysicalSerialNum": "",
+          "entPhysicalModelName": "",
+          "entPhysicalContainedIn": 0
+        }
+      ]
+    },
+    "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 100,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-a1b2c3",
+          "entPhysicalModelName": "WS-C3750X-48P",
+          "entPhysicalName": "Switch 1",
+          "entPhysicalDescr": "48-port PoE switch",
+          "entPhysicalParentRelPos": 1,
+          "entPhysicalContainedIn": 1
+        },
+        {
+          "entPhysicalIndex": 200,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-d4e5f6",
+          "entPhysicalModelName": "WS-C3750X-48P",
+          "entPhysicalName": "Switch 2",
+          "entPhysicalDescr": "48-port PoE switch",
+          "entPhysicalParentRelPos": 2,
+          "entPhysicalContainedIn": 1
+        },
+        {
+          "entPhysicalIndex": 300,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-789abc",
+          "entPhysicalModelName": "WS-C3750X-24T",
+          "entPhysicalName": "Switch 3",
+          "entPhysicalDescr": "24-port switch",
+          "entPhysicalParentRelPos": 3,
+          "entPhysicalContainedIn": 1
+        }
+      ]
+    }
+  },
+  "expected": {
+    "virtual_chassis": {
+      "is_stack": true,
+      "member_count": 3,
+      "member_serials": [
+        "SN-a1b2c3",
+        "SN-d4e5f6",
+        "SN-789abc"
+      ]
+    }
+  }
+}

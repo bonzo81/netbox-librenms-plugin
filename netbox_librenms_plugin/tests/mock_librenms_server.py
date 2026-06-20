@@ -253,6 +253,42 @@ class MockLibreNMSServer:
             method="GET",
         )
 
+    def load_recording(self, recording: dict):
+        """Register every response in a captured data-shape recording as a route.
+
+        A recording's ``responses`` map is keyed by request strings using the same
+        ``"METHOD /path?query"`` convention the handler matches against. Multiple
+        query variants of the same path (e.g. the two ``entPhysicalContainedIn``
+        inventory calls) are collapsed into a single callable route that selects
+        the variant whose recorded query parameters are all present on the incoming
+        request, preferring the most specific match. Matching is order-independent,
+        so it does not depend on how ``requests`` happens to serialize the params.
+
+        Args:
+            recording (dict): Parsed recording with a ``responses`` mapping. Each
+                value is either a JSON body (served with HTTP 200) or a
+                ``[status, body]`` pair.
+        """
+        by_route: dict[tuple[str, str], list] = {}
+        for key, value in recording.get("responses", {}).items():
+            method, sep, rest = key.partition(" ")
+            if not sep:  # No verb prefix → default to GET on the whole key.
+                method, rest = "GET", key
+            path, _, query = rest.partition("?")
+            qdict = {k: v[0] for k, v in parse_qs(query).items()} if query else {}
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
+                status, body = value
+            else:
+                status, body = 200, value
+            by_route.setdefault((method, path), []).append((qdict, status, body))
+
+        for (method, path), variants in by_route.items():
+            if len(variants) == 1 and not variants[0][0]:
+                qdict, status, body = variants[0]
+                self.register(path, body, status=status, method=method)
+            else:
+                self.register(path, _recording_variant_handler(path, variants), method=method)
+
     def vc_inventory_callable(self, device_id: int, root_items: list, children_by_parent_index: dict):
         """
         Register a callable route for VC detection two-call pattern.
@@ -290,6 +326,32 @@ class MockLibreNMSServer:
 
         self.register(f"/api/v0/inventory/{device_id}", _handler, method="GET")
         self.register(f"/api/v0/inventory/{device_id}/all", _handler, method="GET")
+
+
+def _recording_variant_handler(path: str, variants: list):
+    """Build a route handler that picks the recorded query variant matching the request.
+
+    Args:
+        path (str): The request path the handler serves (used only in the 404 message).
+        variants (list): ``(query_dict, status, body)`` tuples for this path.
+
+    Returns:
+        A callable matching the mock server's route-handler signature.
+    """
+
+    def _handler(method, path, query, headers, body):
+        incoming = {k: (v[0] if isinstance(v, list) else v) for k, v in (query or {}).items()}
+        best = None
+        best_score = -1
+        for qdict, status, resp_body in variants:
+            if all(incoming.get(k) == v for k, v in qdict.items()) and len(qdict) > best_score:
+                best = (status, resp_body)
+                best_score = len(qdict)
+        if best is not None:
+            return best
+        return 404, {"status": "error", "message": f"No recorded variant for {path}?{incoming}"}
+
+    return _handler
 
 
 @contextmanager

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "name": "juniper-vc-2member",
+  "description": "Juniper EX Virtual Chassis, 2 members under a chassis-class root, 0-based positions.",
+  "meta": {"os": "junos", "vendor": "juniper", "topology": "virtual-chassis"},
+  "device_id": 1001,
+  "responses": {
+    "GET /api/v0/devices/1001": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 1001,
+          "hostname": "device-vc01",
+          "sysName": "device-vc01",
+          "hardware": "EX4300-48T",
+          "os": "junos",
+          "serial": "SN-aa11bb",
+          "ip": "192.0.2.11",
+          "version": "18.4R2"
+        }
+      ]
+    },
+    "GET /api/v0/inventory/1001?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 10,
+          "entPhysicalClass": "chassis",
+          "entPhysicalName": "Virtual Chassis",
+          "entPhysicalDescr": "EX4300 Virtual Chassis",
+          "entPhysicalSerialNum": "",
+          "entPhysicalModelName": "",
+          "entPhysicalContainedIn": 0
+        }
+      ]
+    },
+    "GET /api/v0/inventory/1001?entPhysicalClass=chassis&entPhysicalContainedIn=10": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 100,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-aa11bb",
+          "entPhysicalModelName": "EX4300-48T",
+          "entPhysicalName": "FPC 0",
+          "entPhysicalDescr": "EX4300-48T",
+          "entPhysicalParentRelPos": 0,
+          "entPhysicalContainedIn": 10
+        },
+        {
+          "entPhysicalIndex": 200,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-cc22dd",
+          "entPhysicalModelName": "EX4300-48T",
+          "entPhysicalName": "FPC 1",
+          "entPhysicalDescr": "EX4300-48T",
+          "entPhysicalParentRelPos": 1,
+          "entPhysicalContainedIn": 10
+        }
+      ]
+    }
+  },
+  "expected": {
+    "virtual_chassis": {
+      "is_stack": true,
+      "member_count": 2,
+      "member_serials": ["SN-aa11bb", "SN-cc22dd"]
+    }
+  }
+}

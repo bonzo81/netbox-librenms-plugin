@@ -588,6 +588,65 @@ def make_superuser(username="review-su"):
 
 
 # =============================================================================
+# Data-shape recording fixtures (replay real LibreNMS responses over HTTP)
+# =============================================================================
+
+
+def make_recording_api(url, *, server_key="test", token="test-token"):
+    """Build a real LibreNMSAPI pointed at a mock server URL.
+
+    Only the plugin config lookup is patched (a true external boundary -- the
+    NetBox settings registry); the API client, its HTTP requests, and the
+    responses it parses are all real.
+
+    Args:
+        url (str): Base URL of the running mock server.
+        server_key (str): Server key to register the config under.
+        token (str): API token to send (the mock server ignores it).
+
+    Returns:
+        LibreNMSAPI: A client configured to talk to the mock server.
+    """
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    servers_config = {
+        server_key: {
+            "librenms_url": url,
+            "api_token": token,
+            "cache_timeout": 0,
+            "verify_ssl": False,
+        }
+    }
+    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
+        mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
+        return LibreNMSAPI(server_key=server_key)
+
+
+@pytest.fixture
+def recording_server():
+    """Yield a loader that starts a mock LibreNMS server for a recording.
+
+    The loader takes a parsed recording dict and returns ``(server, api)`` with
+    every recorded response registered and a real LibreNMSAPI pointed at it.
+    Servers started during the test are stopped on teardown.
+    """
+    from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+
+    started = []
+
+    def _load(recording, *, server_key="test"):
+        server = MockLibreNMSServer().start()
+        started.append(server)
+        server.load_recording(recording)
+        return server, make_recording_api(server.url, server_key=server_key)
+
+    yield _load
+
+    for server in started:
+        server.stop()
+
+
+# =============================================================================
 # Configuration Fixtures
 # =============================================================================
 
