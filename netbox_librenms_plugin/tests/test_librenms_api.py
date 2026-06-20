@@ -146,6 +146,23 @@ class TestLibreNMSAPIInit:
         with pytest.raises(ValueError, match="expected a mapping"):
             LibreNMSAPI(server_key="broken")
 
+    def test_get_available_servers_skips_malformed_entry(self, mock_librenms_config):
+        """get_available_servers() powers the sync-POST server-key membership check. A malformed
+        (non-dict) server entry must be skipped, not raise — otherwise config.get(...) throws and
+        the sync POST 500s instead of degrading to the active server."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "good": {"librenms_url": "https://good.example.com", "api_token": "t", "display_name": "Good"},
+            "broken": "not-a-dict",
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        servers = LibreNMSAPI.get_available_servers()
+
+        assert servers == {"good": "Good"}
+        assert "broken" not in servers
+
 
 # =============================================================================
 # Test Class 2: Connection Testing (4 tests)

@@ -175,8 +175,12 @@ class LibreNMSAPI:
             # Multi-server configuration
             result = {}
             for key, config in servers_config.items():
-                display_name = config.get("display_name", key)
-                result[key] = display_name
+                # Skip malformed (non-dict) entries. Otherwise config.get(...) raises and a sync
+                # POST that calls this for its server-key membership check 500s instead of
+                # degrading to the active server. A non-usable server must not be selectable.
+                if not isinstance(config, dict):
+                    continue
+                result[key] = config.get("display_name", key)
             return result
         else:
             # Legacy single-server configuration

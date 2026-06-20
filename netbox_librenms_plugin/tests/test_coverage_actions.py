@@ -4177,3 +4177,56 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
         # ...and the cached device is still present (repopulated, not cleared).
         assert cache.get(cache_key) is not None
         assert response.status_code == 200
+
+    def test_mapping_persisted_under_normalised_hardware_key(self):
+        """The mapping must be keyed on the NORMALISED hardware string. The matcher normalises via
+        the device_type rules before the DeviceTypeMapping lookup, so a mapping saved under the raw
+        value would never be found by the immediate revalidation (the modal would report no match)."""
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+
+        device_id = 4343
+        dt = self._make_device_type()
+        view = self._make_view()
+
+        # A device_type rule strips the "WS-" prefix the raw LibreNMS string carries.
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r"\1", priority=10
+        )
+
+        libre_device = {
+            "device_id": device_id,
+            "hardware": "WS-C9300-66",  # normalises to "C9300-66"
+            "sysName": "switch-43",
+            "hostname": "switch-43",
+            "os": "ios",
+            "serial": "SN43",
+        }
+        cache.set(get_import_device_cache_key(device_id, "default"), libre_device, timeout=300)
+
+        User = get_user_model()
+        user = User.objects.create_user(username="u43", password="x")
+        user.is_superuser = True
+        user.save()
+
+        request = RequestFactory().post(
+            f"/device-import/add-device-type-mapping/{device_id}/",
+            data={"device_type_id": str(dt.pk)},
+        )
+        request.user = user
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_device_by_id", return_value=None),
+            patch.object(view, "require_write_permission", return_value=None),
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch.object(view, "_should_enable_vc_detection", return_value=False),
+        ):
+            view.post(request, device_id=device_id)
+
+        # Saved under the normalised, lowercased key — NOT the raw "ws-c9300-66".
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="c9300-66").exists()
+        assert not DeviceTypeMapping.objects.filter(librenms_hardware="ws-c9300-66").exists()

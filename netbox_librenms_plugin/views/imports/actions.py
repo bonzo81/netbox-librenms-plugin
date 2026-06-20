@@ -1502,6 +1502,16 @@ class AddDeviceTypeMappingView(
         if not hardware or hardware == "-":
             return _htmx_error_response("Device has no hardware string — cannot create mapping.")
 
+        # Key the mapping on the NORMALISED hardware string. match_librenms_hardware_to_device_type
+        # normalises via the device_type rules before the DeviceTypeMapping lookup, so a mapping
+        # saved under the raw value (e.g. "WS-C9300" when a rule strips it to "C9300") would never
+        # be found by the revalidation below.
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+
+        mapping_hardware = apply_normalization_rules(value=hardware, scope="device_type")
+        if not mapping_hardware or mapping_hardware == "-":
+            return _htmx_error_response("Device hardware normalised to an empty value — cannot create mapping.")
+
         device_type_id = request.POST.get("device_type_id", "").strip()
         if not device_type_id:
             return _htmx_error_response("Please select a device type before submitting.")
@@ -1518,7 +1528,7 @@ class AddDeviceTypeMappingView(
 
         # Resolve the existing mapping first so we only require the permission
         # actually needed: "add" for a new mapping, "change" for an update.
-        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware__iexact=hardware).first()
+        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware__iexact=mapping_hardware).first()
         if existing_mapping:
             self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
         else:
@@ -1532,7 +1542,9 @@ class AddDeviceTypeMappingView(
                 # check and the actual write (select_for_update prevents a concurrent
                 # INSERT from slipping through undetected).
                 locked = (
-                    DeviceTypeMapping.objects.select_for_update().filter(librenms_hardware__iexact=hardware).first()
+                    DeviceTypeMapping.objects.select_for_update()
+                    .filter(librenms_hardware__iexact=mapping_hardware)
+                    .first()
                 )
                 if locked and not existing_mapping:
                     # A concurrent request created the mapping after our upfront read.
@@ -1557,7 +1569,7 @@ class AddDeviceTypeMappingView(
                 else:
                     try:
                         DeviceTypeMapping.objects.create(
-                            librenms_hardware=hardware.lower(),
+                            librenms_hardware=mapping_hardware.lower(),
                             netbox_device_type=device_type,
                         )
                     except IntegrityError:
