@@ -5519,9 +5519,7 @@ class TestBulkImportConfirmCollisions:
         return view
 
     def _run_with_two_devices(self, validation_a, validation_b):
-        """Drive BulkImportConfirmView.post with two LibreNMS rows whose
-        validations are stubbed to whatever the test wants. Returns the
-        actual response object returned by view.post()."""
+        """Drive BulkImportConfirmView.post with two LibreNMS rows whose validations are stubbed to whatever the test wants."""
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]})
         request.POST.getlist = MagicMock(return_value=["1", "2"])

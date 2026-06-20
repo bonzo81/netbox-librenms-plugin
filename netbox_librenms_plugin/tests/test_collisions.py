@@ -6,14 +6,7 @@ from netbox_librenms_plugin.import_utils.collisions import detect_bulk_collision
 
 
 class Device:
-    """Minimal NetBox Device stand-in for collision tests.
-
-    The class name matters: ``detect_bulk_collisions`` keys collision
-    buckets on ``type(obj).__name__`` so a Device and a VirtualMachine
-    sharing an integer pk are not falsely grouped. A ``SimpleNamespace``
-    would bucket as ``"SimpleNamespace"`` and never match the pk-only
-    merge/promote paths, which assume ``"Device"``.
-    """
+    """Minimal NetBox Device stand-in for collision tests."""
 
     def __init__(self, pk, name):
         self.pk = pk
@@ -119,9 +112,7 @@ def test_three_way_collision():
 
 
 def test_same_libre_row_under_multiple_roles_does_not_collide_with_itself():
-    """A single LibreNMS row whose validation lists the same NB pk under
-    multiple roles must NOT be reported as a collision — collisions
-    require at least two *distinct* LibreNMS device_ids."""
+    """A single LibreNMS row whose validation lists the same NB pk under multiple roles must NOT be reported as a collision — collisions require at least two *distinct* LibreNMS device_ids."""
     nb_device = Device(pk=12, name="solo")
     devices = [
         _row(
@@ -169,9 +160,7 @@ def test_groups_sorted_by_nb_pk_for_stable_render():
 
 
 def test_row_roles_are_joined_when_same_libre_row_targets_pk_via_multiple_paths():
-    """When LibreNMS row R touches NB pk P via both 'host' and
-    'merge_host_named' (rare but possible during transitional states),
-    its row entry in the collision group should list both roles."""
+    """When LibreNMS row R touches NB pk P via both 'host' and 'merge_host_named' (rare but possible during transitional states), its row entry in the collision group should list both roles."""
     devices = [
         _row(
             900,
@@ -195,9 +184,7 @@ def test_row_roles_are_joined_when_same_libre_row_targets_pk_via_multiple_paths(
 
 
 def test_malformed_rows_are_skipped_not_crashed():
-    """A single malformed entry (non-dict row, or a non-dict ``validation`` payload) must be
-    skipped rather than crashing the whole bulk-confirm flow on ``.get()``. Valid colliding
-    rows in the same batch must still be detected. Pre-fix this raised AttributeError."""
+    """A single malformed entry (non-dict row, or a non-dict ``validation`` payload) must be skipped rather than crashing the whole bulk-confirm flow on ``.get()``."""
     shared = Device(pk=55, name="shared")
     devices = [
         42,  # non-dict row
@@ -213,8 +200,7 @@ def test_malformed_rows_are_skipped_not_crashed():
 
 
 def test_device_and_vm_with_same_pk_do_not_collide():
-    """Device and VirtualMachine sharing a pk must NOT be reported as a collision
-    because detect_bulk_collisions keys buckets on (model_name, pk)."""
+    """Device and VirtualMachine sharing a pk must NOT be reported as a collision because detect_bulk_collisions keys buckets on (model_name, pk)."""
     devices = [
         _row(1000, "device-row", {"existing_device": Device(pk=42, name="srv")}),
         _row(1001, "vm-row", {"existing_device": VirtualMachine(pk=42, name="srv")}),
@@ -223,8 +209,7 @@ def test_device_and_vm_with_same_pk_do_not_collide():
 
 
 def test_collision_payload_carries_model_name_for_link_targeting():
-    """Each group must expose nb_model_name so the template links to the right object
-    type — a VM collision must not render a dcim:device URL."""
+    """Each group must expose nb_model_name so the template links to the right object type — a VM collision must not render a dcim:device URL."""
     vm = VirtualMachine(pk=77, name="vm-host")
     groups = detect_bulk_collisions(
         [
@@ -239,14 +224,7 @@ def test_collision_payload_carries_model_name_for_link_targeting():
 
 @pytest.mark.django_db
 def test_real_validator_output_feeds_detector_end_to_end():
-    """End-to-end contract test: the REAL ``validate_device_for_import`` output must carry
-    the exact keys ``detect_bulk_collisions`` reads.
-
-    The unit tests above hand-build the ``existing_device`` key, and the view-level test
-    stubs the validator — so neither would catch the validator renaming/moving that key
-    (collision detection would silently never fire while every test stayed green). Here two
-    LibreNMS rows resolve to the SAME real NetBox device by hostname, run through the real
-    validator (real ORM name-match), and the real detector must report one collision."""
+    """End-to-end contract test: the REAL ``validate_device_for_import`` output must carry the exact keys ``detect_bulk_collisions`` reads."""
     from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
     from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -272,13 +250,7 @@ def test_real_validator_output_feeds_detector_end_to_end():
 
 
 def test_collision_template_renders_correct_link_targets_and_escapes():
-    """The collision template must actually render: link to the right object type per
-    ``nb_model_name`` and auto-escape device-supplied names.
-
-    The view-level test mocks ``render`` (asserts only the template name), so a typo in the
-    VM ``{% url %}`` or a lost auto-escape would ship undetected. Render the real template
-    and assert the Device group emits a dcim:device URL, the VM group a
-    virtualization:virtualmachine URL, and a script-y hostname is HTML-escaped."""
+    """The collision template must actually render: link to the right object type per ``nb_model_name`` and auto-escape device-supplied names."""
     from django.template.loader import render_to_string
     from django.urls import reverse
 
