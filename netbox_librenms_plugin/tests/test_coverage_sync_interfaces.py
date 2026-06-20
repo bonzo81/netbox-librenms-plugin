@@ -77,13 +77,10 @@ class TestSyncInterfacesViewPermissions:
 
 
 class TestSyncInterfaceParentViewPermissions:
-    """SyncInterfaceParentView supports VMs (VMInterface has a parent field), so its
-    POST permission must be scoped to the object type, not hardcoded to Interface."""
+    """SyncInterfaceParentView supports VMs (VMInterface has a parent field), so its POST permission must be scoped to the object type, not hardcoded to Interface."""
 
     def _stop_after_perms(self):
-        """Patch the JSON permission gate to short-circuit post() right after the dynamic
-        permission dict is set, returning a sentinel response. The view uses the _json variant
-        (it's a fetch() endpoint), so that's the method to intercept."""
+        """Patch the JSON permission gate to short-circuit post() right after the dynamic permission dict is set, returning a sentinel response."""
         return patch.object(
             __import__(
                 "netbox_librenms_plugin.views.sync.interfaces", fromlist=["SyncInterfaceParentView"]
@@ -122,12 +119,7 @@ class TestSyncInterfaceParentViewPermissions:
 
 @pytest.mark.django_db
 class TestInterfacesSameOwnerGuard:
-    """_interfaces_same_owner gates lag/parent links so a port_stack relationship that
-    resolves across two VC members can't persist a NetBox-forbidden cross-device link.
-
-    Driven against real Interface / VMInterface objects so the genuine ``device_id`` /
-    ``virtual_machine_id`` attributes are compared, rather than values hand-set on a
-    MagicMock (which would also paper over the function reading a wrong attribute name)."""
+    """_interfaces_same_owner gates lag/parent links so a port_stack relationship that resolves across two VC members can't persist a NetBox-forbidden cross-device link."""
 
     def test_same_device_is_true(self):
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
@@ -332,15 +324,7 @@ class TestSyncInterfacesViewGetCachedPortsData:
 
 @pytest.mark.django_db
 class TestInterfaceContextOOBRows:
-    """get_context_data must not let OOB-controller rows hide / falsely-match
-    main-device interfaces in the netbox-only reconciliation set.
-
-    Driven against a real Device whose real ``idrac0`` Interface flows through the real
-    ``_build_interface_lookup_maps`` and the netbox-only reconciliation, so the dedup reads
-    genuine interface attributes (id / name / type / enabled / url) rather than a MagicMock
-    that would synthesize any field the production branch happens to read. Only the VLAN
-    helpers, table construction, and cache (orchestration / external boundaries unrelated to
-    the OOB-dedup logic under test) stay mocked."""
+    """get_context_data must not let OOB-controller rows hide / falsely-match main-device interfaces in the netbox-only reconciliation set."""
 
     def _make_view(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -1256,8 +1240,7 @@ class TestSyncInterfacesViewSyncSelected:
         assert call_args[0][1]["ifName"] == "Gi0/1"
 
     def test_syncs_port_selected_by_stable_id(self):
-        """A port whose display name is not in 'select' is still synced when its port_id
-        is in select_port_id (e.g. a cross-page parent auto-included by the LAG/parent JS)."""
+        """A port whose display name is not in 'select' is still synced when its port_id is in select_port_id (a cross-page parent auto-included by the LAG/parent JS)."""
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
@@ -1281,10 +1264,7 @@ class TestSyncInterfacesViewSyncSelected:
 
 
 class TestSyncLagAndParentRelationships:
-    """Outcome tests for the bulk LAG/parent relationship sync, driven against real NetBox
-    Device/Interface objects (the real _resolve_interface_by_port_id, _interfaces_same_owner and
-    Interface.full_clean run) so the linking — and the new per-row owner pinning — is verified
-    end-to-end rather than re-asserting mock calls."""
+    """Outcome tests for the bulk LAG/parent relationship sync, driven against real NetBox Device/Interface objects (the real _resolve_interface_by_port_id, _interfaces_same_owner and Interface.full_clean run) so the linking — and the new per-row owner pinning — is verified end-to-end rather than re-asserting mock calls."""
 
     @staticmethod
     def _make_device():
@@ -1314,8 +1294,7 @@ class TestSyncLagAndParentRelationships:
         return view
 
     def test_duplicate_display_name_members_not_collapsed(self, db):
-        """In ifDescr mode two member ports share a display name; both must still be linked to
-        their LAG. Keying selection by port_id (not the colliding name) is the fix."""
+        """In ifDescr mode two member ports share a display name; both must still be linked to their LAG."""
         device = self._make_device()
         m1 = self._iface(device, "Gi0/1", 10)
         m2 = self._iface(device, "Gi0/2", 11)
@@ -1337,8 +1316,7 @@ class TestSyncLagAndParentRelationships:
         assert m2.lag_id == agg.pk
 
     def test_member_selected_only_by_stable_id_is_linked(self, db):
-        """A port present only via select_port_id (not selected by display name) is still
-        processed by the relationship sync."""
+        """A port present only via select_port_id (not selected by display name) is still processed by the relationship sync."""
         device = self._make_device()
         member = self._iface(device, "Gi0/2", 11)
         agg = self._iface(device, "Po1", 100, itype="lag")
@@ -1356,8 +1334,7 @@ class TestSyncLagAndParentRelationships:
         assert member.lag_id == agg.pk
 
     def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self, db):
-        """A relationship that fails Interface.full_clean() (a self-LAG from stale/crafted
-        port_stack data) must be skipped, not persisted."""
+        """A relationship that fails Interface.full_clean() (a self-LAG from stale/crafted port_stack data) must be skipped, not persisted."""
         device = self._make_device()
         member = self._iface(device, "Gi0/2", 11)
 
@@ -1386,14 +1363,7 @@ class TestSyncLagAndParentRelationships:
 
 @pytest.mark.django_db
 class TestResolveInterfaceByPortId:
-    """The function must correctly read the nested {'server_key': port_id} dict format.
-
-    Driven against real Device / Interface objects so the real ``Interface.objects.filter``
-    query and the real ``get_librenms_device_id`` (extracting the port id from the nested
-    ``{server_key: id}`` cf) are exercised — a MagicMock standing in for the manager would
-    let a wrong-shape read or a broken filter pass unnoticed. The VC-wide name ambiguity
-    case uses a real two-member VirtualChassis. The unexpected-error propagation test stays
-    a focused unit test (it injects a non-DB RuntimeError into the lookup)."""
+    """The function must correctly read the nested {'server_key': port_id} dict format."""
 
     def test_finds_interface_by_server_keyed_dict(self):
         """When librenms_id = {'production': 42}, resolves for port_id=42 and server_key='production'."""
@@ -1443,8 +1413,7 @@ class TestResolveInterfaceByPortId:
         assert found == iface
 
     def test_ambiguous_port_id_returns_error_not_first_match(self):
-        """Two interfaces carrying the same stale librenms_id must fail as ambiguous,
-        not silently bind lag/parent to whichever happens to be first."""
+        """Two interfaces carrying the same stale librenms_id must fail as ambiguous, not silently bind lag/parent to whichever happens to be first."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
@@ -1475,10 +1444,7 @@ class TestResolveInterfaceByPortId:
         assert "not found" in err.lower()
 
     def test_name_hint_multiple_matches_returns_ambiguous(self):
-        """A name-hint matching multiple interfaces returns an ambiguity error, not a silent
-        not-found. A single Device enforces unique (device, name), so the genuine way to hit
-        MultipleObjectsReturned is a VC-wide name search across two members that each own an
-        interface of the same name."""
+        """A name-hint matching multiple interfaces returns an ambiguity error, not a silent not-found."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
@@ -1496,9 +1462,7 @@ class TestResolveInterfaceByPortId:
         assert "ambiguous" in err.lower()
 
     def test_unexpected_error_during_resolution_propagates(self):
-        """A real DB/runtime fault while scanning the device's interfaces must propagate, not be
-        masked as a silent not-found. Resolution builds a one-pass index over the interface
-        queryset (_build_interface_index); a fault there must surface, never be swallowed."""
+        """A real DB/runtime fault while scanning the device's interfaces must propagate, not be masked as a silent not-found."""
         import pytest
         from unittest.mock import MagicMock, patch
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
@@ -1518,13 +1482,7 @@ class TestResolveInterfaceByPortId:
 
 
 class TestResolveInterfaceByPortIdExpectedOwner:
-    """Real-DB coverage for the expected_owner guard in _resolve_interface_by_port_id.
-
-    The librenms_id search spans every VC member, so a stale/reused id can resolve uniquely onto
-    a *different* member than the row was synced to. Exercised against real VC + Interface objects
-    (not mocks) so the cross-member resolution and the owner check are validated end-to-end.
-    Each test takes pytest-django's ``db`` fixture to enable real database access.
-    """
+    """Real-DB coverage for the expected_owner guard in _resolve_interface_by_port_id."""
 
     @staticmethod
     def _make_vc_members():
@@ -1546,8 +1504,7 @@ class TestResolveInterfaceByPortIdExpectedOwner:
         return iface
 
     def test_rejects_match_on_a_different_vc_member(self, db):
-        """port_id resolves uniquely onto member2's interface; resolving from member1 with
-        expected_owner=member1 must reject it (the fix) — and accept it without the guard."""
+        """port_id resolves uniquely onto member2's interface; resolving from member1 with expected_owner=member1 must reject it (the fix) — and accept it without the guard."""
         from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
         member1, member2 = self._make_vc_members()
@@ -1581,8 +1538,7 @@ class TestResolveInterfaceByPortIdExpectedOwner:
 
 
 class TestInterfaceLinkValidationErrorNoStackTrace:
-    """LAG/parent full_clean() failures return a fixed message and log the detail —
-    the exception text must not be echoed to the client (CodeQL py/stack-trace-exposure)."""
+    """LAG/parent full_clean() failures return a fixed message and log the detail — the exception text must not be echoed to the client (CodeQL py/stack-trace-exposure)."""
 
     _SENTINEL = "SENSITIVE_VALIDATION_INTERNALS"
 
@@ -1667,14 +1623,7 @@ class TestInterfaceLinkValidationErrorNoStackTrace:
 
 @pytest.mark.django_db
 class TestSyncInterfaceLagViewRealDB:
-    """End-to-end (real DB) coverage for SyncInterfaceLagView.post.
-
-    The HTTP contract is otherwise only exercised with MagicMock interfaces (the no-leak test
-    stubs full_clean), so a regression in the real resolution → validate-before-save → persist
-    chain could pass undetected. These drive the view against real Device/Interface objects:
-    the link is proven by what persists, and the self-LAG rejection by NetBox's real
-    Interface.clean().
-    """
+    """End-to-end (real DB) coverage for SyncInterfaceLagView.post."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
@@ -1733,8 +1682,7 @@ class TestSyncInterfaceLagViewRealDB:
         assert iface.lag_id is None
 
     def test_cross_member_aggregate_rejected(self):
-        """The aggregate port_id resolving onto a *different* VC member must not link across
-        devices — the expected_owner pin (obj = the posted member) rejects it at resolution."""
+        """The aggregate port_id resolving onto a *different* VC member must not link across devices — the expected_owner pin (obj = the posted member) rejects it at resolution."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
         member1 = make_device("vc-lag-m1")

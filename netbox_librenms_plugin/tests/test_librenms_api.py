@@ -2141,8 +2141,7 @@ class TestGetPortStack:
         assert data == []
 
     def test_returns_empty_list_when_mappings_is_null(self, mock_librenms_api):
-        """A `{"mappings": null}` body must normalise to (True, []) so downstream
-        resolve_port_relationships() never iterates a None port_stack."""
+        """A `{"mappings": null}` body must normalise to (True, []) so downstream resolve_port_relationships() never iterates a None port_stack."""
         from unittest.mock import MagicMock, patch
 
         fake_response = MagicMock()
@@ -2155,9 +2154,7 @@ class TestGetPortStack:
         assert data == []
 
     def test_error_status_without_mappings_fails_not_empty(self, mock_librenms_api):
-        """An error payload (e.g. {"status": "error"}) omits 'mappings' just like a genuine
-        "no relationships" answer. It must fail — not normalise to (True, []) — so a real API
-        failure isn't masked as "no LAG/parent relationships" and skip valid sync updates."""
+        """An error payload that omits 'mappings' must fail, not normalise to (True, []), so a real API failure isn't masked as 'no LAG/parent relationships'."""
         from unittest.mock import MagicMock, patch
 
         fake_response = MagicMock()
@@ -2170,9 +2167,7 @@ class TestGetPortStack:
         assert data == "device polling disabled"
 
     def test_error_status_with_mappings_present_still_fails(self, mock_librenms_api):
-        """An error payload can still carry mappings (e.g. {"status": "error", "mappings": []}).
-        The explicit error status must be honored *before* consuming mappings, so it fails
-        rather than being read as 'no relationships' and silently skipping valid sync."""
+        """An error payload that still carries mappings must honor the explicit error status before consuming them, so it fails rather than silently skipping valid sync."""
         from unittest.mock import MagicMock, patch
 
         fake_response = MagicMock()
@@ -2189,8 +2184,7 @@ class TestGetPortStack:
         assert data == "stale poll"
 
     def test_returns_error_on_invalid_json(self, mock_librenms_api):
-        """A non-JSON body (response.json() raises ValueError) must surface as
-        (False, error) instead of letting the exception escape."""
+        """A non-JSON body (response.json() raises ValueError) must surface as (False, error) instead of letting the exception escape."""
         from unittest.mock import MagicMock, patch
 
         fake_response = MagicMock()
@@ -2203,9 +2197,7 @@ class TestGetPortStack:
         assert "Invalid JSON" in data
 
     def test_json_decode_error_reports_invalid_json_not_connection_error(self, mock_librenms_api):
-        """requests.exceptions.JSONDecodeError subclasses BOTH ValueError and RequestException, so
-        the ValueError handler must precede the RequestException handler — otherwise a JSON decode
-        failure is swallowed by the broad handler and mislabeled 'Error connecting to LibreNMS'."""
+        """requests.exceptions.JSONDecodeError subclasses BOTH ValueError and RequestException, so the ValueError handler must precede the RequestException handler — otherwise a JSON decode failure is swallowed by the broad handler and mislabeled 'Error connecting to LibreNMS'."""
         from unittest.mock import MagicMock, patch
 
         import requests as _requests
@@ -2221,8 +2213,7 @@ class TestGetPortStack:
         assert "Error connecting" not in data
 
     def test_malformed_mappings_fails_not_empty(self, mock_librenms_api):
-        """A non-list (or list-of-non-dicts) `mappings` is malformed, not 'no relationships'.
-        It must fail the call so sync doesn't silently skip valid updates."""
+        """A non-list (or list-of-non-dicts) `mappings` is malformed, not 'no relationships'."""
         from unittest.mock import MagicMock, patch
 
         for bad in ({"mappings": {"oops": 1}}, {"mappings": ["not-a-dict", 2]}):
@@ -2235,9 +2226,7 @@ class TestGetPortStack:
             assert "mappings" in data
 
     def test_non_object_payload_fails_not_empty(self, mock_librenms_api):
-        """A non-object top-level payload (list/string/null) is malformed, not 'no
-        relationships'. It must fail rather than collapse to (True, []), which would be
-        indistinguishable from a genuine empty result and skip valid sync updates."""
+        """A non-object top-level payload (list/string/null) is malformed, not 'no relationships'."""
         from unittest.mock import MagicMock, patch
 
         for bad in ([{"high_port_id": 1, "low_port_id": 2}], "oops", None):
@@ -2338,9 +2327,7 @@ class TestResolvePortRelationships:
         assert result["sub_interfaces"] == {}
 
     def test_string_port_stack_ids_match_int_port_ids(self, mock_librenms_api):
-        """port_stack and ports are independent LibreNMS payloads: a str high/low_port_id
-        must still match int port_id keys (and vice versa), or the by_id lookup silently
-        misses and valid relationships are dropped. Regression for key-type normalization."""
+        """port_stack and ports are independent LibreNMS payloads: a str high/low_port_id must still match int port_id keys (and vice versa), or the by_id lookup silently misses and valid relationships are dropped."""
         # NOKIA_PORTS carries int port_ids 101/102; reference them as strings in the stack.
         str_stack = [{"high_port_id": "101", "low_port_id": "102"}]
         result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, str_stack, lag_patterns={})
@@ -2356,12 +2343,7 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {"101": "102"}
 
     def test_sub_interface_ids_use_port_record_types_not_stack(self, mock_librenms_api):
-        """sub_interfaces must store the canonical port-record ids (like the LAG branch),
-        not the raw port_stack ids. port_stack and ports are independent payloads: storing
-        the stack's id type would make the map's keys/values mismatch the port_id values on
-        the port dicts, so a downstream port-id lookup (which uses the port-record type)
-        misses the parent mapping. Mirrors test_string_port_stack_ids_match_int_port_ids for
-        the sub-interface side."""
+        """sub_interfaces must store the canonical port-record ids (like the LAG branch), not the raw port_stack ids."""
         # Ports carry STRING port_ids; the stack references them as INTs.
         str_ports = [
             {"port_id": "205", "ifName": "ae10", "ifType": "ieee8023adLag"},
@@ -2431,8 +2413,7 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {101: 102}
 
     def test_non_string_ifname_ports_are_skipped(self, mock_librenms_api):
-        """A port with a non-string ifName must not crash the downstream string ops
-        (regex .search(), ':' membership, suffix splits); it is dropped from the maps."""
+        """A port with a non-string ifName must not crash the downstream string ops (regex .search(), ':' membership, suffix splits); it is dropped from the maps."""
         ports = [
             {"port_id": 501, "ifName": 12345, "ifType": "ethernetCsmacd"},  # malformed: non-string
             {"port_id": 502, "ifName": "lag9", "ifType": "ieee8023adLag"},
@@ -2444,11 +2425,7 @@ class TestResolvePortRelationships:
 
     @pytest.mark.django_db
     def test_db_patterns_scoped_to_device_os(self, mock_librenms_api):
-        """With device_os set, only that OS's stored pattern is loaded — a pattern from a
-        different platform must not classify this device's interfaces (the round-12 finding).
-
-        Uses test-unique OS names so the device_os filter excludes the migration-seeded
-        defaults (e.g. the real ``ios`` pattern, which is also ``^Po\\d+$``)."""
+        """With device_os set, only that OS's stored pattern is loaded — a pattern from a different platform must not classify this device's interfaces (the round-12 finding)."""
         from netbox_librenms_plugin.models import PortStackLagPattern
 
         PortStackLagPattern.objects.create(librenms_os="ztest_pochannel", lag_name_pattern=r"^Po\d+$")
@@ -2478,9 +2455,7 @@ class TestResolvePortRelationships:
 
     @pytest.mark.django_db
     def test_db_patterns_non_string_device_os_falls_back_to_all(self, mock_librenms_api):
-        """A truthy non-string device_os (LibreNMS can return ``os`` as a number) must not crash
-        on ``.strip()``; it falls back to the full unscoped pattern set instead of raising
-        AttributeError. Driven through the real queryset filter with a real stored pattern."""
+        """A truthy non-string device_os (LibreNMS can return ``os`` as a number) must not crash on ``.strip()``; it falls back to the full unscoped pattern set instead of raising AttributeError."""
         from netbox_librenms_plugin.models import PortStackLagPattern
 
         PortStackLagPattern.objects.create(librenms_os="ztest_pochannel", lag_name_pattern=r"^Po\d+$")
@@ -2491,10 +2466,7 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {301: 302}
 
     def test_invalid_lag_pattern_is_skipped_and_logged(self, mock_librenms_api, caplog):
-        """A configured LAG pattern that isn't valid regex is skipped (it must not crash
-        relationship resolution) AND logged at WARNING — otherwise a user with a typo in their
-        PortStackLagPattern has no way to tell why LAG detection silently isn't working for that
-        OS. Driven through the real method with an explicit invalid pattern (no DB needed)."""
+        """A configured LAG pattern that isn't valid regex is skipped (it must not crash relationship resolution) AND logged at WARNING — otherwise a user with a typo in their PortStackLagPattern has no way to tell why LAG detection silently isn't working for that OS."""
         import logging
 
         bad = "([unterminated"  # invalid regex → re.error on compile

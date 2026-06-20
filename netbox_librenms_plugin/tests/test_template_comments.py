@@ -37,20 +37,11 @@ def test_no_multiline_single_hash_comments():
 
 
 def test_netbox_only_modal_hides_bulk_select_in_migrated_mode():
-    """In migrated-donor mode the NetBox-only modal is transfer-only (per-row Move), so the
-    bulk-select controls (select-all header + per-row checkboxes) must be hidden and the copy
-    must describe moving — not deleting — interfaces. The bulk-delete button is already gated
-    on ``not migrated_to_marker``; this guards the rest of the conversion against regressing."""
+    """In migrated-donor mode the NetBox-only modal is transfer-only (per-row Move), so the bulk-select controls (select-all header + per-row checkboxes) must be hidden and the copy must describe moving — not deleting — interfaces."""
     src = (TEMPLATES_DIR / "netbox_librenms_plugin" / "_interface_sync_content.html").read_text(encoding="utf-8")
 
     def _guard_precedes_all(needle):
-        """EVERY occurrence of *needle* must be immediately guarded by the migrated guard.
-
-        Checking only the first match (``src.index``) would let a later unguarded duplicate
-        slip through — exactly the regression this test exists to catch — so iterate all of them.
-        ``last_if > last_endif`` ensures the nearest ``{% if %}`` is still open (not already
-        closed by an intervening ``{% endif %}``) before the needle.
-        """
+        """EVERY occurrence of *needle* must be immediately guarded by the migrated guard."""
         idx = src.find(needle)
         assert idx != -1, f"{needle!r} not found"
         while idx != -1:

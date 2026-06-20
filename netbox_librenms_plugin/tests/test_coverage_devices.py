@@ -316,8 +316,7 @@ class TestSingleInterfaceVerifyView:
         return view
 
     def test_denied_without_view_device_permission(self):
-        """The verify endpoint must reject a user lacking dcim.view_device (no probing
-        arbitrary device IDs for cached interface data)."""
+        """The verify endpoint must reject a user lacking dcim.view_device (no probing arbitrary device IDs for cached interface data)."""
         import json
 
         from django.http import JsonResponse
@@ -509,9 +508,7 @@ class TestSingleInterfaceVerifyView:
 
 
     def test_resolves_netbox_interface_by_stable_port_id_not_name(self):
-        """The NetBox interface is matched by its stored LibreNMS port_id, not the display
-        name — so a naming-mode mismatch (synced under ifName, viewed under ifDescr) can't
-        mis-resolve the row."""
+        """The NetBox interface is matched by its stored LibreNMS port_id, not the display name — so a naming-mode mismatch (synced under ifName, viewed under ifDescr) can't mis-resolve the row."""
         import json
 
         view = self._make_view()

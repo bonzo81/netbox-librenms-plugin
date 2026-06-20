@@ -2052,9 +2052,7 @@ class TestBaseInterfaceTableViewPost:
         mock_get_last_fetched_key.assert_called_with(obj, "ports", "default")
 
     def test_post_lag_inference_excludes_oob_ports(self):
-        """port_stack is scoped to the main device, so its lazy-fetch trigger must ignore
-        OOB rows. A LAG signal that exists only on an OOB-controller port must not provoke a
-        host get_port_stack() fetch (and the 'may be incomplete' warning)."""
+        """port_stack is scoped to the main device, so its lazy-fetch trigger must ignore OOB rows."""
         view = self._make_view()
         obj = _mock_obj()
         request = _mock_request()

@@ -1797,17 +1797,7 @@ class TestBuildVcAttributes:
 
 
 class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
-    """Regression guards for two UI fixes on the interface sync table.
-
-    1. The 'LibreNMS ID' column (accessor port_id) must stay present — it was inadvertently
-       dropped when the Parent/LAG column was added, but it exists on develop and is relied on.
-    2. Every relationship status badge must pair a background colour with a contrasting text
-       colour. A bare ``bg-*`` utility sets only the background and leaves the badge's default
-       (muted/inherited) text colour — unreadable in NetBox's themes. Measured WCAG contrast
-       confirmed the two offenders: ``bg-secondary`` (grey-on-grey, ~4.6 only after pairing) and
-       ``bg-success`` (grey text on green: ~1.8 light / ~1.1 dark). The safe forms are
-       ``text-bg-*`` (pairs fg+bg) or ``bg-* text-*`` (explicit text colour).
-    """
+    """Regression guards for two UI fixes on the interface sync table."""
 
     # The relationship column's status keys; an unknown key exercises the .get() fallback badge.
     _STATUSES = ["match", "mismatch", "missing_nb", "missing_lnms", "definitely-unknown-status"]
@@ -1820,11 +1810,7 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
             return LibreNMSInterfaceTable(data=[], device=mock_device, server_key="default")
 
     def _status_badge_classes(self, table, status):
-        """Render a status's badge in isolation and return its CSS class tokens.
-
-        Passing an empty name and no port_id suppresses the name badge and the sync button, so
-        the only rendered badge is the status badge under test.
-        """
+        """Render a status's badge in isolation and return its CSS class tokens."""
         import re
 
         html = str(
@@ -1848,9 +1834,7 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
         assert table.columns["librenms_id"].verbose_name == "LibreNMS ID"
 
     def test_vc_fallback_coerces_missing_interface_name(self):
-        """The VC member fallback must coerce a missing interface name to "" before calling
-        get_virtual_chassis_member (which re.match()es it), so a record with no name doesn't raise
-        TypeError while rendering the relationship button."""
+        """The VC member fallback must coerce a missing interface name to "" before calling get_virtual_chassis_member (which re.match()es it), so a record with no name doesn't raise TypeError while rendering the relationship button."""
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
         device = MagicMock()
@@ -1876,10 +1860,7 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
         assert gvcm.call_args.args[1] == ""
 
     def test_every_status_badge_pairs_background_with_text_colour(self):
-        """A solid ``bg-*`` colour fill with no companion text colour is the grey-on-grey /
-        grey-on-green readability bug. Readable forms: ``text-bg-*`` (pairs both), ``bg-* text-*``
-        (explicit), or Tabler's ``bg-*-lt`` light variant (ships its own readable text colour in
-        both themes — same exemption the project-wide scan guard uses)."""
+        """A solid ``bg-*`` colour fill with no companion text colour is the grey-on-grey / grey-on-green readability bug."""
         table = self._table()
         for status in self._STATUSES:
             tokens = self._status_badge_classes(table, status)
@@ -1900,11 +1881,7 @@ class TestInterfaceTableLibreNMSIdColumnAndBadgeContrast:
 
 
 class TestRelationshipBadgeCompactLayout:
-    """The Parent/LAG column must render ONE compact pill per relationship line: the relationship
-    type + LibreNMS name in a single light badge, with the status conveyed by colour + an mdi icon
-    + a title tooltip. The old layout stacked a separate solid status badge AND a bordered name
-    badge (plus a muted prefix), which clumped and wrapped to ~3 lines in a narrow column. Keeping
-    it to one pill is what makes the column glanceable on narrow screens."""
+    """The Parent/LAG column must render ONE compact pill per relationship line: the relationship type + LibreNMS name in a single light badge, with the status conveyed by colour + an mdi icon + a title tooltip."""
 
     def _table(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
@@ -2049,9 +2026,7 @@ class TestLibreNMSInterfaceTableInit:
 
 
 class TestRelationshipSyncObjectType:
-    """The missing_nb relationship-sync button must carry the right object type, driven by
-    the table subclass — not a runtime self.device.cluster probe that misclassifies a
-    cluster-less VM as a device."""
+    """The missing_nb relationship-sync button must carry the right object type, driven by the table subclass — not a runtime self.device.cluster probe that misclassifies a cluster-less VM as a device."""
 
     def _render(self, table_cls, device):
         with patch("netbox_librenms_plugin.tables.interfaces.get_interface_name_field", return_value="ifName"):
@@ -2084,15 +2059,7 @@ class TestRelationshipSyncObjectType:
 
 
 class TestParentColumnContainsLagButton:
-    """Regression guard for the 'refresh the LAG cell after VC-member verification' review note.
-
-    There is NO separate ``data-col="lag"`` cell: ``render_parent`` renders BOTH the LAG button
-    (``lag-sync-btn`` carrying ``data-lag-port-id``) and the Parent button into the single combined
-    ``data-col="parent"`` column. The verify-interface response enriches the row then returns
-    ``formatted_row["parent"]`` (re-rendered via render_parent), and librenms_sync.js repaints the
-    whole ``td[data-col="parent"]`` innerHTML — so the LAG button (and its data-lag-port-id) is
-    already refreshed for the newly selected VC member. A ``formatted_row.lag`` / ``td[data-col=
-    "lag"]`` refresh would be a dead no-op (no such key/cell exist)."""
+    """Regression guard for the 'refresh the LAG cell after VC-member verification' review note."""
 
     def _table(self):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
@@ -2135,9 +2102,7 @@ class TestParentColumnContainsLagButton:
 
 
 class TestMigratedModeSuppressesRelationshipButton:
-    """On a migrated donor page the per-row LAG/parent sync button must be suppressed: it
-    POSTs directly via librenms_sync.js, so a live button would let a migrated donor mutate
-    relationship state even though the bulk sync form is hidden. Only the badge should show."""
+    """On a migrated donor page the per-row LAG/parent sync button must be suppressed: it POSTs directly via librenms_sync.js, so a live button would let a migrated donor mutate relationship state even though the bulk sync form is hidden."""
 
     def _render(self, migrated):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
@@ -2171,10 +2136,7 @@ class TestMigratedModeSuppressesRelationshipButton:
 
 
 class TestRelationshipColumnNameEscaping:
-    """Contract: the related interface name in the Parent/LAG badge is escaped exactly once
-    for a name containing & < >. (The prior `escape()` call was redundant rather than a
-    double-escape bug — `escape()` returns a SafeString that `format_html`'s conditional_escape
-    passes through — but the renderer now relies on format_html alone, so guard the contract.)"""
+    """Contract: the related interface name in the Parent/LAG badge is escaped exactly once for a name containing & < >."""
 
     def _render(self, lnms_name):
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
@@ -3296,9 +3258,7 @@ class TestLibreNMSVMInterfaceTable:
         assert table.tab == "interfaces"
 
     def test_parent_column_is_in_sequence(self):
-        """The Parent/LAG column must be exposed on VM pages — VMInterface supports
-        sub-interface parents and the relationship sync path resolves VMInterface targets,
-        so omitting it from the sequence would make the feature unreachable for VMs."""
+        """The Parent/LAG column must be exposed on VM pages — VMInterface supports sub-interface parents and the relationship sync path resolves VMInterface targets, so omitting it from the sequence would make the feature unreachable for VMs."""
         from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
 
         assert "parent" in LibreNMSVMInterfaceTable.Meta.sequence

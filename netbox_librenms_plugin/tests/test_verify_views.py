@@ -261,9 +261,7 @@ class TestSingleInterfaceVerifyView:
     @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
     @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
     def test_verify_normalizes_relationship_map_keys(self, mock_cache, mock_get_obj, mock_table_cls, mock_base):
-        """Cached relationship maps with stringified port_id keys must be normalized to
-        ints before enrichment, mirroring the main table path — otherwise the int-keyed
-        lookup in _enrich_port_with_lag_parent silently drops Parent/LAG context."""
+        """Cached relationship maps with stringified port_id keys must be normalized to ints before enrichment, mirroring the main table path — otherwise the int-keyed lookup in _enrich_port_with_lag_parent silently drops Parent/LAG context."""
         device = MagicMock()
         device.virtual_chassis = None
         device.interfaces.all.return_value = []

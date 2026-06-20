@@ -60,11 +60,7 @@ class TestPortStackLagPattern:
 
 @pytest.mark.django_db
 class TestHasLagSignalsFieldSelection:
-    """_has_lag_signals() must scan the user-selected interface_name_field (plus ifName/
-    ifDescr), not just ifName. On an ifDescr-driven device the LAG/sub-interface signal lives
-    in ifDescr; keying off ifName alone silently skips the port_stack fetch and empties the
-    Parent/LAG column. Exercises the real method against a real (empty) PortStackLagPattern
-    table via the pattern-free sub-interface detection path."""
+    """_has_lag_signals() must scan the user-selected interface_name_field (plus ifName/ ifDescr), not just ifName."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
@@ -72,8 +68,7 @@ class TestHasLagSignalsFieldSelection:
         return object.__new__(BaseInterfaceTableView)
 
     def test_subiface_signal_in_ifdescr_detected(self):
-        """ifDescr-driven device: the sub-interface base+child names live only in ifDescr.
-        The old ifName-only scan returned False here; now it must be detected."""
+        """ifDescr-driven device: the sub-interface base+child names live only in ifDescr."""
         view = self._make_view()
         ports = [
             {"ifName": "", "ifDescr": "ge-0/0/0"},  # parent
@@ -84,9 +79,7 @@ class TestHasLagSignalsFieldSelection:
         assert view._has_lag_signals(ports, "ifDescr") is True
 
     def test_field_parameter_changes_outcome(self):
-        """The signal lives only in a non-default field (ifAlias). It is detected ONLY when
-        that field is the selected interface_name_field — proving the parameter is consulted
-        rather than ifName being hardcoded."""
+        """The signal lives only in a non-default field (ifAlias)."""
         view = self._make_view()
         ports = [
             {"ifAlias": "ae0"},  # parent

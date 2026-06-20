@@ -111,11 +111,7 @@ def make_serial_device(name, *, csp_names=(), cp_names=()):
 
 
 def make_virtual_chassis(name, *devices):
-    """Create a VirtualChassis and enroll *devices* as members (vc_position by order).
-
-    Returns the VirtualChassis. Members are reachable via ``vc.members`` (the reverse
-    Device FK), matching what the sync code reads via ``obj.virtual_chassis.members``.
-    """
+    """Create a VirtualChassis and enroll *devices* as members (vc_position by order)."""
     from dcim.models import VirtualChassis
 
     vc = VirtualChassis.objects.create(name=name)

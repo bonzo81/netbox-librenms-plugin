@@ -1830,7 +1830,7 @@ class TestSyncIPAddressesViewProcessIpSync:
         assert created.assigned_object == iface
 
     def test_existing_bound_ip_not_unbound_when_no_interface(self):
-        """A REAL already-bound IPAddress keeps its binding when no interface resolves: the row is skipped, never unbound."""
+        """Regression for the data-loss case: when no NetBox interface resolves, an IP that is ALREADY bound must keep its binding."""
         view = self._setup_view()
         obj = make_device("ipsync-bound-nomatch-dev")
         bound_owner = make_device("ipsync-bound-owner-dev")
