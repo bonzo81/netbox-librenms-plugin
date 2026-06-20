@@ -394,10 +394,19 @@ class LibreNMSInterfaceTable(tables.Table):
         return self._render_field(value, record, "ifMtu", "mtu")
 
     def render_librenms_id(self, value, record):
-        """Render the LibreNMS port_id, coloured by how it compares to the stored NetBox value.
+        """
+        Render the LibreNMS port_id, coloured by how it compares to NetBox.
 
-        Red when the interface doesn't exist in NetBox or carries no librenms_id custom field,
-        orange when the stored id differs from this LibreNMS port_id, green when they match.
+        Red when the interface doesn't exist in NetBox or carries no librenms_id custom
+        field, orange when the stored id differs from this LibreNMS port_id, green when
+        they match.
+
+        Args:
+            value: The LibreNMS port_id to render.
+            record (dict): The table row, read for NetBox interface/existence state.
+
+        Returns:
+            SafeString: The coloured ``<span>`` markup for the port_id.
         """
         if not record.get("exists_in_netbox"):
             return format_html('<span class="text-danger">{}</span>', value)
@@ -418,12 +427,21 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html('<span class="text-success">{}</span>', value)
 
     def render_parent(self, value, record):
-        """Render combined Parent / LAG relationship column.
+        """
+        Render the combined Parent / LAG relationship column.
 
-        Shows LAG membership (if any) and parent interface (if any) stacked
-        vertically, each prefixed with a small muted label so the type is clear.
-        The sync buttons keep their existing CSS classes (lag-sync-btn /
-        parent-sync-btn) so the JS handler still works without changes.
+        Shows LAG membership (if any) and parent interface (if any) stacked vertically,
+        each prefixed with a small muted label so the type is clear. The sync buttons
+        keep their existing CSS classes (lag-sync-btn / parent-sync-btn) so the JS
+        handler still works without changes.
+
+        Args:
+            value: The cell value (unused; the row drives rendering).
+            record (dict): The table row, read for LAG/parent sync status and names.
+
+        Returns:
+            SafeString: The stacked relationship markup, or empty when neither LAG nor
+                parent applies.
         """
         parts = []
 
@@ -463,14 +481,31 @@ class LibreNMSInterfaceTable(tables.Table):
     def _render_relationship_column(
         self, lnms_name, lnms_port_id, sync_status, record, btn_class, data_related_key, type_label=""
     ):
-        """Shared renderer for LAG and Parent relationship columns.
+        """
+        Render one compact pill for a LAG or Parent relationship line.
 
-        Renders ONE compact pill per relationship line: a Tabler light (``-lt``) badge holding a
-        status icon + the relationship ``type_label`` + the LibreNMS name, with the full status
-        text in the badge ``title``. Status is conveyed by colour + icon rather than a long inline
-        word (e.g. "Not in LibreNMS"), so the column stays glanceable and doesn't clump/wrap to
-        several lines on narrow screens. The ``-lt`` variants ship their own readable text colour
-        in both light and dark themes (and are exempt from the bare-``bg-*`` badge guard).
+        Renders a Tabler light (``-lt``) badge holding a status icon + the relationship
+        ``type_label`` + the LibreNMS name, with the full status text in the badge
+        ``title``. Status is conveyed by colour + icon rather than a long inline word
+        (e.g. "Not in LibreNMS"), so the column stays glanceable and doesn't clump/wrap
+        to several lines on narrow screens. The ``-lt`` variants ship their own
+        readable text colour in both light and dark themes (and are exempt from the
+        bare-``bg-*`` badge guard).
+
+        Args:
+            lnms_name: The LibreNMS-side relationship name to display.
+            lnms_port_id: The LibreNMS port_id of the related interface (drives the
+                sync button).
+            sync_status: The relationship sync status (match/mismatch/missing_nb/
+                missing_lnms), or None to render nothing.
+            record (dict): The table row, read for port/interface context.
+            btn_class (str): The sync-button CSS class (lag-sync-btn / parent-sync-btn).
+            data_related_key (str): The data attribute carrying the related port_id.
+            type_label (str): The short relationship label ("LAG" / "Parent").
+
+        Returns:
+            SafeString: The pill markup (plus a sync button when applicable), or empty
+                when *sync_status* is None.
         """
         if sync_status is None:
             return mark_safe("")

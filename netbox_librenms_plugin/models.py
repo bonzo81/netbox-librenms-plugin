@@ -919,7 +919,8 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
 
 
 class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
-    """Maps LibreNMS OS name to the regex pattern identifying LAG aggregate interfaces.
+    """
+    Maps a LibreNMS OS name to the regex identifying LAG aggregate interfaces.
 
     Used as fallback when a port's ifType is not 'ieee8023adLag'.
     Example: Cisco IOS port-channels have ifType='propVirtual' and need name-based

@@ -197,11 +197,23 @@ class SyncInterfacesView(
         return {}
 
     def _sync_lag_and_parent_relationships(self, obj, selected_interfaces, ports_data, relationships, server_key):
-        """Set LAG member and sub-interface parent relationships for synced interfaces.
+        """
+        Set LAG member and sub-interface parent relationships for synced interfaces.
 
         Runs after sync_selected_interfaces() so all interfaces already exist in NetBox.
         Only processes relationships where this interface is a member/child — the
-        aggregate/parent may or may not be in the selected set (it just needs to exist in NB).
+        aggregate/parent may or may not be in the selected set (it just needs to exist
+        in NB).
+
+        Args:
+            obj: The Device (or VirtualMachine) being synced.
+            selected_interfaces: The interface display names selected for sync.
+            ports_data: The LibreNMS port dicts for the device.
+            relationships (dict): The ``{lag_members, sub_interfaces}`` mapping to apply.
+            server_key (str): The LibreNMS server key scoping stored-id reads.
+
+        Returns:
+            None
         """
         if not relationships:
             return
@@ -438,12 +450,21 @@ class SyncInterfacesView(
         return {device.pk: device for device in queryset.filter(pk__in=target_ids).order_by("pk")}
 
     def _resolve_row_target_device(self, obj, interface_name):
-        """The Device a given interface row syncs to.
+        """
+        Resolve the Device a given interface row syncs to.
 
         Honors the POSTed ``device_selection_<name>`` when it names a valid VC member. Returns
         ``None`` for an invalid, stale, or inaccessible explicit target. The relationship phase
         reuses this so a lag/parent link is pinned to the same owner the row was synced onto, not
         an arbitrary VC member that happens to carry the same (possibly stale) librenms_id.
+
+        Args:
+            obj: The page Device (or VirtualMachine); returned as-is for VMs.
+            interface_name (str): The interface row's name (keys the POST selection).
+
+        Returns:
+            The selected VC member Device when valid, *obj* when no target was selected,
+            or None when an explicit target is invalid or inaccessible.
         """
         if not isinstance(obj, Device):
             return obj
@@ -817,24 +838,40 @@ def _interface_owner(iface):
 
 
 def _interface_owner_for_object(obj):
-    """Owner tuple ``(device_id, virtual_machine_id)`` for the Device/VM that owns an interface,
-    matching the shape :func:`_interface_owner` produces (used as ``expected_owner``)."""
+    """
+    Build the owner tuple for the Device/VM that owns an interface.
+
+    Matches the shape :func:`_interface_owner` produces (used as ``expected_owner``).
+
+    Args:
+        obj: The owning Device or VirtualMachine.
+
+    Returns:
+        tuple: ``(device_id, virtual_machine_id)`` — one element set, the other None.
+    """
     if isinstance(obj, Device):
         return (obj.pk, None)
     return (None, obj.pk)
 
 
 def _build_interface_index(obj, server_key):
-    """One-pass index of *obj*'s interfaces (VC-wide for a chassis member) for repeated
-    port_id/name resolution.
+    """
+    Build a one-pass index of a device's interfaces for repeated resolution.
 
-    A bulk relationship sync resolves many port_ids against the same interface set; without a
-    shared index each :func:`_resolve_interface_by_port_id` call re-queries the DB and re-reads
-    every interface's ``librenms_id`` custom field — O(selected × interfaces). Building this once
-    collapses that to a single scan.
+    VC-wide for a chassis member. A bulk relationship sync resolves many port_ids
+    against the same interface set; without a shared index each
+    :func:`_resolve_interface_by_port_id` call re-queries the DB and re-reads every
+    interface's ``librenms_id`` custom field — O(selected × interfaces). Building this
+    once collapses that to a single scan.
 
-    Returns ``{"by_lnms_id": {int: [iface, ...]}, "by_name": {name: [iface, ...]}}`` (lists so
-    ambiguity stays detectable), or ``None`` for an unsupported object type.
+    Args:
+        obj: The Device (or VirtualMachine) whose interfaces are indexed.
+        server_key (str): The LibreNMS server key scoping stored-id reads.
+
+    Returns:
+        dict | None: ``{"by_lnms_id": {int: [iface, ...]}, "by_name": {name: [iface,
+            ...]}}`` (lists so ambiguity stays detectable), or None for an unsupported
+            object type.
     """
     if isinstance(obj, Device):
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
@@ -860,22 +897,29 @@ def _build_interface_index(obj, server_key):
 def _resolve_interface_by_port_id(
     obj, port_id: str, server_key: str, name_hint: str = "", expected_owner=None, index=None
 ):
-    """Resolve a LibreNMS port_id to a NetBox Interface/VMInterface.
+    """
+    Resolve a LibreNMS port_id to a NetBox Interface/VMInterface.
 
-    1. Searches obj's interfaces for one whose librenms_id custom field matches port_id.
-       For Devices in a Virtual Chassis, searches all VC member interfaces.
-    2. Falls back to exact name match when name_hint is provided (e.g. interface was
-       created manually without a librenms_id).
+    Searches obj's interfaces for one whose librenms_id custom field matches port_id
+    (all VC member interfaces for a Device in a Virtual Chassis), then falls back to an
+    exact name match when *name_hint* is provided (e.g. the interface was created
+    manually without a librenms_id).
 
-    *expected_owner* (optional ``(device_id, virtual_machine_id)`` tuple): when given, a match
-    whose owner differs is rejected. Because the VC search spans every member, a stale/reused
-    librenms_id can otherwise resolve uniquely onto a *different* member than the row was synced
-    to; pinning the owner stops a lag/parent write landing on the wrong interface.
+    Args:
+        obj: The Device (or VirtualMachine) whose interfaces are searched.
+        port_id (str): The LibreNMS port_id to resolve.
+        server_key (str): The LibreNMS server key scoping stored-id reads.
+        name_hint (str): An exact interface name to fall back to.
+        expected_owner: Optional ``(device_id, virtual_machine_id)`` tuple; a match
+            whose owner differs is rejected. Because the VC search spans every member,
+            a stale/reused librenms_id can otherwise resolve uniquely onto a different
+            member than the row was synced to.
+        index: Optional prebuilt lookup from :func:`_build_interface_index` so a bulk
+            caller doesn't rebuild it per call; built once here when None.
 
-    *index* (optional, from :func:`_build_interface_index`): a prebuilt lookup so a bulk caller
-    resolving many port_ids doesn't rebuild it per call. When ``None`` it is built once here, so
-    a standalone call behaves exactly as before (a single scan of obj's interfaces).
-    Returns (interface, None) on success or (None, error_str) on failure.
+    Returns:
+        tuple: ``(interface, None)`` on success or ``(None, error_str)`` on failure
+            (missing, ambiguous, or wrong-owner).
     """
     if not port_id:
         return None, "port_id is required"
@@ -912,11 +956,18 @@ def _resolve_interface_by_port_id(
 
 
 def _resolve_interface_by_name_hint(obj, name_hint, index=None):
-    """Exact-name fallback for :func:`_resolve_interface_by_port_id`.
+    """
+    Exact-name fallback for :func:`_resolve_interface_by_port_id`.
 
-    Returns ``(iface, None)`` on a unique match, ``(None, None)`` when nothing matches, or
-    ``(None, error_str)`` on an ambiguous name. *index* (from :func:`_build_interface_index`)
-    is used when supplied so a bulk caller avoids a per-name DB query.
+    Args:
+        obj: The Device (or VirtualMachine) whose interfaces are searched.
+        name_hint (str): The exact interface name to match.
+        index: Optional prebuilt lookup from :func:`_build_interface_index`; used when
+            supplied so a bulk caller avoids a per-name DB query.
+
+    Returns:
+        tuple: ``(iface, None)`` on a unique match, ``(None, None)`` when nothing
+            matches, or ``(None, error_str)`` on an ambiguous name.
     """
     if index is not None:
         matches = index["by_name"].get(name_hint, [])
@@ -942,12 +993,20 @@ def _resolve_interface_by_name_hint(obj, name_hint, index=None):
 
 
 def _interfaces_same_owner(a, b) -> bool:
-    """True when both interfaces belong to the same Device (or same VM).
+    """
+    Return True when both interfaces belong to the same Device (or same VM).
 
-    `_resolve_interface_by_port_id` searches all members of a Virtual Chassis, so a stale
-    or ambiguous port_stack relationship can resolve a LAG/parent pair onto two different
-    member devices. NetBox forbids a cross-device lag/parent, so callers must reject such a
-    pair instead of persisting an invalid link.
+    `_resolve_interface_by_port_id` searches all members of a Virtual Chassis, so a
+    stale or ambiguous port_stack relationship can resolve a LAG/parent pair onto two
+    different member devices. NetBox forbids a cross-device lag/parent, so callers must
+    reject such a pair instead of persisting an invalid link.
+
+    Args:
+        a: The first interface.
+        b: The second interface.
+
+    Returns:
+        bool: True when *a* and *b* share the same owning Device or VM.
     """
     return (getattr(a, "device_id", None), getattr(a, "virtual_machine_id", None)) == (
         getattr(b, "device_id", None),

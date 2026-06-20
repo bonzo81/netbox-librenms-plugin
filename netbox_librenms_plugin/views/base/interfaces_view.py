@@ -117,11 +117,19 @@ class BaseInterfaceTableView(
         return normalize_librenms_port_id(librenms_id)
 
     def _build_interface_lookup_maps(self, obj):
-        """Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
+        """
+        Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
 
         For device interfaces (not VMs), also select_related the lag/parent FKs so
         _enrich_port_with_lag_parent() doesn't issue N+1 queries when reading
         nb_iface.lag / nb_iface.parent for each port. VMInterface has no such FKs.
+
+        Args:
+            obj: The NetBox device (or VM) whose interfaces are indexed.
+
+        Returns:
+            dict: ``{"by_name": {name: interface}, "by_librenms_id": {id: interface}}``;
+                LibreNMS ids that map to more than one interface are dropped entirely.
         """
         by_name = {}
         by_librenms_id = {}
@@ -814,9 +822,11 @@ class BaseInterfaceTableView(
         port["missing_vlans"] = missing_vlans
 
     def _has_lag_signals(self, ports: list, interface_name_field: str = "ifName") -> bool:
-        """Return True if any port appears to be a LAG interface or sub-interface.
+        """
+        Return True if any port appears to be a LAG interface or sub-interface.
 
-        Triggers lazy port_stack API fetch only when needed. Checks:
+        Used to trigger the lazy port_stack API fetch only when needed. Detects:
+
           - ifType == 'ieee8023adLag' (definitive)
           - ifType == 'propVirtual' (Cisco IOS port-channels / Junos sub-units)
           - Name matches any PortStackLagPattern regex
@@ -828,6 +838,14 @@ class BaseInterfaceTableView(
         later enrichment renders and matches against) lives in ifDescr, so keying the
         signal off ifName alone would silently skip the port_stack fetch and leave the
         Parent/LAG column empty.
+
+        Args:
+            ports (list): The LibreNMS port dicts to scan.
+            interface_name_field (str): The user-selected name field, scanned in
+                addition to ifName/ifDescr.
+
+        Returns:
+            bool: True if any port looks like a LAG aggregate or a sub-interface.
         """
         import re as _re
 
@@ -871,20 +889,32 @@ class BaseInterfaceTableView(
         interface_name_field: str = "ifName",
         server_key: str = "",
     ) -> None:
-        """Add LAG/parent context keys to a port dict in-place.
+        """
+        Add LAG/parent context keys to a port dict in-place.
 
-        Sets six keys on the port dict:
-          port['librenms_lag_name']       -- name of LAG aggregate in LibreNMS, or None
-          port['librenms_lag_port_id']    -- port_id of LAG aggregate in LibreNMS, or None
-          port['lag_sync_status']         -- 'match'|'mismatch'|'missing_nb'|'missing_lnms'|None
-          port['librenms_parent_name']    -- name of parent interface in LibreNMS, or None
-          port['librenms_parent_port_id'] -- port_id of parent interface in LibreNMS, or None
-          port['parent_sync_status']      -- same values as lag_sync_status
+        Sets six keys on the port dict::
 
-        Matching strategy (most-to-least reliable):
-          1. librenms_id stored on the NetBox related interface equals the LibreNMS port_id
-          2. NetBox interface name matches the LibreNMS ifName field
-          3. NetBox interface name matches the LibreNMS ifDescr field
+            port['librenms_lag_name']       -- LAG aggregate name in LibreNMS, or None
+            port['librenms_lag_port_id']    -- LAG aggregate port_id, or None
+            port['lag_sync_status']         -- match|mismatch|missing_nb|missing_lnms|None
+            port['librenms_parent_name']    -- parent interface name, or None
+            port['librenms_parent_port_id'] -- parent interface port_id, or None
+            port['parent_sync_status']      -- same values as lag_sync_status
+
+        Matching strategy (most-to-least reliable): stored librenms_id on the NetBox
+        related interface equal to the LibreNMS port_id; then NetBox interface name
+        equal to the LibreNMS ifName; then equal to ifDescr.
+
+        Args:
+            port (dict): The LibreNMS port dict to enrich (mutated in place).
+            port_id_to_lag (dict): Map of port_id → LAG aggregate port_id.
+            port_id_to_parent (dict): Map of port_id → parent port_id.
+            by_id (dict): Map of port_id → LibreNMS port dict.
+            interface_name_field (str): The name field used to render related names.
+            server_key (str): The LibreNMS server key scoping stored-id lookups.
+
+        Returns:
+            None
         """
         # port_id_to_lag / port_id_to_parent arrive already key-normalized from the caller
         # (see the cached-data branch in get/post), so they're used directly here.
