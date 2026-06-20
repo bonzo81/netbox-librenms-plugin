@@ -3166,10 +3166,11 @@ class PromoteToHostView(
                 )
             # Another device may have claimed new_host_id since validation ran. Re-check
             # inside the transaction and abort on a non-self conflict so we don't create a
-            # duplicate host mapping. find_by_librenms_id is an unlocked read, so this
-            # narrows — not closes — the window (no unique constraint exists on the cf).
+            # duplicate host mapping. select_for_update locks the competing owner row so a
+            # concurrent promote/attach of the same id serializes against it; best-effort like
+            # the serial guard (no unique constraint on the JSON cf to fully close the window).
             try:
-                host_conflict = find_by_librenms_id(Device, new_host_id, server_key)
+                host_conflict = find_by_librenms_id(Device, new_host_id, server_key, select_for_update=True)
             except AmbiguousLibreNMSIdError:
                 return _htmx_error_response(
                     f"LibreNMS device #{new_host_id} is ambiguous — it matches more than one NetBox "
