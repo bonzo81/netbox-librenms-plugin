@@ -863,6 +863,54 @@ class TestValidateDeviceForImportEdgeCases:
             libre_device, api=self._make_api(), include_vc_detection=include_vc_detection, **kwargs
         )
 
+    def test_duplicate_hostname_match_fails_closed(self):
+        """When the hostname match is non-unique (duplicate device names), the earlier .first()
+        existing_device is an arbitrary row. The merge-candidate detector must fail closed — block
+        link/promote/import and surface a blocking issue — rather than leave actionable state
+        pointing at the wrong NetBox device."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-853", slug="acme-853")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-853", slug="dt-853")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-853", slug="role-853")
+        site_a, _ = Site.objects.get_or_create(name="Site-853a", slug="site-853a")
+        site_b, _ = Site.objects.get_or_create(name="Site-853b", slug="site-853b")
+
+        # Two devices share the hostname "dup-host" (different sites). One is LibreNMS-linked.
+        Device.objects.create(
+            name="dup-host",
+            device_type=dt,
+            role=role,
+            site=site_a,
+            status="active",
+            serial="SER853",
+            custom_field_data={"librenms_id": {"default": 7}},
+        )
+        Device.objects.create(
+            name="dup-host",
+            device_type=dt,
+            role=role,
+            site=site_b,
+            status="active",
+            serial="OTHER",
+        )
+
+        libre_device = {
+            "device_id": 999,
+            "hostname": "dup-host",
+            "sysName": "dup-host",
+            "serial": "SER853",
+            "hardware": "Model-X",
+            "os": "ios",
+        }
+        result = self._validate(libre_device)
+
+        # Fail closed: no actionable serial/OOB state, not importable, blocking issue present.
+        assert result["serial_action"] is None
+        assert result.get("oob_candidate") is None
+        assert result["can_import"] is False
+        assert any("resolve the duplicate" in i for i in result["issues"])
+
     def test_vm_librenms_id_not_int_falls_back(self):
         """device_id None → no librenms_id lookup; validation still returns cleanly."""
         libre_device = {
