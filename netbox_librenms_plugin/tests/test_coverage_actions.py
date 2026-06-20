@@ -5709,17 +5709,40 @@ class TestMissingOOBIpPermissions:
             msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
         assert msg is not None and "change_ipaddress" in msg
 
+    @pytest.mark.django_db
     def test_no_change_ipaddress_when_already_on_selected_interface(self):
-        """IP already assigned to the chosen interface → _attach_oob_ip does not save, so change_ipaddress must not be required (least privilege)."""
+        """IP already assigned to the chosen (real) interface → _attach_oob_ip does not save, so change_ipaddress must not be required (least privilege)."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+
+        device = make_device("oob-perm-host")
+        iface = make_interface(device, "idrac0")
+        make_ip("10.0.0.9/32", assigned_object=iface)
+
         view = self._view()
-        req = _make_request(post={"oob_interface_id": "5"})
+        req = _make_request(post={"oob_interface_id": str(iface.pk)})
         # User has every perm EXCEPT change_ipaddress.
         req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
-        with patch("ipam.models.IPAddress.objects") as mock_objects:
-            existing = MagicMock()
-            existing.assigned_object.pk = 5  # already on the selected interface → no mutation
-            mock_objects.filter.return_value.__getitem__.return_value = [existing]
-            assert view._missing_oob_ip_permissions(req, "10.0.0.9") is None
+        assert view._missing_oob_ip_permissions(req, "10.0.0.9", device=device) is None
+
+    @pytest.mark.django_db
+    def test_change_ipaddress_required_when_assigned_object_not_interface(self):
+        """A non-Interface assigned_object (a VMInterface) sharing the selected pk must NOT take the already-on-selected shortcut — the GFK pk can collide across models, so a type check is required or change_ipaddress is wrongly waived."""
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_ip, make_vm
+
+        device = make_device("oob-perm-host2")
+        vm = make_vm("oob-perm-vm")
+        vmi = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+        make_ip("10.0.0.9/32", assigned_object=vmi)
+
+        view = self._view()
+        # The POSTed oob_interface_id is treated as an Interface pk; here it equals the
+        # VMInterface's pk, so a pk-only compare would wrongly skip the change_ipaddress check.
+        req = _make_request(post={"oob_interface_id": str(vmi.pk)})
+        req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
+        msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
+        assert msg is not None and "change_ipaddress" in msg
 
     def test_ambiguous_match_requires_change_despite_selected_interface(self):
         """Multiple rows share the host IP: the write path refuses, so the preflight must NOT take the already-on-selected-interface shortcut — it requires change_ipaddress."""

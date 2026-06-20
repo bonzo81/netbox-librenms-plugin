@@ -1321,7 +1321,7 @@ class AmbiguousLibreNMSIdError(LookupError):
     """
 
 
-def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
+def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, select_for_update: bool = False):
     """
     Return the first object of *model* whose ``librenms_id`` JSON field contains
     *librenms_id* under *server_key*.
@@ -1338,6 +1338,10 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         model: A Django model class (Device, VirtualMachine, Interface, …).
         librenms_id: The LibreNMS device/port ID to look up.
         server_key: LibreNMS server key (from plugin ``servers`` config).
+        select_for_update (bool): When True, lock the matched row(s) with
+            ``SELECT … FOR UPDATE`` so a concurrent conflict check serializes against
+            an existing owner. Must be called inside a transaction; best-effort like
+            the serial guard (a row that does not yet exist cannot be locked).
 
     Returns:
         Model instance or None
@@ -1395,8 +1399,11 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
 
     # Pull two rows per side so a duplicate within either result set is detectable.
-    host_matches = list(model.objects.filter(host_q)[:2])
-    oob_matches = list(model.objects.filter(oob_q)[:2])
+    # Lock the matched rows when asked so a concurrent conflict check serializes against an
+    # existing owner (best-effort: a not-yet-created row can't be locked). Caller must hold a txn.
+    manager = model.objects.select_for_update() if select_for_update else model.objects
+    host_matches = list(manager.filter(host_q)[:2])
+    oob_matches = list(manager.filter(oob_q)[:2])
 
     # Fail closed on intra-set ambiguity: two distinct rows sharing the same host (or
     # OOB) librenms_id is a data-integrity violation — binding to whichever sorts first

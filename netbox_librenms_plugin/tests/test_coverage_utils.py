@@ -775,6 +775,23 @@ class TestFindByLibreNMSIdNoneGuard:
         assert result is None
         model.objects.filter.assert_not_called()
 
+    @pytest.mark.django_db(transaction=False)
+    def test_select_for_update_locks_and_returns_owner(self):
+        """find_by_librenms_id(..., select_for_update=True) locks + returns the owning row inside a txn (serializes a concurrent conflict check against an existing owner)."""
+        from django.db import transaction
+
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        device = make_device("locked-owner", librenms_cf={"default": 4242})
+        # select_for_update requires an open transaction; the locked read must still resolve
+        # the owner (best-effort serialization is additive, not a behaviour change).
+        with transaction.atomic():
+            found = find_by_librenms_id(Device, 4242, server_key="default", select_for_update=True)
+        assert found is not None and found.pk == device.pk
+
 
 class TestNetboxResolvesModuleTokenPerLeaf:
     """Version-gating helper for {module} token resolution behaviour (NetBox #20467)."""

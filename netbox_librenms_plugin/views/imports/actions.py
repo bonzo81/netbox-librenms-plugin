@@ -2367,10 +2367,11 @@ class AddAsOOBView(
             # Another device may already own this LibreNMS id (as its host id or OOB id)
             # since validation ran. Re-check inside the transaction and abort on a non-self
             # conflict so we don't point one LibreNMS device at two NetBox devices. Mirrors
-            # PromoteToHostView's host_conflict guard; find_by_librenms_id is an unlocked
-            # read, so this narrows — not closes — the window (no unique constraint on the cf).
+            # PromoteToHostView's host_conflict guard. select_for_update locks the competing
+            # owner row so a concurrent attach of the same id serializes against it; best-effort
+            # like the serial guard (no unique constraint on the JSON cf to fully close it).
             try:
-                oob_conflict = find_by_librenms_id(Device, librenms_id, server_key)
+                oob_conflict = find_by_librenms_id(Device, librenms_id, server_key, select_for_update=True)
             except AmbiguousLibreNMSIdError:
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is ambiguous — it matches more than one NetBox "
@@ -2605,7 +2606,12 @@ class AddAsOOBView(
                         .first()
                     )
                 if selected_iface_pk is not None:
-                    already_on_selected_iface = getattr(existing.assigned_object, "pk", None) == selected_iface_pk
+                    # Compare the assigned-object TYPE too: assigned_object is a GenericForeignKey,
+                    # so a different model (e.g. a VMInterface) sharing the selected Interface's pk
+                    # must not be treated as "already on the selected interface" and wave the
+                    # change-IPAddress permission through.
+                    assigned = existing.assigned_object
+                    already_on_selected_iface = isinstance(assigned, Interface) and assigned.pk == selected_iface_pk
             if not already_on_selected_iface:
                 needed.append(("change", IPAddress))
 
