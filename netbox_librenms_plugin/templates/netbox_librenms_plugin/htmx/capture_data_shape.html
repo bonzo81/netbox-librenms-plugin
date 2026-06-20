@@ -1,0 +1,79 @@
+{# Capture data shape modal (issue #95): anonymized recording + novelty verdict + prefilled issue link. #}
+<div class="modal-header">
+  <h5 class="modal-title"><i class="mdi mdi-camera-outline"></i> Capture data shape: {{ object.name }}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<div class="modal-body">
+  {% if error %}
+    <div class="alert alert-warning py-2 mb-0"><i class="mdi mdi-alert"></i> {{ error }}</div>
+  {% else %}
+    {% if novelty.verdict == "new" %}
+      <span class="badge bg-warning-lt"><i class="mdi mdi-star-outline"></i> Likely a new shape</span>
+    {% else %}
+      <span class="badge bg-info-lt"><i class="mdi mdi-check-decagram"></i> Likely already covered</span>
+    {% endif %}
+    <span class="text-muted small ms-1">{{ novelty.why }}{% if novelty.closest %} (closest: <code>{{ novelty.closest }}</code>){% endif %}</span>
+
+    {% if residual_pii %}
+    <div class="alert alert-danger py-2 mt-2 mb-0">
+      <i class="mdi mdi-shield-alert"></i>
+      {{ residual_pii|length }} possible PII value{{ residual_pii|length|pluralize }} remain after anonymization &mdash; review before submitting:
+      <ul class="mb-0 small">
+        {% for p in residual_pii %}<li>{{ p.kind }} <code>{{ p.value }}</code> at <code>{{ p.path }}</code></li>{% endfor %}
+      </ul>
+    </div>
+    {% else %}
+    <div class="text-success small mt-2"><i class="mdi mdi-shield-check"></i> No residual IP / MAC / email detected after anonymization.</div>
+    {% endif %}
+
+    <label class="form-label mt-3 mb-1"><strong>Anonymized recording</strong></label>
+    <pre id="capture-json" class="border rounded p-2 small mb-2" data-filename="{{ object.name|slugify }}-shape.json"
+         style="max-height:300px;overflow:auto">{{ recording_json }}</pre>
+    <div class="d-flex gap-2 align-items-center">
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="capture-copy-btn">
+        <i class="mdi mdi-content-copy"></i> Copy JSON
+      </button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="capture-download-btn">
+        <i class="mdi mdi-download"></i> Download
+      </button>
+      <a class="btn btn-sm btn-primary ms-auto" href="{{ issue_url }}" target="_blank" rel="noopener noreferrer">
+        <i class="mdi mdi-github"></i> Open prefilled issue
+      </a>
+    </div>
+    <div class="text-muted small mt-2">
+      Review the JSON, then open the issue and paste it in. The plugin never submits on your behalf.
+    </div>
+  {% endif %}
+</div>
+<div class="modal-footer">
+  <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+</div>
+{% if not error %}
+<script>
+  (function () {
+    var pre = document.getElementById("capture-json");
+    if (!pre) return;
+    var copyBtn = document.getElementById("capture-copy-btn");
+    if (copyBtn) {
+      copyBtn.addEventListener("click", function () {
+        navigator.clipboard.writeText(pre.textContent).then(function () {
+          copyBtn.innerHTML = '<i class="mdi mdi-check"></i> Copied';
+        });
+      });
+    }
+    var dlBtn = document.getElementById("capture-download-btn");
+    if (dlBtn) {
+      dlBtn.addEventListener("click", function () {
+        var blob = new Blob([pre.textContent], { type: "application/json" });
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = pre.getAttribute("data-filename") || "data-shape.json";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+      });
+    }
+  })();
+</script>
+{% endif %}

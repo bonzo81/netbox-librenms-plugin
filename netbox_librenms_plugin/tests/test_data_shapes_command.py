@@ -7,8 +7,8 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
+from netbox_librenms_plugin.data_shapes import recordings_store as store
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
-from netbox_librenms_plugin.management.commands import librenms_recordings as cmd
 from netbox_librenms_plugin.tests.recordings import load_recording
 
 
@@ -58,8 +58,8 @@ def test_rebuild_manifest_writes_signatures(tmp_path, monkeypatch):
     rec_dir.mkdir()
     for name in ("cisco-stackwise-3member", "juniper-vc-2member", "cisco-lag-and-subinterface"):
         (rec_dir / f"{name}.json").write_text(json.dumps(load_recording(name)))
-    monkeypatch.setattr(cmd, "RECORDINGS_DIR", rec_dir)
-    monkeypatch.setattr(cmd, "MANIFEST_PATH", rec_dir / "manifest.json")
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", rec_dir / "manifest.json")
 
     output = _run(**{"rebuild_manifest": True})
 
@@ -79,8 +79,8 @@ def test_rebuild_manifest_excludes_manifest_itself(tmp_path, monkeypatch):
     rec_dir.mkdir()
     (rec_dir / "cisco-stackwise-3member.json").write_text(json.dumps(load_recording("cisco-stackwise-3member")))
     (rec_dir / "manifest.json").write_text(json.dumps([{"name": "stale", "signature": {}}]))
-    monkeypatch.setattr(cmd, "RECORDINGS_DIR", rec_dir)
-    monkeypatch.setattr(cmd, "MANIFEST_PATH", rec_dir / "manifest.json")
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", rec_dir / "manifest.json")
 
     _run(**{"rebuild_manifest": True})
 
