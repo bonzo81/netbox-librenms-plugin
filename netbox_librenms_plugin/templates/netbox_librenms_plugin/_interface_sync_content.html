@@ -44,6 +44,7 @@
                 <i class="mdi mdi-help-circle"></i> info
             </a>
         </div>
+        {% if not migrated_to_marker %}
         <div class="ms-auto d-flex align-items-center">
             <div class="exclude-columns-section d-flex align-items-center gap-2 me-2">
                 <h6 class="mb-0">Exclude from Sync:</h6>
@@ -84,6 +85,7 @@
                 </div>
             </div>
         </div>
+        {% endif %}
 
 
     </div>

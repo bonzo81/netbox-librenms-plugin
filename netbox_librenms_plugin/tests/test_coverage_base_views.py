@@ -2816,6 +2816,26 @@ class TestBaseIPAddressTableViewPrefetchNetboxData:
         assert str(ip.address) in result["ip_addresses_map"]
         assert result["device"] is obj
 
+    def test_duplicate_librenms_id_is_dropped_from_map(self):
+        """Two interfaces sharing a server-scoped librenms_id are ambiguous — the id must be
+        dropped from the lookup map so IP binding falls back to (unambiguous) name matching
+        instead of binding to whichever interface was iterated last."""
+        view = self._make_view()
+        obj = make_device("prefetch-dup-dev")
+        a = make_interface(obj, "Gi0/1")
+        a.custom_field_data["librenms_id"] = {"default": 20}
+        a.save()
+        b = make_interface(obj, "Gi0/2")
+        b.custom_field_data["librenms_id"] = {"default": 20}  # same id → ambiguous
+        b.save()
+
+        result = view._prefetch_netbox_data(obj)
+
+        assert "20" not in result["interfaces_by_librenms_id"]
+        # Names are still unambiguous and remain usable for the fallback match.
+        assert result["interfaces_by_name"]["Gi0/1"] == a
+        assert result["interfaces_by_name"]["Gi0/2"] == b
+
 
 class TestBaseIPAddressTableViewGetTable:
     """Tests for BaseIPAddressTableView.get_table."""

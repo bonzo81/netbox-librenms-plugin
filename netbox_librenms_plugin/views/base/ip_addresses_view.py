@@ -166,11 +166,23 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         # Create maps for efficient lookups (POST-resolved server when provided; else the
         # shared degrading resolver so a missing/misconfigured default can't 500 the GET render).
         server_key = server_key or self._render_server_key()
+        # Fail closed on duplicate server-scoped LibreNMS IDs: if two NetBox interfaces share one,
+        # keeping either would bind an IP to whichever was iterated last. Drop the ambiguous id so
+        # _add_interface_info_to_ip() falls back to the (unambiguous) name match instead.
         interfaces_by_librenms_id = {}
+        ambiguous_librenms_ids = set()
         for interface in all_interfaces:
             lib_id = get_librenms_device_id(interface, server_key, auto_save=False)
-            if lib_id is not None:
-                interfaces_by_librenms_id[str(lib_id)] = interface
+            if lib_id is None:
+                continue
+            lib_id_key = str(lib_id)
+            if lib_id_key in ambiguous_librenms_ids:
+                continue
+            if lib_id_key in interfaces_by_librenms_id:
+                ambiguous_librenms_ids.add(lib_id_key)
+                interfaces_by_librenms_id.pop(lib_id_key, None)
+                continue
+            interfaces_by_librenms_id[lib_id_key] = interface
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
 

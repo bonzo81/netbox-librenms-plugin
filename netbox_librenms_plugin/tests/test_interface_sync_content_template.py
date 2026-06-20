@@ -116,3 +116,13 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
         assert 'aria-label="Select all NetBox-only interfaces"' in html
         assert 'aria-label="Select interface eth-only"' in html
+
+    def test_migrated_mode_hides_exclude_from_sync_controls(self):
+        # The POST form is gone in migrated mode, so the sync-only "Exclude from Sync" checkboxes
+        # must not render as active controls with nowhere to submit.
+        html = self._render(migrated={"server_key": "default", "device_id": 1, "at": "now"})
+        assert "Exclude from Sync:" not in html
+
+    def test_normal_mode_shows_exclude_from_sync_controls(self):
+        html = self._render(migrated=None)
+        assert "Exclude from Sync:" in html
