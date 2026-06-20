@@ -21,13 +21,7 @@ from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_inter
 
 
 def _make_migrate_device(name, librenms_cf=None):
-    """Positional-arg adapter over the shared ``make_device`` builder.
-
-    The marker/winner helpers read the librenms_id custom field through NetBox's ``device.cf``
-    accessor and resolve the winner via ``Device.objects`` — so a real device with a real CF
-    exercises the actual read + ORM lookup. This thin wrapper just preserves the positional
-    ``librenms_cf`` call style used throughout this module.
-    """
+    """Positional-arg adapter over the shared ``make_device`` builder."""
     return make_device(name, librenms_cf=librenms_cf)
 
 
@@ -158,8 +152,7 @@ class TestResolveWinnerForDonor:
         assert marker is None
 
     def test_self_pointing_marker_returns_none_winner(self):
-        """A marker pointing back at the donor (winner.pk == donor.pk) is corrupt — it would
-        make the move operate on one Device as both donor and winner. Fail closed as stale."""
+        """A marker pointing back at the donor (winner.pk == donor.pk) is corrupt — it would make the move operate on one Device as both donor and winner."""
         from netbox_librenms_plugin.views.sync.migrate import _resolve_winner_for_donor
 
         donor = _make_migrate_device("mig-rw-self")
@@ -205,8 +198,7 @@ class TestMoveInterfaceToWinnerView:
 
     @staticmethod
     def _mark(donor, winner):
-        """Write a real ``_migrated_to`` marker so the view's _resolve_winner_for_donor()
-        reads it from the donor's librenms_id custom field for real."""
+        """Write a real ``_migrated_to`` marker so the view's _resolve_winner_for_donor() reads it from the donor's librenms_id custom field for real."""
         from netbox_librenms_plugin.utils import mark_librenms_migrated
 
         mark_librenms_migrated(donor, winner.pk, "default")
@@ -269,11 +261,7 @@ class TestMoveInterfaceToWinnerView:
         assert interface.device_id == winner.pk  # really moved to the winner
 
     def test_cross_device_relationship_rejected_with_409(self):
-        """Real cross-device LAG: the donor interface is a member of a LAG that lives on the
-        donor. Moving only the member to the winner would leave its ``lag`` on the donor —
-        NetBox's real Interface.clean() rejects that, so the move aborts and nothing persists.
-        (Previously this injected the ValidationError via a mock side_effect; now the actual
-        validator runs.)"""
+        """Real cross-device LAG: the donor interface is a member of a LAG that lives on the donor."""
         view = self._setup_view()
         donor = make_device("mi-xdev-donor")
         winner = make_device("mi-xdev-winner")
@@ -296,8 +284,7 @@ class TestMoveInterfaceToWinnerView:
         assert member.lag_id == donor_lag.pk  # relationship untouched
 
     def test_save_integrity_error_rejected_with_409(self):
-        """A concurrent winner-side rename/create can trip a unique constraint at save()
-        time (after our name re-check); surface it as a 409, not a 500."""
+        """A concurrent winner-side rename/create can trip a unique constraint at save() time (after our name re-check); surface it as a 409, not a 500."""
         from django.db import IntegrityError
 
         view = self._setup_view()
@@ -346,9 +333,7 @@ class TestMoveInterfaceToWinnerView:
         assert resp.headers.get("HX-Refresh") is None
 
     def test_marker_repointed_under_lock_is_rejected(self):
-        """If the donor's _migrated_to is repointed between the unlocked resolve
-        and acquiring the row locks, the move must abort instead of targeting the
-        stale winner."""
+        """If the donor's _migrated_to is repointed between the unlocked resolve and acquiring the row locks, the move must abort instead of targeting the stale winner."""
         view = self._setup_view()
         req = _hx_request({"server_key": "default"})
 
@@ -459,11 +444,7 @@ class TestTransferDeviceIPView:
         assert winner.primary_ip4_id == winner_ip.pk  # winner FK intact
 
     def test_happy_path_transfers_oob_ip(self):
-        """Real unique-constraint ordering: ``Device.oob_ip`` is UNIQUE per address, so the
-        donor must release the FK before the winner claims it. The address already lives on a
-        winner-owned interface (NetBox requires oob_ip on one of the device's own interfaces);
-        the donor's FK dangles at it after a prior interface move. Driving real rows exercises
-        the actual constraint — a reversed save order would trip it for real."""
+        """Real unique-constraint ordering: ``Device.oob_ip`` is UNIQUE per address, so the donor must release the FK before the winner claims it."""
         view = self._setup_view()
         donor = make_device("tx-happy-donor")
         winner = make_device("tx-happy-winner")
@@ -483,10 +464,7 @@ class TestTransferDeviceIPView:
         assert donor.oob_ip_id is None  # donor released it
 
     def test_rejects_when_address_still_attached_to_donor(self):
-        """The transfer only flips the FK (save skips full_clean), so it must refuse to point
-        the winner at an address still assigned to a DONOR interface — otherwise the winner
-        would own an oob_ip that isn't on one of its interfaces. Driven against real rows:
-        the owning interface's real device_id is what the view checks."""
+        """The transfer only flips the FK (save skips full_clean), so it must refuse to point the winner at an address still assigned to a DONOR interface — otherwise the winner would own an oob_ip that isn't on one of its interfaces."""
         view = self._setup_view()
         donor = make_device("tx-attached-donor")
         winner = make_device("tx-attached-winner")
@@ -508,10 +486,7 @@ class TestTransferDeviceIPView:
         assert donor.oob_ip_id == oob_ip.pk  # donor FK untouched
 
     def test_rejects_when_assignment_is_not_an_interface(self):
-        """A non-Interface assignment (e.g. a VMInterface) must fail closed: the Interface
-        re-lock is skipped (GenericForeignKey pks aren't unique across models, so filtering
-        Interface by an unrelated pk could lock the wrong row), so the device_id check sees
-        None and the transfer is refused."""
+        """A non-Interface assignment (e.g. a VMInterface) must fail closed: the device_id check sees None and the transfer is refused."""
         view = self._setup_view()
         req = _hx_request({"server_key": "default"})
 
@@ -610,12 +585,7 @@ class TestMoveIPAddressToWinnerView:
         assert ip.assigned_object == donor_iface  # stayed on the donor interface
 
     def test_happy_path_reassigns_ip_to_winner_interface(self):
-        """Real DB end-to-end: the IP on the donor's interface is reassigned to the winner's
-        same-named interface. Because the move is driven against real rows, the donor re-lock
-        ``filter(pk=..., device=donor)`` and the winner lookup ``filter(device=winner,
-        name=...)`` must use the correct device/name — a wrong lookup would leave the IP off
-        the winner's interface and the reload assertion would fail (no mock-call inspection
-        needed to pin the exact kwargs)."""
+        """Real DB end-to-end: the IP on the donor's interface is reassigned to the winner's same-named interface."""
         view = self._setup_view()
 
         donor = make_device("donor-device")
@@ -660,13 +630,7 @@ def _nonhtmx_request(post=None, referer=None):
 
 @pytest.mark.django_db
 class TestReconcileDonorDeviceIpFks:
-    """Real-DB coverage for _reconcile_donor_device_ip_fks: it locks the owning Interface and
-    re-reads device_id from the locked row before transferring a device-level primary/OOB IP FK,
-    so the winner never ends up owning an address that sits on an interface it doesn't own.
-
-    Exercised against real NetBox models (not mocks) so the FK transfer, the Interface lookup,
-    and the owner comparison are validated against actual ORM behavior end-to-end.
-    """
+    """Real-DB coverage for _reconcile_donor_device_ip_fks: it locks the owning Interface and re-reads device_id from the locked row before transferring a device-level primary/OOB IP FK, so the winner never ends up owning an address that sits on an interface it doesn't own."""
 
     @staticmethod
     def _make_devices():
@@ -678,8 +642,7 @@ class TestReconcileDonorDeviceIpFks:
         )
 
     def test_transfers_primary_ip_when_interface_is_on_winner(self):
-        """The donor's primary_ip4 dangles on an address now sitting on a winner-owned interface;
-        the FK is transferred to the winner and cleared on the donor."""
+        """The donor's primary_ip4 dangles on an address now sitting on a winner-owned interface; the FK is transferred to the winner and cleared on the donor."""
         from django.db import transaction
 
         from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
@@ -700,8 +663,7 @@ class TestReconcileDonorDeviceIpFks:
         assert any("transferred" in n for n in notes)
 
     def test_skips_when_interface_belongs_to_a_different_device(self):
-        """If the address sits on an interface owned by neither the winner (a stale/concurrent
-        state), the locked-row device_id check rejects it: no FK is moved onto the winner."""
+        """If the address sits on an interface owned by neither the winner (a stale/concurrent state), the locked-row device_id check rejects it: no FK is moved onto the winner."""
         from django.db import transaction
 
         from netbox_librenms_plugin.views.sync.migrate import _reconcile_donor_device_ip_fks
@@ -724,10 +686,7 @@ class TestReconcileDonorDeviceIpFks:
 
 @pytest.mark.django_db
 class TestSetDeviceIpFk:
-    """Real-DB coverage for utils.set_device_ip_fk: the single guarded chokepoint every
-    device primary/OOB IP-FK write (which bypass full_clean via update_fields) goes through.
-    It must enforce the NetBox invariant that the address sits on one of the device's OWN
-    interfaces, so a careless caller can never persist an off-device FK."""
+    """Real-DB coverage for utils.set_device_ip_fk: the single guarded chokepoint every device primary/OOB IP-FK write (which bypass full_clean via update_fields) goes through."""
 
     def test_sets_and_saves_fk_when_address_on_device_interface(self):
         from netbox_librenms_plugin.utils import set_device_ip_fk
@@ -909,16 +868,7 @@ class TestNonHtmxFallbackRedirect:
 
 @pytest.mark.django_db
 class TestMigratedTransferIpDeviceOnlyGate:
-    """librenms_sync_base.html serves both Devices and VMs, but the migrated-donor transfer-IP
-    buttons all POST to ``device_transfer_ip`` with ``pk=object.pk`` (a Device lookup). The gate
-    ``object|meta:"model_name" == "device"`` keeps those buttons off VM pages so a VM can't drive
-    a mutation against a same-pk Device. build_migrated_context() doesn't itself gate on Device,
-    so a VM with a stale ``_migrated_to`` marker would otherwise reach the buttons.
-
-    The full template extends generic/object.html (not cheaply renderable in isolation), so this
-    exercises the exact gate predicate from the template via the real ``meta`` filter and real
-    ORM objects.
-    """
+    """librenms_sync_base.html serves both Devices and VMs, but the migrated-donor transfer-IP buttons all POST to ``device_transfer_ip`` with ``pk=object.pk`` (a Device lookup)."""
 
     GATE = "{% load helpers %}{% if object|meta:'model_name' == 'device' %}TRANSFER{% endif %}"
 

@@ -6007,16 +6007,7 @@ class TestAddAsOOBViewPost:
 
 @pytest.mark.django_db
 class TestPromoteToHostViewPost:
-    """View-level tests for PromoteToHostView.post() — HTTP interface + OOB sentinel regression.
-
-    Companion to TestAddAsOOBViewPost for the other half of the OOB sentinel flow: the
-    promote endpoint demotes the existing device's current LibreNMS link into the OOB slot
-    and makes the incoming LibreNMS device the new host. The concurrency guards
-    (get_librenms_device_id / get_librenms_oob / find_by_librenms_id), set_librenms_device_id
-    + set_librenms_oob, and _save_device all run for real against a real Device, and the
-    persisted custom_field_data is reloaded from the DB. Only the LibreNMS validation
-    pipeline, auth gates, and row HTML render stay mocked.
-    """
+    """View-level tests for PromoteToHostView.post() — HTTP interface + OOB sentinel regression."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
@@ -6068,8 +6059,7 @@ class TestPromoteToHostViewPost:
         assert response["HX-Reswap"] == "none"
 
     def test_device_id_mismatch_returns_htmx_error(self):
-        """When the validation's existing_device pk does not match the posted
-        existing_device_id, the view rejects the stale modal."""
+        """When the validation's existing_device pk does not match the posted existing_device_id, the view rejects the stale modal."""
         view = self._make_view()
         existing_device = make_device("promote-existing", librenms_cf={"default": {"id": 10}})
         other_device = make_device("promote-other")
@@ -6102,8 +6092,7 @@ class TestPromoteToHostViewPost:
         assert response["HX-Reswap"] == "none"
 
     def test_existing_link_already_points_at_incoming_device_returns_error(self):
-        """If the existing link already equals the incoming LibreNMS id there is nothing to
-        promote — the view must say so rather than self-demoting the same id into OOB."""
+        """If the existing link already equals the incoming LibreNMS id there is nothing to promote — the view must say so rather than self-demoting the same id into OOB."""
         view = self._make_view()
         existing_device = make_device("promote-noop", librenms_cf={"default": {"id": 17}})
         request = _make_request(post={"existing_device_id": str(existing_device.pk)})
@@ -6118,16 +6107,7 @@ class TestPromoteToHostViewPost:
         assert response["HX-Reswap"] == "none"
 
     def test_happy_path_generic_oob_sentinel_promotes_and_demotes_link(self):
-        """End-to-end VIEW-level regression for issue #89: POST to PromoteToHostView with the
-        generic 'oob' sentinel as the existing controller type. The real concurrency guards,
-        set_librenms_device_id + set_librenms_oob, and _save_device run against a real Device;
-        the persisted custom_field_data is reloaded from the DB to prove the host id was
-        swapped to the incoming LibreNMS device and the previous link demoted to the OOB slot
-        with the sentinel type.
-
-        Historically set_librenms_oob rejected the generic 'oob', so this endpoint returned
-        an 'Invalid promotion data' HTMX error; removing the sentinel branch in
-        set_librenms_oob makes this test go red (error response + no committed oob slot)."""
+        """End-to-end VIEW-level regression for issue #89: POST to PromoteToHostView with the generic 'oob' sentinel as the existing controller type."""
         from dcim.models import Device
         from django.http import HttpResponse
 
@@ -6157,9 +6137,7 @@ class TestPromoteToHostViewPost:
         assert entry["oob"] == {"id": 10, "type": "oob"}
 
     def test_aborts_when_incoming_host_id_owned_by_another_device(self):
-        """The incoming host id must not already belong to another NetBox device. Re-checked
-        inside the transaction via the real find_by_librenms_id so promotion can't point one
-        LibreNMS device at two NetBox devices."""
+        """The incoming host id must not already belong to another NetBox device."""
         from dcim.models import Device
         from django.http import HttpResponse
 
@@ -6187,16 +6165,7 @@ class TestPromoteToHostViewPost:
 
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewOOBTransfer:
-    """MergeNetBoxDevicesView.post: oob_ip may only move to the winner when its
-    underlying IP already sits on a winner interface (the merge does not move
-    interfaces, and the save skips full_clean()).
-
-    Driven against real Device / Interface / IPAddress so the transfer is proven by
-    what actually persists and reloads, not by inspecting ``save(update_fields=...)``
-    on a MagicMock. The real ``merge_librenms_links`` / ``mark_librenms_migrated`` run
-    and the locked rows are genuine ``select_for_update`` re-reads — only the LibreNMS
-    validation pipeline, auth gates, and the row HTML render stay mocked.
-    """
+    """MergeNetBoxDevicesView.post: oob_ip may only move to the winner when its underlying IP already sits on a winner interface (the merge does not move interfaces, and the save skips full_clean())."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
@@ -6208,9 +6177,7 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         return view
 
     def _run(self, *, oob_on_winner):
-        """Drive a merge where the donor's oob_ip sits on an interface owned by the
-        winner (``oob_on_winner=True``) or by the donor (``False``).
-        Returns ``(winner, donor, oob_ip)`` with the devices reloaded from the DB."""
+        """Drive a merge where the donor's oob_ip sits on an interface owned by the winner (``oob_on_winner=True``) or by the donor (``False``)."""
         from dcim.models import Device
         from django.http import HttpResponse
 
@@ -6251,18 +6218,7 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         assert winner.oob_ip_id is None
 
     def test_save_failure_rolls_back_donor_oob_release_and_marker(self):
-        """Forced persist failure mid-merge must roll back the donor's already-executed save.
-
-        The view saves the donor first — releasing its ``oob_ip`` (a UNIQUE OneToOne) and
-        stamping the ``_migrated_to`` marker — then saves the winner to claim the IP. If the
-        winner save fails, the ``except`` block must mark the transaction rollback-only;
-        otherwise the donor is left with no ``oob_ip`` AND no winner holding it (an orphaned
-        address) plus a ``_migrated_to`` marker for a merge that never completed.
-
-        Driven against real rows: only the *second* Device.save (the winner's) is forced to
-        raise, so the donor's real release is genuinely on disk inside the savepoint before the
-        rollback. Removing ``set_rollback(True)`` leaves the donor's release/marker committed and
-        this test goes red."""
+        """Forced persist failure mid-merge must roll back the donor's already-executed save."""
         from dcim.models import Device
         from django.db import IntegrityError
         from django.http import HttpResponse
@@ -7493,15 +7449,7 @@ class TestConflictActionsObjectScope:
 
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewDonorDerivation:
-    """The merge view derives the donor from winner_pk + merge_candidates and
-    ignores the client-posted donor_pk, which a stale/failed inline sync script
-    could otherwise leave equal to winner_pk (a self-merge of moving data).
-
-    Driven against real Devices and the real merge/migration helpers: the role
-    derivation is proven by which device actually ends up with the persisted
-    ``_migrated_to`` marker after reload — not by which MagicMock was handed to a
-    patched ``merge_librenms_links``.
-    """
+    """The merge view derives the donor from winner_pk + merge_candidates and ignores the client-posted donor_pk, which a stale/failed inline sync script could otherwise leave equal to winner_pk (a self-merge of moving data)."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView

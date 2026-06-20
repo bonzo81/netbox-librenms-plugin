@@ -67,17 +67,13 @@ class TestDeviceValidationDetailsMergeBadge:
         ), "merge badge must pair bg-warning with text-dark on one element"
 
     def test_oob_ip_move_copy_states_the_real_condition(self):
-        """The 'Moved to winner' copy must state the OOB IP only moves when the winner has no OOB IP
-        AND the IP is already on a winner interface — the old copy over-promised the move."""
+        """The 'Moved to winner' copy must state the OOB IP only moves when the winner has no OOB IP AND the IP is already on a winner interface — the old copy over-promised the move."""
         html = self._render()
         assert "the IP is already on a winner interface" in html
         assert "(only if the winner has no OOB IP yet)" not in html
 
     def test_merge_donor_sync_script_is_scoped_to_its_form(self):
-        """The donor-sync script must scope its winner-radio lookup to the current form, not the
-        whole document. A document-wide query would read merge-winner radios from another
-        validation fragment still in the DOM and write the wrong donor_pk — merging the wrong
-        NetBox device."""
+        """The donor-sync script must scope its winner-radio lookup to the current form, not the whole document."""
         html = self._render()
         # Form-scoped lookup present...
         assert 'closest("form")' in html

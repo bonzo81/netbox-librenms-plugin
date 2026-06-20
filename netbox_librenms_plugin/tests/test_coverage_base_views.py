@@ -1384,9 +1384,7 @@ class TestBaseInterfaceTableViewBasics:
         mock_render.assert_called_once()
 
     def test_ip_post_stale_server_key_keeps_migrated_context(self):
-        """IP sync's stale-server branch must include build_migrated_context so a migrated
-        donor keeps its suppressed sync form/button — a stale server_key must not silently
-        re-enable IP sync. Mirrors cables_view."""
+        """IP sync's stale-server branch must include build_migrated_context so a migrated donor keeps its suppressed sync form/button — a stale server_key must not silently re-enable IP sync."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView

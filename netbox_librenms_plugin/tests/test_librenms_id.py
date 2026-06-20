@@ -768,9 +768,7 @@ class TestMergeLibreNMSLinks:
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
 
     def test_donor_real_oob_preferred_over_demoting_donor_id(self):
-        """Donor shaped {"id": X, "oob": {...}} with the winner already holding a host id:
-        the donor's REAL oob must be inherited, not the donor's host id demoted into oob —
-        otherwise the actual OOB controller is silently lost during merge."""
+        """Donor shaped {"id": X, "oob": {...}} with the winner already holding a host id: the donor's REAL oob must be inherited, not the donor's host id demoted into oob — otherwise the actual OOB controller is silently lost during merge."""
         from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
@@ -807,8 +805,7 @@ class TestMergeLibreNMSLinks:
         assert summary["oob_from_donor"] == {"id": 77, "type": "ipmi"}
 
     def test_malformed_donor_oob_id_fails_closed_on_inherit(self):
-        """A corrupt donor oob link ({"oob": {"id": "abc"}}) must not be inherited verbatim;
-        the inherit branch coerces the host id and raises on a non-empty invalid value."""
+        """A corrupt donor oob link ({"oob": {"id": "abc"}}) must not be inherited verbatim; the inherit branch coerces the host id and raises on a non-empty invalid value."""
         import pytest
 
         from netbox_librenms_plugin.utils import merge_librenms_links
@@ -830,10 +827,7 @@ class TestMergeLibreNMSLinks:
         assert summary["oob_from_donor"] == {"id": 77, "type": "ipmi"}
 
     def test_blank_donor_oob_id_is_lenient_and_dropped(self):
-        """A blank/whitespace donor oob id ({"oob": {"id": "   "}}) must be treated as 'no oob
-        id' (lenient) — the same as a blank host id and an absent oob id — not raise like a
-        non-blank corrupt one. The blank id is dropped so the winner inherits the oob (type)
-        without carrying a bogus id string."""
+        """A blank/whitespace donor oob id ({"oob": {"id": " "}}) must be treated as 'no oob id' (lenient) — the same as a blank host id and an absent oob id — not raise like a non-blank corrupt one."""
         from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
@@ -878,8 +872,7 @@ class TestMergeLibreNMSLinks:
             merge_librenms_links(winner, donor, "default")
 
     def test_malformed_per_server_string_id_fails_closed(self):
-        """A bare per-server string entry ({server_key: 'abc'}) that can't be parsed must
-        raise, not silently collapse to {} (which would drop/swap link state)."""
+        """A bare per-server string entry ({server_key: 'abc'}) that can't be parsed must raise, not silently collapse to {} (which would drop/swap link state)."""
         import pytest
 
         from netbox_librenms_plugin.utils import merge_librenms_links
@@ -907,9 +900,7 @@ class TestMergeLibreNMSLinks:
         assert summary["host_id_from_donor"] == 99
 
     def test_blank_dict_form_id_is_lenient(self):
-        """A blank/whitespace dict-form id ({"id": "   "}) must be treated as 'no id'
-        (lenient), the same as a blank top-level string — not raise like a non-blank
-        corrupt id ('abc'). Equivalent stored states must behave the same."""
+        """A blank/whitespace dict-form id ({"id": " "}) must be treated as 'no id' (lenient), the same as a blank top-level string — not raise like a non-blank corrupt id ('abc')."""
         from netbox_librenms_plugin.utils import merge_librenms_links
 
         winner = self._make_dev("eve-ng-02", {"default": {"id": "   "}})
@@ -977,9 +968,7 @@ class TestMarkLibreNMSMigrated:
 
     @pytest.mark.django_db
     def test_after_marker_find_by_librenms_id_no_longer_matches(self):
-        """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned
-        by find_by_librenms_id, queried against the REAL Device model. winner_pk equals the searched
-        LibreNMS id so an accidental match on the marker's device_id would be caught."""
+        """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned by find_by_librenms_id, queried against the REAL Device model."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.utils import find_by_librenms_id, mark_librenms_migrated
