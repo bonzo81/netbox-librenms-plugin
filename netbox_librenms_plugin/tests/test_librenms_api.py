@@ -3140,8 +3140,7 @@ class TestGetSerialPortSensors:
 
     @pytest.fixture(autouse=True)
     def _clear_serial_sensor_cache(self):
-        """The instance-wide sensor fetch is cached per server_key; clear between tests so a
-        prior test's cached payload can't bleed into the next one's mocked response."""
+        """The instance-wide sensor fetch is cached per server_key; clear between tests so a prior test's cached payload can't bleed into the next one's mocked response."""
         from django.core.cache import cache
 
         cache.clear()
@@ -3178,8 +3177,7 @@ class TestGetSerialPortSensors:
         assert all(s["sensor_type"] == "acsSerialPortTable" for s in data)
 
     def test_non_dict_sensor_item_does_not_crash(self, mock_librenms_api, mock_response_factory):
-        """A list payload doesn't guarantee dict items. A non-dict entry must be skipped, not
-        raise AttributeError on s.get() and escape the (success, data) contract."""
+        """A list payload doesn't guarantee dict items."""
         import unittest.mock as mock
 
         sensors = ["bad-string", None, self._make_sensor(12, port_num=7)]
@@ -3202,9 +3200,7 @@ class TestGetSerialPortSensors:
         assert data == []
 
     def test_missing_sensors_key_returns_failure(self, mock_librenms_api, mock_response_factory):
-        """status=ok but neither 'sensors' nor 'resources' present is a malformed response, not a
-        successful zero-sensor result. The old `get('sensors') or get('resources', [])` collapsed
-        it to [] (silent success); now it must return (False, message)."""
+        """status=ok but neither 'sensors' nor 'resources' present is a malformed response, not a successful zero-sensor result."""
         import unittest.mock as mock
 
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "message": "no sensors key"})
@@ -3215,8 +3211,7 @@ class TestGetSerialPortSensors:
         assert "no sensors key" in msg
 
     def test_falsy_present_sensors_value_returns_failure(self, mock_librenms_api, mock_response_factory):
-        """A present-but-non-list 'sensors' (e.g. "") must fail, not be coerced to an empty
-        success — the old `get(...) or get(...)` treated "" as falsy and fell through to []."""
+        """A present-but-non-list 'sensors' (e.g. "") must fail, not be coerced to an empty success."""
         import unittest.mock as mock
 
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": ""})
@@ -3262,9 +3257,7 @@ class TestGetSerialPortSensors:
         assert "refused" in msg or "error" in msg.lower()
 
     def test_second_device_lookup_reuses_cached_instance_fetch(self, mock_librenms_api, mock_response_factory):
-        """The /resources/sensors route is instance-wide (LibreNMS exposes no per-device filter),
-        so two device lookups within the cache TTL must reuse a single HTTP fetch rather than
-        re-pulling the whole sensor table per device, while each still gets only its own rows."""
+        """The /resources/sensors route is instance-wide (LibreNMS exposes no per-device filter), so two device lookups within the cache TTL must reuse a single HTTP fetch rather than re-pulling the whole sensor table per device, while each still gets only its own rows."""
         import unittest.mock as mock
 
         sensors = [self._make_sensor(12, port_num=7), self._make_sensor(99, port_num=3)]
@@ -3278,8 +3271,7 @@ class TestGetSerialPortSensors:
         assert ok2 is True and [s["device_id"] for s in data2] == [99]
 
     def test_failed_fetch_is_not_cached(self, mock_librenms_api, mock_response_factory):
-        """A failed fetch must not populate the cache: a subsequent call has to retry the HTTP
-        request (otherwise a transient error would poison serial sync until the TTL elapsed)."""
+        """A failed fetch must not populate the cache: a subsequent call has to retry the HTTP request (otherwise a transient error would poison serial sync until the TTL elapsed)."""
         import unittest.mock as mock
 
         good = [self._make_sensor(12, port_num=7)]

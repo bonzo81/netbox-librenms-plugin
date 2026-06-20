@@ -123,9 +123,7 @@ class TestGetLinksDataSerial:
         assert port_names == {"ttyS3", "ttyS7"}
 
     def test_serial_gate_uses_sync_device_csps_on_vc(self):
-        """On a VC-member page the viewed obj may lack ConsoleServerPorts while the resolved sync
-        device owns them. The serial gate must check lookup_device (the sync device) — the sensor
-        fetch is already scoped to it — so the rows still append instead of being skipped."""
+        """On a VC-member page the viewed obj may lack ConsoleServerPorts while the resolved sync device owns them."""
         view = _make_view()
         sensors = [_serial_sensor(3, "router-a")]
         self._base_setup(view, sensors=sensors)
@@ -166,9 +164,7 @@ class TestGetLinksDataSerial:
         assert result == []
 
     def test_serial_fetch_failure_does_not_append(self):
-        """When sensor fetch fails, no serial rows are added (graceful degradation), and the
-        failure is flagged so post() can warn the user instead of silently dropping the rows
-        under a success banner (parity with the OOB-fetch-failure warning)."""
+        """When sensor fetch fails, no serial rows are added (graceful degradation), and the failure is flagged so post() can warn the user instead of silently dropping the rows under a success banner (parity with the OOB-fetch-failure warning)."""
         view = _make_view()
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
         view._librenms_api.get_librenms_id.return_value = 12
@@ -261,11 +257,7 @@ class TestEnrichLocalPortSerial:
         assert "netbox_local_interface_id" not in link
 
     def test_serial_resolves_via_csp_not_interface(self):
-        """A serial row must resolve through ConsoleServerPorts, never Interfaces.
-
-        The device has an Interface whose name collides with the serial port name but no
-        matching CSP; the serial path must ignore the interface and leave the link
-        unresolved (proving it queried CSPs, not interfaces)."""
+        """A serial row must resolve through ConsoleServerPorts, never Interfaces."""
         from dcim.models import Interface
 
         view = _make_view()
@@ -287,11 +279,7 @@ class TestEnrichLocalPortSerial:
 
 @pytest.mark.django_db
 class TestCheckSerialCableStatus:
-    """check_serial_cable_status sets correct cable_status and can_create_cable.
-
-    Driven against real ConsoleServerPort / Cable objects so the ``.cable`` state it branches
-    on reflects actual NetBox termination wiring, not a value preset on a MagicMock.
-    """
+    """check_serial_cable_status sets correct cable_status and can_create_cable."""
 
     def test_no_csp_id_not_found(self):
         """Missing netbox_local_interface_id -> 'Console Server Port Not Found'."""
@@ -596,8 +584,7 @@ class TestEnrichSerialRemote:
 
     @pytest.mark.django_db
     def test_uncabled_console_port_pick_is_deterministic_by_name(self):
-        """With several uncabled ConsolePorts, the remote pick is the lowest by name, every run —
-        the Avocent label is only a hint, so the choice must not depend on insertion/DB order."""
+        """With several uncabled ConsolePorts, the remote pick is the lowest by name, every run — the Avocent label is only a hint, so the choice must not depend on insertion/DB order."""
         view = _make_view()
         # Create CPs out of alphabetical order to prove ordering isn't insertion order.
         router, _, cps = make_serial_device("router-det", cp_names=["con-z", "con-a", "con-m"])
@@ -686,12 +673,7 @@ class TestEnrichSerialRemote:
 
 @pytest.mark.django_db
 class TestHandleSerialCableCreation:
-    """SyncCablesView.handle_serial_cable_creation creates CSP <-> CP cables.
-
-    The CSP/CP lookups and their ``.cable`` state are exercised against real NetBox objects;
-    ``create_cable`` (which performs the actual cable write and needs a real request/permission
-    context) is the one collaborator left patched, so these tests target the handler's resolve
-    + duplicate/missing detection logic end to end."""
+    """SyncCablesView.handle_serial_cable_creation creates CSP <-> CP cables."""
 
     def _make_sync_view(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -703,8 +685,7 @@ class TestHandleSerialCableCreation:
         return view
 
     def test_creates_cable_when_both_sides_found(self):
-        """When a real CSP and CP both exist and are uncabled, create_cable is invoked and the
-        result is valid."""
+        """When a real CSP and CP both exist and are uncabled, create_cable is invoked and the result is valid."""
         view = self._make_sync_view()
         _, (csp,), _ = make_serial_device("ser-hsc-csp", csp_names=["ttyS7"])
         _, _, (cp,) = make_serial_device("ser-hsc-cp", cp_names=["con0"])
@@ -847,9 +828,7 @@ class TestHandleSerialCableCreation:
 
 @pytest.mark.django_db
 class TestSingleCableVerifySerial:
-    """A serial row reaching SingleCableVerifyView (the VC-member dropdown fires verify-cable
-    for EVERY row, serial included) must resolve through the serial pipeline — not fall into the
-    Interface lookup path, which would mislabel the row 'Missing Interface' with no Sync action."""
+    """A serial row reaching SingleCableVerifyView (the VC-member dropdown fires verify-cable for EVERY row, serial included) must resolve through the serial pipeline — not fall into the Interface lookup path, which would mislabel the row 'Missing Interface' with no Sync action."""
 
     def _verify_view(self, server_key="default"):
         from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView

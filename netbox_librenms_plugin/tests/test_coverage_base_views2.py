@@ -983,10 +983,7 @@ class TestCablePartialSnapshotNotCached:
 
 
 class TestCablePostSerialFetchWarning:
-    """post() must warn when the serial-port sensor fetch failed: serial rows are otherwise
-    silently omitted under a green 'refreshed successfully' banner (parity with the OOB
-    warning), making a transient LibreNMS failure indistinguishable from 'no serial ports'.
-    """
+    """post() must warn when the serial-port sensor fetch failed: serial rows are otherwise silently omitted under a green 'refreshed successfully' banner (parity with the OOB warning), making a transient LibreNMS failure indistinguishable from 'no serial ports'."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView

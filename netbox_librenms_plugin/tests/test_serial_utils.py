@@ -92,8 +92,7 @@ class TestMapSensorsToSerialLinks:
         assert row["device_id"] is None
 
     def test_device_id_threaded_into_rows(self):
-        """The caller's NetBox device_id is carried on each row so the cable table's row_attrs
-        (record["device_id"]) is satisfied even before enrich_links_data runs."""
+        """The caller's NetBox device_id is carried on each row so the cable table's row_attrs (record["device_id"]) is satisfied even before enrich_links_data runs."""
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
         sensors = [
@@ -112,8 +111,7 @@ class TestMapSensorsToSerialLinks:
 
     @pytest.mark.django_db
     def test_serial_row_renders_in_cable_table_without_keyerror(self):
-        """End-to-end: a serial row must render in LibreNMSCableTable. row_attrs reads
-        record["device_id"] per row at render time — without it the table raises KeyError."""
+        """End-to-end: a serial row must render in LibreNMSCableTable."""
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
 
@@ -236,8 +234,7 @@ class TestMapSensorsToSerialLinks:
 
 
 class TestMapSensorsMalformedRows:
-    """A single malformed LibreNMS sensor row must not crash mapping and drop ALL serial rows.
-    Each bad-row shape is skipped; the valid row in the same batch still maps."""
+    """A single malformed LibreNMS sensor row must not crash mapping and drop ALL serial rows."""
 
     def _valid(self, port=7, sid=7007):
         return {
