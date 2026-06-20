@@ -62,14 +62,25 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         raise NotImplementedError
 
     def _failure_redirect(self, request, obj, server_key):
-        """Redirect to the sync tab after a refresh failure, preserving the POST-scoped
-        server_key so the user stays on the server they were working in (otherwise the next
+        """
+        Redirect to the sync tab after a refresh failure, preserving the POST-scoped server_key.
+
+        Preserving server_key keeps the user on the server they were working in (otherwise the next
         retry/sync can target the session/default LibreNMS instance instead).
 
         server_key is POST-derived, so the candidate URL is gated by Django's
-        ``url_has_allowed_host_and_scheme`` (sink inside the validated branch) — the
-        open-redirect barrier CodeQL recognises for py/url-redirection (CWE-601). The bare
-        ``url`` fallback is a pure ``reverse()`` path with no user input."""
+        ``url_has_allowed_host_and_scheme`` (sink inside the validated branch) — the open-redirect
+        barrier CodeQL recognises for py/url-redirection (CWE-601). The bare ``url`` fallback is a
+        pure ``reverse()`` path with no user input.
+
+        Args:
+            request (HttpRequest): Current request, used for the host-allowlist check.
+            obj (Device | VirtualMachine): Object whose sync tab to return to.
+            server_key (str | None): POST-scoped server key to carry on the redirect URL.
+
+        Returns:
+            HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
+        """
         url = self.get_redirect_url(obj)
         if server_key:
             sep = "&" if "?" in url else "?"

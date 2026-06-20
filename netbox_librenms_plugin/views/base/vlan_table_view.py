@@ -175,13 +175,23 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         }
 
     def _get_error_context(self, obj, error_message, server_key=_SERVER_KEY_UNSET):
-        """Build context for error state.
+        """
+        Build the template context for the VLAN error fragment.
 
-        Keep the fragment's ``server_key`` on the POST-resolved server so a retry/action
-        after an error targets the same scope. An explicit ``server_key=None`` (the
-        stale-server branch) is preserved as-is — using ``or`` here would treat it as
-        falsey and silently fall back to the session server, re-rendering the fragment
-        on the wrong (still-configured) server. Only an *omitted* server_key falls back.
+        Keep the fragment's ``server_key`` on the POST-resolved server so a retry/action after an
+        error targets the same scope. An explicit ``server_key=None`` (the stale-server branch) is
+        preserved as-is — using ``or`` here would treat it as falsey and silently fall back to the
+        session server, re-rendering the fragment on the wrong (still-configured) server. Only an
+        *omitted* server_key falls back.
+
+        Args:
+            obj (Device | VirtualMachine): The object being synced.
+            error_message (str): The error message to display in the fragment.
+            server_key: POST-resolved server key; the ``_SERVER_KEY_UNSET`` sentinel means "omitted"
+                and falls back to the session server (an explicit None is preserved as-is).
+
+        Returns:
+            dict: The render context for the VLAN error fragment.
         """
         resolved = getattr(self.librenms_api, "server_key", None) if server_key is _SERVER_KEY_UNSET else server_key
         return {

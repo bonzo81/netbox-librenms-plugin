@@ -445,18 +445,23 @@ class LibreNMSAPIMixin:
         """
         return self.librenms_api.get_device_info(librenms_id, use_cache=False)
     def rebind_api_for_server(self, server_key):
-        """Rebind ``self.librenms_api`` to the POST-scoped *server_key*.
+        """
+        Rebind ``self.librenms_api`` to the POST-scoped *server_key*.
 
-        Base refresh views run live LibreNMS lookups through ``self.librenms_api``;
-        in a multi-server setup the active session server can differ from the tab
-        the user is acting on, so the client must be re-scoped to the POSTed key —
-        otherwise data fetched from the session/default server is cached under the
-        posted key (wrong cable/VLAN/inventory set). Mirrors
+        Base refresh views run live LibreNMS lookups through ``self.librenms_api``; in a multi-server
+        setup the active session server can differ from the tab the user is acting on, so the client
+        must be re-scoped to the POSTed key — otherwise data fetched from the session/default server
+        is cached under the posted key (wrong cable/VLAN/inventory set). Mirrors
         :meth:`SyncIPAddressesView.post`.
 
-        Returns the resolved server key on success, or ``None`` when the posted key
-        is unknown/misconfigured (a stale page or tampered request) — the caller
-        surfaces a user-facing fragment error instead of an unhandled 500.
+        Args:
+            server_key (str | None): The server key from the POST; blank/None falls back to the
+                session/default server.
+
+        Returns:
+            str | None: The resolved server key, or None when the posted key is
+                unknown/misconfigured (stale page or tampered request) so the caller can surface a
+                fragment error instead of an unhandled 500.
         """
         from netbox_librenms_plugin.librenms_api import build_librenms_api
 

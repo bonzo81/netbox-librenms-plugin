@@ -165,17 +165,25 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return same_host(a, b)
 
     def _build_interface_maps(self, obj, server_key):
-        """Index the object's *current* interfaces by LibreNMS port id and by name.
+        """
+        Index the object's *current* interfaces by LibreNMS port id and by name.
 
-        Used to re-resolve the target interface at sync time instead of trusting
-        the cached ``interface_url`` (see ``_match_interface``).
+        Used to re-resolve the target interface at sync time instead of trusting the cached
+        ``interface_url`` (see ``_match_interface``).
 
-        For a Device in a Virtual Chassis, all member interfaces are indexed (not just the
-        viewed member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``:
-        LibreNMS treats a VC as one logical device, so a VC member IP can legitimately resolve to
-        an interface on another member. Duplicate names are marked ambiguous (None) the same way
-        duplicate port ids are, so a same-named interface on another member can't silently rebind
-        the address to the wrong interface.
+        For a Device in a Virtual Chassis, all member interfaces are indexed (not just the viewed
+        member's), mirroring ``_resolve_interface_by_port_id`` in ``views/sync/interfaces``: LibreNMS
+        treats a VC as one logical device, so a VC member IP can legitimately resolve to an interface
+        on another member. Duplicate names are marked ambiguous (None) the same way duplicate port
+        ids are, so a same-named interface on another member can't silently rebind the address to the
+        wrong interface.
+
+        Args:
+            obj (Device | VirtualMachine): The synced object whose current interfaces to index.
+            server_key (str): LibreNMS server key scoping the per-server librenms_id lookup.
+
+        Returns:
+            tuple[dict, dict]: The (by_librenms_id, by_name) maps; an ambiguous key maps to None.
         """
         if isinstance(obj, Device):
             # Route member expansion through the shared helper (returns [obj] when not in a VC)
@@ -206,14 +214,22 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     @staticmethod
     def _match_interface(ip_data, by_librenms_id, by_name):
-        """Resolve the NetBox interface for a cached IP row against current state.
+        """
+        Resolve the NetBox interface for a cached IP row against current state.
 
-        The cached ``interface_url`` is enrichment captured when the rows were
-        fetched, so an interface synced *afterwards* is missed and the sync would
-        wrongly report "no interface" until a manual cache refresh. The rendered
-        table re-enriches on every load (so it already shows the link); matching
-        here on the stable LibreNMS port id (preferred) then interface name keeps
-        the sync consistent with what the user sees. Returns the interface or None.
+        The cached ``interface_url`` is enrichment captured when the rows were fetched, so an
+        interface synced *afterwards* is missed and the sync would wrongly report "no interface"
+        until a manual cache refresh. The rendered table re-enriches on every load (so it already
+        shows the link); matching here on the stable LibreNMS port id (preferred) then interface
+        name keeps the sync consistent with what the user sees.
+
+        Args:
+            ip_data (dict): The cached IP row (carries ``port_id`` and ``interface_name``).
+            by_librenms_id (dict): Current interfaces keyed by LibreNMS port id (str).
+            by_name (dict): Current interfaces keyed by name.
+
+        Returns:
+            Interface | VMInterface | None: The matched interface, or None if none resolves.
         """
         port_id = ip_data.get("port_id")
         if port_id is not None and str(port_id) in by_librenms_id:
@@ -228,10 +244,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     @staticmethod
     def _set_primary_ip(obj, ip_obj):
-        """Point obj.primary_ip4/6 (by family) at *ip_obj*. Returns True if changed.
+        """
+        Point ``obj.primary_ip4``/``primary_ip6`` (by family) at *ip_obj*.
 
-        The caller guarantees ``ip_obj`` is assigned to one of the object's
-        interfaces, so this satisfies NetBox's ``primary_ip`` constraint.
+        The caller guarantees ``ip_obj`` is assigned to one of the object's interfaces, so this
+        satisfies NetBox's ``primary_ip`` constraint.
+
+        Args:
+            obj (Device | VirtualMachine): The object whose primary IP to set.
+            ip_obj (IPAddress): The address to set as primary (already interface-assigned).
+
+        Returns:
+            bool: True if the primary IP changed, False if it was already set.
         """
         field = "primary_ip6" if ip_obj.family == 6 else "primary_ip4"
         if getattr(obj, f"{field}_id") == ip_obj.pk:
