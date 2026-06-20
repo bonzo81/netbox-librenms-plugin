@@ -17,28 +17,32 @@ from __future__ import annotations
 
 
 def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str, str, str]]:
-    """Return [(nb_device_pk, nb_device_name, role, model_name)] candidates for a single row.
+    """
+    Return the NetBox-device candidates a single LibreNMS row would touch.
 
-    ``role`` is a short human-readable label describing how this LibreNMS
-    row would touch the NetBox device:
+    ``role`` is a short human-readable label describing how this LibreNMS row would
+    touch the NetBox device:
 
-    * ``"host"`` — the device is the existing NetBox device this row would
-      update / link to (``existing_device``).
-    * ``"oob"`` — this LibreNMS row would be installed as the OOB
-      controller of the NetBox device (``oob_candidate.device``).
-    * ``"merge_host_named"`` / ``"merge_oob_named"`` — the row would feed
-      a Stage-2 merge of two NetBox devices.
-    * ``"promote_target"`` — the row should be promoted to host of an
-      existing NetBox device that currently only has an OOB link
-      (``promote_to_host``).
+    * ``"host"`` — the device is the existing NetBox device this row would update /
+      link to (``existing_device``).
+    * ``"oob"`` — this LibreNMS row would be installed as the OOB controller of the
+      NetBox device (``oob_candidate.device``).
+    * ``"merge_host_named"`` / ``"merge_oob_named"`` — the row would feed a Stage-2
+      merge of two NetBox devices.
+    * ``"promote_target"`` — the row should be promoted to host of an existing NetBox
+      device that currently only has an OOB link (``promote_to_host``).
 
-    ``model_name`` is the Python class name of the NetBox object
-    (e.g. ``"Device"``, ``"VirtualMachine"``) so that two objects of
-    different types that happen to share the same pk are not grouped as
-    collisions.
+    ``model_name`` is the Python class name of the NetBox object (e.g. ``"Device"``,
+    ``"VirtualMachine"``) so that two objects of different types that happen to share
+    the same pk are not grouped as collisions.
 
-    Duplicate ``(pk, role, model_name)`` tuples are de-duplicated; a
-    single row may legitimately surface the same pk under different roles.
+    Args:
+        validation (dict): The per-row validation result to inspect.
+
+    Returns:
+        list[tuple[int, str, str, str]]: ``(nb_device_pk, nb_device_name, role,
+            model_name)`` candidates, de-duplicated on ``(pk, role, model_name)`` (a
+            single row may legitimately surface the same pk under different roles).
     """
     candidates: list[tuple[int, str, str, str]] = []
     seen: set[tuple[int, str, str]] = set()
@@ -82,34 +86,32 @@ def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str, str, str]]:
 
 
 def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
-    """Find groups of LibreNMS rows in *devices* that resolve to the same NetBox device.
+    """
+    Find groups of LibreNMS rows that resolve to the same NetBox device.
 
-    *devices* matches the list assembled by ``BulkImportConfirmView`` —
-    each item is a dict with at least ``device_id``, ``device_name`` and
-    ``validation`` keys.  ``None`` is accepted and treated as an empty list.
-
-    Returns a list of collision groups (one per offending NetBox device),
-    sorted by model type then ``nb_device_pk`` for stable rendering (the
-    composite key prevents false collisions when a Device and a
-    VirtualMachine share the same integer pk).  Each group:
-
-    .. code-block:: python
-
-        {
-            "nb_device_pk": int,
-            "nb_device_name": str,
-            "librenms_rows": [
-                {"device_id": int, "hostname": str, "role": str},
-                ...
-            ],
-        }
-
-    Rows are de-duplicated by ``device_id`` within a group (same LibreNMS
-    row touching the same NetBox device under multiple roles only appears
+    A group is only emitted when at least two distinct LibreNMS ``device_id`` values
+    target the same NetBox pk. Rows are de-duplicated by ``device_id`` within a group
+    (same LibreNMS row touching the same NetBox device under multiple roles appears
     once, with all matching role labels joined by ``", "``).
 
-    A group is only emitted when at least two distinct LibreNMS
-    ``device_id`` values target the same NetBox pk.
+    Args:
+        devices (list[dict] | None): The list assembled by ``BulkImportConfirmView`` —
+            each item a dict with at least ``device_id``, ``device_name`` and
+            ``validation`` keys. None is accepted and treated as an empty list.
+
+    Returns:
+        list[dict]: Collision groups (one per offending NetBox device), sorted by
+            model type then ``nb_device_pk`` for stable rendering. Each group has the
+            shape::
+
+                {
+                    "nb_device_pk": int,
+                    "nb_device_name": str,
+                    "librenms_rows": [
+                        {"device_id": int, "hostname": str, "role": str},
+                        ...
+                    ],
+                }
     """
     # Key by (model_name, nb_pk) to avoid false collisions when a Device
     # and a VirtualMachine happen to share the same integer pk.
