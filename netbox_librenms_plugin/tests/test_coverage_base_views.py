@@ -1477,6 +1477,11 @@ class TestBaseInterfaceTableViewPost:
         # POST-derived), then the barrier must be consulted and the tainted key dropped on reject.
         mock_rebind.assert_called_once_with("prod")
         mock_barrier.assert_called_once()
+        # Pin the barrier INPUT, not just that it was called: the candidate URL gated through
+        # url_has_allowed_host_and_scheme must be the one carrying the POST-derived server_key.
+        # Otherwise a regression that validated the bare "/device/1/" and appended the key after
+        # the check would still pass this test while reintroducing the open-redirect path.
+        assert mock_barrier.call_args.args[0] == "/device/1/?server_key=prod"
         mock_redirect.assert_called_once_with("/device/1/")
 
     def test_post_clears_stale_cache_before_fetch(self):
