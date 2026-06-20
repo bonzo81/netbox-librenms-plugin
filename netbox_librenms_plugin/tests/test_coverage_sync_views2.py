@@ -1658,16 +1658,22 @@ class TestSyncVLANsViewCreateVLAN:
         mock_api = MagicMock(server_key="default")
         dev = make_device("vlan-sync-dev")
 
+        # Leave reverse() UNPATCHED so the success path exercises the real plugin route contract
+        # (a typo'd/invalid URL name would raise NoReverseMatch here instead of passing silently).
         with (
             patch("netbox_librenms_plugin.views.sync.vlans.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.sync.vlans.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.sync.vlans.redirect"),
-            patch("netbox_librenms_plugin.views.sync.vlans.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.vlans.redirect") as mock_redirect,
             patch.object(type(view), "librenms_api", new_callable=lambda: property(lambda s: mock_api)),
         ):
             mock_cache.get.return_value = vlans
             view.request = _make_request(post_data={"action": "create_vlans", "select": ["100"]})
             view.post(view.request, object_type="device", object_id=dev.pk)
+
+        # The real reverse() resolved and the redirect targets the VLAN tab on the active server.
+        mock_redirect.assert_called_once()
+        redirect_url = mock_redirect.call_args.args[0]
+        assert redirect_url.endswith("?tab=vlans&server_key=default")
         return mock_msgs
 
     def test_new_vlan_created(self):

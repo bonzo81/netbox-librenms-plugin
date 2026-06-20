@@ -1309,10 +1309,18 @@ class TestDeviceNamingPreferencesLegacy:
         existing = MagicMock()
         existing.name = "core-switch"
         existing.serial = ""
+
         # find_by_librenms_id consumes the queryset via list(qs[:2]) per side (host + OOB);
-        # both miss here (empty slice), then the hostname query's .first() returns existing.
-        mock_device.objects.filter.return_value.__getitem__.return_value = []
-        mock_device.objects.filter.return_value.first.return_value = existing
+        # both miss here (empty slice). Make the name lookup PATH-SENSITIVE: only the resolved
+        # name ("core-switch") returns existing, so the test fails if the code queries the raw
+        # hostname ("10.0.0.1") instead — a blanket .first() would pass either way.
+        def device_filter(*args, **kwargs):
+            qs = MagicMock()
+            qs.__getitem__.return_value = []
+            qs.first.return_value = existing if kwargs.get("name__iexact") == "core-switch" else None
+            return qs
+
+        mock_device.objects.filter.side_effect = device_filter
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -1327,6 +1335,9 @@ class TestDeviceNamingPreferencesLegacy:
 
         assert result["existing_device"] == existing
         assert result["existing_match_type"] == "hostname"
+        # Proved by path: the resolved name was queried, the raw hostname never was.
+        assert any(c.kwargs.get("name__iexact") == "core-switch" for c in mock_device.objects.filter.call_args_list)
+        assert all(c.kwargs.get("name__iexact") != "10.0.0.1" for c in mock_device.objects.filter.call_args_list)
 
     @patch("virtualization.models.VirtualMachine")
     @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
@@ -3733,10 +3744,17 @@ class TestDeviceNamingPreferences:
         existing.serial = ""
         existing.virtual_chassis = None
         existing.vc_position = None
+
         # find_by_librenms_id consumes the queryset via list(qs[:2]) per side (host + OOB);
-        # both miss here (empty slice), then the hostname query's .first() returns existing.
-        mock_device.objects.filter.return_value.__getitem__.return_value = []
-        mock_device.objects.filter.return_value.first.return_value = existing
+        # both miss here (empty slice). Path-sensitive: only the resolved name returns existing, so
+        # the test fails if the code queries the raw hostname instead of the resolved sysName.
+        def device_filter(*args, **kwargs):
+            qs = MagicMock()
+            qs.__getitem__.return_value = []
+            qs.first.return_value = existing if kwargs.get("name__iexact") == "core-switch" else None
+            return qs
+
+        mock_device.objects.filter.side_effect = device_filter
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -3749,6 +3767,8 @@ class TestDeviceNamingPreferences:
 
         assert result["existing_device"] == existing
         assert result["existing_match_type"] == "hostname"
+        assert any(c.kwargs.get("name__iexact") == "core-switch" for c in mock_device.objects.filter.call_args_list)
+        assert all(c.kwargs.get("name__iexact") != "10.0.0.1" for c in mock_device.objects.filter.call_args_list)
 
     @patch("virtualization.models.VirtualMachine")
     @patch("netbox_librenms_plugin.import_utils.device_operations.Device")

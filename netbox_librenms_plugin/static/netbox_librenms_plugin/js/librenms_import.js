@@ -1308,7 +1308,24 @@
                 // .closest() — guard with instanceof Element so this never throws a TypeError.
                 const eventStartedInNestedModal =
                     event.target instanceof Element && event.target.closest('#htmx-modal-content .modal');
-                if (eventStartedInNestedModal || document.querySelector('#htmx-modal-content .modal.show')) {
+                const openNestedModal = document.querySelector('#htmx-modal-content .modal.show');
+                if (eventStartedInNestedModal || openNestedModal) {
+                    // Normally Bootstrap's own listener closes the topmost nested modal. In the
+                    // manual fallback path (Bootstrap unavailable) there is no such listener, so
+                    // Escape would be a no-op while a child modal is open — close it manually.
+                    const hasBootstrapModal =
+                        (typeof bootstrap !== 'undefined' && bootstrap.Modal) ||
+                        (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal);
+                    if (!hasBootstrapModal) {
+                        const nestedToHide = openNestedModal || eventStartedInNestedModal;
+                        if (nestedToHide) {
+                            event.preventDefault();
+                            nestedToHide.classList.remove('show');
+                            nestedToHide.style.display = 'none';
+                            nestedToHide.setAttribute('aria-hidden', 'true');
+                            nestedToHide.removeAttribute('aria-modal');
+                        }
+                    }
                     return;
                 }
                 if (modalElement?.classList.contains('show')) {
