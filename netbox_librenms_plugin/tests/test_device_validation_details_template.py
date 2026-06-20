@@ -124,3 +124,63 @@ class TestSerialActionBadges:
         html = self._render("some_other_action")
         assert "Serial match" in html
         assert "OOB Already Linked" not in html
+
+
+@pytest.mark.django_db
+class TestExistingLinkStateText:
+    """The 'Exists as …' status line must reflect the existing device's LibreNMS link state for
+    both serial- and hostname-matches: a host link, an OOB-only link, or genuinely unlinked. A
+    device linked only as an OOB controller must not be mislabelled 'not linked to LibreNMS'."""
+
+    def _render(self, *, match_type, link):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        existing = make_device("host-link-1")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        ctx = {
+            "validation": {
+                "existing_device": existing,
+                "existing_match_type": match_type,
+                "existing_librenms_link": link,
+                "serial_action": None,
+                "warnings": [],
+            },
+            "libre_device": {
+                "device_id": 5,
+                "sysName": "host-link-1",
+                "hostname": "host-link-1",
+                "serial": "ABC123",
+                "hardware": "Model-X",
+                "os": "ios",
+                "ip": "10.0.0.1",
+                "location": "lab",
+                "status": True,
+            },
+            "server_key": "default",
+            "existing_device_model_name": "device",
+            "existing_device_url": existing.get_absolute_url(),
+            "sync_info": {},
+            "existing_id_servers": [],
+            "use_sysname": True,
+            "strip_domain": False,
+        }
+        return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
+
+    def test_serial_match_oob_only_link_is_not_labelled_unlinked(self):
+        html = self._render(match_type="serial", link={"host_id": None, "oob_id": 77, "oob_type": "idrac"})
+        assert "currently linked to LibreNMS as OOB #77" in html
+        assert "not linked to LibreNMS" not in html
+
+    def test_hostname_match_linked_host_is_not_labelled_unlinked(self):
+        html = self._render(match_type="hostname", link={"host_id": 42, "oob_id": None})
+        assert "currently linked to LibreNMS device #42" in html
+        assert "not linked to LibreNMS" not in html
+
+    def test_hostname_match_genuinely_unlinked_still_says_not_linked(self):
+        html = self._render(match_type="hostname", link={"host_id": None, "oob_id": None})
+        assert "not linked to LibreNMS" in html

@@ -318,9 +318,15 @@
             <div class="modal-body">
                 <div class="alert alert-warning">
                     <i class="mdi mdi-alert me-2"></i>
+                    {% if migrated_to_marker %}
+                    <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
+                    the LibreNMS data. Moving an interface reassigns it, along with related cables/IPs/MACs, to the
+                    migration winner.
+                    {% else %}
                     <strong>Warning:</strong> The following interfaces exist in NetBox but are not found in the LibreNMS
                     data.
                     Deleting these interfaces will permanently remove them from NetBox. This action cannot be undone.
+                    {% endif %}
                 </div>
 
                 {% if interface_sync.netbox_only_interfaces %}

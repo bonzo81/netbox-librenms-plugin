@@ -96,3 +96,23 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "select-all-netbox-interfaces" in html
         assert "netbox-interface-checkbox" in html
         assert "Delete Selected Interfaces" in html
+
+    def test_migrated_warning_describes_move_not_delete(self):
+        # In migrated (move) mode the modal warning must not threaten permanent deletion.
+        html = self._render(
+            migrated={"server_key": "default", "device_id": 1, "at": "now"},
+            netbox_only=[{"id": 1, "name": "eth-only"}],
+        )
+        assert "Moving an interface reassigns it" in html
+        assert "permanently remove them from NetBox" not in html
+
+    def test_normal_warning_describes_delete(self):
+        html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
+        assert "permanently remove them from NetBox" in html
+        assert "Moving an interface reassigns it" not in html
+
+    def test_delete_checkboxes_have_accessible_names(self):
+        # The select-all and per-row checkboxes must carry aria-labels for screen-reader users.
+        html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])
+        assert 'aria-label="Select all NetBox-only interfaces"' in html
+        assert 'aria-label="Select interface eth-only"' in html

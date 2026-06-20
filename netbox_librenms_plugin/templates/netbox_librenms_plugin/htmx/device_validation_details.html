@@ -485,8 +485,10 @@
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
-          not linked to LibreNMS.
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% if validation.existing_librenms_link.host_id %},
+          currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% elif validation.existing_librenms_link.oob_id %},
+          currently linked to LibreNMS as OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %} ({{ validation.existing_librenms_link.oob_type }}){% endif %}.{% else %},
+          not linked to LibreNMS.{% endif %}
         </span>
       </div>
       {% if validation.serial_action == 'conflict' %}
@@ -557,7 +559,8 @@
         <span class="text-muted ms-1">
           — Exists as
           <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% if validation.existing_librenms_link.host_id %},
-          currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% else %},
+          currently linked to LibreNMS device #{{ validation.existing_librenms_link.host_id }}{% if validation.existing_librenms_link.oob_id %} (OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %}, {{ validation.existing_librenms_link.oob_type }}{% endif %}){% endif %}.{% elif validation.existing_librenms_link.oob_id %},
+          currently linked to LibreNMS as OOB #{{ validation.existing_librenms_link.oob_id }}{% if validation.existing_librenms_link.oob_type %} ({{ validation.existing_librenms_link.oob_type }}){% endif %}.{% else %},
           not linked to LibreNMS.{% endif %}
         </span>
       </div>
