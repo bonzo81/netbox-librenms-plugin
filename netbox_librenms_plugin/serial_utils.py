@@ -35,14 +35,20 @@ def parse_port_number(sensor_index: str | None) -> int | None:
     """
     Extract the trailing integer from a sensor_index string.
 
+    A non-string ``sensor_index`` (``None`` or e.g. an int from a malformed payload) is
+    coerced to ``str`` so the regex search can't raise ``TypeError``.
+
     Examples::
 
         "acsSerialPortTableStatus.7"  -> 7
         "acsSerialPortTableStatus.49" -> 49
         "invalid"                     -> None
 
-    A non-string ``sensor_index`` (``None`` or e.g. an int from a malformed payload)
-    is coerced to ``str`` so the regex search can't raise ``TypeError``.
+    Args:
+        sensor_index (str | None): The LibreNMS sensor index to parse.
+
+    Returns:
+        int | None: The trailing integer, or None when there is no trailing number.
     """
     m = _INDEX_SUFFIX_RE.search(str(sensor_index or ""))
     return int(m.group(1)) if m else None
@@ -57,6 +63,12 @@ def strip_status_suffix(descr: str) -> str:
         "PROD-LAB03A-RA1 Status" -> "PROD-LAB03A-RA1"
         "ttyS49 Status"          -> "ttyS49"
         "bare label"             -> "bare label"  (no suffix, returned as-is)
+
+    Args:
+        descr (str): The LibreNMS sensor description.
+
+    Returns:
+        str: The description with a trailing " Status" removed, else unchanged.
     """
     if descr.endswith(" Status"):
         return descr[:-7]

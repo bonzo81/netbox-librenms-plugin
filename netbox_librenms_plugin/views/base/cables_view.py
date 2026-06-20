@@ -741,13 +741,20 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
     def enrich_serial_remote(self, link):
         """
-        Resolve the remote ConsolePort for a serial row using the Avocent port label.
+        Resolve the remote ConsolePort for a serial row using the Avocent label.
 
-        Only called when the local ConsoleServerPort is found and has no cable.
-        Tries to match the label to a NetBox device by name, then picks the first
-        uncabled ConsolePort on that device.  If successful, sets
-        ``netbox_remote_interface_id`` and ``can_create_cable = True`` so the
-        existing sync action can create the cable in Phase 3.
+        Only called when the local ConsoleServerPort is found and has no cable. Tries to
+        match the label to a NetBox device by name, then picks the first uncabled
+        ConsolePort on that device. If successful, sets ``netbox_remote_interface_id``
+        and ``can_create_cable = True`` so the existing sync action can create the cable
+        in Phase 3.
+
+        Args:
+            link (dict): The serial cable-sync row, mutated in place with the resolved
+                remote device/port (or a ``cable_status`` note on failure).
+
+        Returns:
+            None
         """
 
         label = link.get("remote_device")
@@ -1057,11 +1064,23 @@ class SingleCableVerifyView(BaseCableTableView):
     required_object_permissions = {"POST": [("view", Device)]}
 
     def _format_serial_verify_row(self, request, selected_device, link_data, local_port_id, server_key):
-        """Build the verify-cable formatted_row for a serial ConsoleServerPort row.
+        """
+        Build the verify-cable formatted_row for a serial ConsoleServerPort row.
 
-        Mirrors the serial path of enrich_links_data (resolve CSP -> cable status -> remote
-        ConsolePort) and renders the same Serial badge + Sync form as the initial table render,
-        with LibreNMS-sourced labels HTML-escaped.
+        Mirrors the serial path of enrich_links_data (resolve CSP -> cable status ->
+        remote ConsolePort) and renders the same Serial badge + Sync form as the initial
+        table render, with LibreNMS-sourced labels HTML-escaped.
+
+        Args:
+            request: The current HTTP request (for the CSRF token in the sync form).
+            selected_device: The NetBox device the row is verified against.
+            link_data (dict): The serial link row to enrich and render (mutated).
+            local_port_id: The local ConsoleServerPort id for the sync form.
+            server_key: The active LibreNMS server key.
+
+        Returns:
+            dict: The formatted row (local_port, remote_port, remote_device,
+                cable_status, actions) as escaped HTML fragments.
         """
         self.enrich_local_port(link_data, selected_device, server_key=server_key)
         self.check_serial_cable_status(link_data)
