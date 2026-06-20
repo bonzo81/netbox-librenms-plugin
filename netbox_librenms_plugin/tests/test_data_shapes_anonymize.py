@@ -137,6 +137,26 @@ def test_find_pii_flags_residual_pii_in_unexpected_field():
     assert not any(f["kind"] == "email" for f in find_pii(anon))
 
 
+def test_find_pii_ignores_oid_and_version_dotted_decimals():
+    """SNMP object IDs and version strings are dotted-decimal but not IPs — the safety-net must not flag them."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        "devices": [{"device_id": 1, "sysObjectID": "1.3.6.1.4.1.9.1.2068", "version": "24.4.1.41I-ULH_800ZR"}],
+    }
+    anon = anonymize_recording(rec)
+    assert find_pii(anon) == []
+
+
+def test_find_pii_still_flags_a_real_ip_next_to_text():
+    """A genuine IPv4 embedded in free-form text is still caught."""
+    rec = _ports(
+        {"port_id": 1, "ifName": "Gi0/1", "ifType": "ethernetCsmacd", "entPhysicalName": "uplink 10.7.8.9 core"}
+    )
+    anon = anonymize_recording(rec)
+    assert any(f["kind"] == "ipv4" and f["value"] == "10.7.8.9" for f in find_pii(anon))
+
+
 def test_salt_changes_pseudonyms():
     """Different salts produce different pseudonyms for the same input."""
     rec = load_recording("cisco-stackwise-3member")

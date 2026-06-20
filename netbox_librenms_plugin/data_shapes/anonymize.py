@@ -71,7 +71,11 @@ FREETEXT_KEYS = frozenset({"ifAlias", "sysContact", "sysDescr", "purpose", "note
 _DOC_IP_PREFIXES = ("192.0.2.", "198.51.100.", "203.0.113.", "2001:db8")
 _SYNTH_MAC_PREFIX = "02:00:00"
 
-_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# Octet-validated (0-255) and bounded so dotted-decimal SNMP OIDs (1.3.6.1.4.1.9.1…) and
+# letter-suffixed version strings (24.4.1.41I-ULH) don't read as IPs. A genuine IP — preceded
+# and followed by a non-word, non-dot boundary — still matches.
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+_IPV4_RE = re.compile(rf"(?<![\w.]){_OCTET}(?:\.{_OCTET}){{3}}(?![\w.])")
 _IPV6_RE = re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){3,}[0-9a-fA-F]{1,4}\b")
 _MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b")
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
