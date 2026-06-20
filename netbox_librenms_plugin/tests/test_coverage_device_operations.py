@@ -880,6 +880,10 @@ class TestValidateDeviceForImportEdgeCases:
         assert result.get("oob_candidate") is None
         assert result["can_import"] is False
         assert any("resolve the duplicate" in i for i in result["issues"])
+        # The arbitrary .first() match must NOT keep a hostname/serial match_type: both the
+        # device_status table (has_actions) and device_validation_details.html branch on it to
+        # render a "Link to LibreNMS" action, which would link the wrong NetBox device.
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
 
     def test_duplicate_hostname_without_serial_fails_closed(self):
         """A duplicate-hostname match with no usable serial must still fail closed (the check ran only inside the serial-gated merge block)."""
@@ -916,6 +920,7 @@ class TestValidateDeviceForImportEdgeCases:
         assert result.get("oob_candidate") is None
         assert result["can_import"] is False
         assert any("resolve the duplicate" in i for i in result["issues"])
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
 
     def test_vm_librenms_id_not_int_falls_back(self):
         """device_id None → no librenms_id lookup; validation still returns cleanly."""
@@ -2204,7 +2209,7 @@ class TestMergeCandidateNonUniqueSerialPeer:
         assert result.get("merge_candidates")
 
     def test_current_hostname_side_nonunique_skips_merge(self):
-        """The CURRENT merge side (existing_match_type='hostname') is itself taken from a .first() match, so duplicate device names make it an arbitrary row."""
+        """The CURRENT merge side (existing_match_type='hostname') is itself taken from a .first() match, so duplicate device names make it an arbitrary row that must fail closed instead of offering a merge."""
         from dcim.models import Device, Site
 
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -2229,8 +2234,14 @@ class TestMergeCandidateNonUniqueSerialPeer:
         }
         result = self._validate(libre)
 
-        assert any("Multiple NetBox devices share hostname 'dup-host'" in w for w in result["warnings"])
+        # The arbitrary non-unique current side is a terminal blocking state: match_type is
+        # demoted to "ambiguous_hostname_or_serial" (which also suppresses the merge-candidate
+        # pairing) and a blocking issue is surfaced — strictly safer than offering a merge whose
+        # current side is an arbitrary .first() row.
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
         assert not result.get("merge_candidates")
+        assert result["can_import"] is False
+        assert any("resolve the duplicate" in i for i in result["issues"])
 
 
 @pytest.mark.django_db

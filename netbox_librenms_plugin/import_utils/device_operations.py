@@ -841,6 +841,11 @@ def validate_device_for_import(
                 if _dup_current:
                     # Arbitrary .first() match among duplicates: block link/promote/import and
                     # surface a blocking issue. The match is left for display only.
+                    # Demote the match_type off "hostname"/"serial" so neither the device_status
+                    # table (has_actions) nor device_validation_details.html renders a "Link to
+                    # LibreNMS" action — otherwise the arbitrary row could be linked to the wrong
+                    # NetBox device. Mirrors the "ambiguous_librenms_id" terminal-state pattern.
+                    result["existing_match_type"] = "ambiguous_hostname_or_serial"
                     result["serial_action"] = None
                     result["oob_candidate"] = None
                     result.pop("promote_to_host", None)
