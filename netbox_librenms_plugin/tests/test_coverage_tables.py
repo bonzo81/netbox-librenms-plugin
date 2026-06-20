@@ -1495,6 +1495,11 @@ class TestDeviceImportTableRenderActions:
 
         assert "Linked as host" not in result
         assert "#bad" not in result
+        # Positive assertion: it actually fell through to the generic details button (the
+        # btn-outline-success "View details" fallback), not an unintended/empty state that
+        # would also pass the negative checks above.
+        assert "btn-outline-success" in result
+        assert 'title="View details"' in result
 
 
 # ===========================================================================
