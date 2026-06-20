@@ -37,11 +37,20 @@ logger = logging.getLogger(__name__)
 
 
 def _detect_oob_type_from_name(name):
-    """Return canonical OOB type token (idrac/ilo/ipmi/bmc/drac) found in *name*, or None.
+    """
+    Return the canonical OOB type token found in a device name.
 
-    Routes through normalize_oob_type() so a vendor-specific token wins over the generic
-    "oob" even when "oob" appears earlier in the name (e.g. "leaf01-oob-idrac9" -> "idrac",
-    not "oob"). A bare re.search() returns the first token and would downgrade the hint.
+    Routes through normalize_oob_type() so a vendor-specific token wins over the
+    generic "oob" even when "oob" appears earlier in the name (e.g.
+    "leaf01-oob-idrac9" -> "idrac", not "oob"). A bare re.search() returns the first
+    token and would downgrade the hint.
+
+    Args:
+        name (str): The device name to inspect.
+
+    Returns:
+        str | None: The canonical OOB type token (idrac/ilo/ipmi/bmc/drac), or None
+            if no token matches.
     """
     if not name:
         return None
@@ -52,10 +61,17 @@ def _describe_existing_librenms_link(obj, server_key):
     """
     Describe the current LibreNMS linkage on a NetBox object.
 
-    Returns a dict ``{"host_id": int|None, "oob_id": int|None, "oob_type": str|None}``
-    summarising the ``librenms_id`` custom field for *server_key*.  Always returns a
-    dict (with all-None values if nothing is linked) so callers can treat it as a
-    plain status object.  Tolerates legacy bare-int and dict-form custom field values.
+    Always returns a dict (with all-None values if nothing is linked) so callers can
+    treat it as a plain status object. Tolerates legacy bare-int and dict-form custom
+    field values.
+
+    Args:
+        obj: The NetBox object whose ``librenms_id`` custom field is inspected.
+        server_key (str): The LibreNMS server key to read linkage for.
+
+    Returns:
+        dict: ``{"host_id": int|None, "oob_id": int|None, "oob_type": str|None}``
+            summarising the ``librenms_id`` custom field for *server_key*.
     """
     info = {"host_id": None, "oob_id": None, "oob_type": None}
     # Host ID via the single canonical accessor (per coding guidelines) rather than touching the
@@ -187,14 +203,24 @@ def _determine_device_name(
 
 
 def _flag_ambiguous_librenms_id(result, librenms_id, exc):
-    """Block import when a librenms_id resolves to more than one NetBox object.
+    """
+    Block import when a librenms_id resolves to more than one NetBox object.
 
-    An ambiguous id is a data-integrity violation; treating it as "not found" would let
-    the device import as new (or bind to an arbitrary row), so fail closed instead.
+    An ambiguous id is a data-integrity violation; treating it as "not found" would
+    let the device import as new (or bind to an arbitrary row), so fail closed
+    instead.
 
-    The message is appended to ``issues`` (not just ``warnings``) because the readiness
-    step recomputes ``can_import`` from ``issues`` — a warning alone would be silently
-    overridden back to importable when no other issue is present.
+    The message is appended to ``issues`` (not just ``warnings``) because the
+    readiness step recomputes ``can_import`` from ``issues`` — a warning alone would
+    be silently overridden back to importable when no other issue is present.
+
+    Args:
+        result (dict): The validation result dict, mutated in place.
+        librenms_id: The ambiguous LibreNMS id (for the message text).
+        exc: The :class:`AmbiguousLibreNMSIdError` raised during resolution.
+
+    Returns:
+        None
     """
     logger.warning("Import validation blocked — ambiguous librenms_id %r: %s", librenms_id, exc)
     result["ambiguous_librenms_id"] = True
@@ -1555,12 +1581,22 @@ def fetch_device_with_cache(
 
 
 def __getattr__(name):
-    """Lazily re-export ``bulk_import_devices_shared`` to satisfy the
-    ``import_utils/device_operations.py`` export contract.
+    """
+    Lazily re-export ``bulk_import_devices_shared`` (PEP 562 module ``__getattr__``).
 
     A top-level ``from .bulk_import import bulk_import_devices_shared`` would be a
     circular import (``bulk_import`` imports ``validate_device_for_import`` from this
-    module at load time), so PEP 562 defers the import until the attribute is accessed.
+    module at load time), so PEP 562 defers the import until the attribute is
+    accessed.
+
+    Args:
+        name (str): The attribute name being looked up on the module.
+
+    Returns:
+        The ``bulk_import_devices_shared`` callable when requested.
+
+    Raises:
+        AttributeError: If *name* is any other attribute.
     """
     if name == "bulk_import_devices_shared":
         from .bulk_import import bulk_import_devices_shared

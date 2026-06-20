@@ -359,7 +359,8 @@ def bulk_import_devices(
 
 
 def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, server_key: str) -> None:
-    """Re-derive the LibreNMS-id linkage fields for a refreshed *device*.
+    """
+    Re-derive the LibreNMS-id linkage fields for a refreshed device.
 
     Cheap and DB-only (reads the device's ``librenms_id`` custom field) — no
     LibreNMS API call — so a cached import row picks up OOB-link / host-link
@@ -371,6 +372,15 @@ def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, serv
     ``existing_librenms_link``, and when the device is matched to the scanned
     LibreNMS id it classifies the match as ``librenms_oob`` (matched via the OOB
     sub-key) or ``librenms_id`` (matched as the host).
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+        device: The refreshed NetBox device (or VM) to re-derive linkage from.
+        libre_device (dict): The scanned LibreNMS device record (may be empty).
+        server_key (str): The LibreNMS server key the row was scanned against.
+
+    Returns:
+        None
     """
     link = _describe_existing_librenms_link(device, server_key)
     validation["existing_librenms_link"] = link
@@ -400,9 +410,18 @@ def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, serv
 
 
 def _clear_existing_match_derived_fields(validation: dict) -> None:
-    """Reset the fields produced from an existing match so stale serial/OOB/merge/promote
-    actions don't linger after that match is dropped (device deleted, or librenms/OOB link
-    removed since caching). The subsequent fresh lookup re-populates them if it re-matches.
+    """
+    Reset the fields produced from an existing match.
+
+    Clears stale serial/OOB/merge/promote actions so they don't linger after that
+    match is dropped (device deleted, or librenms/OOB link removed since caching).
+    The subsequent fresh lookup re-populates them if it re-matches.
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+
+    Returns:
+        None
     """
     validation["serial_action"] = None
     validation["oob_candidate"] = None
@@ -423,16 +442,25 @@ def _clear_existing_match_derived_fields(validation: dict) -> None:
 
 
 def _reassert_new_import_blockers(validation: dict) -> None:
-    """Re-add the create-time role/cluster blocker that validate_device_for_import() attaches
-    to unmatched rows.
+    """
+    Re-add the create-time role/cluster blocker for unmatched rows.
 
-    When a refresh drops a cached match (or never had one) and the fresh lookup finds nothing,
-    the row is back in the "new import" path. recalculate_validation_status() recomputes
-    can_import purely from the issues list, so without re-adding this blocker a row that still
-    has no role/cluster selected could flip back to importable and then fail at import time.
+    ``validate_device_for_import()`` attaches this blocker to unmatched rows. When a
+    refresh drops a cached match (or never had one) and the fresh lookup finds
+    nothing, the row is back in the "new import" path.
+    ``recalculate_validation_status()`` recomputes can_import purely from the issues
+    list, so without re-adding this blocker a row that still has no role/cluster
+    selected could flip back to importable and then fail at import time.
 
-    Guarded by the selection state (found/role/cluster), so a row where the user *has* picked a
-    role/cluster — which sets found=True and removed the issue — is left importable.
+    Guarded by the selection state (found/role/cluster), so a row where the user
+    *has* picked a role/cluster — which sets found=True and removed the issue — is
+    left importable.
+
+    Args:
+        validation (dict): The import-row validation dict, mutated in place.
+
+    Returns:
+        None
     """
     if validation.get("import_as_vm"):
         cluster = validation.get("cluster") or {}

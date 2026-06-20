@@ -19,12 +19,18 @@ def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:
     """
     Extract and normalize the OOB controller type from LibreNMS os/hardware strings.
 
-    Returns the canonical lowercase token (one of OOB_TYPES) or None if no match.
-
     A vendor-specific match (idrac/ilo/ipmi/bmc/drac/cimc) always wins over the
     generic ``oob`` token, even when ``oob`` appears earlier in the text, so e.g.
     ``normalize_oob_type("oob", "iDRAC9")`` resolves to ``"idrac"`` rather than
     being masked by the generic token.
+
+    Args:
+        os_str (str): LibreNMS ``os`` field for the device.
+        hardware_str (str): LibreNMS ``hardware`` field for the device.
+
+    Returns:
+        str | None: The canonical lowercase token (one of OOB_TYPES), or None if
+            no token matches.
 
     Examples:
         normalize_oob_type("drac9", "iDRAC9") → "drac"

@@ -19,14 +19,21 @@ logger = logging.getLogger(__name__)
 
 
 def build_librenms_api(server_key):
-    """Return a :class:`LibreNMSAPI` for *server_key*, or ``None`` when the key is
-    unknown or the server is misconfigured.
+    """
+    Build a :class:`LibreNMSAPI` for a server key, tolerating bad keys.
 
     ``LibreNMSAPI(server_key=...)`` raises ``KeyError`` for an unknown non-default
     key and ``ValueError`` when the URL/token is missing. Views take ``server_key``
     from request POST, where a stale page or tampered request can carry a key that
     no longer exists — returning ``None`` lets the caller surface a user-facing
     error instead of an unhandled 500.
+
+    Args:
+        server_key (str): The configured LibreNMS server key to build a client for.
+
+    Returns:
+        LibreNMSAPI | None: A client for *server_key*, or None when the key is
+            unknown or the server is misconfigured.
     """
     try:
         return LibreNMSAPI(server_key=server_key)
@@ -327,10 +334,17 @@ class LibreNMSAPI:
 
     @staticmethod
     def _normalize_librenms_id(value):
-        """Coerce a raw LibreNMS ID value to int or None.
+        """
+        Coerce a raw LibreNMS ID value to int or None.
 
         Thin wrapper around :func:`netbox_librenms_plugin.utils.coerce_librenms_id`
         kept for back-compat with internal callers in this module.
+
+        Args:
+            value: The raw LibreNMS id value (int, digit string, or other).
+
+        Returns:
+            int | None: The coerced id, or None if it can't be coerced.
         """
         from netbox_librenms_plugin.utils import coerce_librenms_id
 
