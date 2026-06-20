@@ -886,6 +886,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             serial = ""
         name = item.get("entPhysicalName", "") or model_name
 
+        # OOB-controller inventory is merged into the cached snapshot for display only (the UI
+        # renders those rows read-only). Never install it onto the host: a crafted POST could
+        # otherwise target an OOB row by its (offset) entPhysicalIndex. Reject at this shared
+        # chokepoint so both the branch and selected install paths are covered.
+        if item.get("_source") == "oob":
+            return {"status": "skipped", "name": name, "reason": "OOB controller inventory is read-only"}
+
         # Match module type (direct, then normalization fallback)
         manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)

@@ -901,6 +901,32 @@ class TestInstallSingleStatus:
 
         assert result["status"] == "skipped"
         assert "no matching type" in result["reason"]
+
+    @pytest.mark.django_db
+    def test_oob_sourced_item_is_never_installed(self):
+        """An OOB-sourced inventory row must be skipped (read-only), even with a matching type+bay — a crafted POST must not install OOB inventory onto the host."""
+        from dcim.models import Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+
+        view = _make_install_branch_view()
+        device = make_device("install-oob-dev")
+        make_module_bay(device, "Slot 1")
+        mt = make_module_type("WS-X4748")
+        # A fully installable row (matching type + free bay) — only _source="oob" must block it.
+        item = {
+            "entPhysicalIndex": 1010,
+            "entPhysicalModelName": "WS-X4748",
+            "entPhysicalSerialNum": "SN123",
+            "entPhysicalName": "Line Card",
+            "entPhysicalContainedIn": 0,
+            "_source": "oob",
+        }
+
+        result = view._install_single(device, item, {1010: item}, {"WS-X4748": mt}, ModuleBay, ModuleType, Module)
+
+        assert result["status"] == "skipped"
+        assert "OOB controller inventory is read-only" in result["reason"]
         assert not Module.objects.filter(device=device).exists()
 
     @pytest.mark.django_db
