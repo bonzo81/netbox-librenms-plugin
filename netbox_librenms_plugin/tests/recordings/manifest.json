@@ -1,0 +1,76 @@
+[
+  {
+    "name": "cisco-lag-and-subinterface",
+    "signature": {
+      "os": "ios",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": null,
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "Port-channel"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": false,
+      "transceivers": false
+    }
+  },
+  {
+    "name": "cisco-stackwise-3member",
+    "signature": {
+      "os": "ios",
+      "virtual_chassis": {
+        "present": true,
+        "root_class": "stack",
+        "member_count": 3,
+        "position_base": 1
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false
+    }
+  },
+  {
+    "name": "juniper-vc-2member",
+    "signature": {
+      "os": "junos",
+      "virtual_chassis": {
+        "present": true,
+        "root_class": "chassis",
+        "member_count": 2,
+        "position_base": 0
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false
+    }
+  }
+]

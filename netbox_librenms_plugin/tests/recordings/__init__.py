@@ -14,8 +14,8 @@ _DIR = Path(__file__).parent
 
 
 def iter_recording_paths():
-    """Return the sorted list of recording JSON file paths."""
-    return sorted(_DIR.glob("*.json"))
+    """Return the sorted list of recording JSON file paths (excluding the novelty manifest)."""
+    return sorted(p for p in _DIR.glob("*.json") if p.name != "manifest.json")
 
 
 def load_recording(name: str) -> dict:
