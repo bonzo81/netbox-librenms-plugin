@@ -419,7 +419,7 @@
           The other one becomes the <em>donor</em> and is absorbed.
         </div>
         <ul class="mb-1 ps-3">
-          <li><strong>Moved to winner:</strong> LibreNMS link (host id, OOB id, OOB type) and OOB IP <span class="text-muted">(only if the winner has no OOB IP yet)</span>.</li>
+          <li><strong>Moved to winner:</strong> LibreNMS link (host id, OOB id, OOB type) and OOB IP <span class="text-muted">(only if the winner has no OOB IP and the IP is already on a winner interface; otherwise re-home it later from the donor's migrated tab)</span>.</li>
           <li><strong>Stays on donor:</strong> interfaces, cables, primary IP. Re-home them later from the donor's <em>"Migrated to ..."</em> tab.</li>
         </ul>
         <div class="text-muted">

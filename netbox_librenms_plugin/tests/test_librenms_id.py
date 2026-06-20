@@ -975,33 +975,24 @@ class TestMarkLibreNMSMigrated:
             with pytest.raises(ValueError):
                 mark_librenms_migrated(donor, winner_pk=bad, server_key="default")
 
+    @pytest.mark.django_db
     def test_after_marker_find_by_librenms_id_no_longer_matches(self):
-        """Donor with only _migrated_to should not be returned by find_by_librenms_id."""
+        """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned
+        by find_by_librenms_id, queried against the REAL Device model. winner_pk equals the searched
+        LibreNMS id so an accidental match on the marker's device_id would be caught."""
+        from dcim.models import Device
+
         from netbox_librenms_plugin.utils import find_by_librenms_id, mark_librenms_migrated
 
-        donor = MagicMock()
-        donor.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
-        donor.cf = donor.custom_field_data
-        mark_librenms_migrated(donor, winner_pk=42, server_key="default")
+        donor = _dev({"default": {"id": 99}})
+        mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+        donor.save()
+        donor.refresh_from_db()
 
-        # cf.librenms_id[default] now only has _migrated_to — no id, no oob.
-        # find_by_librenms_id walks cf via the model query, but logic-wise: simulate
-        # by directly inspecting the entry.
+        # The entry now holds only _migrated_to — no id, no oob.
         entry = donor.cf["librenms_id"]["default"]
         assert entry.get("id") is None
         assert entry.get("oob") is None
-        # Mock model.objects.filter: should return empty queryset for either id or oob lookup
-        mock_model = MagicMock()
-        mock_model.objects.filter.return_value.__getitem__.return_value = []
-        assert find_by_librenms_id(mock_model, 99, "default") is None
 
-        # Prove the function actually built the lookup (not a vacuous pass): the
-        # combined Q must target the id/oob predicates and must NEVER match on the
-        # _migrated_to marker, so a migrated-only donor can't be returned.
-        # Host and OOB predicates are queried separately now — aggregate across calls.
-        lookups = []
-        for call in mock_model.objects.filter.call_args_list:
-            lookups += [child[0] for child in call[0][0].children]
-        assert any(lk == "custom_field_data__librenms_id__default__id" for lk in lookups)
-        assert any(lk == "custom_field_data__librenms_id__default__oob__id" for lk in lookups)
-        assert all("_migrated_to" not in lk for lk in lookups)
+        # The real model query must not return the migrated-only donor for id 99.
+        assert find_by_librenms_id(Device, 99, "default") is None
