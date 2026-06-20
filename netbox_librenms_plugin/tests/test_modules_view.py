@@ -402,6 +402,31 @@ class TestMergeTransceiverDataPortIdentity:
         mock_cache.delete.assert_called_once_with("test_cache_key")
         view._librenms_api.get_ports.assert_not_called()
 
+    def test_post_stale_server_key_resolves_migrated_context_with_fallback(self):
+        """When the POSTed server_key is stale (rebind fails) and absent from POST, the migrated context must still resolve via the session server-key fallback, not None — otherwise a migrated donor loses migrated mode and its sync controls are re-enabled."""
+        view = _make_view()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default  # no server_key posted
+        view.get_object = MagicMock(return_value=obj)
+        view.rebind_api_for_server = MagicMock(return_value=None)  # stale key → rebind fails
+        view.has_write_permission = MagicMock(return_value=False)
+        view.partial_template_name = "x.html"
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
+            patch(
+                "netbox_librenms_plugin.views.base.modules_view.build_migrated_context",
+                return_value={"migrated_to_marker": None},
+            ) as mock_migrated,
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value="rendered"),
+        ):
+            result = view.post(request, pk=1)
+
+        # Resolved via the session server-key fallback ("test-server"), not None.
+        mock_migrated.assert_called_once_with(obj, "test-server")
+        assert result == "rendered"
+
     def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self):
         """A list payload that carries non-dict entries (e.g."""
         view = _make_view()

@@ -354,9 +354,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 {
                     "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
                     "has_write_permission": self.has_write_permission(),
-                    # Keep donor-mode flags on this render too — resolve from the posted key
-                    # (server_key is None here) so a migrated donor doesn't lose context.
-                    **build_migrated_context(obj, request.POST.get("server_key")),
+                    # Keep donor-mode flags on this render too. request.POST.get("server_key") can
+                    # be None (malformed/stale request); fall back to the session server key so
+                    # build_migrated_context still resolves the marker and the template keeps the
+                    # donor's sync controls suppressed. Mirrors ip_addresses_view.
+                    **build_migrated_context(obj, request.POST.get("server_key") or self.librenms_api.server_key),
                 },
             )
         sync_device = self._get_sync_device(obj, server_key=server_key)
