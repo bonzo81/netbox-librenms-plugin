@@ -881,6 +881,42 @@ class TestValidateDeviceForImportEdgeCases:
         assert result["can_import"] is False
         assert any("resolve the duplicate" in i for i in result["issues"])
 
+    def test_duplicate_hostname_without_serial_fails_closed(self):
+        """A duplicate-hostname match with no usable serial must still fail closed (the check ran only inside the serial-gated merge block)."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-113c", slug="acme-113c")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-113c", slug="dt-113c")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-113c", slug="role-113c")
+        site_a, _ = Site.objects.get_or_create(name="Site-113ca", slug="site-113ca")
+        site_b, _ = Site.objects.get_or_create(name="Site-113cb", slug="site-113cb")
+
+        # Two devices share hostname "dup-noserial"; the incoming LibreNMS row carries no serial.
+        Device.objects.create(
+            name="dup-noserial",
+            device_type=dt,
+            role=role,
+            site=site_a,
+            status="active",
+            custom_field_data={"librenms_id": {"default": 7}},
+        )
+        Device.objects.create(name="dup-noserial", device_type=dt, role=role, site=site_b, status="active")
+
+        libre_device = {
+            "device_id": 999,
+            "hostname": "dup-noserial",
+            "sysName": "dup-noserial",
+            "serial": "-",  # no usable serial → merge block is skipped; check must still run
+            "hardware": "Model-X",
+            "os": "ios",
+        }
+        result = self._validate(libre_device)
+
+        assert result["serial_action"] is None
+        assert result.get("oob_candidate") is None
+        assert result["can_import"] is False
+        assert any("resolve the duplicate" in i for i in result["issues"])
+
     def test_vm_librenms_id_not_int_falls_back(self):
         """device_id None → no librenms_id lookup; validation still returns cleanly."""
         libre_device = {

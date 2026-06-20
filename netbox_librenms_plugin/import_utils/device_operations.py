@@ -817,6 +817,43 @@ def validate_device_for_import(
             # doesn't fall through to Device-only merge logic.
             import_as_vm = result["import_as_vm"]
 
+            # Fail closed against an ARBITRARY duplicate match for the current side, independent of
+            # whether a usable serial is available. The hostname/serial match above used .first(),
+            # so with duplicate NetBox names/serials result["existing_device"] may be an arbitrary
+            # row and acting on it (link/promote/import) would target the wrong device. This must
+            # run even for a hostname match with no serial — the merge-candidate block below is
+            # gated on a serial (it pairs host+OOB) and would otherwise skip the check entirely.
+            if (
+                not import_as_vm
+                and result.get("existing_device") is not None
+                and result.get("existing_match_type") in ("hostname", "serial")
+            ):
+                _dup_current = False
+                if result["existing_match_type"] == "hostname" and hostname:
+                    _dup_current = len(list(Device.objects.filter(name__iexact=hostname)[:2])) > 1
+                elif result["existing_match_type"] == "serial":
+                    _serial_now = (libre_device.get("serial") or "").strip()
+                    _dup_current = (
+                        bool(_serial_now)
+                        and _serial_now != "-"
+                        and len(list(Device.objects.filter(serial=_serial_now)[:2])) > 1
+                    )
+                if _dup_current:
+                    # Arbitrary .first() match among duplicates: block link/promote/import and
+                    # surface a blocking issue. The match is left for display only.
+                    result["serial_action"] = None
+                    result["oob_candidate"] = None
+                    result.pop("promote_to_host", None)
+                    result["serial_role_choice_available"] = False
+                    result["can_import"] = False
+                    result["is_ready"] = False
+                    _dup_msg = (
+                        "Multiple NetBox devices share this device's hostname/serial; resolve the "
+                        "duplicate before importing or linking."
+                    )
+                    if _dup_msg not in result.setdefault("issues", []):
+                        result["issues"].append(_dup_msg)
+
             # Stage 2 — merge-candidates detection.
             # When the hostname-matched device and the serial-matched device are
             # DIFFERENT NetBox objects, the two probably represent the same
@@ -839,16 +876,14 @@ def validate_device_for_import(
                     # otherwise skip the merge suggestion and warn.
                     _hostname_match = None
                     _serial_match = None
-                    # When the CURRENT matched side is itself non-unique, result["existing_device"]
-                    # (set earlier via .first()) is an arbitrary duplicate row. Track that so we can
-                    # block any link/promote/import action against the wrong device below.
-                    _ambiguous_current_side = False
+                    # A non-unique current side (duplicate name/serial) is already failed closed
+                    # above; here it just means we can't pick a single peer to pair, so skip the
+                    # merge suggestion and warn.
                     if result.get("existing_match_type") == "hostname" and hostname:
                         _hostname_peers = list(Device.objects.filter(name__iexact=hostname)[:2])
                         if len(_hostname_peers) == 1:
                             _hostname_match = _hostname_peers[0]
                         elif len(_hostname_peers) > 1:
-                            _ambiguous_current_side = True
                             result["warnings"].append(
                                 f"Multiple NetBox devices share hostname '{hostname}'; merge suggestion skipped."
                             )
@@ -857,7 +892,6 @@ def validate_device_for_import(
                         if len(_serial_peers) == 1:
                             _serial_match = _serial_peers[0]
                         elif len(_serial_peers) > 1:
-                            _ambiguous_current_side = True
                             result["warnings"].append(
                                 f"Multiple NetBox devices share serial '{_serial_for_pair}'; merge suggestion skipped."
                             )
@@ -915,21 +949,6 @@ def validate_device_for_import(
                                 ),
                             )
 
-                    if _ambiguous_current_side:
-                        # The earlier .first() match is one of several duplicate rows — an arbitrary
-                        # device. Fail closed: block link/promote/import so the user can't act
-                        # against the wrong NetBox device, and surface a blocking issue. The match
-                        # is left for display, but no actionable serial/OOB state remains.
-                        result["serial_action"] = None
-                        result["oob_candidate"] = None
-                        result.pop("promote_to_host", None)
-                        result["serial_role_choice_available"] = False
-                        result["can_import"] = False
-                        result["is_ready"] = False
-                        result.setdefault("issues", []).append(
-                            "Multiple NetBox devices share this device's hostname/serial; resolve the "
-                            "duplicate before importing or linking."
-                        )
             except Exception:  # pragma: no cover - defensive: never break validation
                 logger.exception("merge-candidate detection failed")
 
