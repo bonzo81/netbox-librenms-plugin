@@ -297,6 +297,50 @@ class TestMergeTransceiverDataPortIdentity:
         assert mock_merge.call_args.kwargs.get("ports_data") == ports_payload
         assert mock_enrich.call_args.kwargs.get("ports_data") == ports_payload
 
+    def test_post_normalizes_main_inventory_indices_to_int(self):
+        """Main inventory indices are cached as ints (LibreNMS returns strings) so the int(parent_index) install lookup matches."""
+        view = _make_view()
+        view.model = MagicMock()
+        obj = MagicMock()
+        request = MagicMock()
+        request.POST.get.side_effect = lambda key, default=None: default
+        view.get_object = MagicMock(return_value=obj)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.has_write_permission = MagicMock(return_value=True)
+        view._build_context = MagicMock(
+            return_value={"table": None, "object": obj, "cache_expiry": None, "server_key": "test-server"}
+        )
+        view._librenms_api.get_librenms_id.return_value = 777
+        # LibreNMS/SNMP returns indices as strings.
+        view._librenms_api.get_device_inventory.return_value = (
+            True,
+            [
+                {
+                    "entPhysicalIndex": "10",
+                    "entPhysicalContainedIn": "0",
+                    "entPhysicalModelName": "X",
+                    "entPhysicalName": "card",
+                }
+            ],
+        )
+        view._librenms_api.get_device_transceivers.return_value = (True, [])
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
+            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            view.post(request, pk=1)
+
+        cached = mock_cache.set.call_args.args[1]["inventory"]
+        main = next(i for i in cached if i.get("_source") == "main")
+        assert main["entPhysicalIndex"] == 10
+        assert isinstance(main["entPhysicalIndex"], int)
+        assert main["entPhysicalContainedIn"] == 0
+        assert isinstance(main["entPhysicalContainedIn"], int)
+
     def test_post_treats_non_list_inventory_as_fetch_failure(self):
         """get_device_inventory is an external boundary: a success flag with a non-list payload (e.g."""
         view = _make_view()

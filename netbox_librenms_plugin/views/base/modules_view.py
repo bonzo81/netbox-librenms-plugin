@@ -411,6 +411,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
         for item in inventory_data:
             item.setdefault("_source", "main")
+            # Normalize main-inventory indices to int, matching the OOB normalization below.
+            # LibreNMS returns SNMP indices as strings; the install/branch action handlers cast
+            # parent_index to int (modules.py) and match it against entPhysicalIndex, so a
+            # string-keyed main item would never match an integer lookup — silently breaking
+            # branch install for main device inventory.
+            if (idx := _try_int(item.get("entPhysicalIndex"))) is not None:
+                item["entPhysicalIndex"] = idx
+            if (parent := _try_int(item.get("entPhysicalContainedIn"))) is not None:
+                item["entPhysicalContainedIn"] = parent
         # Enrich port rows with stable LibreNMS port_id using ports data so
         # interface matching works even when transceiver metadata is absent.
         self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
