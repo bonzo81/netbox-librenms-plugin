@@ -667,6 +667,39 @@ class LibreNMSAPI:
             # A 2xx whose body carries no usable device is treated as absent, as before.
             return False, None
 
+    def _raw_get(self, path: str, params: dict | None = None) -> tuple[int, object]:
+        """
+        Issue a raw GET against the LibreNMS API and return ``(status_code, body)`` verbatim.
+
+        Unlike the typed ``get_*`` helpers this performs no shape validation or normalisation:
+        it returns the parsed JSON body exactly as LibreNMS sent it so the data-shape capture
+        tooling records the real wire shape. A transport error yields ``(0, None)`` and a
+        non-JSON body yields ``(status_code, None)``.
+
+        Args:
+            path (str): API path relative to ``/api/v0/`` (e.g. ``"devices/1000"``).
+            params (dict | None): Optional query parameters.
+
+        Returns:
+            tuple: ``(status_code, body)`` where body is the parsed JSON (dict/list/scalar) or None.
+        """
+        url = f"{self.librenms_url}/api/v0/{path.lstrip('/')}"
+        try:
+            response = requests.get(
+                url,
+                headers=self.headers,
+                params=params or {},
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+        except requests.exceptions.RequestException:
+            return 0, None
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        return response.status_code, body
+
     def get_ports(self, device_id, with_vlans=True):
         """
         Fetch ports data from LibreNMS for a device using its primary IP.
