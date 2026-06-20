@@ -50,14 +50,24 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         """
         Enrich IP data with NetBox information in a more efficient manner.
 
-        This optimized implementation:
-        1. Caches port data to reduce API calls
-        2. Pre-loads all relevant device data
-        3. Uses dictionary lookups instead of repeated iterations
+        This optimized implementation caches port data to reduce API calls,
+        pre-loads all relevant device data, and uses dictionary lookups instead of
+        repeated iterations.
 
-        *mgmt_ip* is the device's LibreNMS management IP, resolved once on the
-        fresh-fetch path and passed back in on cached renders so this method
-        never makes a live LibreNMS API call.
+        Args:
+            ip_data: The LibreNMS IP rows to enrich.
+            obj: The NetBox device the IPs belong to.
+            interface_name_field: The interface name field preference used for port
+                lookups.
+            mgmt_ip (str): The device's LibreNMS management IP, resolved once on the
+                fresh-fetch path and passed back in on cached renders so this method
+                never makes a live LibreNMS API call.
+            server_key: The LibreNMS server key scoping per-server interface matching.
+            port_data_cache: Optional pre-populated port map (keyed by port_id) so
+                cached renders avoid live ``get_port_by_id()`` calls.
+
+        Returns:
+            list: The enriched IP entries.
         """
         # Prefetch all necessary data (scoped to the POST-resolved server when provided
         # so interface librenms_id matching uses the right per-server mapping).
@@ -124,11 +134,15 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         return enriched_data
 
     def _resolve_management_ip(self):
-        """Fetch the LibreNMS management/polling IP for ``self.librenms_id``.
+        """
+        Fetch the LibreNMS management/polling IP for ``self.librenms_id``.
 
-        Called only on the fresh-fetch path; the result is cached alongside the
-        IP rows so cached renders don't re-hit the LibreNMS API. Best-effort:
-        any failure returns an empty string so the sync table still renders.
+        Called only on the fresh-fetch path; the result is cached alongside the IP
+        rows so cached renders don't re-hit the LibreNMS API.
+
+        Returns:
+            str: The management IP, or an empty string on any failure (best-effort,
+                so the sync table still renders).
         """
         librenms_id = getattr(self, "librenms_id", None)
         if not librenms_id:
@@ -145,11 +159,20 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         return ip_value.strip() if isinstance(ip_value, str) else ""
 
     def _flag_management_ip(self, enriched_data, mgmt_ip):
-        """Mark the entry whose IP equals the device's LibreNMS management IP.
+        """
+        Mark the entry whose IP equals the device's LibreNMS management IP.
 
-        Used by the "Set Primary IP" toggle on the IP-sync tab to auto-select
-        the right row. *mgmt_ip* is resolved once on fetch and cached, so this
-        makes no API call; an empty *mgmt_ip* simply flags nothing.
+        Used by the "Set Primary IP" toggle on the IP-sync tab to auto-select the
+        right row. *mgmt_ip* is resolved once on fetch and cached, so this makes no
+        API call; an empty *mgmt_ip* simply flags nothing.
+
+        Args:
+            enriched_data: The enriched IP entries to scan; the matching entry is
+                mutated in place (``is_mgmt_ip = True``).
+            mgmt_ip (str): The device's LibreNMS management IP.
+
+        Returns:
+            None
         """
         if not mgmt_ip:
             return

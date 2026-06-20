@@ -55,11 +55,18 @@ _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
 
 
 def _try_int(v: object) -> int | None:
-    """Return int(v), or None if v is not coercible to int.
+    """
+    Return int(v), or None if v is not coercible to int.
 
-    LibreNMS API responses may return numeric SNMP indices as strings.
-    This helper lets callers safely coerce without crashing on unexpected
-    non-numeric values such as empty strings or "N/A".
+    LibreNMS API responses may return numeric SNMP indices as strings. This helper
+    lets callers safely coerce without crashing on unexpected non-numeric values such
+    as empty strings or "N/A".
+
+    Args:
+        v (object): The value to coerce.
+
+    Returns:
+        int | None: The coerced integer, or None if *v* is not coercible.
     """
     try:
         return int(v)  # type: ignore[arg-type]
@@ -187,10 +194,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         raise NotImplementedError("Subclasses must implement get_table()")
 
     def _get_sync_device(self, obj, server_key=None):
-        """Resolve the LibreNMS sync device for cache reads/writes in VC contexts.
+        """
+        Resolve the LibreNMS sync device for cache reads/writes in VC contexts.
 
         Scoped to the POST-resolved server when provided (fallback: session server)
-        so a VC member synced from a non-default server resolves the right sync device.
+        so a VC member synced from a non-default server resolves the right sync
+        device.
+
+        Args:
+            obj: The NetBox device (or VC member) being synced.
+            server_key: The LibreNMS server key; falls back to the session server
+                when None.
+
+        Returns:
+            The resolved sync device, or *obj* itself for non-VC devices.
         """
         server_key = server_key or self.librenms_api.server_key
         sync_device = get_librenms_sync_device(obj, server_key=server_key)

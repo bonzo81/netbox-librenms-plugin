@@ -344,15 +344,32 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         return enriched
 
     def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None):
-        """Get the context data for the interface sync view.
+        """
+        Build the context data for the interface sync view.
 
-        ``fresh_data`` is a render-from-snapshot escape hatch: when given, the view renders
-        from that in-memory dict instead of reading the ports cache (for a caller that built
-        a response without a preceding cache write). No in-tree caller currently passes it.
+        ``fresh_data`` is a render-from-snapshot escape hatch: when given, the view
+        renders from that in-memory dict instead of reading the ports cache (for a
+        caller that built a response without a preceding cache write). No in-tree
+        caller currently passes it.
 
-        The OOB-ports-fetch-failure path does *not* use it: ``post()`` caches the host-only
-        snapshot tagged ``oob_incomplete=True`` and renders from the cache like the normal
-        flow; an inline banner (driven by that tag) surfaces the missing OOB rows.
+        The OOB-ports-fetch-failure path does *not* use it: ``post()`` caches the
+        host-only snapshot tagged ``oob_incomplete=True`` and renders from the cache
+        like the normal flow; an inline banner (driven by that tag) surfaces the
+        missing OOB rows.
+
+        Args:
+            request: The current HTTP request.
+            obj: The NetBox device (or VC member) being synced.
+            interface_name_field: The interface name field preference; resolved from
+                the request when None.
+            server_key: The LibreNMS server key; resolved from the API client when
+                None.
+            fresh_data: Optional in-memory ports snapshot to render from instead of
+                the cache.
+
+        Returns:
+            dict: The template context (object, table, vlan_groups, server_key,
+                oob_incomplete and related render state).
         """
         ports_data = []
         table = None

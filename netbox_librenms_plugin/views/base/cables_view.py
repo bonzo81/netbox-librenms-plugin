@@ -41,6 +41,14 @@ def _librenms_id_q(server_key: str, value) -> Q:
     (``{server_key: {"id": 42, "oob": {"id": 99}}}``) so a device carrying OOB
     metadata or a merged link still resolves by LibreNMS ID. Mirrors the path
     coverage of :func:`utils.find_by_librenms_id`.
+
+    Args:
+        server_key (str): The LibreNMS server key whose JSON sub-key is matched.
+        value: The LibreNMS id to match (int or string form).
+
+    Returns:
+        Q: A combined lookup matching any stored form of the id (matches nothing for
+            a bool *value*).
     """
     # Match nothing for values that can't be a valid librenms_id. Reject bools (an int subclass)
     # and any non-int/str type up front: int() would truncate a float like 1.9 to 1 and match the

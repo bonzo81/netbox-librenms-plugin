@@ -175,14 +175,21 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
 
 
 def get_virtual_chassis_members(device: Device) -> list:
-    """Return all member Devices of *device*'s virtual chassis (including *device* itself),
-    or ``[device]`` when it isn't in a virtual chassis.
+    """
+    Return all member Devices of a device's virtual chassis.
 
     Centralizes VC member expansion so callers don't hand-roll
-    ``device.virtual_chassis.members.values_list(...)`` and can't drift on which members are
-    considered. LibreNMS treats a virtual chassis as one logical device, so member-spanning
-    lookups (e.g. resolving an interface/IP that may live on another member) must always
-    consider the full member set this returns.
+    ``device.virtual_chassis.members.values_list(...)`` and can't drift on which
+    members are considered. LibreNMS treats a virtual chassis as one logical device,
+    so member-spanning lookups (e.g. resolving an interface/IP that may live on
+    another member) must always consider the full member set this returns.
+
+    Args:
+        device (Device): The device whose virtual chassis members are expanded.
+
+    Returns:
+        list: All member Devices (including *device* itself), or ``[device]`` when
+            it isn't in a virtual chassis.
     """
     vc = getattr(device, "virtual_chassis", None)
     members = getattr(vc, "members", None) if vc is not None else None
@@ -1129,13 +1136,20 @@ def check_vlan_group_matches(
 
 
 def coerce_librenms_id(value) -> int | None:
-    """Coerce a raw LibreNMS ID value (int or string-digit) to int, or None.
+    """
+    Coerce a raw LibreNMS ID value (int or string-digit) to int, or None.
 
-    Accepts only ``int`` and ``str`` — other types (None, dicts, MagicMocks,
-    etc.) return None.  Booleans are rejected because ``bool`` is a subclass
-    of ``int`` in Python, so ``int(True)`` silently becomes ``1`` — a
-    valid-looking device ID.  Zero and negative values are also rejected since
-    LibreNMS IDs are strictly positive integers.
+    Accepts only ``int`` and ``str`` — other types (None, dicts, MagicMocks, etc.)
+    return None. Booleans are rejected because ``bool`` is a subclass of ``int`` in
+    Python, so ``int(True)`` silently becomes ``1`` — a valid-looking device ID. Zero
+    and negative values are also rejected since LibreNMS IDs are strictly positive
+    integers.
+
+    Args:
+        value: The raw LibreNMS id value to coerce.
+
+    Returns:
+        int | None: The positive integer id, or None if it can't be coerced.
     """
     if isinstance(value, bool):
         return None
@@ -1296,13 +1310,14 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
 
 
 class AmbiguousLibreNMSIdError(LookupError):
-    """Raised when a librenms_id resolves to more than one NetBox object.
+    """
+    Raised when a librenms_id resolves to more than one NetBox object.
 
     Distinguishes a genuine ambiguity (a data-integrity violation — e.g. two devices
-    sharing the same host id, or a host id and a *different* OOB id) from a clean miss.
-    Returning ``None`` for both would let callers treat an ambiguous link as "not found"
-    and proceed (importing/binding), so :func:`find_by_librenms_id` raises this instead
-    and callers fail closed.
+    sharing the same host id, or a host id and a *different* OOB id) from a clean
+    miss. Returning ``None`` for both would let callers treat an ambiguous link as
+    "not found" and proceed (importing/binding), so :func:`find_by_librenms_id` raises
+    this instead and callers fail closed.
     """
 
 
@@ -1723,27 +1738,39 @@ DEVICE_IP_FK_FIELDS = ("primary_ip4", "primary_ip6", "oob_ip")
 
 
 def set_device_ip_fk(device, field, ip, *, save=True):
-    """Assign a device's ``primary_ip4`` / ``primary_ip6`` / ``oob_ip`` FK with the NetBox
-    ownership invariant enforced, then (by default) persist ONLY that column.
+    """
+    Assign a device IP FK with the NetBox ownership invariant enforced.
 
-    NetBox requires ``Device.primary_ip4/primary_ip6/oob_ip`` to reference an address assigned
-    to one of *that* device's own interfaces. The OOB/merge/move flows persist these via
-    ``save(update_fields=[...])`` to avoid ``full_clean()`` rejecting the write over unrelated
-    pre-existing inconsistencies (e.g. ``face`` set without ``rack``) — but ``update_fields``
-    also skips the ownership check, so a careless call site could silently store an FK pointing
-    at an address on *another* device's interface. This is the single guarded chokepoint for
-    those writes: a non-``None`` *ip* that is not assigned to an interface on *device* raises
-    ``ValueError``, so the invalid state can never be persisted. Clearing (``ip is None``) is
-    always allowed.
+    Sets the device's ``primary_ip4`` / ``primary_ip6`` / ``oob_ip`` FK, then (by
+    default) persists ONLY that column. NetBox requires those fields to reference an
+    address assigned to one of *that* device's own interfaces. The OOB/merge/move
+    flows persist these via ``save(update_fields=[...])`` to avoid ``full_clean()``
+    rejecting the write over unrelated pre-existing inconsistencies (e.g. ``face`` set
+    without ``rack``) — but ``update_fields`` also skips the ownership check, so a
+    careless call site could silently store an FK pointing at an address on *another*
+    device's interface. This is the single guarded chokepoint for those writes:
+    clearing (``ip is None``) is always allowed.
 
-    Re-homing an FK between two devices must still order the writes in the caller — release the
-    donor (set ``None``) BEFORE the winner claims it, because ``primary_ip*``/``oob_ip`` are
-    UNIQUE per address. Pass ``save=False`` to validate + assign only (when the column is
-    batched into a larger ``update_fields`` list saved elsewhere); the caller adds the returned
-    *field* to its own ``update_fields``. Run inside the caller's transaction with the relevant
-    rows locked.
+    Re-homing an FK between two devices must still order the writes in the caller —
+    release the donor (set ``None``) BEFORE the winner claims it, because
+    ``primary_ip*``/``oob_ip`` are UNIQUE per address. Run inside the caller's
+    transaction with the relevant rows locked.
 
-    Returns *field* (handy for ``update_fields.append(set_device_ip_fk(...))``).
+    Args:
+        device: The NetBox device whose FK is being assigned.
+        field (str): One of ``primary_ip4`` / ``primary_ip6`` / ``oob_ip``.
+        ip: The IPAddress to assign, or None to clear the FK.
+        save (bool): When True (default) persist only this column; pass False to
+            validate + assign only and let the caller batch *field* into its own
+            ``update_fields``.
+
+    Returns:
+        str: The assigned *field* (handy for
+            ``update_fields.append(set_device_ip_fk(...))``).
+
+    Raises:
+        ValueError: If *field* is unsupported, or a non-``None`` *ip* is not assigned
+            to an interface on *device*, or its family doesn't match the field.
     """
     from dcim.models import Interface
 
