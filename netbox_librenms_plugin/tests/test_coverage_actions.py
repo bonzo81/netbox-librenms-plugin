@@ -4230,3 +4230,64 @@ class TestAddDeviceTypeMappingNoSecondRoundTrip:
         # Saved under the normalised, lowercased key — NOT the raw "ws-c9300-66".
         assert DeviceTypeMapping.objects.filter(librenms_hardware="c9300-66").exists()
         assert not DeviceTypeMapping.objects.filter(librenms_hardware="ws-c9300-66").exists()
+
+    def test_normalised_hardware_is_trimmed_before_lookup(self):
+        """The normalised key must be trimmed. DeviceTypeMapping.clean() strips on save, so a rule
+        that emits surrounding whitespace would make the untrimmed lookup miss the stored mapping,
+        take the add path, and then fail uniqueness validation generically. With trimming, the
+        existing mapping is found and updated instead."""
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.test import RequestFactory
+
+        from dcim.models import DeviceType, Manufacturer
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+
+        device_id = 4444
+        mfr = Manufacturer.objects.create(name="Cisco-trim", slug="cisco-trim")
+        dt_old = DeviceType.objects.create(manufacturer=mfr, model="C9300-old", slug="c9300-old")
+        dt_new = DeviceType.objects.create(manufacturer=mfr, model="C9300-new", slug="c9300-new")
+        view = self._make_view()
+
+        # A pre-existing mapping (stored stripped+lowercased by clean()).
+        existing = DeviceTypeMapping.objects.create(librenms_hardware="c9300-44", netbox_device_type=dt_old)
+
+        # A rule that pads the value with spaces — the untrimmed output is " C9300-44 ".
+        NormalizationRule.objects.create(
+            scope="device_type", match_pattern=r"^WS-(.+)$", replacement=r" \1 ", priority=10
+        )
+
+        libre_device = {
+            "device_id": device_id,
+            "hardware": "WS-C9300-44",
+            "sysName": "switch-44",
+            "hostname": "switch-44",
+            "os": "ios",
+            "serial": "SN44",
+        }
+        cache.set(get_import_device_cache_key(device_id, "default"), libre_device, timeout=300)
+
+        User = get_user_model()
+        user = User.objects.create_user(username="u44", password="x")
+        user.is_superuser = True
+        user.save()
+
+        request = RequestFactory().post(
+            f"/device-import/add-device-type-mapping/{device_id}/",
+            data={"device_type_id": str(dt_new.pk)},
+        )
+        request.user = user
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_device_by_id", return_value=None),
+            patch.object(view, "require_write_permission", return_value=None),
+            patch.object(view, "require_object_permissions", return_value=None),
+            patch.object(view, "_should_enable_vc_detection", return_value=False),
+        ):
+            view.post(request, device_id=device_id)
+
+        # The trimmed key matched the existing mapping → it was UPDATED, not duplicated.
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="c9300-44").count() == 1
+        existing.refresh_from_db()
+        assert existing.netbox_device_type_id == dt_new.pk

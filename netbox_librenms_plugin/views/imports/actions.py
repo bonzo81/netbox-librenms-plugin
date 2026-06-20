@@ -1505,10 +1505,12 @@ class AddDeviceTypeMappingView(
         # Key the mapping on the NORMALISED hardware string. match_librenms_hardware_to_device_type
         # normalises via the device_type rules before the DeviceTypeMapping lookup, so a mapping
         # saved under the raw value (e.g. "WS-C9300" when a rule strips it to "C9300") would never
-        # be found by the revalidation below.
+        # be found by the revalidation below. Strip the rule output too: DeviceTypeMapping.clean()
+        # strips before save, so an untrimmed key (e.g. " C9300 ") would miss the stored "c9300"
+        # mapping and take the add path, then fail uniqueness validation generically on save.
         from netbox_librenms_plugin.utils import apply_normalization_rules
 
-        mapping_hardware = apply_normalization_rules(value=hardware, scope="device_type")
+        mapping_hardware = (apply_normalization_rules(value=hardware, scope="device_type") or "").strip()
         if not mapping_hardware or mapping_hardware == "-":
             return _htmx_error_response("Device hardware normalised to an empty value — cannot create mapping.")
 
