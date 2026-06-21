@@ -19,7 +19,7 @@ from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, fi
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import classify_novelty, compute_shape_signature
-from netbox_librenms_plugin.utils import get_librenms_sync_device
+from netbox_librenms_plugin.utils import get_librenms_oob, get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
@@ -56,11 +56,15 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 request, device, "This device is not linked to LibreNMS, so there is no data shape to capture."
             )
 
+        # Include a linked OOB controller's ports (a separate LibreNMS device the interfaces view
+        # merges into the host) so the submitted shape is complete for OOB hosts.
+        oob = get_librenms_oob(sync_device, server_key=server_key)
         recording = capture_device_recording(
             self.librenms_api,
             librenms_id,
             name=f"{device.name}-shape",
             description=f"Captured from {device.name}.",
+            oob_id=oob["id"] if oob and oob.get("id") else None,
         )
         # Trim redundant high-cardinality ports BEFORE anonymizing — on the raw port names, which is
         # exactly what relationship resolution reads — so the shape stays intact while the recording

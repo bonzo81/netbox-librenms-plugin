@@ -144,6 +144,36 @@ def test_capture_view_compresses_redundant_ports(recording_server):
 
 
 @pytest.mark.django_db
+def test_capture_view_includes_oob_controller_ports(recording_server):
+    """A device with a linked OOB controller has the controller's ports captured into the recording."""
+    rec = load_recording("cisco-stackwise-3member")  # host device 1000
+    # The OOB controller (LibreNMS id 2500) is a separate device with its own ports route.
+    rec["responses"]["GET /api/v0/devices/2500/ports"] = {
+        "status": "ok",
+        "ports": [
+            {"port_id": 7001, "ifName": "bmc", "ifType": "ethernetCsmacd"},
+            {"port_id": 7002, "ifName": "eth0", "ifType": "ethernetCsmacd"},
+        ],
+    }
+    _server, api = recording_server(rec)
+    # Seed the device's librenms_id CF with an OOB controller under the 'test' server key.
+    device = make_device("cap-oob", librenms_cf={"test": {"id": 1000, "oob": {"id": 2500, "type": "drac"}}})
+    view = _view_with_api(api)
+
+    with (
+        patch.object(view, "rebind_api_for_server", return_value="test"),
+        patch.object(api, "get_librenms_id", return_value=1000),
+        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
+    ):
+        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+
+    html = response.content.decode()
+    # The recording records meta.oob_id and the controller's own /ports route (quotes are HTML-escaped).
+    assert "oob_id" in html
+    assert "2500/ports" in html
+
+
+@pytest.mark.django_db
 def test_capture_view_errors_when_device_not_linked(recording_server):
     """A device with no LibreNMS id shows an error panel instead of capturing."""
     _server, api = recording_server(load_recording("cisco-stackwise-3member"))
