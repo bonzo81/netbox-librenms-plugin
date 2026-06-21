@@ -1,6 +1,6 @@
 """Outcome tests driven by captured LibreNMS data-shape recordings.
 
-Each recording in ``tests/recordings/*.json`` is replayed through the mock
+Each recording in ``data_shapes/recordings/*.json`` is replayed through the mock
 LibreNMS HTTP server and the real LibreNMSAPI client, then the real detection
 and relationship-resolution logic runs against it and is asserted against the
 recording's ``expected`` block. A new recording with an ``expected`` block
@@ -26,7 +26,7 @@ def _ids(recording):
 
 def test_recordings_present():
     """The recordings directory must contain at least one scenario."""
-    assert iter_recording_paths(), "no recording JSON files found in tests/recordings/"
+    assert iter_recording_paths(), "no recording JSON files found in data_shapes/recordings/"
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
@@ -41,7 +41,7 @@ def test_bundled_recording_carries_no_residual_pii(recording):
 
 
 def test_manifest_is_in_sync_with_bundled_recordings():
-    """tests/recordings/manifest.json must match the bundled recordings.
+    """data_shapes/recordings/manifest.json must match the bundled recordings.
 
     Fails when a recording is added/changed without `librenms_recordings --rebuild-manifest`,
     so the in-plugin novelty check never goes stale.

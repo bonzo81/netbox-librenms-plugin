@@ -8,7 +8,7 @@ automatically.
 
 A *recording* is one device scenario: the LibreNMS responses captured verbatim plus an
 `expected` block describing the outcome. Recordings live in
-`netbox_librenms_plugin/tests/recordings/*.json`; `tests/test_recordings.py` parametrizes over
+`netbox_librenms_plugin/data_shapes/recordings/*.json`; `tests/test_recordings.py` parametrizes over
 them, so **a new JSON with an `expected` block is a new passing test, no code required**.
 
 ## Capturing a shape (contributors)
@@ -44,7 +44,7 @@ modal surfaces its findings; **review them before submitting.**
 
 ## Promoting a submission to a recording (maintainers)
 
-1. Save the anonymized JSON to `netbox_librenms_plugin/tests/recordings/<name>.json`.
+1. Save the anonymized JSON to `netbox_librenms_plugin/data_shapes/recordings/<name>.json`.
 2. Add an `expected` block describing the outcome to assert, e.g.:
    ```json
    "expected": {
@@ -56,7 +56,7 @@ modal surfaces its findings; **review them before submitting.**
    All three keys are optional — include only what the shape exercises.
 3. Validate and refresh the novelty manifest:
    ```console
-   $ python manage.py librenms_recordings --validate netbox_librenms_plugin/tests/recordings/<name>.json
+   $ python manage.py librenms_recordings --validate netbox_librenms_plugin/data_shapes/recordings/<name>.json
    $ python manage.py librenms_recordings --rebuild-manifest
    ```
 4. Run the suite — the new recording is now a test:
@@ -68,7 +68,7 @@ modal surfaces its findings; **review them before submitting.**
 
 - `--validate PATH` — schema-check a recording, re-run the PII safety-net, and report novelty.
   Exits non-zero on a schema or PII failure (suitable for CI/pre-commit).
-- `--rebuild-manifest` — regenerate `tests/recordings/manifest.json` (the novelty reference the
+- `--rebuild-manifest` — regenerate `data_shapes/recordings/manifest.json` (the novelty reference the
   capture view reads).
 - `--list` — print each bundled recording with its computed signature.
 

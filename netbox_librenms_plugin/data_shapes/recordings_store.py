@@ -1,29 +1,41 @@
 """
 Locate and load the bundled data-shape recordings and the novelty manifest.
 
-Single source of truth for where recordings live (``tests/recordings/``) so the management
-command (which writes the manifest) and the in-plugin capture view (which reads it for the
-novelty verdict) agree. Reading is best-effort: a missing manifest yields an empty list so the
-novelty check degrades to "new" rather than erroring.
+Single source of truth for where recordings live and how they're loaded, shared by the test
+suite, the management command (which writes the manifest), and the in-plugin capture view (which
+reads it for the novelty verdict). The recordings live INSIDE the package
+(``data_shapes/recordings/``) — not under ``tests/`` — so they ship in the wheel (the tests
+package is excluded from the build). Reading the manifest is best-effort: a missing manifest
+yields an empty list so the novelty check degrades to "new" rather than erroring.
 """
 
 import json
 from pathlib import Path
 
-# data_shapes/ -> netbox_librenms_plugin/ -> tests/recordings/
-RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "tests" / "recordings"
+# data_shapes/recordings/ (a data directory inside the data_shapes package, so it ships).
+RECORDINGS_DIR = Path(__file__).resolve().parent / "recordings"
 MANIFEST_PATH = RECORDINGS_DIR / "manifest.json"
 MANIFEST_NAME = MANIFEST_PATH.name
 
 
-def load_bundled_recordings():
-    """Load every bundled recording JSON (excluding the manifest), sorted by path."""
-    recordings = []
-    for path in sorted(RECORDINGS_DIR.glob("*.json")):
-        if path.name == MANIFEST_NAME:
-            continue
-        recordings.append(json.loads(path.read_text()))
-    return recordings
+def iter_recording_paths():
+    """Return the sorted list of recording JSON file paths (excluding the novelty manifest)."""
+    return sorted(p for p in RECORDINGS_DIR.glob("*.json") if p.name != MANIFEST_NAME)
+
+
+def load_recording(name: str) -> dict:
+    """Load a single recording by name, with or without the ``.json`` suffix."""
+    filename = name if name.endswith(".json") else f"{name}.json"
+    return json.loads((RECORDINGS_DIR / filename).read_text())
+
+
+def iter_recordings() -> list[dict]:
+    """Load and return every bundled recording (excluding the manifest), sorted by path."""
+    return [json.loads(p.read_text()) for p in iter_recording_paths()]
+
+
+# Back-compat alias used by the management command / novelty manifest builder.
+load_bundled_recordings = iter_recordings
 
 
 def load_manifest():

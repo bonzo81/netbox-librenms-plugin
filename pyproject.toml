@@ -48,10 +48,11 @@ include = ["netbox_librenms_plugin*"]
 exclude = ["site*", "netbox_librenms_plugin.tests*"]
 
 [tool.setuptools.package-data]
-# Ship templates and the data-shape recordings + novelty manifest. The tests package itself is
-# excluded from the wheel, but the recordings are runtime data: the in-plugin "Capture data shape"
-# view reads manifest.json to classify novelty, so the JSON must travel with the package.
-netbox_librenms_plugin = ["templates/**", "tests/recordings/*.json"]
+netbox_librenms_plugin = ["templates/**"]
+# Data-shape recordings + novelty manifest are runtime data (the in-plugin "Capture data shape"
+# view reads manifest.json to classify novelty), so they live inside the data_shapes package and
+# ship with the wheel.
+"netbox_librenms_plugin.data_shapes" = ["recordings/*.json"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "netbox_librenms_plugin.tests.isolated_settings"

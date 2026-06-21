@@ -6,7 +6,7 @@ This is the maintainer/CI entry point for the capture→anonymize→replay pipel
 * ``--validate PATH`` — schema-check a (community-submitted) recording, re-run the PII safety-net
   on it, and report its novelty vs the bundled shapes. Exits non-zero on a schema or PII failure
   so CI can gate on it.
-* ``--rebuild-manifest`` — regenerate ``tests/recordings/manifest.json`` from the bundled
+* ``--rebuild-manifest`` — regenerate ``data_shapes/recordings/manifest.json`` from the bundled
   recordings (the novelty reference set).
 * ``--list`` — print each bundled recording with its computed signature.
 """
@@ -34,7 +34,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--rebuild-manifest",
             action="store_true",
-            help="Rebuild tests/recordings/manifest.json from the bundled recordings.",
+            help="Rebuild data_shapes/recordings/manifest.json from the bundled recordings.",
         )
         parser.add_argument("--list", action="store_true", help="List bundled recordings with their signatures.")
 

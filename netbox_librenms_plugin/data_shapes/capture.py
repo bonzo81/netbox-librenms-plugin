@@ -5,7 +5,7 @@ The capture issues the same structural requests the sync logic reads — device 
 Virtual-Chassis detection inventory calls, ports (with VLAN data), and port_stack — and
 assembles them into a recording dict that
 :meth:`netbox_librenms_plugin.tests.mock_librenms_server.MockLibreNMSServer.load_recording`
-can replay. See ``tests/recordings/`` and issue #95.
+can replay. See ``data_shapes/recordings/`` and issue #95.
 """
 
 SCHEMA_VERSION = 1
