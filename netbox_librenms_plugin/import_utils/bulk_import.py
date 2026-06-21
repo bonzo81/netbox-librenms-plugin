@@ -414,29 +414,33 @@ def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, serv
     """
     link = _describe_existing_librenms_link(device, server_key)
     validation["existing_librenms_link"] = link
-    # Only re-classify librenms-id-based matches; leave serial/hostname/primary_ip
-    # match types untouched.
+
+    scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
+    oob = get_librenms_oob(device, server_key=server_key)
+    oob_id = coerce_librenms_id(oob.get("id")) if oob else None
+
+    # Promote to a *current* librenms-id / OOB link first, regardless of the cached match type.
+    # A row cached as a serial/hostname conflict may since have gained the matching host/OOB
+    # librenms_id in NetBox; it should render as the link, not the stale conflict, instead of
+    # waiting for the cache to expire.
+    if scanned_id is not None and oob_id is not None and oob_id == scanned_id:
+        validation["existing_match_type"] = "librenms_oob"
+        return
+    if scanned_id is not None and link["host_id"] is not None and link["host_id"] == scanned_id:
+        validation["existing_match_type"] = "librenms_id"
+        return
+
+    # No current id/OOB link matches the scanned device. Only clear a *prior* librenms-id/OOB
+    # match here — leave serial/hostname/primary_ip match types untouched (evaluated elsewhere).
     if validation.get("existing_match_type") in ("librenms_id", "librenms_oob"):
-        scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
         if scanned_id is None:
-            # The current scan didn't return a usable device_id (libre_device omitted or
-            # malformed). A missing scanned id is NOT proof the link disappeared — only drop
-            # the cached match when the DB linkage itself is gone; otherwise leave the prior
-            # match type until there's a real id to compare against.
+            # A missing scanned id (libre_device omitted/malformed) is NOT proof the link
+            # disappeared — only drop the cached match when the DB linkage itself is gone.
             if link["host_id"] is None and link["oob_id"] is None:
                 validation["existing_match_type"] = None
             return
-        oob = get_librenms_oob(device, server_key=server_key)
-        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
-        if scanned_id is not None and oob_id is not None and oob_id == scanned_id:
-            validation["existing_match_type"] = "librenms_oob"
-        elif scanned_id is not None and link["host_id"] is not None and link["host_id"] == scanned_id:
-            # Host id still matches the scanned device — a genuine host-side link.
-            validation["existing_match_type"] = "librenms_id"
-        else:
-            # Linkage changed since caching: neither the host id nor the OOB id matches
-            # the scanned device anymore, so don't keep a stale librenms_id badge.
-            validation["existing_match_type"] = None
+        # scanned id present but neither the host id nor the OOB id matches it anymore.
+        validation["existing_match_type"] = None
 
 
 def _clear_existing_match_derived_fields(validation: dict) -> None:

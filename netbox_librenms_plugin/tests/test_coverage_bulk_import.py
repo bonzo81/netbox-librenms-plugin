@@ -1054,6 +1054,28 @@ class TestRefreshExistingDevice:
 
         assert validation["existing_match_type"] is None
 
+    def test_serial_cached_row_promoted_to_librenms_id_when_now_linked(self):
+        """A row cached as a serial conflict that has since gained the matching host librenms_id must promote to a librenms_id match, not keep the stale serial badge."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
+
+        dev = make_device("ref-serial-now-linked", librenms_cf={"default": {"id": 42}})
+        validation = self._device_validation(existing_device=dev, existing_match_type="serial")
+
+        _refresh_librenms_linkage(validation, dev, {"device_id": 42, "hostname": "h"}, "default")
+
+        assert validation["existing_match_type"] == "librenms_id"
+
+    def test_serial_cached_row_untouched_when_no_current_link_matches(self):
+        """A serial-matched row whose device has no matching librenms link stays 'serial' — only prior id/OOB matches are cleared."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
+
+        dev = make_device("ref-serial-no-link")  # no librenms_id CF
+        validation = self._device_validation(existing_device=dev, existing_match_type="serial")
+
+        _refresh_librenms_linkage(validation, dev, {"device_id": 42, "hostname": "h"}, "default")
+
+        assert validation["existing_match_type"] == "serial"
+
     # ------------------------------------------------------------------
     # Deleted match → readiness recompute
     # ------------------------------------------------------------------
