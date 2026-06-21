@@ -1,5 +1,55 @@
 [
   {
+    "name": "arcos-lag-transceivers",
+    "signature": {
+      "os": "os-2519ea",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "bond"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": true,
+      "transceivers": true
+    }
+  },
+  {
+    "name": "avocent-serial-ports",
+    "signature": {
+      "os": "os-bd42c9",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": null,
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": true,
+      "transceivers": true
+    }
+  },
+  {
     "name": "cisco-lag-and-subinterface",
     "signature": {
       "os": "os-901310",
@@ -123,6 +173,32 @@
       "port_stack": true,
       "vlans": true,
       "transceivers": false
+    }
+  },
+  {
+    "name": "nokia-timos-transceivers",
+    "signature": {
+      "os": "os-57cfb3",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "lag-"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": true,
+      "transceivers": true
     }
   }
 ]

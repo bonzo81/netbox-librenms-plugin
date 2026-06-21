@@ -108,6 +108,23 @@ def _assert_port_relationships(api, device_id, recording, expected):
             assert got == want, f"{recording['name']} {key}: {got} != {want}"
 
 
+def _assert_transceivers(api, device_id, expected):
+    ok, transceivers = api.get_device_transceivers(device_id)
+    assert ok, transceivers
+    assert len(transceivers) == expected["count"]
+
+
+def _assert_serial_ports(api, device_id, expected):
+    from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+    ok, sensors = api.get_serial_port_sensors(device_id)
+    assert ok, sensors
+    rows = map_sensors_to_serial_links(sensors, device_id=device_id)
+    assert len(rows) == expected["count"]
+    if "configured" in expected:
+        assert sum(1 for r in rows if r["is_configured"]) == expected["configured"]
+
+
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_recording_outcomes(recording, recording_server):
     """Replay a recording and assert its declared outcomes against the real logic."""
@@ -120,3 +137,9 @@ def test_recording_outcomes(recording, recording_server):
 
     if "lag_members" in expected or "sub_interfaces" in expected:
         _assert_port_relationships(api, device_id, recording, expected)
+
+    if "transceivers" in expected:
+        _assert_transceivers(api, device_id, expected["transceivers"])
+
+    if "serial_ports" in expected:
+        _assert_serial_ports(api, device_id, expected["serial_ports"])
