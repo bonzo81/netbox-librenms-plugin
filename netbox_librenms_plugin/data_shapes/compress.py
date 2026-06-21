@@ -115,7 +115,10 @@ def compress_recording(recording):
         dict: A new recording. When ports were trimmed, ``meta["compressed_ports"]`` records
             ``{"from": <original count>, "to": <kept count>}``; the input is never mutated.
     """
-    ports_key = _route_key(recording, "/ports")
+    # Target the MAIN device's ports route. A recording may carry a second /ports route for a linked
+    # OOB controller (devices/<oob_id>/ports); compress only the host's ports (the OOB controller's
+    # are a separate device, left intact for the merge), falling back to any /ports route otherwise.
+    ports_key = _route_key(recording, f"devices/{recording.get('device_id')}/ports") or _route_key(recording, "/ports")
     if ports_key is None:
         return recording
     ports_body = _unwrap(recording["responses"][ports_key])

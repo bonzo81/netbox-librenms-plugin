@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "name": "linux-host",
+  "description": "Linux host: plain interface shape, no virtual chassis and no OOB controller.",
+  "meta": {
+    "os": "os-9bf16a",
+    "compressed_ports": {
+      "from": 991,
+      "to": 3
+    }
+  },
+  "device_id": 32,
+  "responses": {
+    "GET /api/v0/devices/32": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 32,
+          "inserted": "2026-05-02T15:03:27.000000Z",
+          "hostname": "device-1d9e81",
+          "sysName": "device-747d6c",
+          "display": null,
+          "ip": "192.0.2.217",
+          "overwrite_ip": null,
+          "community": null,
+          "authlevel": "",
+          "authname": "",
+          "authpass": "",
+          "authalgo": "",
+          "cryptopass": "",
+          "cryptoalgo": "",
+          "snmpver": "",
+          "port": 161,
+          "transport": "udp",
+          "timeout": null,
+          "retries": null,
+          "snmp_disable": false,
+          "bgpLocalAs": null,
+          "sysObjectID": ".1.3.6.1.4.1.8072.3.2.10",
+          "sysDescr": "",
+          "sysContact": "",
+          "version": null,
+          "hardware": null,
+          "features": null,
+          "location_id": 1,
+          "os": "os-9bf16a",
+          "status": false,
+          "status_reason": "snmp",
+          "ignore": false,
+          "disabled": false,
+          "uptime": 9680249,
+          "agent_uptime": 0,
+          "last_polled": "2026-06-17T15:54:45.000000Z",
+          "last_poll_attempted": null,
+          "last_polled_timetaken": 27.346137046814,
+          "last_discovered_timetaken": 1.8409199714661,
+          "last_discovered": "2026-06-21T12:00:19.000000Z",
+          "last_ping": "2026-06-21T16:05:21.000000Z",
+          "last_ping_timetaken": 0.613,
+          "purpose": null,
+          "type": "server",
+          "serial": "SN-2273b8",
+          "icon": "images/os/generic.svg",
+          "poller_group": 0,
+          "override_sysLocation": false,
+          "notes": null,
+          "port_association_mode": 1,
+          "max_depth": 0,
+          "disable_notify": false,
+          "ignore_status": false,
+          "mtu_status": true,
+          "location": "Lab",
+          "lat": null,
+          "lng": null
+        }
+      ],
+      "count": 1
+    },
+    "GET /api/v0/inventory/32?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
+    },
+    "GET /api/v0/devices/32/ports": {
+      "status": "ok",
+      "ports": [
+        {
+          "port_id": 7997,
+          "ifName": "iface-343506",
+          "ifType": "softwareLoopback",
+          "ifSpeed": 10000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-343506",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 65536,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 7998,
+          "ifName": "eth0",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 1000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "eth0",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:47:d1:bb",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 8014,
+          "ifName": "iface-836d19",
+          "ifType": "other",
+          "ifSpeed": 0,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-836d19",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 9500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        }
+      ]
+    },
+    "GET /api/v0/devices/32/port_stack": {
+      "status": "ok",
+      "mappings": []
+    },
+    "GET /api/v0/devices/32/transceivers": {
+      "status": "ok",
+      "transceivers": []
+    }
+  },
+  "expected": {
+    "virtual_chassis": null
+  }
+}

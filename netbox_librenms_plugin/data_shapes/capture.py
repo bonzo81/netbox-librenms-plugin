@@ -42,7 +42,7 @@ def _select_parent_index(root_items):
     return stack_index if stack_index is not None else chassis_index
 
 
-def capture_device_recording(api, device_id, *, name=None, description="", meta=None):
+def capture_device_recording(api, device_id, *, name=None, description="", meta=None, oob_id=None):
     """
     Capture a device's structural LibreNMS responses into a recording dict.
 
@@ -52,6 +52,9 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         name (str | None): Recording name; defaults to ``"device-<id>"``.
         description (str): Human-readable description of the scenario.
         meta (dict | None): Extra metadata to merge; ``os`` is auto-filled from device info.
+        oob_id (int | None): LibreNMS id of a linked out-of-band controller. When set, its ports are
+            recorded too (the interfaces view merges them into the host as ``_source="oob"`` rows and
+            runs shared-LOM detection), and ``meta["oob_id"]`` is stored so replay can fetch them.
 
     Returns:
         dict: A recording with ``schema_version``, ``name``, ``description``, ``meta``,
@@ -115,11 +118,18 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         if ss_ok and device_serial_sensors:
             responses["GET /api/v0/resources/sensors"] = {"status": "ok", "sensors": device_serial_sensors}
 
+    # 7. OOB controller ports — a SEPARATE LibreNMS device the interfaces view merges into the host.
+    #    Record them under the controller's own /ports route so replay's get_ports(oob_id) serves them.
+    meta_out = {"os": device_os, **(meta or {})}
+    if oob_id is not None:
+        record(f"devices/{oob_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
+        meta_out["oob_id"] = oob_id
+
     return {
         "schema_version": SCHEMA_VERSION,
         "name": name or f"device-{device_id}",
         "description": description,
-        "meta": {"os": device_os, **(meta or {})},
+        "meta": meta_out,
         "device_id": device_id,
         "responses": responses,
     }

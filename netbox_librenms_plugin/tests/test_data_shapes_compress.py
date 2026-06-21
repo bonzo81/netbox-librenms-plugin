@@ -124,3 +124,25 @@ def test_compression_no_ports_route_is_noop():
     """A recording without a ports response is returned unchanged."""
     rec = {"schema_version": 1, "name": "x", "device_id": 1, "meta": {}, "responses": {}}
     assert compress_recording(rec) is rec
+
+
+def test_compression_targets_main_device_not_oob_controller():
+    """With an OOB controller's /ports route present, compression trims the host's ports, not the OOB's."""
+    host_ports = [_port(i, f"eth{i}", "ethernetCsmacd", ifVlan=10) for i in range(20)]  # redundant
+    oob_ports = [_port(900 + i, f"oob{i}", "ethernetCsmacd") for i in range(10)]
+    rec = {
+        "schema_version": 1,
+        "name": "host-oob",
+        "device_id": 39,
+        "meta": {"os": "linux", "oob_id": 25},
+        "responses": {
+            "GET /api/v0/devices/39/ports": {"status": "ok", "ports": host_ports},
+            "GET /api/v0/devices/25/ports": {"status": "ok", "ports": oob_ports},
+        },
+    }
+    comp = compress_recording(rec)
+
+    # The host's 20 same-shape ports collapse to 1; the OOB controller's 10 ports are untouched.
+    assert len(comp["responses"]["GET /api/v0/devices/39/ports"]["ports"]) == 1
+    assert len(comp["responses"]["GET /api/v0/devices/25/ports"]["ports"]) == 10
+    assert comp["meta"]["compressed_ports"] == {"from": 20, "to": 1}

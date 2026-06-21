@@ -125,6 +125,15 @@ def _assert_serial_ports(api, device_id, expected):
         assert sum(1 for r in rows if r["is_configured"]) == expected["configured"]
 
 
+def _assert_oob(api, recording, expected):
+    """The linked OOB controller's ports are recorded and replayable (the interfaces view merges them)."""
+    oob_id = recording.get("meta", {}).get("oob_id")
+    assert oob_id is not None, f"{recording['name']} declares oob outcome but no meta.oob_id"
+    ok, oob_data = api.get_ports(oob_id)
+    assert ok, oob_data
+    assert len(oob_data["ports"]) == expected["controller_ports"]
+
+
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_recording_outcomes(recording, recording_server):
     """Replay a recording and assert its declared outcomes against the real logic."""
@@ -143,3 +152,6 @@ def test_recording_outcomes(recording, recording_server):
 
     if "serial_ports" in expected:
         _assert_serial_ports(api, device_id, expected["serial_ports"])
+
+    if "oob" in expected:
+        _assert_oob(api, recording, expected["oob"])

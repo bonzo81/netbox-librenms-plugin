@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "name": "linux-host-oob",
+  "description": "Linux host with a linked DRAC out-of-band controller (separate LibreNMS device whose ports the interfaces view merges in).",
+  "meta": {
+    "os": "os-9bf16a",
+    "oob_id": 25,
+    "compressed_ports": {
+      "from": 7,
+      "to": 3
+    }
+  },
+  "device_id": 39,
+  "responses": {
+    "GET /api/v0/devices/39": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 39,
+          "inserted": "2026-05-08T11:31:50.000000Z",
+          "hostname": "device-5896a4",
+          "sysName": "device-3baf97",
+          "display": "device-3baf97",
+          "ip": "192.0.2.73",
+          "overwrite_ip": null,
+          "community": null,
+          "authlevel": "",
+          "authname": "",
+          "authpass": "",
+          "authalgo": "",
+          "cryptopass": "",
+          "cryptoalgo": "",
+          "snmpver": "",
+          "port": 161,
+          "transport": "udp",
+          "timeout": null,
+          "retries": null,
+          "snmp_disable": false,
+          "bgpLocalAs": null,
+          "sysObjectID": ".1.3.6.1.4.1.8072.3.2.10",
+          "sysDescr": "",
+          "sysContact": "",
+          "version": null,
+          "hardware": "MODEL-ff652c",
+          "features": "Ubuntu 22.04",
+          "location_id": 1,
+          "os": "os-9bf16a",
+          "status": true,
+          "status_reason": "",
+          "ignore": false,
+          "disabled": false,
+          "uptime": 6980973,
+          "agent_uptime": 0,
+          "last_polled": "2026-06-21T16:03:00.000000Z",
+          "last_poll_attempted": null,
+          "last_polled_timetaken": 7.3144137859344,
+          "last_discovered_timetaken": 14.006812810898,
+          "last_discovered": "2026-06-21T12:00:35.000000Z",
+          "last_ping": "2026-06-21T16:02:54.000000Z",
+          "last_ping_timetaken": 0.489,
+          "purpose": null,
+          "type": "server",
+          "serial": "SN-7a9947",
+          "icon": "images/os/generic.svg",
+          "poller_group": 0,
+          "override_sysLocation": false,
+          "notes": null,
+          "port_association_mode": 1,
+          "max_depth": 0,
+          "disable_notify": false,
+          "ignore_status": false,
+          "mtu_status": true,
+          "location": "Lab",
+          "lat": null,
+          "lng": null
+        }
+      ],
+      "count": 1
+    },
+    "GET /api/v0/inventory/39?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
+    },
+    "GET /api/v0/devices/39/ports": {
+      "status": "ok",
+      "ports": [
+        {
+          "port_id": 8641,
+          "ifName": "iface-343506",
+          "ifType": "softwareLoopback",
+          "ifSpeed": 10000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-343506",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 65536,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 8642,
+          "ifName": "eno17395np0",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 1000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "eno17395np0",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:2c:58:35",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 8647,
+          "ifName": "iface-836d19",
+          "ifType": "other",
+          "ifSpeed": null,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-836d19",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 9500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        }
+      ]
+    },
+    "GET /api/v0/devices/39/port_stack": {
+      "status": "ok",
+      "mappings": []
+    },
+    "GET /api/v0/devices/39/transceivers": {
+      "status": "ok",
+      "transceivers": []
+    },
+    "GET /api/v0/devices/25/ports": {
+      "status": "ok",
+      "ports": [
+        {
+          "port_id": 2459,
+          "ifName": "iface-343506",
+          "ifType": "softwareLoopback",
+          "ifSpeed": 10000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-343506",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 65536,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2460,
+          "ifName": "bond0",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": null,
+          "ifAdminStatus": "down",
+          "ifDescr": "bond0",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:85:fb:52",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2461,
+          "ifName": "eth0",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 1000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "eth0",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:63:17:b3",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2462,
+          "ifName": "ens10",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": null,
+          "ifAdminStatus": "up",
+          "ifDescr": "ens10",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:63:17:b3",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2463,
+          "ifName": "iface-686547",
+          "ifType": "tunnel",
+          "ifSpeed": null,
+          "ifAdminStatus": "down",
+          "ifDescr": "iface-686547",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 1480,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2464,
+          "ifName": "iface-6c2424",
+          "ifType": "tunnel",
+          "ifSpeed": null,
+          "ifAdminStatus": "down",
+          "ifDescr": "iface-6c2424",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 1480,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2465,
+          "ifName": "iface-e5edbd",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": null,
+          "ifAdminStatus": "down",
+          "ifDescr": "iface-e5edbd",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:1e:58:07",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2466,
+          "ifName": "iface-293493",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": null,
+          "ifAdminStatus": "down",
+          "ifDescr": "iface-293493",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:f3:ae:c4",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2467,
+          "ifName": "iface-4cd8f6",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": null,
+          "ifAdminStatus": "down",
+          "ifDescr": "iface-4cd8f6",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:79:5a:68",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 2468,
+          "ifName": "iface-225126",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 1000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-225126",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:63:17:b3",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        }
+      ]
+    }
+  },
+  "expected": {
+    "virtual_chassis": null,
+    "oob": {
+      "controller_ports": 10
+    }
+  }
+}
