@@ -413,6 +413,20 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             cached_data = cache.get(self.get_cache_key(cache_device, "ports", server_key))
             last_fetched = cache.get(self.get_last_fetched_key(cache_device, "ports", server_key))
 
+        # Fail closed on a stale/corrupt cache entry: the enrichment below assumes a dict with a
+        # list of dict ports (same contract post() validates before caching), so a malformed
+        # snapshot would 500 the sync tab before the user could refresh. Drop it and render empty.
+        if cached_data is not None and not (
+            isinstance(cached_data, dict)
+            and isinstance(cached_data.get("ports"), list)
+            and all(isinstance(port, dict) for port in cached_data["ports"])
+        ):
+            if fresh_data is None:
+                cache.delete(self.get_cache_key(cache_device, "ports", server_key))
+                cache.delete(self.get_last_fetched_key(cache_device, "ports", server_key))
+            cached_data = None
+            last_fetched = None
+
         # A snapshot tagged oob_incomplete is host-only because the linked OOB controller's
         # ports could not be fetched on the last refresh. Surface it on every render of that
         # snapshot (via an inline banner) so the missing OOB rows are never silently absent.

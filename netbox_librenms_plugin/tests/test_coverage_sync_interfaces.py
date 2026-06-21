@@ -293,6 +293,23 @@ class TestInterfaceContextOOBRows:
         assert "table" in ctx
         assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
 
+    def test_malformed_cached_port_snapshot_fails_closed(self):
+        """A stale/corrupt cached ports snapshot (non-dict, or ports not a list of dicts) must be dropped and re-rendered empty, not 500 the sync tab — and the bad entry purged so a later render re-fetches."""
+        view, _ = self._make_view({"ports": []})
+        obj = MagicMock(id=1, name="host1")
+        obj.virtual_chassis = None
+        req = _make_request()
+
+        for bad in ("garbage-string", {"ports": "not-a-list"}, {"ports": [42]}):
+            with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
+                mock_cache.get.side_effect = lambda key, bad=bad: (
+                    bad if key == "ports-key" else ({} if key == "ov-key" else None)
+                )
+                mock_cache.ttl.return_value = None
+                ctx = view.get_context_data(req, obj, "ifName", "default")  # must not raise
+            assert "table" in ctx
+            assert any(c.args and c.args[0] == "ports-key" for c in mock_cache.delete.call_args_list)
+
 
 # ===========================================================================
 # SyncInterfacesView.post — full flows
