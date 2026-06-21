@@ -890,6 +890,9 @@ class TestValidateDeviceForImportEdgeCases:
         from netbox_librenms_plugin.tests.conftest import make_device, make_ip
 
         dev = make_device("host-with-oob-ctrl")
+        # Decoy row sharing the host address, created FIRST so .first() returns it — it is not
+        # anyone's oob_ip, so the match must come from the full matching-IP set, not .first().
+        make_ip("10.10.10.9/32")
         oob_ip = make_ip("10.10.10.9/32")  # bare OOB address, assigned to no interface
         dev.oob_ip = oob_ip
         dev.save()

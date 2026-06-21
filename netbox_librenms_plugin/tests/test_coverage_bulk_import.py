@@ -1188,6 +1188,9 @@ class TestRefreshExistingDevice:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         dev = make_device("ref-oob-ip-dev")
+        # A decoy row sharing the same host address, created FIRST so .first() returns it — it is
+        # NOT anyone's oob_ip, so the match must come from the FULL matching-IP set, not .first().
+        IPAddress.objects.create(address="10.0.0.19/24")
         oob_ip = IPAddress.objects.create(address="10.0.0.19/24")  # assigned to no interface
         dev.oob_ip = oob_ip
         dev.save()

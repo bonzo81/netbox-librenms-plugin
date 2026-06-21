@@ -963,7 +963,8 @@ def validate_device_for_import(
                 if primary_ip and not import_as_vm:
                     from ipam.models import IPAddress
 
-                    existing_ip = IPAddress.objects.filter(address__net_host=primary_ip).first()
+                    matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
+                    existing_ip = matching_ips.first()
                     if existing_ip:
                         device = (
                             existing_ip.assigned_object.device
@@ -973,9 +974,11 @@ def validate_device_for_import(
                         # Device.oob_ip is a direct FK independent of assigned_object: an IP can be
                         # a device's OOB address while assigned to no interface (e.g. a NAT'd OOB IP
                         # whose assigned_object is None). Fall back to the oob_ip FK so the OOB
-                        # detection below still finds such devices.
+                        # detection below still finds such devices. Match against EVERY row sharing
+                        # this host address, not just .first(), so the OOB device is found even when
+                        # its oob_ip is a different one of the duplicate net_host rows.
                         if device is None:
-                            device = Device.objects.filter(oob_ip=existing_ip).first()
+                            device = Device.objects.filter(oob_ip__in=matching_ips).first()
                         if device:
                             # Surface any existing host/OOB linkage so the import UI renders the
                             # correct row state (the librenms_id / serial branches do the same;
@@ -988,7 +991,13 @@ def validate_device_for_import(
                                 libre_device.get("os", ""),
                                 libre_device.get("hardware", ""),
                             )
-                            is_oob_ip = device.oob_ip_id is not None and existing_ip.pk == device.oob_ip_id
+                            # Check the device's oob_ip against EVERY row sharing this host address,
+                            # not just existing_ip (.first()): with duplicate net_host rows the device's
+                            # oob_ip may be a different matching row, and comparing only the first would
+                            # wrongly read is_oob_ip as False.
+                            is_oob_ip = (
+                                device.oob_ip_id is not None and matching_ips.filter(pk=device.oob_ip_id).exists()
+                            )
                             has_primary_ip = bool(device.primary_ip4_id or device.primary_ip6_id)
                             # When the incoming IP already IS the device's oob_ip this is an OOB
                             # candidate regardless of whether the LibreNMS os/hardware tokens let us

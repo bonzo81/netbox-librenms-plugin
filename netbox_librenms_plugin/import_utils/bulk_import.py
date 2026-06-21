@@ -700,7 +700,8 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 if primary_ip:
                     from ipam.models import IPAddress
 
-                    existing_ip = IPAddress.objects.filter(address__net_host=primary_ip).first()
+                    matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
+                    existing_ip = matching_ips.first()
                     assigned = getattr(existing_ip, "assigned_object", None) if existing_ip else None
                     dev = getattr(assigned, "device", None) if assigned else None
                     if dev is None and existing_ip is not None:
@@ -708,7 +709,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                         # (a direct FK) while assigned to no interface, so the assigned_object
                         # lookup above misses it. Without this fallback a row whose only link is
                         # an OOB address flips to importable and re-imports the existing device.
-                        dev = _Device.objects.filter(oob_ip=existing_ip).first()
+                        # Match against EVERY row sharing this host address (duplicate net_host
+                        # entries), not just .first(), so the OOB device is found even when its
+                        # oob_ip is a different one of the matching rows.
+                        dev = _Device.objects.filter(oob_ip__in=matching_ips).first()
                     if dev:
                         new_device, match_type = dev, "primary_ip"
 
