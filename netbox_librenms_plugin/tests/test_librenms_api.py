@@ -3096,6 +3096,18 @@ class TestResolvePortRelationships:
         result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns={})
         assert result == {"lag_members": {501: 502}, "sub_interfaces": {}, "bridge_members": {}}
 
+    def test_none_ports_and_port_stack_return_empty_maps(self, mock_librenms_api):
+        """A 0-port device can surface ports/port_stack as None (e.g. `ports_data["ports"]` is null on a 0-port iosxr device); resolution must treat that as 'nothing to resolve', not crash iterating None."""
+        # ports is None (null "ports" body), port_stack a valid list — must not raise.
+        result = mock_librenms_api.resolve_port_relationships(None, NOKIA_PORT_STACK[:1], lag_patterns={})
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
+        # port_stack is None (null "mappings"), ports a valid list — must not raise.
+        result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, None, lag_patterns={})
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
+        # Both None — the full 0-port shape.
+        result = mock_librenms_api.resolve_port_relationships(None, None, lag_patterns={})
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
+
     @pytest.mark.django_db
     def test_db_patterns_scoped_to_device_os(self, mock_librenms_api):
         """With device_os set, only that OS's stored pattern is loaded — a pattern from a different platform must not classify this device's interfaces (the round-12 finding)."""

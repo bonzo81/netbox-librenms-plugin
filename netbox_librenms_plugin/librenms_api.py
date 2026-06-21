@@ -877,6 +877,18 @@ class LibreNMSAPI:
 
         """
         from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS
+
+        # A 0-port device (e.g. an iosxr management node with an empty ifTable) can surface
+        # `ports`/`port_stack` as None when a caller threads a missing or `null` payload field
+        # straight in — `ports_data["ports"]` is None when the LibreNMS body carries
+        # `"ports": null`, and likewise a null `mappings`. Coerce any non-list input to [] so
+        # resolution is a clean no-op instead of crashing on iteration ("'NoneType' object is
+        # not iterable"). A dict/str input already yields no usable entries below; normalizing
+        # here keeps that behaviour while closing the None gap.
+        if not isinstance(ports, list):
+            ports = []
+        if not isinstance(port_stack, list):
+            port_stack = []
         from netbox_librenms_plugin.utils import normalize_librenms_port_id
 
         # Ignore malformed port items without losing valid relationships from the same payload.
