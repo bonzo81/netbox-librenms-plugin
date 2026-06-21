@@ -355,6 +355,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                 # Reject it here so a malformed LibreNMS payload fails closed.
                 if not isinstance(item, dict) or "port_id" not in item:
                     return False
+                # port_id is used as a cache-dict key in _get_port_info(); an unhashable
+                # (e.g. {}/[]) or bool value would raise inside `port_id not in port_data_cache`
+                # and 500 the fresh-refresh path. Reject anything that is not a plain int/str.
+                port_id = item.get("port_id")
+                if isinstance(port_id, bool) or not isinstance(port_id, (int, str)):
+                    return False
                 return (
                     {"ip_address", "prefix_length"} <= item.keys()
                     or {"ipv6_compressed", "ipv6_prefixlen"} <= item.keys()

@@ -1378,6 +1378,30 @@ class TestPrepareContextInterfaceNameFieldNone:
         mock_enrich.assert_not_called()  # never enrich a row that would KeyError downstream
         mock_cache.set.assert_not_called()
 
+    def test_fetch_fresh_unhashable_port_id_returns_none(self):
+        """A row with a valid address/prefix pair but an unhashable port_id (e.g. {}) must fail closed: as a cache-dict key in _get_port_info() it would raise `unhashable type` and 500 the fresh-refresh path."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        with (
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch.object(
+                view,
+                "get_ip_addresses",
+                return_value=(True, [{"port_id": {}, "ip_address": "10.0.0.1", "prefix_length": 24}]),
+            ),
+            patch.object(view, "_resolve_management_ip", return_value="") as mock_mgmt,
+            patch.object(view, "enrich_ip_data") as mock_enrich,
+        ):
+            result = view._prepare_context(request, obj, "ifName", fetch_fresh=True)
+
+        assert result is None
+        mock_mgmt.assert_not_called()  # bail before the live mgmt-ip lookup
+        mock_enrich.assert_not_called()  # never enrich a row whose port_id would crash the cache lookup
+        mock_cache.set.assert_not_called()
+
     def test_cached_render_reuses_cached_ports_without_live_calls(self):
         """A warm-cache render must enrich from the cached ports_by_id map and never call get_port_by_id(), so the IP tab keeps working when LibreNMS is unavailable."""
         view = self._make_view()
