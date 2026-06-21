@@ -458,5 +458,7 @@ def find_pii(recording):
                         continue
                     findings.append({"path": path, "kind": kind, "value": match})
 
-    scan(recording.get("responses", {}), "responses")
+    # Scan the whole recording, not just `responses`: residual PII can also land in top-level
+    # fields (name/description/meta), which feed the same validation + fixture safety net.
+    scan(recording, "recording")
     return findings

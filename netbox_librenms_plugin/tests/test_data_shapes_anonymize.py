@@ -152,6 +152,17 @@ def test_find_pii_flags_residual_pii_in_unexpected_field():
     assert not any(f["kind"] == "email" for f in find_pii(anon))
 
 
+def test_find_pii_scans_top_level_fields_not_just_responses():
+    """find_pii must scan the whole recording — residual PII in a top-level field (name/description/meta) is missed if only `responses` is scanned."""
+    rec = _ports()
+    rec["description"] = "captured from noc@example.com"  # top-level free text with a residual email
+    rec["meta"] = {"note": "mgmt 10.4.5.6"}  # top-level meta with a residual IP
+
+    kinds = {(f["kind"], f["value"]) for f in find_pii(rec)}
+    assert ("email", "noc@example.com") in kinds
+    assert ("ipv4", "10.4.5.6") in kinds
+
+
 def test_find_pii_ignores_oid_and_version_dotted_decimals():
     """SNMP object IDs and version strings are dotted-decimal but not IPs — the safety-net must not flag them."""
     rec = _ports()
