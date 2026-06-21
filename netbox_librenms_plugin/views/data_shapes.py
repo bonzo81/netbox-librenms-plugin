@@ -17,6 +17,7 @@ from django.views import View
 from netbox_librenms_plugin.data_shapes import recordings_store
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
+from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import classify_novelty, compute_shape_signature
 from netbox_librenms_plugin.utils import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
@@ -61,6 +62,10 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             name=f"{device.name}-shape",
             description=f"Captured from {device.name}.",
         )
+        # Trim redundant high-cardinality ports BEFORE anonymizing — on the raw port names, which is
+        # exactly what relationship resolution reads — so the shape stays intact while the recording
+        # the contributor submits is small and reviewable.
+        recording = compress_recording(recording)
         anonymized = anonymize_recording(recording)
         signature = compute_shape_signature(anonymized)
         novelty = classify_novelty(signature, recordings_store.load_manifest())

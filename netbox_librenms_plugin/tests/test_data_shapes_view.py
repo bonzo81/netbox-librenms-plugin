@@ -98,6 +98,52 @@ def test_capture_view_reports_similar_for_related_os_variant(recording_server):
 
 
 @pytest.mark.django_db
+def test_capture_view_compresses_redundant_ports(recording_server):
+    """The capture pipeline trims redundant high-cardinality ports before anonymizing/displaying."""
+    ports = [
+        {"port_id": 1, "ifName": "Bundle-Ether1", "ifType": "ieee8023adLag"},
+        {"port_id": 2, "ifName": "GigabitEthernet0/0/0/1", "ifType": "ethernetCsmacd"},
+    ]
+    # 60 same-shape access ports (ethernetCsmacd + VLAN), no relationships — pure cardinality.
+    for i in range(60):
+        ports.append(
+            {"port_id": 100 + i, "ifName": f"GigabitEthernet0/0/1/{i}", "ifType": "ethernetCsmacd", "ifVlan": 10}
+        )
+    rec = {
+        "schema_version": 1,
+        "name": "big",
+        "device_id": 1000,
+        "meta": {"os": "iosxr"},
+        "responses": {
+            "GET /api/v0/devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "iosxr"}]},
+            "GET /api/v0/devices/1000/ports": {"status": "ok", "ports": ports},
+            "GET /api/v0/devices/1000/port_stack": {
+                "status": "ok",
+                "mappings": [{"high_port_id": 2, "low_port_id": 1}],
+            },
+        },
+    }
+    _server, api = recording_server(rec)
+    device = make_device("cap-big")
+    view = _view_with_api(api)
+
+    with (
+        patch.object(view, "rebind_api_for_server", return_value="test"),
+        patch.object(api, "get_librenms_id", return_value=1000),
+        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
+    ):
+        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+
+    html = response.content.decode()
+    # The displayed JSON is HTML-escaped (quotes → &quot;), so assert on quote-free substrings.
+    # The meta records that compression ran (the key is only added when ports are dropped)...
+    assert "compressed_ports" in html
+    # ...and only 3 port records remain (down from 62): LAG aggregate + its member + one access rep.
+    # ifName appears once per port and nowhere else in the recording.
+    assert html.count("ifName") == 3
+
+
+@pytest.mark.django_db
 def test_capture_view_errors_when_device_not_linked(recording_server):
     """A device with no LibreNMS id shows an error panel instead of capturing."""
     _server, api = recording_server(load_recording("cisco-stackwise-3member"))
