@@ -401,3 +401,28 @@ class TestPromoteToHostFallbackPane:
         """Branch-agnostic: whether the fallback or the real promote pane renders, the row must offer an action inside the Host div."""
         html = self._render()
         assert 'id="serial-role-host-5"' in html
+
+
+def test_promote_override_handler_clears_hidden_when_switching_back_to_keep():
+    """The override JS must set the hidden from the 'new' radio's own checked state.
+
+    The old handler only cleared the hidden when a radio carrying data-override-target had
+    value 'keep' — but the Keep radio has no data-override-target, so switching back to Keep
+    left the previous override value posted. Assert against the shipped template source.
+    """
+    from pathlib import Path
+
+    import netbox_librenms_plugin
+
+    source = (
+        Path(netbox_librenms_plugin.__file__).parent
+        / "templates"
+        / "netbox_librenms_plugin"
+        / "htmx"
+        / "device_validation_details.html"
+    ).read_text()
+
+    # The fixed handler keys off the new radio's checked state (clears when unchecked).
+    assert "hidden.value = r.checked ?" in source
+    # The buggy keep-branch (which never fired, since Keep has no data-override-target) is gone.
+    assert 'r.value === "keep"' not in source

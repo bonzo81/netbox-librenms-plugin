@@ -402,12 +402,13 @@ class TestMergeTransceiverDataPortIdentity:
         mock_cache.delete.assert_called_once_with("test_cache_key")
         view._librenms_api.get_ports.assert_not_called()
 
-    def test_post_stale_server_key_resolves_migrated_context_with_fallback(self):
-        """When the POSTed server_key is stale (rebind fails) and absent from POST, the migrated context must still resolve via the session server-key fallback, not None — otherwise a migrated donor loses migrated mode and its sync controls are re-enabled."""
+    def test_post_stale_server_key_resolves_migrated_context_with_session_key(self):
+        """When the POSTed server_key is stale (rebind fails), the migrated context must resolve under the session/active key — NOT the stale posted key (which would miss the marker and re-enable a donor's sync controls)."""
         view = _make_view()
         obj = MagicMock()
         request = MagicMock()
-        request.POST.get.side_effect = lambda key, default=None: default  # no server_key posted
+        # A NON-EMPTY but stale/unconfigured key is posted (rebind returns None for it).
+        request.POST.get.side_effect = lambda key, default=None: {"server_key": "ghost-server"}.get(key, default)
         view.get_object = MagicMock(return_value=obj)
         view.rebind_api_for_server = MagicMock(return_value=None)  # stale key → rebind fails
         view.has_write_permission = MagicMock(return_value=False)
@@ -423,7 +424,7 @@ class TestMergeTransceiverDataPortIdentity:
         ):
             result = view.post(request, pk=1)
 
-        # Resolved via the session server-key fallback ("test-server"), not None.
+        # Resolved under the session/active server key ("test-server"), NOT the stale "ghost-server".
         mock_migrated.assert_called_once_with(obj, "test-server")
         assert result == "rendered"
 

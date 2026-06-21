@@ -878,23 +878,62 @@ class TestNonHtmxFallbackRedirect:
         assert resp.url == f"{expected}?tab=interfaces&server_key=siteB"
 
 
-@pytest.mark.django_db
 class TestMigratedTransferIpDeviceOnlyGate:
-    """librenms_sync_base.html serves both Devices and VMs, but the migrated-donor transfer-IP buttons all POST to ``device_transfer_ip`` with ``pk=object.pk`` (a Device lookup)."""
+    """The shipped librenms_sync_base.html must gate the migrated-donor transfer-IP buttons to Devices.
 
-    GATE = "{% load helpers %}{% if object|meta:'model_name' == 'device' %}TRANSFER{% endif %}"
+    These POST to ``device_transfer_ip`` with ``pk=object.pk`` (a Device lookup), so they must not
+    render on a VM page. Assert against the real template SOURCE so the test fails if the guard is
+    dropped — not a hand-copied mini-template that can drift from what ships.
+    """
 
-    def _render(self, obj):
-        from django.template import engines
+    def _template_source(self):
+        from pathlib import Path
 
-        return engines["django"].from_string(self.GATE).render({"object": obj})
+        import netbox_librenms_plugin
 
-    def test_device_page_renders_transfer_block(self):
-        device = make_device("transfer-gate-dev")
-        assert self._render(device) == "TRANSFER"
+        return (
+            Path(netbox_librenms_plugin.__file__).parent
+            / "templates"
+            / "netbox_librenms_plugin"
+            / "librenms_sync_base.html"
+        ).read_text()
 
-    def test_vm_page_omits_transfer_block(self):
-        from netbox_librenms_plugin.tests.conftest import make_vm
+    def test_transfer_ip_buttons_are_gated_to_devices_in_shipped_template(self):
+        source = self._template_source()
+        assert "device_transfer_ip" in source
+        # The device-only guard must open before the transfer-IP controls so a VM page can't
+        # render them; if the guard is dropped, this fails.
+        guard_idx = source.find('object|meta:"model_name" == "device"')
+        assert guard_idx != -1, "device-only guard missing from migrated transfer block"
+        assert guard_idx < source.find("device_transfer_ip"), "transfer-IP controls are not behind the device guard"
 
-        vm = make_vm("transfer-gate-vm")
-        assert self._render(vm) == ""
+
+@pytest.mark.django_db
+class TestVlanStaleServerMigratedContext:
+    """The VLAN stale-server error path resolves migrated context under the session key, not the stale posted key."""
+
+    def test_stale_key_resolves_migrated_context_under_session_key(self):
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        view._librenms_api = MagicMock(server_key="test-server")
+        obj = MagicMock()
+        view.get_object = MagicMock(return_value=obj)
+        view.rebind_api_for_server = MagicMock(return_value=None)  # stale/unconfigured posted key
+        view._get_error_context = MagicMock(return_value={})
+        request = MagicMock()
+        request.POST.get.side_effect = lambda k, d=None: {"server_key": "ghost-server"}.get(k, d)
+
+        with (
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
+            patch(
+                "netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}
+            ) as mock_mig,
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.render", return_value="rendered"),
+        ):
+            result = view.post(request, pk=1)
+
+        mock_mig.assert_called_once_with(obj, "test-server")  # session key, not "ghost-server"
+        assert result == "rendered"

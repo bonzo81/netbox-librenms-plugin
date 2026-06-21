@@ -957,11 +957,11 @@
                   if (!target) return;
                   var hidden = modal.querySelector('input[type=hidden][name="' + target + '"]');
                   if (!hidden) return;
-                  if (r.checked && r.value === "new") {
-                    hidden.value = r.getAttribute("data-override-value") || "";
-                  } else if (r.checked && r.value === "keep") {
-                    hidden.value = "";
-                  }
+                  // Only the "Use new" radio carries data-override-target; set the hidden to its
+                  // override value when it's checked and clear it otherwise. Keying off this
+                  // radio's own checked state means switching back to "Keep" (whose radio has no
+                  // data-override-target) still clears the hidden instead of leaving the stale value.
+                  hidden.value = r.checked ? (r.getAttribute("data-override-value") || "") : "";
                 });
               });
             })();

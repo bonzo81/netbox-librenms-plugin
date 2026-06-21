@@ -56,8 +56,10 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
                 ),
                 # Preserve migrated-context flags on this error exit too (every other POST
                 # path includes them); otherwise a donor/winner device loses its migration
-                # controls on a stale-server refresh until the next full reload.
-                **build_migrated_context(obj, request.POST.get("server_key")),
+                # controls on a stale-server refresh until the next full reload. Resolve the
+                # marker under the session/active server key — NOT the POSTed key, which failed
+                # to rebind (stale/unconfigured) and would miss the marker entirely.
+                **build_migrated_context(obj, self.librenms_api.server_key),
             }
             return render(request, self.partial_template_name, context)
         migrated = build_migrated_context(obj, server_key)

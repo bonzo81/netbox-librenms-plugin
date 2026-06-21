@@ -6091,6 +6091,39 @@ class TestPromoteToHostViewPost:
         assert b"legacy" in response.content.lower()
         assert response["HX-Reswap"] == "none"
 
+    def test_boolean_existing_libre_id_rejected(self):
+        """A boolean existing_libre_id (corrupt CF) must fail closed, not coerce to 1/0 via int()."""
+        view = self._make_view()
+        existing_device = make_device("promote-bool", librenms_cf={"default": {"id": 10}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        promote = {"existing_libre_id": True, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"Invalid existing LibreNMS id" in response.content
+
+    def test_promote_rejected_when_new_host_id_already_linked_elsewhere(self):
+        """When another device already owns the incoming host id, promotion aborts (exercises the deterministic-order conflict lock)."""
+        view = self._make_view()
+        existing_device = make_device("promote-src", librenms_cf={"default": {"id": 10}})
+        # Another NetBox device already linked to the incoming host id 17.
+        make_device("promote-conflict", librenms_cf={"default": {"id": 17}})
+        request = _make_request(post={"existing_device_id": str(existing_device.pk)})
+
+        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 17}, validation, {}))
+        response = view.post(request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"already linked to" in response.content
+        # The source device must be left unchanged (still host id 10, no OOB).
+        existing_device.refresh_from_db()
+        assert existing_device.custom_field_data["librenms_id"]["default"] == {"id": 10}
+
     def test_existing_link_already_points_at_incoming_device_returns_error(self):
         """If the existing link already equals the incoming LibreNMS id there is nothing to promote — the view must say so rather than self-demoting the same id into OOB."""
         view = self._make_view()

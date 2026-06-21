@@ -3113,10 +3113,10 @@ class PromoteToHostView(
         if new_host_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id")
 
-        existing_libre_id = promote.get("existing_libre_id")
-        try:
-            existing_libre_id = int(existing_libre_id)
-        except (TypeError, ValueError):
+        # Use coerce_librenms_id (not int()) so a boolean True/False in the JSON CF can't be
+        # coerced to 1/0 and treated as a real device id — mirrors the new_host_id guard above.
+        existing_libre_id = coerce_librenms_id(promote.get("existing_libre_id"))
+        if existing_libre_id is None:
             return _htmx_error_response("Invalid existing LibreNMS id in promotion data")
         if existing_libre_id == new_host_id:
             return _htmx_error_response("Existing link already points at this LibreNMS device")
@@ -3143,18 +3143,34 @@ class PromoteToHostView(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
 
-        with transaction.atomic():
-            try:
-                existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
-            except Device.DoesNotExist:
-                return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+        from netbox_librenms_plugin.utils import (
+            AmbiguousLibreNMSIdError,
+            find_by_librenms_id,
+            get_librenms_device_id,
+            get_librenms_oob,
+        )
 
-            from netbox_librenms_plugin.utils import (
-                AmbiguousLibreNMSIdError,
-                find_by_librenms_id,
-                get_librenms_device_id,
-                get_librenms_oob,
+        # Pre-resolve any device already linked to new_host_id WITHOUT locking, so the
+        # transaction can lock every row it touches in one deterministic pk order (mirrors the
+        # merge flow). Locking existing_device first and the conflict second would let two
+        # concurrent opposite-direction promotions each hold one row and block on the other
+        # (lock-order deadlock).
+        try:
+            pre_conflict = find_by_librenms_id(Device, new_host_id, server_key)
+        except AmbiguousLibreNMSIdError:
+            return _htmx_error_response(
+                f"LibreNMS device #{new_host_id} is ambiguous — it matches more than one NetBox "
+                "device. Resolve the duplicate assignment before promoting."
             )
+        lock_pks = {existing_device.pk}
+        if pre_conflict is not None:
+            lock_pks.add(pre_conflict.pk)
+
+        with transaction.atomic():
+            locked = {d.pk: d for d in Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk")}
+            existing_device = locked.get(existing_device.pk)
+            if existing_device is None:
+                return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
 
             current_host_id = get_librenms_device_id(existing_device, server_key=server_key, auto_save=False)
             current_oob = get_librenms_oob(existing_device, server_key=server_key)
@@ -3164,11 +3180,9 @@ class PromoteToHostView(
                 return _htmx_error_response(
                     "OOB link already set; this device may have been promoted by a concurrent request."
                 )
-            # Another device may have claimed new_host_id since validation ran. Re-check
-            # inside the transaction and abort on a non-self conflict so we don't create a
-            # duplicate host mapping. select_for_update locks the competing owner row so a
-            # concurrent promote/attach of the same id serializes against it; best-effort like
-            # the serial guard (no unique constraint on the JSON cf to fully close the window).
+            # Re-verify the conflict under lock (TOCTOU): a device could have gained or lost
+            # new_host_id between the unlocked pre-lookup and acquiring the row locks. The rows
+            # in lock_pks are already locked in pk order, so this re-check doesn't reorder locks.
             try:
                 host_conflict = find_by_librenms_id(Device, new_host_id, server_key, select_for_update=True)
             except AmbiguousLibreNMSIdError:
