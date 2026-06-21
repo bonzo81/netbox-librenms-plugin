@@ -579,8 +579,8 @@ function initializeVCMemberSelect() {
                     // after select.value already equals the newly-selected member, so a verify
                     // failure would "roll back" to the rejected member.
                     if (typeof select._lastVerifiedMember === 'undefined') {
-                        select._lastVerifiedMember =
-                            select.querySelector('option[selected]')?.value || select.value || null;
+                        const selectedOption = select.querySelector('option[selected]');
+                        select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
                     }
                     select.tomselect.on('change', function (value) {
                         handleInterfaceChange(select, value);
@@ -1227,7 +1227,8 @@ function handleInterfaceChange(select, value) {
     // NOT from select.value, which by the time this callback runs already equals the newly
     // selected (unverified) member, so a verify failure would otherwise "roll back" to it.
     if (typeof select._lastVerifiedMember === 'undefined') {
-        select._lastVerifiedMember = select.querySelector('option[selected]')?.value || null;
+        const selectedOption = select.querySelector('option[selected]');
+        select._lastVerifiedMember = selectedOption ? selectedOption.value : null;
     }
 
     // Disable this row's LAG/parent sync buttons while the verify is in flight. A click landing
