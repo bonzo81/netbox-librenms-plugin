@@ -86,25 +86,27 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 "signature": signature,
                 "recording_json": recording_json,
                 "residual_pii": residual_pii,
-                "issue_url": self._issue_url(device),
+                "issue_url": self._issue_url(anonymized.get("name", "")),
             },
         )
 
     def _error(self, request, device, message):
         return render(request, self.template_name, {"object": device, "error": message})
 
-    def _issue_url(self, device):
+    def _issue_url(self, anonymized_name):
         """
         Build a prefilled GitHub issue URL targeting the data-shape issue form.
 
         Only ``template``/``title``/``labels`` are prefilled — the data-shape.yml issue *form*
         ignores a ``body`` query param, and the anonymized recording is intentionally kept out of
         the URL (a full recording would blow past URL length limits). The user pastes the JSON
-        (copy/download from the modal) into the form's "Anonymized recording" field.
+        (copy/download from the modal) into the form's "Anonymized recording" field. The title uses
+        the *anonymized* recording name (``os-<hash>-shape-<hash>``), never the real device name —
+        the title goes into the public issue URL, so it must not leak infra the JSON scrubbed.
         """
         params = {
             "template": "data-shape.yml",
-            "title": f"Data shape: {device.name}",
+            "title": f"Data shape: {anonymized_name}" if anonymized_name else "Data shape submission",
             "labels": "data-shape",
         }
         return f"{ISSUE_BASE_URL}?{urlencode(params)}"

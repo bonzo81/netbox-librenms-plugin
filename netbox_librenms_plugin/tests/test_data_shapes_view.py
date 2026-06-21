@@ -144,6 +144,30 @@ def test_capture_view_compresses_redundant_ports(recording_server):
 
 
 @pytest.mark.django_db
+def test_capture_view_issue_url_uses_anonymized_name_not_device_name(recording_server):
+    """The prefilled GitHub issue title must carry the anonymized recording name, not the real device name."""
+    import re
+
+    _server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("supersecret-rtr01.dc1.internal")  # a realistic, infra-revealing name
+    view = _view_with_api(api)
+
+    with (
+        patch.object(view, "rebind_api_for_server", return_value="test"),
+        patch.object(api, "get_librenms_id", return_value=1000),
+        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
+    ):
+        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+
+    html = response.content.decode()
+    issue_url = re.search(r"https://github.com/[^\"']*issues/new[^\"']*", html)
+    assert issue_url, "issue link not found"
+    # The real device name must NOT reach the public issue URL; the anonymized shape name is used.
+    assert "supersecret-rtr01" not in issue_url.group(0)
+    assert "shape" in issue_url.group(0)
+
+
+@pytest.mark.django_db
 def test_capture_view_includes_oob_controller_ports(recording_server):
     """A device with a linked OOB controller has the controller's ports captured into the recording."""
     rec = load_recording("cisco-stackwise-3member")  # host device 1000
