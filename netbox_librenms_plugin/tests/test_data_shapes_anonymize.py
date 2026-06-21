@@ -342,6 +342,25 @@ def test_name_and_description_are_scrubbed_of_hostname():
     assert anon["description"] == "Anonymized LibreNMS data-shape capture."
 
 
+def test_version_pseudonymized_to_fw_hash():
+    """A device firmware version is pseudonymized to a deterministic fw-<hash> (no raw build leaks)."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        "devices": [{"device_id": 1, "version": "21.2R3-S4.8", "entPhysicalSoftwareRev": "21.2R3-S4.8"}],
+    }
+    a1 = anonymize_recording(rec)
+    a2 = anonymize_recording(rec)
+    dev1 = a1["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    dev2 = a2["responses"]["GET /api/v0/devices/1"]["devices"][0]
+
+    assert dev1["version"].startswith("fw-")
+    assert "21.2R3" not in dev1["version"]
+    assert dev1["entPhysicalSoftwareRev"].startswith("fw-")
+    assert dev1["version"] == dev2["version"]  # deterministic
+    assert find_pii(a1) == []
+
+
 def test_find_pii_flags_residual_fqdn_but_not_icon_or_version():
     """find_pii catches a leaked FQDN in free text, but not static asset paths or firmware versions."""
     rec = {
@@ -368,7 +387,7 @@ def test_find_pii_flags_residual_fqdn_but_not_icon_or_version():
     kinds = {(f["kind"], f["value"]) for f in findings}
     assert ("fqdn", "rtr.dc1.example.net") in kinds
     assert not any(f["value"] == "nokia.svg" for f in findings)  # icon exempt
-    assert not any(f["value"] == "3.9.0.4" for f in findings)  # version exempt
+    assert not any(f["value"] == "3.9.0.4" for f in findings)  # version pseudonymized to fw-<hash>
 
 
 def test_anonymization_preserves_port_relationships(recording_server):

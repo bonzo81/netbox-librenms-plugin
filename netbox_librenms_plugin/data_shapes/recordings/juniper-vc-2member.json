@@ -16,7 +16,7 @@
           "os": "junos",
           "serial": "SN-aa11bb",
           "ip": "192.0.2.11",
-          "version": "18.4R2"
+          "version": "fw-52119b"
         }
       ]
     },

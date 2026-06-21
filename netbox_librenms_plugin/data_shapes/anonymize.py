@@ -10,9 +10,9 @@ tests. Three strategies, by field:
   (entPhysicalModelName, transceiver model — keyed to NetBox ModuleType for module install).
   Anonymizing these would destroy the LAG/sub-interface/VC detection and module-matching the
   recordings exist to test.
-* **Pseudonymize deterministically** identifiers (serials, hostnames, the device chassis SKU):
-  the same input always maps to the same fake, so cross-references (a device serial that equals a
-  stack member serial) still match after anonymization.
+* **Pseudonymize deterministically** identifiers (serials, hostnames, the device chassis SKU,
+  firmware/software versions): the same input always maps to the same fake, so cross-references (a
+  device serial that equals a stack member serial) still match after anonymization.
 * **Scrub** PII to safe placeholders (IPs → RFC 5737/3849 documentation ranges, MACs → a
   synthetic ``02:00:00`` block, lat/lng → null, location → ``"Lab"``, free-text → "").
 
@@ -91,6 +91,10 @@ HOSTNAME_KEYS = frozenset({"hostname", "sysName", "remote_hostname", "display"})
 # blanking it loses no testable outcome. (entPhysicalModelName / transceiver `model` ARE matching
 # keys and are preserved via PRESERVE_KEYS instead.)
 MODEL_KEYS = frozenset({"hardware"})
+# Firmware / software version strings. Identifying (pin an exact build → deployment fingerprint /
+# CVE surface) and read by no sync logic, so pseudonymized to a deterministic fw-<hash>. (Device
+# chassis HARDWARE revision is left alone — it's not a firmware version.)
+VERSION_KEYS = frozenset({"version", "entPhysicalFirmwareRev", "entPhysicalSoftwareRev"})
 IP_KEYS = frozenset({"ip", "ipv4", "ipv6", "inet", "ip_address", "overwrite_ip"})
 MAC_KEYS = frozenset({"ifPhysAddress", "mac", "mac_address"})
 GEO_KEYS = frozenset({"lat", "lng", "latitude", "longitude"})
@@ -282,6 +286,8 @@ def _anon_value(key, value, salt):
         return f"device-{_hash(value, salt)}"
     if key in MODEL_KEYS:
         return f"MODEL-{_hash(value, salt)}"
+    if key in VERSION_KEYS:
+        return f"fw-{_hash(value, salt)}"
     if key in IP_KEYS:
         return _doc_ip(value, salt)
     if key in MAC_KEYS:
