@@ -40,6 +40,24 @@ def test_bundled_recording_carries_no_residual_pii(recording):
     assert find_pii(recording) == []
 
 
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_recording_has_no_public_asn(recording):
+    """A committed recording must not leak a public BGP ASN — bgpLocalAs is identifying, so it must be anonymized into the private 64512-65534 range (find_pii() is string-only and won't catch an int ASN)."""
+    from netbox_librenms_plugin.data_shapes.anonymize import BGP_KEYS
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in BGP_KEYS and isinstance(v, int) and not isinstance(v, bool) and v != 0:
+                    assert 64512 <= v <= 65534, f"{k}={v} is a public ASN; anonymize it to the private range"
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(recording.get("responses", {}))
+
+
 def test_manifest_is_in_sync_with_bundled_recordings():
     """data_shapes/recordings/manifest.json must match the bundled recordings.
 
