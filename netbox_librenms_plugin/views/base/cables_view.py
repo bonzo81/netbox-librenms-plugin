@@ -744,13 +744,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             # Keep migrated-donor context so the template still suppresses the live POST
             # form/button — a stale server_key must not silently re-enable cable sync on a
-            # migrated donor. Resolve the marker from the POSTed key (the rebind failed).
+            # migrated donor. Resolve the marker from the active session key (the POSTed key is
+            # now known-invalid after the failed rebind).
             return render(
                 request,
                 self.partial_template_name,
                 {
                     "cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
-                    **build_migrated_context(obj, posted_server_key),
+                    **build_migrated_context(
+                        obj, self.librenms_api.server_key
+                    ),  # session key, not the stale POSTed key
                 },
             )
         context = self._prepare_context(request, obj, fetch_fresh=True, server_key=server_key)

@@ -921,6 +921,30 @@ class TestMergeLibreNMSLinks:
         with pytest.raises(ValueError, match="unparseable librenms_id"):
             merge_librenms_links(winner, donor, "default")
 
+    def test_unsupported_winner_entry_shape_fails_closed(self):
+        """A non-None winner entry of an unsupported type (bool/float/list) must raise, not collapse to {} (which would let the winner inherit the donor's id)."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        for bad in (True, 1.5, [99], (1, 2)):
+            winner = self._make_dev("eve-ng-02", {"default": bad})
+            donor = self._make_dev("router-spare", {"default": {"id": 99}})
+            with pytest.raises(ValueError, match="unsupported librenms_id"):
+                merge_librenms_links(winner, donor, "default")
+
+    def test_unsupported_donor_entry_shape_fails_closed(self):
+        """A non-None donor entry of an unsupported type must raise rather than silently becoming {} (dropping the donor's link during merge)."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        for bad in (True, 1.5, [99], (1, 2)):
+            winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+            donor = self._make_dev("router-spare", {"default": bad})
+            with pytest.raises(ValueError, match="unsupported librenms_id"):
+                merge_librenms_links(winner, donor, "default")
+
 
 class TestMarkLibreNMSMigrated:
     """Tests for mark_librenms_migrated()."""

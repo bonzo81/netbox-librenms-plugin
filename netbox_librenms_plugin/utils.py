@@ -1940,8 +1940,16 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
         winner_entry = {"id": _coerced} if _coerced else {}
     elif isinstance(winner_entry, dict):
         winner_entry = dict(winner_entry)
-    else:
+    elif winner_entry is None:
         winner_entry = {}
+    else:
+        # An unsupported shape (bool/float/list/…) is corrupted state, not "no link". Fail closed
+        # like the string branch rather than collapsing to {}, which could silently change the
+        # merge (e.g. the winner inheriting the donor's id).
+        raise ValueError(
+            f"winner '{winner.name}' has an unsupported librenms_id[{server_key!r}] of type "
+            f"{type(winner_entry).__name__} — expected a positive integer, numeric string, or mapping."
+        )
 
     donor_entry = donor_cf.get(server_key)
     if isinstance(donor_entry, int) and not isinstance(donor_entry, bool):
@@ -1954,8 +1962,15 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
                 f"{donor_entry!r} — expected a positive integer or numeric string."
             )
         donor_entry = {"id": _coerced} if _coerced else {}
-    elif not isinstance(donor_entry, dict):
+    elif isinstance(donor_entry, dict):
+        pass
+    elif donor_entry is None:
         donor_entry = {}
+    else:
+        raise ValueError(
+            f"donor '{donor.name}' has an unsupported librenms_id[{server_key!r}] of type "
+            f"{type(donor_entry).__name__} — expected a positive integer, numeric string, or mapping."
+        )
 
     donor_id = donor_entry.get("id")
     donor_oob = donor_entry.get("oob") if isinstance(donor_entry.get("oob"), dict) else None

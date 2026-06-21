@@ -1390,6 +1390,7 @@ class TestBaseInterfaceTableViewBasics:
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
 
         view = object.__new__(BaseIPAddressTableView)
+        view._librenms_api = MagicMock(server_key="session-key")
         obj = MagicMock(pk=1)
         view.get_object = MagicMock(return_value=obj)
         view.rebind_api_for_server = MagicMock(return_value=None)  # stale key → rebind fails
@@ -1409,8 +1410,9 @@ class TestBaseInterfaceTableViewBasics:
             result = view.post(req, pk=1)
 
         mock_messages.error.assert_called_once()
-        # Migrated context resolved from the POSTed (stale) key and merged into the render.
-        mock_migrated.assert_called_once_with(obj, "ghost")
+        # Migrated context resolved under the session/active key — NOT the stale POSTed "ghost"
+        # (which failed to rebind and would miss the marker, re-enabling the donor's sync controls).
+        mock_migrated.assert_called_once_with(obj, "session-key")
         ctx = mock_render.call_args.args[2]
         assert ctx["migrated_to_marker"] == {"device_id": 7}
         # The stale-key render must also disable live IP sync state: ip_sync.server_key is None
