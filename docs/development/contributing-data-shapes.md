@@ -46,6 +46,7 @@ modal surfaces its findings; **review them before submitting.**
 
 1. Save the anonymized JSON to `netbox_librenms_plugin/data_shapes/recordings/<name>.json`.
 2. Add an `expected` block describing the outcome to assert, e.g.:
+
    ```json
    "expected": {
      "virtual_chassis": {"is_stack": true, "member_count": 2, "member_serials": ["SN-…", "SN-…"]},
@@ -53,15 +54,19 @@ modal surfaces its findings; **review them before submitting.**
      "sub_interfaces": {"<child_port_id>": "<parent_port_id>"}
    }
    ```
+
    All three keys are optional — include only what the shape exercises.
 3. Validate and refresh the novelty manifest:
+
    ```console
-   $ python manage.py librenms_recordings --validate netbox_librenms_plugin/data_shapes/recordings/<name>.json
-   $ python manage.py librenms_recordings --rebuild-manifest
+   python manage.py librenms_recordings --validate netbox_librenms_plugin/data_shapes/recordings/<name>.json
+   python manage.py librenms_recordings --rebuild-manifest
    ```
+
 4. Run the suite — the new recording is now a test:
+
    ```console
-   $ pytest netbox_librenms_plugin/tests/test_recordings.py
+   pytest netbox_librenms_plugin/tests/test_recordings.py
    ```
 
 ## The `librenms_recordings` command
