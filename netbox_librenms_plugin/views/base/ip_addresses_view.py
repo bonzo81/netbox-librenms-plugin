@@ -520,7 +520,16 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                 request,
                 self.partial_template_name,
                 {
-                    "ip_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
+                    "ip_sync": {
+                        "object": obj,
+                        "table": None,
+                        "cache_expiry": None,
+                        "server_key": None,
+                        # Preserve the user's set-primary-IP preference: the template binds the
+                        # checkbox to ip_sync.set_primary_ip, so omitting it silently unchecks it
+                        # on this error re-render.
+                        "set_primary_ip": resolve_set_primary_ip(request),
+                    },
                     **build_migrated_context(
                         obj, self.librenms_api.server_key
                     ),  # session key, not the stale POSTed key
@@ -542,6 +551,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                         "table": None,
                         "cache_expiry": None,
                         "server_key": server_key,
+                        # Preserve the set-primary-IP checkbox state across a failed refresh
+                        # (the template binds it to ip_sync.set_primary_ip).
+                        "set_primary_ip": resolve_set_primary_ip(request),
                     },
                     **build_migrated_context(obj, server_key),
                 },

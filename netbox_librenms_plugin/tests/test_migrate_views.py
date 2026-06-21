@@ -235,6 +235,46 @@ class TestMoveInterfaceToWinnerView:
         interface.refresh_from_db()
         assert interface.device_id == donor.pk  # not moved
 
+    def test_corrupt_self_pointing_marker_reports_stale_not_deleted(self):
+        """A self-pointing _migrated_to marker is corrupt state, not a deleted winner — the error must say so for recovery."""
+        view = self._setup_view()
+        donor = make_device("mi-corrupt-donor")
+        # Marker points at the donor's own pk → corrupt (would move a device onto itself).
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default", "at": "x"}}
+        }
+        donor.save()
+        interface = make_interface(donor, "Eth0")
+        req = _hx_request({"server_key": "default"})
+
+        resp = view.post(req, pk=interface.pk)
+
+        assert resp.status_code == 200
+        assert b"stale or corrupt" in resp.content
+        assert b"Winner device no longer exists" not in resp.content
+        interface.refresh_from_db()
+        assert interface.device_id == donor.pk  # not moved
+
+    def test_deleted_winner_marker_reports_winner_gone(self):
+        """A well-formed marker whose winner row was deleted still reports the winner as gone — distinct from a corrupt marker."""
+        from dcim.models import Device
+
+        view = self._setup_view()
+        donor = make_device("mi-delwin-donor")
+        winner = make_device("mi-delwin-winner")
+        self._mark(donor, winner)
+        Device.objects.filter(pk=winner.pk).delete()
+        interface = make_interface(donor, "Eth0")
+        req = _hx_request({"server_key": "default"})
+
+        resp = view.post(req, pk=interface.pk)
+
+        assert resp.status_code == 200
+        assert b"Winner device no longer exists" in resp.content
+        assert b"stale or corrupt" not in resp.content
+        interface.refresh_from_db()
+        assert interface.device_id == donor.pk  # not moved
+
     def test_rejects_on_name_collision(self):
         # The winner already has a same-named interface → the real collision query finds
         # it and the move is refused; the donor interface is not reassigned.
@@ -1004,3 +1044,53 @@ class TestMigratedContextServerKeyFallback:
         self._post_with_server_key(
             BaseInterfaceTableView, "netbox_librenms_plugin.views.base.interfaces_view", {"server_key": "ghost"}
         )
+
+    def test_ip_view_stale_key_fallback_preserves_set_primary_ip(self):
+        """The stale-server-key error fallback must carry set_primary_ip so the template doesn't silently uncheck the user's preference."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "sessionkey"
+        request = MagicMock()
+        request.POST = {"server_key": "ghost", "set-primary-ip-toggle": "on"}
+
+        with (
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch.object(view, "rebind_api_for_server", return_value=None),  # rebind fails → stale-key fallback
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context", return_value={}),
+        ):
+            view.post(request, pk=1)
+
+        ip_sync = mock_render.call_args.args[2]["ip_sync"]
+        assert "set_primary_ip" in ip_sync  # the field was omitted before, silently unchecking the box
+        assert ip_sync["set_primary_ip"] is True  # reflects the POSTed toggle
+
+    def test_ip_view_failed_refresh_fallback_preserves_set_primary_ip(self):
+        """The failed-live-refresh error fallback must also carry set_primary_ip."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "good"
+        request = MagicMock()
+        request.POST = {"server_key": "good", "set-primary-ip-toggle": "on"}
+
+        with (
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch.object(view, "rebind_api_for_server", return_value="good"),  # rebind OK
+            patch.object(view, "_prepare_context", return_value=None),  # live fetch failed
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context", return_value={}),
+        ):
+            view.post(request, pk=1)
+
+        ip_sync = mock_render.call_args.args[2]["ip_sync"]
+        assert ip_sync["set_primary_ip"] is True

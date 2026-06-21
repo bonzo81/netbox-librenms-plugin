@@ -51,6 +51,8 @@ def _resolve_winner_for_donor(donor, server_key="default"):
             ``(None, None)`` when no marker is present; ``(None, marker)`` when the
             marker is stale (winner deleted, unparseable ``device_id``, or
             self-pointing) so callers can distinguish "no marker" from "stale marker".
+            Use :func:`_winner_unavailable_reason` to tell a deleted winner from a
+            corrupt marker.
     """
     marker = get_migrated_to_marker(donor, server_key)
     if not marker:
@@ -74,6 +76,41 @@ def _resolve_winner_for_donor(donor, server_key="default"):
     if winner.pk == donor.pk:
         return None, marker
     return winner, marker
+
+
+def _winner_unavailable_reason(donor, marker):
+    """
+    Classify a present ``_migrated_to`` marker that resolved to no winner.
+
+    Called only on the ``(None, marker)`` path of :func:`_resolve_winner_for_donor`, so a
+    well-formed, non-self ``device_id`` here means the winner row was deleted; anything else
+    is a corrupt marker. Mirrors the staleness checks in :func:`_resolve_winner_for_donor`.
+
+    Returns:
+        str: ``"deleted"`` (well-formed id, winner row gone) or ``"corrupt"``
+            (bool/unparseable ``device_id``, or self-pointing).
+    """
+    device_id = marker.get("device_id")
+    if isinstance(device_id, bool):
+        return "corrupt"
+    try:
+        winner_pk = int(device_id)
+    except (TypeError, ValueError):
+        return "corrupt"
+    if winner_pk == donor.pk:
+        return "corrupt"
+    return "deleted"
+
+
+def _fail_winner_unavailable(view, request, donor, marker):
+    """Render the right error for a present-but-unresolvable migration marker."""
+    if _winner_unavailable_reason(donor, marker) == "corrupt":
+        return view._fail(
+            request,
+            "Donor migration marker is stale or corrupt; clear it and re-run the migration.",
+            status=409,
+        )
+    return view._fail(request, "Winner device no longer exists.", status=410)
 
 
 def _server_key_from_request(request, default_factory=None):
@@ -363,7 +400,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)
         if winner is None:
-            return self._fail(request, "Winner device no longer exists.", status=410)
+            return _fail_winner_unavailable(self, request, donor, marker)
 
         # Quick pre-check before acquiring the lock (avoids round-trip in the
         # obvious already-taken case).  The check is repeated under the lock
@@ -512,7 +549,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)
         if winner is None:
-            return self._fail(request, "Winner device no longer exists.", status=410)
+            return _fail_winner_unavailable(self, request, donor, marker)
 
         # Quick pre-check before acquiring the lock.  Repeated under lock below.
         if not Interface.objects.filter(device=winner, name=assigned.name).exists():
@@ -609,7 +646,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
         if marker is None:
             return self._fail(request, "Donor device is not marked as migrated.", status=409)
         if winner is None:
-            return self._fail(request, "Winner device no longer exists.", status=410)
+            return _fail_winner_unavailable(self, request, donor, marker)
 
         donor_ip = getattr(donor, field, None)
         if donor_ip is None:
