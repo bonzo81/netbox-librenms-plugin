@@ -1,0 +1,41 @@
+---
+name: 📦 LibreNMS data shape
+description: Contribute an anonymized LibreNMS device data shape to grow the plugin's outcome tests
+labels: ["data-shape"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thanks for contributing a data shape! Use the **Capture data shape** button on a device's
+        LibreNMS sync page to generate an *anonymized* recording, then paste it below. The plugin
+        scrubs IPs/MACs/serials/hostnames automatically, but **please review the JSON before
+        submitting** — only you can confirm it carries nothing sensitive.
+  - type: input
+    attributes:
+      label: Vendor and OS
+      description: e.g. "Cisco IOS-XE", "Juniper Junos", "Arista EOS".
+      placeholder: Cisco IOS
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Topology / what's interesting about this shape
+      description: >
+        Stack / virtual chassis (how many members? 0- or 1-based positions?), LAG style,
+        sub-interface style, transceivers — whatever makes this shape worth covering.
+      placeholder: 2-member EX4300 virtual chassis, 0-based positions; ae LAGs.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Anonymized recording (JSON)
+      description: Paste the JSON copied from the plugin's *Capture data shape* modal.
+      render: json
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: Confirmation
+      options:
+        - label: I generated this with the plugin's Capture data shape button and reviewed it for sensitive data.
+          required: true

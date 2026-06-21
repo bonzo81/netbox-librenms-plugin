@@ -86,24 +86,16 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
     def _issue_url(self, device):
         """
-        Build a prefilled GitHub issue URL (title/labels/body scaffold; the JSON is pasted from the modal).
+        Build a prefilled GitHub issue URL targeting the data-shape issue form.
 
-        The anonymized recording is deliberately NOT embedded in the URL: a full recording can blow
-        past URL length limits and silently break the link, so the modal asks the user to paste the
-        JSON (copy/download buttons) into the issue instead.
+        Only ``template``/``title``/``labels`` are prefilled — the data-shape.yml issue *form*
+        ignores a ``body`` query param, and the anonymized recording is intentionally kept out of
+        the URL (a full recording would blow past URL length limits). The user pastes the JSON
+        (copy/download from the modal) into the form's "Anonymized recording" field.
         """
-        body = (
-            "## Device data shape\n\n"
-            "Describe the device: vendor, model, and topology (stack / virtual chassis, LAG, "
-            "sub-interfaces).\n\n"
-            "### Anonymized recording\n\n"
-            "Paste the anonymized JSON from the plugin's *Capture data shape* modal here:\n\n"
-            "```json\n\n```\n"
-        )
         params = {
             "template": "data-shape.yml",
             "title": f"Data shape: {device.name}",
             "labels": "data-shape",
-            "body": body,
         }
         return f"{ISSUE_BASE_URL}?{urlencode(params)}"

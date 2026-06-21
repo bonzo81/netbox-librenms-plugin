@@ -30,6 +30,30 @@ def test_recordings_present():
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_recording_carries_no_residual_pii(recording):
+    """Every committed recording must be anonymized — the PII safety-net finds nothing.
+
+    Guards against a maintainer accidentally committing a non-anonymized capture.
+    """
+    from netbox_librenms_plugin.data_shapes.anonymize import find_pii
+
+    assert find_pii(recording) == []
+
+
+def test_manifest_is_in_sync_with_bundled_recordings():
+    """tests/recordings/manifest.json must match the bundled recordings.
+
+    Fails when a recording is added/changed without `librenms_recordings --rebuild-manifest`,
+    so the in-plugin novelty check never goes stale.
+    """
+    from netbox_librenms_plugin.data_shapes import recordings_store
+    from netbox_librenms_plugin.data_shapes.signature import build_manifest
+
+    expected = build_manifest(recordings_store.load_bundled_recordings())
+    assert recordings_store.load_manifest() == expected, "run: manage.py librenms_recordings --rebuild-manifest"
+
+
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_recording_has_required_schema(recording):
     """Every recording declares the keys the replay harness depends on."""
     assert recording.get("schema_version") == 1
