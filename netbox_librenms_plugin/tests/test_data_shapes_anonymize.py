@@ -232,3 +232,150 @@ def test_anonymized_recording_still_detects_vc(recording_server):
     assert [m["position"] for m in result["members"]] == [1, 2, 3]
     # The master is still identified by the (now pseudonymized) device serial matching a member.
     assert any(m["serial"] == result["members"][0]["serial"] for m in result["members"])
+
+
+# ── ifName / ifDescr pattern-aware anonymization ──────────────────────────────
+
+import pytest  # noqa: E402
+
+_PORT_PATTERNS = [
+    "ge-0/0/0.100",
+    "xe-4/2/2",
+    "ae42",
+    "ae10.2221",
+    "lag-1",
+    "Po12",
+    "Po10.100",
+    "Bundle-Ether1",
+    "GigabitEthernet0/0/0",
+    "Te1/5",
+    "HundredGigE0/0/0/18",
+    "1/1/c31/3",
+    "2/x1/1/c1/1",
+    "A/1",
+    "swp15.3",
+    "bond1",
+    "eth0",
+    "lo0",
+]
+
+
+@pytest.mark.parametrize("name", _PORT_PATTERNS)
+def test_port_pattern_ifname_preserved_verbatim(name):
+    """A real port-name (slot notation or known vendor prefix) survives anonymization unchanged."""
+    rec = _ports({"port_id": 1, "ifName": name, "ifType": "ethernetCsmacd"})
+    port = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
+    assert port["ifName"] == name
+
+
+@pytest.mark.parametrize("custom", ["AORTA-SSP-CUSTOMER-1", "to_prod-lab03c-ra2", "IXIA", "OpenXR-100G-Testing"])
+def test_custom_ifname_pseudonymized(custom):
+    """A custom (non-port-pattern) ifName is replaced by a stable iface-<hash> pseudonym, leaking nothing."""
+    rec = _ports({"port_id": 1, "ifName": custom, "ifType": "ethernetCsmacd"})
+    out = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
+    assert out.startswith("iface-")
+    assert custom not in out
+    # Deterministic.
+    assert out == anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
+
+
+def test_ifdescr_keeps_port_token_drops_freetext_annotation():
+    """An ifDescr with a leading port token + free-text annotation keeps only the token (no infra leak)."""
+    rec = _ports(
+        {
+            "port_id": 1,
+            "ifName": "lag2",
+            "ifType": "ipForward",
+            "ifDescr": "lag2, IP interface, ** prod-lab03d-rc1 ae42 PCE testing jdoe **",
+        },
+        {"port_id": 2, "ifName": "AORTA-CUST-9", "ifType": "other", "ifDescr": "AORTA-CUST-9, customer Microsoft"},
+    )
+    ports = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"]
+    assert ports[0]["ifDescr"] == "lag2"  # token kept, annotation dropped
+    assert ports[1]["ifDescr"].startswith("iface-")  # no port token → pseudonym
+    blob = str(ports)
+    for infra in ("prod-lab03d-rc1", "Microsoft", "jdoe", "PCE testing"):
+        assert infra not in blob
+
+
+def test_bgp_local_as_anonymized_to_private_asn():
+    """The bgpLocalAs int is mapped to a deterministic private ASN, not passed through."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "responses": {"GET /api/v0/devices/1": {"devices": [{"device_id": 1, "bgpLocalAs": 6730}]}},
+    }
+    dev = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    assert dev["bgpLocalAs"] != 6730
+    assert 64512 <= dev["bgpLocalAs"] <= 65534
+
+
+def test_name_and_description_are_scrubbed_of_hostname():
+    """The capture auto-fills name/description from the device name; anonymization neutralizes them."""
+    rec = {
+        "schema_version": 1,
+        "name": "core-rtr01.dc1.example.net-shape",
+        "description": "Captured from core-rtr01.dc1.example.net.",
+        "meta": {"os": "junos"},
+        "device_id": 1,
+        "responses": {},
+    }
+    anon = anonymize_recording(rec)
+    assert "core-rtr01" not in anon["name"] and "core-rtr01" not in anon["description"]
+    assert anon["name"].startswith("junos-shape-")
+    assert anon["description"] == "Anonymized LibreNMS data-shape capture."
+
+
+def test_find_pii_flags_residual_fqdn_but_not_icon_or_version():
+    """find_pii catches a leaked FQDN in free text, but not static asset paths or firmware versions."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1": {
+                "devices": [
+                    {
+                        "device_id": 1,
+                        "icon": "images/os/nokia.svg",
+                        "version": "3.9.0.4",
+                        "sysDescr": "core-rtr01.dc1.example.net leaked here",
+                    }
+                ]
+            }
+        },
+    }
+    # sysDescr is scrubbed to "" by the field rules, so plant the FQDN in an unclassified field
+    # to exercise the safety net directly.
+    rec["responses"]["GET /api/v0/devices/1"]["devices"][0]["custom_note"] = "see rtr.dc1.example.net"
+    findings = find_pii(anonymize_recording(rec))
+    kinds = {(f["kind"], f["value"]) for f in findings}
+    assert ("fqdn", "rtr.dc1.example.net") in kinds
+    assert not any(f["value"] == "nokia.svg" for f in findings)  # icon exempt
+    assert not any(f["value"] == "3.9.0.4" for f in findings)  # version exempt
+
+
+def test_anonymization_preserves_port_relationships(recording_server):
+    """The LAG/sub-interface maps resolve identically before and after anonymization (logic intact)."""
+    rec = load_recording("cisco-lag-and-subinterface")
+
+    def _resolve(recording):
+        _server, api = recording_server(recording)
+        _ok, ports = api.get_ports(recording["device_id"])
+        _ok2, stack = api.get_port_stack(recording["device_id"])
+        rel = api.resolve_port_relationships(
+            ports["ports"],
+            stack,
+            lag_patterns=recording.get("lag_patterns", {}),
+            device_os=recording.get("meta", {}).get("os"),
+        )
+        return (
+            {str(k): str(v) for k, v in rel["lag_members"].items()},
+            {str(k): str(v) for k, v in rel["sub_interfaces"].items()},
+        )
+
+    raw_lag, raw_sub = _resolve(rec)
+    anon_lag, anon_sub = _resolve(anonymize_recording(rec))
+    assert raw_lag == anon_lag and raw_sub == anon_sub
+    assert raw_lag and raw_sub  # non-vacuous: the recording really exercises both relationships
