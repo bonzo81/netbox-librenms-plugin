@@ -1981,8 +1981,23 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
             f"{type(donor_entry).__name__} — expected a positive integer, numeric string, or mapping."
         )
 
+    def _extract_oob_entry(owner_label, owner_name, entry):
+        # Validate the nested oob shape the same way the top-level/per-server shapes are
+        # validated above: a non-dict, non-null oob is corrupted state, not "no OOB link".
+        # Silently treating it as None could let donor data overwrite it, or drop it when the
+        # donor is later marked migrated — so fail closed instead.
+        raw_oob = entry.get("oob")
+        if raw_oob is None:
+            return None
+        if isinstance(raw_oob, dict):
+            return raw_oob
+        raise ValueError(
+            f"{owner_label} '{owner_name}' has an unsupported librenms_id[{server_key!r}] oob shape "
+            f"{type(raw_oob).__name__} — expected a mapping or null."
+        )
+
     donor_id = donor_entry.get("id")
-    donor_oob = donor_entry.get("oob") if isinstance(donor_entry.get("oob"), dict) else None
+    donor_oob = _extract_oob_entry("donor", donor.name, donor_entry)
 
     # Coerce both IDs before branching so that a malformed but truthy winner_id
     # (e.g. "abc") does not incorrectly trigger the "demote donor" path.
@@ -2008,7 +2023,7 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
             f"donor '{donor.name}' has an unparseable librenms_id[{server_key!r}] id "
             f"{_raw_donor_id!r} — expected a positive integer or numeric string."
         )
-    winner_oob = winner_entry.get("oob") if isinstance(winner_entry.get("oob"), dict) else None
+    winner_oob = _extract_oob_entry("winner", winner.name, winner_entry)
 
     if winner_id is None and donor_id is not None:
         winner_entry["id"] = donor_id

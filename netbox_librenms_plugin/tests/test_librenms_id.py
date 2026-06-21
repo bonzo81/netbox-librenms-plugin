@@ -815,6 +815,28 @@ class TestMergeLibreNMSLinks:
         with pytest.raises(ValueError, match="unparseable librenms_id.*oob id"):
             merge_librenms_links(winner, donor, "default")
 
+    def test_non_dict_donor_oob_shape_fails_closed(self):
+        """A corrupt non-dict donor oob (e.g. a list) is corrupted state, not 'no OOB link' — fail closed rather than silently drop it during merge."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("eve-ng-02-old", {"default": {"id": 7, "oob": ["not", "a", "dict"]}})
+        with pytest.raises(ValueError, match="unsupported librenms_id.*oob shape"):
+            merge_librenms_links(winner, donor, "default")
+
+    def test_non_dict_winner_oob_shape_fails_closed(self):
+        """A corrupt non-dict winner oob (e.g. a string) must fail closed, not be silently overwritten by donor data."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": "garbage"}})
+        donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
+        with pytest.raises(ValueError, match="unsupported librenms_id.*oob shape"):
+            merge_librenms_links(winner, donor, "default")
+
     def test_donor_oob_id_coerced_to_int_on_inherit(self):
         """A numeric-string donor oob id is normalized to int when inherited."""
         from netbox_librenms_plugin.utils import merge_librenms_links
