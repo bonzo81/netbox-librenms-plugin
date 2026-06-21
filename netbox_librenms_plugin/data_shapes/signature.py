@@ -134,7 +134,7 @@ def compute_shape_signature(recording):
         "lag": {"present": bool(lag_ports), "ieee8023ad": bool(lag_ports), "name_prefix": name_prefix},
         "sub_interfaces": {"present": bool(sub_styles), "styles": sorted(sub_styles)},
         "port_stack": port_stack,
-        "vlans": any("ifVlan" in p or "vlans" in p for p in ports),
+        "vlans": any(p.get("ifVlan") not in (None, "") or bool(p.get("vlans")) for p in ports),
         "transceivers": _body(recording, lambda k: k.endswith("/transceivers")) is not None,
     }
 

@@ -41,6 +41,28 @@ def test_signature_lag_and_subinterface():
     assert sig["port_stack"] is True
 
 
+def test_signature_vlans_requires_actual_vlan_data():
+    """The vlans axis must reflect real VLAN data, not mere key presence — an empty/null ifVlan must not flip it true."""
+
+    def _rec(ports):
+        return {
+            "schema_version": 1,
+            "name": "x",
+            "device_id": 1,
+            "responses": {"GET /api/v0/devices/1/ports": {"status": "ok", "ports": ports}},
+        }
+
+    # Keys present but carrying no data → vlans False.
+    assert (
+        compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": None, "vlans": []}]))["vlans"]
+        is False
+    )
+    assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": ""}]))["vlans"] is False
+    # Real VLAN data → vlans True.
+    assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": 10}]))["vlans"] is True
+    assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "vlans": [10, 20]}]))["vlans"] is True
+
+
 def test_signature_stable_under_anonymization():
     """Anonymization preserves all structural fields, so the signature is unchanged."""
     rec = load_recording("cisco-stackwise-3member")
