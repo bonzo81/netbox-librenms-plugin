@@ -1735,9 +1735,12 @@ class TestBaseInterfaceTableViewPost:
             view.post(request, pk=1)
 
         mock_messages.warning.assert_called()
-        warning_text = " ".join(str(a) for call in mock_messages.warning.call_args_list for a in call.args)
-        assert "99" not in warning_text  # internal OOB id must stay out of the UI
-        assert "OOB controller ports fetch failed" in warning_text
+        # Inspect only the string message args — joining the request MagicMock's repr would
+        # spuriously match digits from its object id, so the test must assert on the real message.
+        warning_msgs = [a for call in mock_messages.warning.call_args_list for a in call.args if isinstance(a, str)]
+        oob_msg = next((m for m in warning_msgs if "OOB controller ports fetch failed" in m), None)
+        assert oob_msg is not None  # the OOB-fetch failure is surfaced to the user
+        assert "99" not in oob_msg  # but the internal OOB id stays out of the UI
 
     def test_post_success_caches_and_renders(self):
         """Successful fetch caches data and renders template."""
