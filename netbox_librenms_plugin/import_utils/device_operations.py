@@ -990,7 +990,20 @@ def validate_device_for_import(
                             )
                             is_oob_ip = device.oob_ip_id is not None and existing_ip.pk == device.oob_ip_id
                             has_primary_ip = bool(device.primary_ip4_id or device.primary_ip6_id)
-                            if oob_type and (is_oob_ip or not has_primary_ip):
+                            # When the incoming IP already IS the device's oob_ip this is an OOB
+                            # candidate regardless of whether the LibreNMS os/hardware tokens let us
+                            # classify a type. Requiring oob_type here silently downgrades such a row
+                            # to a plain primary-IP match and loses the OOB action flow, so infer a
+                            # type from the hostname (or a generic "oob" fallback), mirroring the
+                            # serial-match branch above.
+                            inferred_oob_type = (
+                                oob_type
+                                or _detect_oob_type_from_name(
+                                    libre_device.get("hostname") or libre_device.get("sysName") or ""
+                                )
+                                or "oob"
+                            )
+                            if is_oob_ip or (oob_type and not has_primary_ip):
                                 existing_oob = get_librenms_oob(device, server_key=server_key)
                                 if existing_oob is None:
                                     result["existing_device"] = device
@@ -998,7 +1011,7 @@ def validate_device_for_import(
                                     result["serial_action"] = "oob_candidate"
                                     result["oob_candidate"] = {
                                         "device": device,
-                                        "type": oob_type,
+                                        "type": inferred_oob_type,
                                         "version": libre_device.get("version") or None,
                                         "ip": libre_device.get("ip") or None,
                                     }

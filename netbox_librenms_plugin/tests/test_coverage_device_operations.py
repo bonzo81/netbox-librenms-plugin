@@ -885,6 +885,32 @@ class TestValidateDeviceForImportEdgeCases:
         # render a "Link to LibreNMS" action, which would link the wrong NetBox device.
         assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
 
+    def test_oob_ip_match_without_os_token_still_oob_candidate(self):
+        """An incoming IP equal to device.oob_ip is still an OOB candidate when no os token classifies a type."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_ip
+
+        dev = make_device("host-with-oob-ctrl")
+        oob_ip = make_ip("10.10.10.9/32")  # bare OOB address, assigned to no interface
+        dev.oob_ip = oob_ip
+        dev.save()
+
+        libre_device = {
+            "device_id": 555,
+            "hostname": "mgmt-controller-z",  # does NOT match dev.name → falls to the IP branch
+            "sysName": "mgmt-controller-z",
+            "serial": "-",
+            "hardware": "-",
+            "os": "-",  # no OOB-classifying token → normalize_oob_type() == ""
+            "ip": "10.10.10.9",
+        }
+        result = self._validate(libre_device)
+
+        assert result.get("existing_device").pk == dev.pk
+        assert result["existing_match_type"] == "primary_ip"
+        assert result["serial_action"] == "oob_candidate"
+        assert result["oob_candidate"] is not None
+        assert result["oob_candidate"]["type"] == "oob"  # generic fallback when no token
+
     def test_duplicate_hostname_without_serial_fails_closed(self):
         """A duplicate-hostname match with no usable serial must still fail closed (the check ran only inside the serial-gated merge block)."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
