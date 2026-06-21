@@ -50,6 +50,32 @@
     }
   },
   {
+    "name": "iosxe-subinterfaces",
+    "signature": {
+      "os": "iosxe",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": true,
+      "transceivers": false
+    }
+  },
+  {
     "name": "juniper-vc-2member",
     "signature": {
       "os": "junos",
@@ -70,6 +96,32 @@
       },
       "port_stack": false,
       "vlans": false,
+      "transceivers": false
+    }
+  },
+  {
+    "name": "junos-subinterfaces",
+    "signature": {
+      "os": "junos",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": true,
       "transceivers": false
     }
   }
