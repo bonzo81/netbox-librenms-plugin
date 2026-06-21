@@ -927,7 +927,9 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
     identification via pattern '^Po\\d+$'.
 
     Universal rules (hardcoded, vendor-agnostic):
-      - LAG aggregate is always in the 'low' position of a port_stack pair.
+      - LAG aggregate is normally the 'low' entry in a port_stack pair, but the
+        aggregate side is determined authoritatively by ifType or this pattern, so a
+        pair whose aggregate is on the 'high' side is still mapped member->aggregate.
       - Pairs where either name contains ':' are skipped (Nokia SAP entries).
       - .N suffix is stripped for name resolution (handles Junos sub-unit pairing).
     """
