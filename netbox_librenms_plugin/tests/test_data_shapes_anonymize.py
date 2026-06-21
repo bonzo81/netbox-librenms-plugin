@@ -324,6 +324,12 @@ _PORT_PATTERNS = [
     "bond1",
     "eth0",
     "lo0",
+    # Junos digit-less pseudo-interfaces and their sub-units: the base/sub-unit names must both
+    # survive so the resolver's name-based pairing (jsrv.1 -> jsrv) is preserved after anonymization.
+    "jsrv",
+    "jsrv.1",
+    "irb",
+    "irb.100",
 ]
 
 
@@ -335,7 +341,19 @@ def test_port_pattern_ifname_preserved_verbatim(name):
     assert port["ifName"] == name
 
 
-@pytest.mark.parametrize("custom", ["AORTA-SSP-CUSTOMER-1", "to_prod-lab03c-ra2", "IXIA", "OpenXR-100G-Testing"])
+@pytest.mark.parametrize(
+    "custom",
+    [
+        "AORTA-SSP-CUSTOMER-1",
+        "to_prod-lab03c-ra2",
+        "IXIA",
+        "OpenXR-100G-Testing",
+        # Free text that merely STARTS with a digit-less interface name must still be scrubbed — the
+        # word-bounded rule keeps "jsrv"/"irb" from preserving (leaking) a customer/host annotation.
+        "jsrv-customer-rtr",
+        "irbridge-core01",
+    ],
+)
 def test_custom_ifname_pseudonymized(custom):
     """A custom (non-port-pattern) ifName is replaced by a stable iface-<hash> pseudonym, leaking nothing."""
     rec = _ports({"port_id": 1, "ifName": custom, "ifType": "ethernetCsmacd"})
@@ -469,9 +487,13 @@ def test_find_pii_flags_residual_fqdn_but_not_icon_or_version():
     assert not any(f["value"] == "nokia.svg" for f in findings)
 
 
-def test_anonymization_preserves_port_relationships(recording_server):
+@pytest.mark.parametrize(
+    ("recording_name", "expect_lag"),
+    [("cisco-lag-and-subinterface", True), ("junos-subinterfaces", False)],
+)
+def test_anonymization_preserves_port_relationships(recording_server, recording_name, expect_lag):
     """The LAG/sub-interface maps resolve identically before and after anonymization (logic intact)."""
-    rec = load_recording("cisco-lag-and-subinterface")
+    rec = load_recording(recording_name)
 
     def _resolve(recording):
         _server, api = recording_server(recording)
@@ -491,7 +513,11 @@ def test_anonymization_preserves_port_relationships(recording_server):
     raw_lag, raw_sub = _resolve(rec)
     anon_lag, anon_sub = _resolve(anonymize_recording(rec))
     assert raw_lag == anon_lag and raw_sub == anon_sub
-    assert raw_lag and raw_sub  # non-vacuous: the recording really exercises both relationships
+    # Non-vacuous: the recording really exercises the sub-interface relationship (the Junos fixture's
+    # jsrv/irb digit-less base <-> .unit pairing is exactly what the anonymizer must keep intact).
+    assert raw_sub
+    if expect_lag:
+        assert raw_lag  # LAG coverage when the fixture includes a LAG aggregate
 
 
 def test_transceiver_serial_pseudonymized_model_and_optics_preserved():

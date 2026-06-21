@@ -184,10 +184,23 @@ _IF_PREFIXES = (
     "swp|bond|eth|ens|eno|enp|veth|mgmt|vni|br|"
     "Gi|Te|Fa|Hu|Fo|Twe|Eth|Po|BE|Lo|Tu|Se|nve|BVI|Null"
 )
-# A logic-bearing port-name token at the START of the string. Two shapes: slot notation
-# (optional leading letter, then digit groups separated by '/'), or a known prefix + '-?' + digit.
-# The trailing run stays within name chars (no spaces/commas) so a free-text tail is excluded.
-_PORT_TOKEN_RE = re.compile(rf"^(?:[A-Za-z]?\d+(?:/[A-Za-z]*\d+)+|[A-Za-z]/\d+|(?:{_IF_PREFIXES})-?\d)[\w/.:-]*")
+# Junos pseudo-interfaces whose base name carries no slot/digit (irb, jsrv, dsc, ...). Without a
+# dedicated rule the general "prefix + digit" shape below never matches them, so a base/sub-unit
+# pair like jsrv <-> jsrv.1 anonymizes to two unrelated iface-<hash> values and the resolver's
+# name-based sub-unit pairing (low_name startswith high_name + '.') is lost. Match the bare base
+# (optionally + '.unit') as a COMPLETE token, word-bounded, so the relationship survives while free
+# text like "jsrv-customer" is still pseudonymized rather than preserved verbatim (which would leak
+# it — unlike CR's "make the trailing digit optional", which would also preserve any value starting
+# with a short prefix such as "ip"/"lo").
+_DIGITLESS_IF_NAMES = "jsrv|irb|dsc|lsi|mtun|pimd|pime|tap"
+# A logic-bearing port-name token at the START of the string. Three shapes: a digit-less Junos
+# special (above), slot notation (optional leading letter, then digit groups separated by '/'), or a
+# known prefix + '-?' + digit. The trailing run stays within name chars (no spaces/commas) so a
+# free-text tail is excluded.
+_PORT_TOKEN_RE = re.compile(
+    rf"^(?:(?:{_DIGITLESS_IF_NAMES})(?:\.\d+)?(?![\w/.:-])"
+    rf"|(?:[A-Za-z]?\d+(?:/[A-Za-z]*\d+)+|[A-Za-z]/\d+|(?:{_IF_PREFIXES})-?\d)[\w/.:-]*)"
+)
 
 
 def _hash(value, salt, length=6):
