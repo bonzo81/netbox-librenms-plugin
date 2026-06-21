@@ -703,6 +703,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     existing_ip = IPAddress.objects.filter(address__net_host=primary_ip).first()
                     assigned = getattr(existing_ip, "assigned_object", None) if existing_ip else None
                     dev = getattr(assigned, "device", None) if assigned else None
+                    if dev is None and existing_ip is not None:
+                        # Mirror validate_device_for_import(): an IP can be a device's oob_ip
+                        # (a direct FK) while assigned to no interface, so the assigned_object
+                        # lookup above misses it. Without this fallback a row whose only link is
+                        # an OOB address flips to importable and re-imports the existing device.
+                        dev = _Device.objects.filter(oob_ip=existing_ip).first()
                     if dev:
                         new_device, match_type = dev, "primary_ip"
 

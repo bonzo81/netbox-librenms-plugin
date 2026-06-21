@@ -1181,6 +1181,25 @@ class TestRefreshExistingDevice:
         assert validation["existing_match_type"] == "primary_ip"
         assert validation["can_import"] is False
 
+    def test_fresh_lookup_matches_by_oob_ip_blocks_import(self):
+        """The refresh must also catch a device reachable only via its oob_ip (no interface assignment), mirroring validate_device_for_import()."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-oob-ip-dev")
+        oob_ip = IPAddress.objects.create(address="10.0.0.19/24")  # assigned to no interface
+        dev.oob_ip = oob_ip
+        dev.save()
+        validation = self._device_validation()
+        libre_device = {"device_id": 53, "hostname": "h3", "sysName": "h3", "ip": "10.0.0.19"}
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"].pk == dev.pk
+        assert validation["existing_match_type"] == "primary_ip"
+        assert validation["can_import"] is False
+
     def test_no_existing_device_found_by_librenms_id(self):
         """existing=None: a device now carrying the scanned librenms_id host CF is re-matched."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
