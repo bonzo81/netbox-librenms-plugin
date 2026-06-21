@@ -186,7 +186,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         if not self.librenms_id:
             messages.error(request, "Device not found in LibreNMS.")
-            return self._failure_redirect(request, obj, post_server_key)
+            return self._failure_redirect(request, obj, _server_key)
 
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
 

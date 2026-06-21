@@ -431,8 +431,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # is not safe for high-density chassis. Instead we compute an offset
         # that is always above the main device's highest observed index,
         # including any synthetic transceiver rows added above.
-        _server_key = server_key
-        oob = get_librenms_oob(sync_device, server_key=_server_key)
+        oob = get_librenms_oob(sync_device, server_key=server_key)
         oob_id = oob.get("id") if isinstance(oob, dict) else None
         oob_failed = False
         if oob_id:
