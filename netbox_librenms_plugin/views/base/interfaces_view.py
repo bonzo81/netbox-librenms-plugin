@@ -244,23 +244,31 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                 oob_enriched = self._enrich_ports_with_vlan_data(oob_ports, interface_name_field)
                 for port in oob_enriched:
                     port["_source"] = "oob"
+
                 # Detect shared-LOM: same MAC seen on BOTH main and OOB sides.
                 # Build separate per-source MAC sets so that within-source
                 # duplicates are not falsely flagged as cross-source conflicts.
+                def _normalized_mac(port):
+                    # The ports payload is validated only as a list of dicts, so a malformed
+                    # truthy ifPhysAddress (int/list) would 500 on .lower(). Treat any
+                    # non-string MAC as absent rather than crashing the refresh.
+                    mac = port.get("ifPhysAddress")
+                    return mac.lower().strip() if isinstance(mac, str) else ""
+
                 main_macs: set[str] = set()
                 for port in enriched_ports:
-                    mac = (port.get("ifPhysAddress") or "").lower().strip()
+                    mac = _normalized_mac(port)
                     if mac:
                         main_macs.add(mac)
                 oob_macs: set[str] = set()
                 for port in oob_enriched:
-                    mac = (port.get("ifPhysAddress") or "").lower().strip()
+                    mac = _normalized_mac(port)
                     if mac:
                         oob_macs.add(mac)
                 shared_macs = main_macs & oob_macs
                 if shared_macs:
                     for port in enriched_ports + oob_enriched:
-                        mac = (port.get("ifPhysAddress") or "").lower().strip()
+                        mac = _normalized_mac(port)
                         if mac in shared_macs:
                             port["_dedup_conflict"] = True
                 librenms_data["ports"] = enriched_ports + oob_enriched

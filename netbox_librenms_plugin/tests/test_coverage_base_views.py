@@ -1603,6 +1603,46 @@ class TestBaseInterfaceTableViewPost:
         assert ports_set_calls[0].args[1]["oob_incomplete"] is True
         mock_messages.warning.assert_called()
 
+    def test_post_oob_non_string_mac_does_not_crash(self):
+        """get_ports is an external boundary: a malformed truthy ifPhysAddress (int/list) on a host or OOB port must be treated as absent in the shared-LOM dedup, not 500 on .lower() after the cache was already cleared."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host port carries a corrupt non-string MAC; the OOB controller exposes a valid one.
+        # The enricher is passed through unchanged, so the real dedup block runs on these dicts.
+        view._librenms_api.get_ports.side_effect = [
+            (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0", "ifPhysAddress": 123}]}),
+            (True, {"ports": [{"port_id": 2, "ifName": "MGMT", "ifPhysAddress": ["aa:bb"]}]}),
+        ]
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            patch.object(view, "_has_lag_signals", return_value=False, create=True),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)  # must not raise on the non-string MACs
+
+        ports_set_calls = [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "cache-key"]
+        assert len(ports_set_calls) == 1
+        snapshot = ports_set_calls[0].args[1]
+        # Both rows merged; the corrupt MACs were treated as absent (no shared-LOM conflict).
+        assert any(p.get("_source") == "oob" for p in snapshot["ports"])
+        assert not any(p.get("_dedup_conflict") for p in snapshot["ports"])
+
     def test_post_success_caches_and_renders(self):
         """Successful fetch caches data and renders template."""
         view = self._make_view()
