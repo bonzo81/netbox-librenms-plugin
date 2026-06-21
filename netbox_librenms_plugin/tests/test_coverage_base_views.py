@@ -1643,6 +1643,102 @@ class TestBaseInterfaceTableViewPost:
         assert any(p.get("_source") == "oob" for p in snapshot["ports"])
         assert not any(p.get("_dedup_conflict") for p in snapshot["ports"])
 
+    def test_post_placeholder_mac_not_flagged_as_shared_lom(self):
+        """A placeholder 00:00:00:00:00:00 on both host and OOB is not a real address, so it must not flag a shared-LOM conflict — while a genuinely shared MAC still does."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host + OOB each carry a placeholder MAC (must NOT conflict) and a genuinely shared
+        # real MAC (must still conflict). Colon vs hyphen formatting differs to prove normalization.
+        view._librenms_api.get_ports.side_effect = [
+            (
+                True,
+                {
+                    "ports": [
+                        {"port_id": 1, "ifName": "Gi0/0", "ifPhysAddress": "00:00:00:00:00:00"},
+                        {"port_id": 2, "ifName": "Gi0/1", "ifPhysAddress": "aa:bb:cc:dd:ee:ff"},
+                    ]
+                },
+            ),
+            (
+                True,
+                {
+                    "ports": [
+                        {"port_id": 3, "ifName": "MGMT", "ifPhysAddress": "00:00:00:00:00:00"},
+                        {"port_id": 4, "ifName": "LOM", "ifPhysAddress": "AA-BB-CC-DD-EE-FF"},
+                    ]
+                },
+            ),
+        ]
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            patch.object(view, "_has_lag_signals", return_value=False, create=True),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        ports_set_calls = [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "cache-key"]
+        assert len(ports_set_calls) == 1
+        by_id = {p["port_id"]: p for p in ports_set_calls[0].args[1]["ports"]}
+        # Placeholder-MAC ports are not flagged...
+        assert not by_id[1].get("_dedup_conflict")
+        assert not by_id[3].get("_dedup_conflict")
+        # ...but the genuinely shared real MAC still is (non-vacuous: dedup still works).
+        assert by_id[2].get("_dedup_conflict")
+        assert by_id[4].get("_dedup_conflict")
+
+    def test_post_oob_ports_fetch_failure_warning_omits_oob_id(self):
+        """The user-facing OOB-fetch-failure toast must not leak the internal LibreNMS OOB id (it is logged server-side only)."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host ports OK; OOB controller fetch fails outright.
+        view._librenms_api.get_ports.side_effect = [
+            (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]}),
+            (False, "boom"),
+        ]
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            patch.object(view, "_has_lag_signals", return_value=False, create=True),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        mock_messages.warning.assert_called()
+        warning_text = " ".join(str(a) for call in mock_messages.warning.call_args_list for a in call.args)
+        assert "99" not in warning_text  # internal OOB id must stay out of the UI
+        assert "OOB controller ports fetch failed" in warning_text
+
     def test_post_success_caches_and_renders(self):
         """Successful fetch caches data and renders template."""
         view = self._make_view()

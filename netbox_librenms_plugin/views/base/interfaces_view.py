@@ -253,7 +253,16 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                     # truthy ifPhysAddress (int/list) would 500 on .lower(). Treat any
                     # non-string MAC as absent rather than crashing the refresh.
                     mac = port.get("ifPhysAddress")
-                    return mac.lower().strip() if isinstance(mac, str) else ""
+                    if not isinstance(mac, str):
+                        return ""
+                    # Strip to bare hex so colon/hyphen formatting differences don't matter, then
+                    # drop placeholders: an all-zero (or non-12-digit) MAC is not a real address,
+                    # so shared 00:00:00:00:00:00 fillers on both sides must not flag a shared-LOM
+                    # conflict on otherwise-unrelated ports.
+                    normalized = "".join(ch for ch in mac.lower() if ch in "0123456789abcdef")
+                    if len(normalized) != 12 or normalized == "0" * 12:
+                        return ""
+                    return normalized
 
                 main_macs: set[str] = set()
                 for port in enriched_ports:
@@ -284,7 +293,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                 )
                 messages.warning(
                     request,
-                    f"Interfaces refreshed, but OOB controller ports fetch failed (OOB id {oob['id']}); "
+                    "Interfaces refreshed, but OOB controller ports fetch failed; "
                     "showing host interfaces only. See server logs for details.",
                 )
                 oob_ports_failed = True
