@@ -15,6 +15,8 @@ tests. Three strategies, by field:
   device serial that equals a stack member serial) still match after anonymization. The OS string
   is pseudonymized too, but *unsalted* (see :func:`pseudonymize_os`) so the same OS yields one
   stable token across all recordings — the novelty matcher needs that to compare/relate platforms.
+  Vendor-naming SNMP OIDs (sysObjectID, sensor_oid, entPhysicalVendorType) are remapped under the
+  example-enterprise arc so they keep their shape without naming the vendor the OS hash hides.
 * **Scrub** PII to safe placeholders (IPs → RFC 5737/3849 documentation ranges, MACs → a
   synthetic ``02:00:00`` block, lat/lng → null, location → ``"Lab"``, free-text → "").
 
@@ -102,7 +104,17 @@ IP_KEYS = frozenset({"ip", "ipv4", "ipv6", "inet", "ip_address", "overwrite_ip"}
 MAC_KEYS = frozenset({"ifPhysAddress", "mac", "mac_address"})
 GEO_KEYS = frozenset({"lat", "lng", "latitude", "longitude"})
 LOCATION_KEYS = frozenset({"location", "sysLocation"})
-FREETEXT_KEYS = frozenset({"ifAlias", "sysContact", "sysDescr", "purpose", "notes"})
+# Operator-configurable free text → scrubbed to "". entPhysicalAssetID (RFC 2737 asset-tracking id)
+# and entPhysicalAlias (manager-assigned alias) can carry internal asset tags / rack codes; neither
+# is read by the sync logic.
+FREETEXT_KEYS = frozenset(
+    {"ifAlias", "sysContact", "sysDescr", "purpose", "notes", "entPhysicalAssetID", "entPhysicalAlias"}
+)
+# OID-valued fields whose enterprise arc (1.3.6.1.4.1.<N>) names the vendor — e.g. sysObjectID
+# 1.3.6.1.4.1.6527… (Nokia), sensor_oid …10418… (Avocent). They re-reveal the platform that
+# pseudonymize_os hides, and no sync logic reads them, so map each to a well-formed OID under the
+# IANA example-enterprise number (32473, RFC 5612) so the shape is kept but the vendor is not.
+OID_KEYS = frozenset({"sysObjectID", "sensor_oid", "entPhysicalVendorType"})
 # SNMP credentials/config from the device row — secrets, scrubbed to empty. A LibreNMS
 # /api/v0/devices/{id} response is a full DB row that carries these in plaintext; none are read
 # by the sync logic, so blanking them all is safe and conservative.
@@ -286,6 +298,12 @@ def _anon_serial_label(value, salt):
     return f"device-{_hash(value, salt)}"
 
 
+def _anon_oid(value, salt):
+    """Map an SNMP OID to a deterministic OID under the example-enterprise arc (hides the vendor)."""
+    prefix = "." if value.startswith(".") else ""
+    return f"{prefix}1.3.6.1.4.1.32473.{int(_hash(value, salt, 6), 16)}"
+
+
 def _anon_asn(value, salt):
     """Map a BGP ASN to a deterministic 16-bit private ASN (64512-65534), preserving int type."""
     if value in (None, "", 0):
@@ -324,6 +342,8 @@ def _anon_value(key, value, salt):
         # The icon path spells out the OS/vendor (e.g. "images/os/nokia.svg"), which would re-reveal
         # exactly what pseudonymize_os hides — genericize it to stay consistent with the hashed os.
         return "images/os/generic.svg"
+    if key in OID_KEYS:
+        return _anon_oid(value, salt)
     if key in IP_KEYS:
         return _doc_ip(value, salt)
     if key in MAC_KEYS:

@@ -36,7 +36,7 @@
           "retries": null,
           "snmp_disable": false,
           "bgpLocalAs": 65528,
-          "sysObjectID": ".1.3.6.1.4.1.6527.1.3.17",
+          "sysObjectID": ".1.3.6.1.4.1.32473.12446781",
           "sysDescr": "",
           "sysContact": "",
           "version": "fw-96ed2e",

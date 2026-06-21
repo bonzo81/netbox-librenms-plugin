@@ -36,7 +36,7 @@
           "retries": null,
           "snmp_disable": false,
           "bgpLocalAs": null,
-          "sysObjectID": ".1.3.6.1.4.1.8072.3.2.10",
+          "sysObjectID": ".1.3.6.1.4.1.32473.4263913",
           "sysDescr": "",
           "sysContact": "",
           "version": null,

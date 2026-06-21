@@ -163,6 +163,58 @@ def test_find_pii_ignores_oid_and_version_dotted_decimals():
     assert find_pii(anon) == []
 
 
+def test_vendor_oids_pseudonymized_under_example_enterprise():
+    """sysObjectID/sensor_oid/entPhysicalVendorType lose the vendor enterprise arc, keeping OID shape."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        "devices": [
+            {
+                "device_id": 1,
+                "sysObjectID": ".1.3.6.1.4.1.6527.1.3.17",  # Nokia
+                "entPhysicalVendorType": "1.3.6.1.4.1.9.12.3.1.3.1234",  # Cisco (no leading dot)
+            }
+        ],
+    }
+    rec["responses"]["GET /api/v0/resources/sensors"] = {
+        "status": "ok",
+        "sensors": [
+            {"sensor_id": 1, "device_id": 1, "sensor_type": "acsSerialPortTable", "sensor_oid": ".1.3.6.1.4.1.10418.1"}
+        ],
+    }
+    anon = anonymize_recording(rec)
+    dev = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    sensor = anon["responses"]["GET /api/v0/resources/sensors"]["sensors"][0]
+
+    # The example-enterprise arc (32473) replaces the real vendor numbers (6527, 9, 10418).
+    assert dev["sysObjectID"].startswith(".1.3.6.1.4.1.32473.") and "6527" not in dev["sysObjectID"]
+    assert dev["entPhysicalVendorType"].startswith("1.3.6.1.4.1.32473.")  # leading-dot convention preserved
+    assert ".9.12." not in dev["entPhysicalVendorType"]
+    assert sensor["sensor_oid"].startswith(".1.3.6.1.4.1.32473.") and "10418" not in sensor["sensor_oid"]
+    # Deterministic, and find_pii stays clean (the pseudonym is a well-formed OID).
+    assert (
+        anonymize_recording(rec)["responses"]["GET /api/v0/devices/1"]["devices"][0]["sysObjectID"]
+        == dev["sysObjectID"]
+    )
+    assert find_pii(anon) == []
+
+
+def test_asset_id_and_alias_scrubbed():
+    """Operator-configurable entPhysicalAssetID / entPhysicalAlias are scrubbed to empty."""
+    rec = _ports(
+        {
+            "port_id": 1,
+            "ifName": "Gi0/1",
+            "ifType": "ethernetCsmacd",
+            "entPhysicalAssetID": "ASSET-2024-1337",
+            "entPhysicalAlias": "rackA3-U12-core-rtr",
+        }
+    )
+    port = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
+    assert port["entPhysicalAssetID"] == ""
+    assert port["entPhysicalAlias"] == ""
+
+
 def test_find_pii_still_flags_a_real_ip_next_to_text():
     """A genuine IPv4 embedded in free-form text is still caught."""
     rec = _ports(
