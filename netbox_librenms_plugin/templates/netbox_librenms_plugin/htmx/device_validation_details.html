@@ -938,13 +938,17 @@
               }
               if (!modal.dataset.promoteResetBound) {
                 modal.dataset.promoteResetBound = "1";
-                modal.addEventListener("hidden.bs.modal", resetPromoteForm);
-                // Fallback when Bootstrap's modal JS isn't active: the dismiss buttons
-                // only hide the modal and never fire hidden.bs.modal, so a stale "Use
-                // new" selection would persist across reopen. Reset on their click too.
-                modal.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function (btn) {
-                  btn.addEventListener("click", resetPromoteForm);
-                });
+                if (typeof bootstrap !== "undefined" && bootstrap.Modal) {
+                  modal.addEventListener("hidden.bs.modal", resetPromoteForm);
+                } else {
+                  // Fallback only when Bootstrap's modal JS isn't active: the dismiss buttons
+                  // then only hide the modal and never fire hidden.bs.modal, so a stale "Use
+                  // new" selection would persist across reopen. Reset on their click instead —
+                  // binding both would call resetPromoteForm twice when Bootstrap IS present.
+                  modal.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function (btn) {
+                    btn.addEventListener("click", resetPromoteForm);
+                  });
+                }
               }
               modal.addEventListener("change", function (e) {
                 var t = e.target;
