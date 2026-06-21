@@ -703,7 +703,11 @@ class LibreNMSInterfaceTable(tables.Table):
         # unrelated host interface and inviting a sync the server then silently skips.
         if port_data.get("_source") == "oob":
             port_data["netbox_interface"] = None
-        else:
+        # Preserve a netbox_interface already resolved by the stable port_id (e.g. the single-
+        # interface verify view resolves by port_id first). Only fall back to the fragile name
+        # lookup when nothing has been resolved yet, so a display-name change or collision can't
+        # clobber the correct port-id match with the wrong (or no) name-matched interface.
+        elif not port_data.get("netbox_interface"):
             port_data["netbox_interface"] = device.interfaces.filter(name=interface_name).first()
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
 

@@ -528,10 +528,32 @@ class TestSingleInterfaceVerifyView:
         other_iface.name = "Gi0/2"
         mock_device.interfaces.all.return_value = [other_iface, nb_iface]
 
-        port_data = {"ifDescr": "GigabitEthernet0/1", "ifName": "Gi0/1", "port_id": 42, "speed": 1000}
+        port_data = {
+            "ifDescr": "GigabitEthernet0/1",
+            "ifName": "Gi0/1",
+            "port_id": 42,
+            "ifSpeed": 1000,
+            "ifType": "ethernetCsmacd",
+            "ifAlias": "",
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+        }
         cached_data = {"ports": [port_data]}
+
+        # Run the REAL format_interface_data (the formatter re-does a name lookup that could
+        # overwrite the port-id-resolved interface); discard its rendered dict so the mock
+        # render_* values aren't serialized. This makes the test fail if the formatter clobbers
+        # the port-id match instead of preserving it.
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+
         mock_table = MagicMock()
-        mock_table.format_interface_data.return_value = "<tr>row</tr>"
+        mock_table.interface_name_field = "ifDescr"
+        mock_table.sync_object_type = "dcim.device"
+        mock_table.format_interface_data.side_effect = lambda pd, dev: (
+            LibreNMSInterfaceTable.format_interface_data(mock_table, pd, dev),
+            "<tr>row</tr>",
+        )[1]
 
         def fake_get_id(iface, server_key, auto_save=False):
             return 42 if iface is nb_iface else 7
