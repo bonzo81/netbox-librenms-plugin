@@ -179,6 +179,17 @@ class TestResolveWinnerForDonor:
         assert winner is None
         assert marker["device_id"] == donor.pk
 
+    def test_non_positive_winner_id_classified_corrupt(self):
+        """A marker with a non-positive device_id (0 / negative) is corrupt, not a deleted winner — int() succeeds but it can never be a real Device pk."""
+        from netbox_librenms_plugin.views.sync.migrate import _winner_unavailable_reason
+
+        donor = _make_migrate_device("mig-rw-nonpos")
+        assert _winner_unavailable_reason(donor, {"device_id": 0}) == "corrupt"
+        assert _winner_unavailable_reason(donor, {"device_id": -5}) == "corrupt"
+        assert _winner_unavailable_reason(donor, {"device_id": "0"}) == "corrupt"
+        # A well-formed positive id whose row is gone is still "deleted".
+        assert _winner_unavailable_reason(donor, {"device_id": 999999}) == "deleted"
+
 
 # ── MoveInterfaceToWinnerView ─────────────────────────────────────────────
 

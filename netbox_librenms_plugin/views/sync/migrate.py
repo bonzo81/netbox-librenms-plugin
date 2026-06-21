@@ -87,8 +87,8 @@ def _winner_unavailable_reason(donor, marker):
     is a corrupt marker. Mirrors the staleness checks in :func:`_resolve_winner_for_donor`.
 
     Returns:
-        str: ``"deleted"`` (well-formed id, winner row gone) or ``"corrupt"``
-            (bool/unparseable ``device_id``, or self-pointing).
+        str: ``"deleted"`` (well-formed positive id, winner row gone) or ``"corrupt"``
+            (bool/unparseable/non-positive ``device_id``, or self-pointing).
     """
     device_id = marker.get("device_id")
     if isinstance(device_id, bool):
@@ -97,7 +97,10 @@ def _winner_unavailable_reason(donor, marker):
         winner_pk = int(device_id)
     except (TypeError, ValueError):
         return "corrupt"
-    if winner_pk == donor.pk:
+    # A non-positive pk is never a real Device row, so int() succeeding doesn't make it a
+    # "deleted winner" — it's a corrupt marker. Classify it as such so recovery isn't sent
+    # chasing a device that never existed.
+    if winner_pk <= 0 or winner_pk == donor.pk:
         return "corrupt"
     return "deleted"
 
