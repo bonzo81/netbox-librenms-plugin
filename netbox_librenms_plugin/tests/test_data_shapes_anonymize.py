@@ -407,11 +407,14 @@ def test_find_pii_flags_residual_fqdn_but_not_icon_or_version():
     # sysDescr is scrubbed to "" by the field rules, so plant the FQDN in an unclassified field
     # to exercise the safety net directly.
     rec["responses"]["GET /api/v0/devices/1"]["devices"][0]["custom_note"] = "see rtr.dc1.example.net"
-    findings = find_pii(anonymize_recording(rec))
+    anon = anonymize_recording(rec)
+    findings = find_pii(anon)
     kinds = {(f["kind"], f["value"]) for f in findings}
     assert ("fqdn", "rtr.dc1.example.net") in kinds
-    assert not any(f["value"] == "nokia.svg" for f in findings)  # icon exempt
     assert not any(f["value"] == "3.9.0.4" for f in findings)  # version pseudonymized to fw-<hash>
+    # The icon names the OS/vendor, so it's genericized (and not flagged).
+    assert anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["icon"] == "images/os/generic.svg"
+    assert not any(f["value"] == "nokia.svg" for f in findings)
 
 
 def test_anonymization_preserves_port_relationships(recording_server):

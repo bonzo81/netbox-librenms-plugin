@@ -320,6 +320,10 @@ def _anon_value(key, value, salt):
         return f"fw-{_hash(value, salt)}"
     if key == "os":
         return pseudonymize_os(value)
+    if key == "icon":
+        # The icon path spells out the OS/vendor (e.g. "images/os/nokia.svg"), which would re-reveal
+        # exactly what pseudonymize_os hides — genericize it to stay consistent with the hashed os.
+        return "images/os/generic.svg"
     if key in IP_KEYS:
         return _doc_ip(value, salt)
     if key in MAC_KEYS:
