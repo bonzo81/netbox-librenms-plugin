@@ -773,6 +773,54 @@ class TestCablePostHostFetchWarning:
         assert not any("host links fetch failed" in t for t in warn_texts)
 
 
+class TestCablePartialSnapshotNotCached:
+    """A fresh fetch that partially failed (host or OOB) must NOT be cached — later cached renders/verify would otherwise silently serve the incomplete cable set."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+        view.get_cache_key = MagicMock(return_value="links-key")
+        view.get_table = MagicMock(return_value=MagicMock())
+        view.enrich_links_data = MagicMock(side_effect=lambda d, o, server_key=None: d)
+        return view
+
+    def _links_cache_sets(self, *, oob_failed, links_error, librenms_id):
+        view = self._make_view()
+
+        def fake_get_links(obj, server_key=None):
+            view._oob_links_fetch_failed = oob_failed
+            view._links_fetch_error = links_error
+            view.librenms_id = librenms_id
+            return [{"local_port": "Gi0/0", "remote_port": "Gi0/1", "_source": "host"}]
+
+        view.get_links_data = MagicMock(side_effect=fake_get_links)
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
+                return_value=MagicMock(),
+            ),
+        ):
+            mock_cache.ttl.return_value = None
+            view._prepare_context(MagicMock(), MagicMock(virtual_chassis=None), fetch_fresh=True, server_key="default")
+        return [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "links-key"]
+
+    def test_oob_fetch_failure_not_cached(self):
+        assert self._links_cache_sets(oob_failed=True, links_error=None, librenms_id=42) == []
+
+    def test_host_fetch_failure_with_host_id_not_cached(self):
+        assert self._links_cache_sets(oob_failed=False, links_error="auth failed", librenms_id=42) == []
+
+    def test_oob_only_mapping_still_cached(self):
+        # librenms_id None + a host "failure" is an OOB-only mapping (absent host) → still cache it.
+        assert len(self._links_cache_sets(oob_failed=False, links_error="no host", librenms_id=None)) == 1
+
+    def test_clean_fresh_fetch_cached(self):
+        assert len(self._links_cache_sets(oob_failed=False, links_error=None, librenms_id=42)) == 1
+
+
 # =============================================================================
 # TestGetTableOverride  — BaseCableTableView.get_table (lines 302-305)
 # =============================================================================

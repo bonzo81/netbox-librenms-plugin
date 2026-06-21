@@ -620,12 +620,22 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
         # Cache after enrichment so verify/sync views read current NetBox state
         cache_key = self.get_cache_key(cache_device, "links", server_key)
+        # Don't persist a PARTIAL fresh snapshot: a host fetch failure on a device that has a host
+        # id, or any OOB fetch failure, drops one side's cable rows — caching it would make later
+        # cached renders / verify actions silently serve the incomplete set. An OOB-only mapping
+        # (no host id) legitimately records _links_fetch_error for the absent host, so keep caching
+        # that successful OOB refresh (mirrors the host_mapping_absent_but_oob_scoped guard above).
+        partial_fetch_failed = fetch_fresh and (
+            bool(getattr(self, "_oob_links_fetch_failed", False))
+            or (bool(getattr(self, "_links_fetch_error", None)) and getattr(self, "librenms_id", None) is not None)
+        )
         if fetch_fresh:
-            cache.set(
-                cache_key,
-                {"links": links_data},
-                timeout=self.librenms_api.cache_timeout,
-            )
+            if not partial_fetch_failed:
+                cache.set(
+                    cache_key,
+                    {"links": links_data},
+                    timeout=self.librenms_api.cache_timeout,
+                )
         else:
             # Write enriched data back, preserving original TTL
             remaining_ttl = cache_remaining_ttl(cache, cache_key)
@@ -633,7 +643,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 cache.set(cache_key, {"links": links_data}, timeout=remaining_ttl)
 
         # Calculate cache expiry
-        cache_ttl = cache_remaining_ttl(cache, cache_key)
+        cache_ttl = None if partial_fetch_failed else cache_remaining_ttl(cache, cache_key)
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         # Generate the table
