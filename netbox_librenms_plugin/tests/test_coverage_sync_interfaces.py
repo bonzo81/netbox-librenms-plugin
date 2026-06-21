@@ -450,6 +450,23 @@ class TestInterfaceContextOOBRows:
         assert "table" in ctx
         assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
 
+    def test_malformed_port_stack_relationships_does_not_crash(self):
+        """A cached snapshot whose port_stack_relationships is None / a non-dict (corruption, partial write, format migration) must fail soft, not AttributeError on the .get('lag_members') calls."""
+        view = self._make_view()
+        obj = self._host_with_idrac()
+        req = _make_request()
+
+        for bad in (None, ["not", "a", "dict"], "garbage"):
+            fresh = {
+                "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
+                "port_stack_relationships": bad,
+            }
+            with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
+                mock_cache.get.return_value = None
+                mock_cache.ttl.return_value = None
+                ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)  # must not raise
+            assert "table" in ctx
+
     def test_malformed_cached_port_snapshot_fails_closed(self):
         """A stale/corrupt cached ports snapshot (non-dict, or ports not a list of dicts) must be dropped and re-rendered empty, not 500 the sync tab — and the bad entry purged so a later render re-fetches."""
         view = self._make_view()
@@ -1348,6 +1365,29 @@ class TestSyncLagAndParentRelationships:
 
         member.refresh_from_db()
         assert member.lag_id is None  # invalid self-LAG was not persisted
+
+    def test_oob_row_excluded_from_relationship_sync(self, db):
+        """An OOB-controller row sharing a selected host display name must not contribute its port_id, or the LAG pass would link the hidden controller interface instead of the host."""
+        device = self._make_device()
+        self._iface(device, "Gi0/1", 10)  # real host member sharing the name
+        self._iface(device, "Po1", 100, itype="lag")  # the LAG aggregate (port_id 100)
+        # The OOB controller's interface, which the OOB row's port_id would resolve to.
+        oob_iface = self._iface(device, "idrac0", 999)
+
+        ports_data = [
+            {"ifName": "Gi0/1", "port_id": 10},
+            {"ifName": "Po1", "port_id": 100},
+            # OOB controller row merged for display; shares the selected host name "Gi0/1".
+            {"ifName": "Gi0/1", "port_id": 999, "_source": "oob"},
+        ]
+        # Crafted/colliding port_stack data maps the OOB row's port_id to the aggregate.
+        relationships = {"lag_members": {"999": 100}, "sub_interfaces": {}}
+
+        view = self._make_view(name_field="ifName")
+        view._sync_lag_and_parent_relationships(device, ["Gi0/1"], ports_data, relationships, "default")
+
+        oob_iface.refresh_from_db()
+        assert oob_iface.lag_id is None  # OOB row skipped → no link persisted on the controller iface
 
 
 # A POSTed valid non-default server_key must scope the sync to that server without 500ing on a

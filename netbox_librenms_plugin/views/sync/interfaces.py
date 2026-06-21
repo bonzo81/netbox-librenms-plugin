@@ -232,6 +232,12 @@ class SyncInterfacesView(
         port_by_id = {}
         selected_port_ids = set(getattr(self, "_selected_port_ids", set()))
         for port in ports_data:
+            # OOB-controller rows are context-only (merged for shared-LOM display); sync_selected_interfaces()
+            # already skips them. Exclude them here too: on a page where an OOB row shares the host display
+            # name, adding its port_id would let the LAG/parent pass persist links on the hidden controller
+            # row instead of the host interface.
+            if port.get("_source") == "oob":
+                continue
             pid = port.get("port_id")
             if pid is None:
                 continue

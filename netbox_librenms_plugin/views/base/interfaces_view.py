@@ -553,7 +553,12 @@ class BaseInterfaceTableView(
             # non-OOB port): a JSON cache round-trip stringifies dict keys while the port_id
             # values on the port dicts stay int, so without normalizing the .get() lookups
             # silently miss and valid LAG/parent relationships vanish from the table.
-            port_stack_relationships = cached_data.get("port_stack_relationships", {})
+            # The default only applies when the key is missing; a cache entry holding None or a
+            # non-dict value (corruption, partial write, format migration) would AttributeError on
+            # the .get("lag_members"/"sub_interfaces") calls below. Normalize to {} so it fails soft.
+            port_stack_relationships = cached_data.get("port_stack_relationships") or {}
+            if not isinstance(port_stack_relationships, dict):
+                port_stack_relationships = {}
             lag_members = {
                 normalize_librenms_port_id(k): v for k, v in port_stack_relationships.get("lag_members", {}).items()
             }
