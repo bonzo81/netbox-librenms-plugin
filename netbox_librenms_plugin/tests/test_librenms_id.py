@@ -921,6 +921,25 @@ class TestMergeLibreNMSLinks:
         with pytest.raises(ValueError, match="unparseable librenms_id"):
             merge_librenms_links(winner, donor, "default")
 
+    def test_falsy_corrupt_top_level_librenms_id_fails_closed(self):
+        """A top-level librenms_id of False/0 must raise, not collapse to {} via `or {}` and merge as 'no mapping'."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        for bad in (False, 0):
+            # Corrupt winner.
+            winner = self._make_dev("eve-ng-02", bad)
+            donor = self._make_dev("router-spare", {"default": {"id": 99}})
+            with pytest.raises(ValueError, match="legacy bare-integer or corrupt"):
+                merge_librenms_links(winner, donor, "default")
+
+            # Corrupt donor.
+            winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+            donor = self._make_dev("router-spare", bad)
+            with pytest.raises(ValueError, match="legacy bare-integer or corrupt"):
+                merge_librenms_links(winner, donor, "default")
+
     def test_unsupported_winner_entry_shape_fails_closed(self):
         """A non-None winner entry of an unsupported type (bool/float/list) must raise, not collapse to {} (which would let the winner inherit the donor's id)."""
         import pytest

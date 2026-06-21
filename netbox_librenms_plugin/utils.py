@@ -1918,11 +1918,20 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
         "donor_id_demoted_to_oob": None,
     }
 
-    winner_cf = winner.custom_field_data.get("librenms_id") or {}
-    donor_cf = donor.custom_field_data.get("librenms_id") or {}
+    # Read with an explicit None check rather than ``or {}``: a falsy-but-corrupt value
+    # (``False`` from a bad bool write, or ``0``) must NOT collapse to ``{}`` and be merged as
+    # "no mapping" — it has to reach the dict guard below and fail closed. Only a genuinely
+    # absent field (None) is treated as "no link".
+    winner_cf = winner.custom_field_data.get("librenms_id")
+    donor_cf = donor.custom_field_data.get("librenms_id")
+    if winner_cf is None:
+        winner_cf = {}
+    if donor_cf is None:
+        donor_cf = {}
     if not isinstance(winner_cf, dict) or not isinstance(donor_cf, dict):
-        # Legacy bare-int forms must be migrated by the caller before merging.
-        raise ValueError("Cannot merge: one or both devices have a legacy bare-integer librenms_id.")
+        # Legacy bare-int forms (and corrupt non-mapping values such as a bool/0) must be
+        # repaired/migrated by the caller before merging — never silently treated as "no link".
+        raise ValueError("Cannot merge: one or both devices have a legacy bare-integer or corrupt librenms_id.")
 
     winner_entry = winner_cf.get(server_key)
     if isinstance(winner_entry, int) and not isinstance(winner_entry, bool):

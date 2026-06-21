@@ -157,25 +157,18 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         post_server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            # Render the fragment with the message (like the cables/ip/modules/vlan
-            # failed-rebind branches) — a redirect here points at this same POST-only URL,
-            # which the hx-post XHR transparently follows with a GET: 405, no swap, a dead
-            # button, and the queued error only surfacing on a later full page load.
+            # This POST is HTMX (the success path swaps in the partial), so a bare redirect would
+            # swap a full page into the partial target AND drop the migrated-donor context —
+            # re-enabling sync controls on a migrated donor. Render the partial with migrated
+            # context resolved under the active session key (the POSTed key is now known-invalid),
+            # mirroring the ip/cables/modules/vlan stale-key error paths.
             return render(
                 request,
                 self.partial_template_name,
                 {
-                    "interface_sync": {
-                        "table": None,
-                        "object": obj,
-                        "cache_expiry": None,
-                        "last_fetched": None,
-                        # Explicit None so the fragment doesn't silently fall back to the
-                        # session/default server for the next retry (mirrors vlan_table_view's
-                        # stale-server branch).
-                        "server_key": None,
-                    },
+                    "interface_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
                     "interface_name_field": interface_name_field,
+                    **build_migrated_context(obj, self.librenms_api.server_key),
                 },
             )
 

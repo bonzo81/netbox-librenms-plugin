@@ -1351,8 +1351,8 @@ class TestBaseInterfaceTableViewBasics:
         # A real failure redirect came back (the rebound client has no host id).
         assert result.status_code == 302
 
-    def test_post_stale_server_key_renders_partial_without_session_fallback(self):
-        """A posted server_key that no longer resolves (build returns None) → error + fragment render, not an unhandled 500 — and the session client is never queried."""
+    def test_post_stale_server_key_renders_migrated_context(self):
+        """A posted server_key that no longer resolves (build returns None) → error + partial render with migrated context under the session key (NOT a redirect, which an HTMX swap would mishandle and which would drop migrated-donor suppression)."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
@@ -1373,15 +1373,24 @@ class TestBaseInterfaceTableViewBasics:
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="name"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render", return_value="fragment") as mock_render,
+            patch(
+                "netbox_librenms_plugin.views.base.interfaces_view.build_migrated_context",
+                return_value={"migrated_to_marker": {"device_id": 7}},
+            ) as mock_migrated,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render", return_value="rendered") as mock_render,
         ):
             result = view.post(req, pk=1)
 
-        # Never reached the live id lookup; surfaced an error and rendered the fragment in place.
+        # Never reached the live id lookup; surfaced an error and rendered the partial.
         session_api.get_librenms_id.assert_not_called()
         mock_messages.error.assert_called_once()
-        assert result == "fragment"
-        mock_render.assert_called_once()
+        assert result == "rendered"
+        # Migrated context resolved under the session/active key — NOT the stale POSTed "ghost".
+        mock_migrated.assert_called_once_with(obj, "default")
+        ctx = mock_render.call_args.args[2]
+        assert ctx["migrated_to_marker"] == {"device_id": 7}
+        # The stale-key render must also disable live sync state: interface_sync.server_key is None.
+        assert ctx["interface_sync"]["server_key"] is None
 
     def test_ip_post_stale_server_key_keeps_migrated_context(self):
         """IP sync's stale-server branch must include build_migrated_context so a migrated donor keeps its suppressed sync form/button — a stale server_key must not silently re-enable IP sync."""

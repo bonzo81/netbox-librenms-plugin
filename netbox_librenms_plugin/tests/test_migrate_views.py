@@ -990,3 +990,17 @@ class TestMigratedContextServerKeyFallback:
         self._post_with_server_key(
             BaseIPAddressTableView, "netbox_librenms_plugin.views.base.ip_addresses_view", {"server_key": "ghost"}
         )
+
+    def test_interfaces_view_empty_key_uses_session_key(self):
+        # interfaces_view previously redirected on a stale key (dropping migrated context); it must
+        # now render the partial with migrated context, so build_migrated_context is reached.
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        self._post_with_server_key(BaseInterfaceTableView, "netbox_librenms_plugin.views.base.interfaces_view", {})
+
+    def test_interfaces_view_stale_nonempty_key_uses_session_key(self):
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        self._post_with_server_key(
+            BaseInterfaceTableView, "netbox_librenms_plugin.views.base.interfaces_view", {"server_key": "ghost"}
+        )
