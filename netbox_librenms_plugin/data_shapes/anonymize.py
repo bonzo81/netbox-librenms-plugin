@@ -59,13 +59,33 @@ PRESERVE_KEYS = frozenset(
     }
 )
 SERIAL_KEYS = frozenset({"serial", "entPhysicalSerialNum"})
-HOSTNAME_KEYS = frozenset({"hostname", "sysName", "remote_hostname"})
+# `display` is the LibreNMS device display name — operators often set it to a real FQDN.
+HOSTNAME_KEYS = frozenset({"hostname", "sysName", "remote_hostname", "display"})
 MODEL_KEYS = frozenset({"hardware", "entPhysicalModelName"})
 IP_KEYS = frozenset({"ip", "ipv4", "ipv6", "inet", "ip_address", "overwrite_ip"})
 MAC_KEYS = frozenset({"ifPhysAddress", "mac", "mac_address"})
 GEO_KEYS = frozenset({"lat", "lng", "latitude", "longitude"})
 LOCATION_KEYS = frozenset({"location", "sysLocation"})
 FREETEXT_KEYS = frozenset({"ifAlias", "sysContact", "sysDescr", "purpose", "notes"})
+# SNMP credentials/config from the device row — secrets, scrubbed to empty. A LibreNMS
+# /api/v0/devices/{id} response is a full DB row that carries these in plaintext; none are read
+# by the sync logic, so blanking them all is safe and conservative.
+SNMP_CREDENTIAL_KEYS = frozenset(
+    {
+        "community",
+        "authname",
+        "authpass",
+        "authalgo",
+        "cryptopass",
+        "cryptoalgo",
+        "authlevel",
+        "snmpver",
+        "snmp_community",
+    }
+)
+# Safety-net (find_pii) key denylist: any non-empty string under a key whose name suggests a
+# secret is flagged for review, even if it's a field the rules above don't explicitly cover.
+_SECRET_KEY_HINTS = ("pass", "community", "secret", "token", "cryptopass", "privkey", "authkey", "apikey")
 
 # Documentation/synthetic ranges this module emits — find_pii() allows them.
 _DOC_IP_PREFIXES = ("192.0.2.", "198.51.100.", "203.0.113.", "2001:db8")
@@ -125,7 +145,7 @@ def _anon_value(key, value, salt):
         return _synthetic_mac(value, salt)
     if key in LOCATION_KEYS:
         return "Lab"
-    if key in FREETEXT_KEYS:
+    if key in FREETEXT_KEYS or key in SNMP_CREDENTIAL_KEYS:
         return ""
     return value
 
@@ -161,22 +181,27 @@ def anonymize_recording(recording, *, salt=""):
 
 def find_pii(recording):
     """
-    Sweep a recording's responses for residual IP/MAC/email strings the field rules missed.
+    Sweep a recording's responses for residual secrets the field rules missed.
 
-    The documentation IP ranges and the synthetic ``02:00:00`` MAC block this module emits are
-    treated as safe and not reported.
+    Catches IP/MAC/email string patterns, plus any non-empty value under a key whose name
+    suggests a credential (defense-in-depth for unexpected secret fields the rules don't
+    explicitly scrub). The documentation IP ranges and the synthetic ``02:00:00`` MAC block this
+    module emits are treated as safe and not reported.
 
     Args:
         recording (dict): The recording to scan (typically the anonymized output).
 
     Returns:
-        list[dict]: One ``{"path", "kind", "value"}`` entry per residual match.
+        list[dict]: One ``{"path", "kind", "value"}`` entry per residual match. Credential-key
+            findings report ``value`` as ``"<redacted>"`` so the secret itself isn't echoed.
     """
     findings = []
 
     def scan(obj, path):
         if isinstance(obj, dict):
             for k, v in obj.items():
+                if isinstance(v, str) and v and any(hint in k.lower() for hint in _SECRET_KEY_HINTS):
+                    findings.append({"path": f"{path}.{k}", "kind": "credential", "value": "<redacted>"})
                 scan(v, f"{path}.{k}")
         elif isinstance(obj, list):
             for i, v in enumerate(obj):

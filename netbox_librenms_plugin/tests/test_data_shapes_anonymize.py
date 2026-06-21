@@ -157,6 +157,55 @@ def test_find_pii_still_flags_a_real_ip_next_to_text():
     assert any(f["kind"] == "ipv4" and f["value"] == "10.7.8.9" for f in find_pii(anon))
 
 
+def test_snmp_credentials_scrubbed():
+    """SNMP community / v3 auth+priv secrets in the device row are scrubbed to empty, not leaked."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        "devices": [
+            {
+                "device_id": 1,
+                "community": "s3cr3t-community",
+                "authname": "snmpuser",
+                "authpass": "authPassw0rd",
+                "cryptopass": "privKey12345",
+                "authalgo": "SHA",
+                "cryptoalgo": "AES",
+                "snmpver": "v3",
+            }
+        ],
+    }
+    dev = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    for field in ("community", "authname", "authpass", "cryptopass", "authalgo", "cryptoalgo", "snmpver"):
+        assert dev[field] == "", f"{field} must be scrubbed"
+
+
+def test_display_name_pseudonymized():
+    """The device `display` field (often a real FQDN) is pseudonymized like hostname/sysName."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        "devices": [{"device_id": 1, "display": "core-sw-01.nyc.corp.example.com"}],
+    }
+    dev = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    assert dev["display"].startswith("device-")
+    assert "example.com" not in dev["display"]
+
+
+def test_find_pii_flags_nonempty_value_under_secret_looking_key():
+    """A secret under an unexpected key the rules don't scrub is still flagged (value redacted)."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        "devices": [{"device_id": 1, "api_token": "abc123def456"}],
+    }
+    anon = anonymize_recording(rec)  # api_token isn't in any rule set → survives
+    findings = find_pii(anon)
+    token_findings = [f for f in findings if f["kind"] == "credential" and f["path"].endswith("api_token")]
+    assert token_findings, "an unexpected secret-keyed value must be flagged"
+    assert token_findings[0]["value"] == "<redacted>"  # the secret itself is never echoed
+
+
 def test_salt_changes_pseudonyms():
     """Different salts produce different pseudonyms for the same input."""
     rec = load_recording("cisco-stackwise-3member")
