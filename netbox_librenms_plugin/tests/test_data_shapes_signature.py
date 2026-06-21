@@ -1,6 +1,6 @@
 """Tests for data-shape signatures + novelty classification."""
 
-from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, pseudonymize_os
 from netbox_librenms_plugin.data_shapes.signature import (
     build_manifest,
     classify_novelty,
@@ -12,7 +12,7 @@ from netbox_librenms_plugin.tests.recordings import iter_recordings, load_record
 def test_signature_cisco_stackwise():
     """A Cisco StackWise recording fingerprints as a 3-member, 1-based, stack-rooted VC."""
     sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
-    assert sig["os"] == "ios"
+    assert sig["os"] == pseudonymize_os("ios")  # OS is pseudonymized in the recording
     assert sig["virtual_chassis"] == {
         "present": True,
         "root_class": "stack",
@@ -26,7 +26,7 @@ def test_signature_cisco_stackwise():
 def test_signature_juniper_vc_zero_based_chassis_root():
     """A Juniper VC fingerprints as a 2-member, 0-based, chassis-rooted VC."""
     sig = compute_shape_signature(load_recording("juniper-vc-2member"))
-    assert sig["os"] == "junos"
+    assert sig["os"] == pseudonymize_os("junos")  # OS is pseudonymized in the recording
     assert sig["virtual_chassis"]["root_class"] == "chassis"
     assert sig["virtual_chassis"]["member_count"] == 2
     assert sig["virtual_chassis"]["position_base"] == 0
@@ -74,9 +74,26 @@ def test_classify_novelty_new_for_unseen_axes():
     assert verdict["closest"] is None
 
 
-def test_os_family_groups_cisco_variants():
-    """Cisco ios and nxos collapse to one family, so a covered ios VC marks an nxos VC likely-covered."""
+def test_classify_novelty_similar_for_related_os_variant():
+    """A different cisco OS variant with the same shape is 'similar' — neither fully covered nor new."""
+    manifest = build_manifest([load_recording("cisco-stackwise-3member")])  # ios VC
+    sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
+    sig["os"] = "iosxr"  # same vendor family as the covered ios shape, but a distinct OS
+    verdict = classify_novelty(sig, manifest)
+    assert verdict["verdict"] == "similar"
+    assert verdict["closest"] == "cisco-stackwise-3member"
+
+
+def test_classify_novelty_exact_os_is_covered_not_merely_similar():
+    """The same OS + same shape is 'likely-covered' (the stronger verdict wins over 'similar')."""
     manifest = build_manifest([load_recording("cisco-stackwise-3member")])
     sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
-    sig["os"] = "nxos"  # same family as the covered ios shape
     assert classify_novelty(sig, manifest)["verdict"] == "likely-covered"
+
+
+def test_classify_novelty_new_for_different_vendor_same_shape():
+    """A different VENDOR with the same shape is 'new' — variants relate, vendors don't."""
+    manifest = build_manifest([load_recording("cisco-stackwise-3member")])  # cisco VC
+    sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
+    sig["os"] = "junos"  # different vendor family, same VC shape
+    assert classify_novelty(sig, manifest)["verdict"] == "new"

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "juniper-vc-2member",
   "description": "Juniper EX Virtual Chassis, 2 members under a chassis-class root, 0-based positions.",
-  "meta": {"os": "junos", "vendor": "juniper", "topology": "virtual-chassis"},
+  "meta": {"os": "os-990f10", "vendor": "juniper", "topology": "virtual-chassis"},
   "device_id": 1001,
   "responses": {
     "GET /api/v0/devices/1001": {
@@ -13,7 +13,7 @@
           "hostname": "device-vc01",
           "sysName": "device-vc01",
           "hardware": "EX4300-48T",
-          "os": "junos",
+          "os": "os-990f10",
           "serial": "SN-aa11bb",
           "ip": "192.0.2.11",
           "version": "fw-52119b"

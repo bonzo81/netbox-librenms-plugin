@@ -74,6 +74,30 @@ def test_capture_view_reports_novelty_verdict(recording_server):
 
 
 @pytest.mark.django_db
+def test_capture_view_reports_similar_for_related_os_variant(recording_server):
+    """A same-shape device on a related OS variant is flagged 'similar', not 'already covered'."""
+    rec = load_recording("cisco-stackwise-3member")  # ios VC, covered by the manifest
+    # Same VC shape, but a different cisco OS variant (iosxr) — behaves differently, so 'similar'.
+    rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["os"] = "iosxr"
+    rec["meta"] = {**rec.get("meta", {}), "os": "iosxr"}
+    _server, api = recording_server(rec)
+    device = make_device("cap-dev-similar")
+    view = _view_with_api(api)
+
+    with (
+        patch.object(view, "rebind_api_for_server", return_value="test"),
+        patch.object(api, "get_librenms_id", return_value=1000),
+        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
+    ):
+        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+
+    html = response.content.decode()
+    assert "Similar to an existing shape" in html
+    assert "Likely already covered" not in html
+    assert "cisco-stackwise-3member" in html  # the closest neighbour is surfaced
+
+
+@pytest.mark.django_db
 def test_capture_view_errors_when_device_not_linked(recording_server):
     """A device with no LibreNMS id shows an error panel instead of capturing."""
     _server, api = recording_server(load_recording("cisco-stackwise-3member"))

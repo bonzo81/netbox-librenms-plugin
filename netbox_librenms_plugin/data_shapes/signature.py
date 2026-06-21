@@ -10,25 +10,48 @@ match and a reason, never an authoritative decision.
 
 import re
 
-# Coarse OS-family grouping so e.g. ios/iosxe/nxos all read as "cisco" for novelty matching.
-_OS_FAMILY = {
+from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
+
+# Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
+# "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
+# so an ios recording does not *cover* an iosxr shape; it's only "similar". Recordings carry a
+# pseudonymized OS (see pseudonymize_os), so the map is precomputed for BOTH the raw OS strings and
+# their stable os-<hash> tokens — that way novelty works whether it reads a raw or anonymized
+# signature. Extend with new variants (e.g. a Junos-Evolved OS string) as they appear.
+_OS_FAMILY_RAW = {
     "ios": "cisco",
     "iosxe": "cisco",
     "iosxr": "cisco",
     "nxos": "cisco",
+    "asa": "cisco",
+    "ftd": "cisco",
     "junos": "juniper",
+    "junos-evo": "juniper",
+    "junosevo": "juniper",
     "eos": "arista",
     "routeros": "mikrotik",
     "timos": "nokia",
     "sros": "nokia",
+    "arcos": "arrcus",
+    "vrp": "huawei",
 }
+_OS_FAMILY = {}
+for _os, _fam in _OS_FAMILY_RAW.items():
+    _OS_FAMILY[_os] = _fam
+    _OS_FAMILY[pseudonymize_os(_os)] = _fam
 
 
 def _os_family(os_name):
-    """Map a LibreNMS os string to a coarse vendor family (falls back to the raw os)."""
+    """
+    Return a coarse vendor family for an OS string (raw or pseudonymized), for similarity matching.
+
+    A recognized OS maps to its vendor (ios/iosxr → "cisco"); an unrecognized (niche) OS falls back
+    to its own pseudonymized token, so two recordings of the same niche OS still relate to each
+    other while different ones don't.
+    """
     if not isinstance(os_name, str) or not os_name:
         return None
-    return _OS_FAMILY.get(os_name.lower(), os_name.lower())
+    return _OS_FAMILY.get(os_name) or _OS_FAMILY.get(os_name.lower()) or pseudonymize_os(os_name)
 
 
 def _body(recording, predicate):
@@ -116,11 +139,10 @@ def compute_shape_signature(recording):
     }
 
 
-def _novelty_axes(signature):
-    """Reduce a signature to the coarse axes novelty matching compares."""
+def _structural_axes(signature):
+    """Reduce a signature to its OS-independent shape axes (VC + LAG + sub-interface presence)."""
     vc = signature.get("virtual_chassis", {})
     return (
-        _os_family(signature.get("os")),
         vc.get("present", False),
         vc.get("root_class"),
         signature.get("lag", {}).get("present", False),
@@ -135,26 +157,54 @@ def build_manifest(recordings):
 
 def classify_novelty(signature, manifest):
     """
-    Fuzzily classify a signature against a manifest of already-covered shapes.
+    Graded-similarity classification of a signature against a manifest of covered shapes.
+
+    Three verdicts, because OS variants are *similar but not interchangeable* — an ios recording
+    shares almost everything with an iosxr one yet they differ (notably ifName/ifDescr), so the
+    former should not be reported as fully *covering* the latter:
+
+    * ``likely-covered`` — a covered shape has the SAME OS (pseudonymized token) and the same
+      VC/LAG/sub-interface shape.
+    * ``similar`` — a covered shape has the same VC/LAG/sub-interface shape and a related OS (same
+      vendor family, e.g. ios↔iosxr, junos↔Junos-Evolved) but not the exact OS — likely still worth
+      adding, just informed by the close neighbour.
+    * ``new`` — nothing shares both the shape and the OS family.
 
     Args:
-        signature (dict): Output of :func:`compute_shape_signature`.
+        signature (dict): Output of :func:`compute_shape_signature` (raw or anonymized OS both work).
         manifest (list[dict]): ``[{name, signature}]`` entries (see :func:`build_manifest`).
 
     Returns:
-        dict: ``{"verdict": "new" | "likely-covered", "closest": <name|None>, "why": <str>}``.
+        dict: ``{"verdict": "likely-covered" | "similar" | "new", "closest": <name|None>,
+            "why": <str>}``.
     """
-    target = _novelty_axes(signature)
+    target_shape = _structural_axes(signature)
+    target_os = pseudonymize_os(signature.get("os"))
+    target_family = _os_family(signature.get("os"))
+
+    similar = None
     for entry in manifest:
-        if _novelty_axes(entry.get("signature", {})) == target:
-            name = entry.get("name")
+        sig = entry.get("signature", {})
+        if _structural_axes(sig) != target_shape:
+            continue
+        name = entry.get("name")
+        if pseudonymize_os(sig.get("os")) == target_os:
             return {
                 "verdict": "likely-covered",
                 "closest": name,
-                "why": f"shares OS-family + VC/LAG/sub-interface axes with '{name}'",
+                "why": f"shares the same OS + VC/LAG/sub-interface shape with '{name}'",
             }
+        if similar is None and target_family is not None and _os_family(sig.get("os")) == target_family:
+            similar = name
+
+    if similar is not None:
+        return {
+            "verdict": "similar",
+            "closest": similar,
+            "why": f"same VC/LAG/sub-interface shape as '{similar}' on a related OS variant — likely worth adding",
+        }
     return {
         "verdict": "new",
         "closest": None,
-        "why": "no covered shape shares its OS-family + VC/LAG/sub-interface axes",
+        "why": "no covered shape shares its OS + VC/LAG/sub-interface shape",
     }

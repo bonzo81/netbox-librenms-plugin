@@ -154,8 +154,9 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
 
     captured = capture_device_recording(api, seed["device_id"], name="captured-cisco")
 
-    # os metadata is lifted from the captured device-info response.
-    assert captured["meta"]["os"] == "ios"
+    # os metadata is lifted verbatim from the captured device-info response (the bundled seed's OS
+    # is already pseudonymized, and capture does not anonymize — it records what the server returns).
+    assert captured["meta"]["os"] == seed["responses"]["GET /api/v0/devices/1000"]["devices"][0]["os"]
     # The capture recorded device info, both inventory variants, ports, and port_stack.
     keys = list(captured["responses"])
     assert "GET /api/v0/devices/1000" in keys

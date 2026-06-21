@@ -3,7 +3,7 @@
   "name": "junos-subinterfaces",
   "description": "Real Junos route-reflector capture (anonymized): unit sub-interfaces over physical parents.",
   "meta": {
-    "os": "junos"
+    "os": "os-990f10"
   },
   "device_id": 15,
   "lag_patterns": {},
@@ -40,7 +40,7 @@
           "hardware": "MODEL-01c226",
           "features": null,
           "location_id": 1,
-          "os": "junos",
+          "os": "os-990f10",
           "status": true,
           "status_reason": "",
           "ignore": false,

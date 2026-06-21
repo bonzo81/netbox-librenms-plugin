@@ -9,6 +9,8 @@
   {% else %}
     {% if novelty.verdict == "new" %}
       <span class="badge bg-warning-lt"><i class="mdi mdi-star-outline"></i> Likely a new shape</span>
+    {% elif novelty.verdict == "similar" %}
+      <span class="badge bg-warning-lt"><i class="mdi mdi-star-half-full"></i> Similar to an existing shape &mdash; likely still worth adding</span>
     {% else %}
       <span class="badge bg-info-lt"><i class="mdi mdi-check-decagram"></i> Likely already covered</span>
     {% endif %}

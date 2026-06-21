@@ -3,7 +3,7 @@
   "name": "cisco-stackwise-3member",
   "description": "Cisco StackWise, 3 chassis members under a stack-class root, 1-based positions.",
   "meta": {
-    "os": "ios",
+    "os": "os-901310",
     "vendor": "cisco",
     "topology": "stackwise"
   },
@@ -17,7 +17,7 @@
           "hostname": "device-stack01",
           "sysName": "device-stack01",
           "hardware": "WS-C3750X-48P",
-          "os": "ios",
+          "os": "os-901310",
           "serial": "SN-a1b2c3",
           "ip": "192.0.2.10",
           "version": "fw-994e2d"

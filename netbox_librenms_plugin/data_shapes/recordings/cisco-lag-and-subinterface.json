@@ -3,7 +3,7 @@
   "name": "cisco-lag-and-subinterface",
   "description": "Single Cisco device: one Port-channel LAG member and one numeric sub-interface, resolved from port_stack.",
   "meta": {
-    "os": "ios",
+    "os": "os-901310",
     "vendor": "cisco",
     "topology": "single"
   },
@@ -17,7 +17,7 @@
           "hostname": "device-rtr01",
           "sysName": "device-rtr01",
           "hardware": "ISR4351",
-          "os": "ios",
+          "os": "os-901310",
           "serial": "SN-ee33ff",
           "ip": "192.0.2.12",
           "version": "fw-9d812d"

@@ -2,7 +2,7 @@
   {
     "name": "cisco-lag-and-subinterface",
     "signature": {
-      "os": "ios",
+      "os": "os-901310",
       "virtual_chassis": {
         "present": false,
         "root_class": null,
@@ -28,7 +28,7 @@
   {
     "name": "cisco-stackwise-3member",
     "signature": {
-      "os": "ios",
+      "os": "os-901310",
       "virtual_chassis": {
         "present": true,
         "root_class": "stack",
@@ -52,7 +52,7 @@
   {
     "name": "iosxe-subinterfaces",
     "signature": {
-      "os": "iosxe",
+      "os": "os-48b51d",
       "virtual_chassis": {
         "present": false,
         "root_class": "chassis",
@@ -78,7 +78,7 @@
   {
     "name": "juniper-vc-2member",
     "signature": {
-      "os": "junos",
+      "os": "os-990f10",
       "virtual_chassis": {
         "present": true,
         "root_class": "chassis",
@@ -102,7 +102,7 @@
   {
     "name": "junos-subinterfaces",
     "signature": {
-      "os": "junos",
+      "os": "os-990f10",
       "virtual_chassis": {
         "present": false,
         "root_class": "chassis",

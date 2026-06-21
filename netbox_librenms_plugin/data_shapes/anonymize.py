@@ -6,13 +6,15 @@ sync logic actually reads intact, so the anonymized recording still drives the s
 tests. Three strategies, by field:
 
 * **Preserve verbatim** the logic-bearing fields (ifName/ifType/port ids, ENTITY-MIB
-  class/index/position, VLANs, transceiver optics, os) and the public module-matching SKUs
+  class/index/position, VLANs, transceiver optics) and the public module-matching SKUs
   (entPhysicalModelName, transceiver model — keyed to NetBox ModuleType for module install).
   Anonymizing these would destroy the LAG/sub-interface/VC detection and module-matching the
   recordings exist to test.
 * **Pseudonymize deterministically** identifiers (serials, hostnames, the device chassis SKU,
   firmware/software versions): the same input always maps to the same fake, so cross-references (a
-  device serial that equals a stack member serial) still match after anonymization.
+  device serial that equals a stack member serial) still match after anonymization. The OS string
+  is pseudonymized too, but *unsalted* (see :func:`pseudonymize_os`) so the same OS yields one
+  stable token across all recordings — the novelty matcher needs that to compare/relate platforms.
 * **Scrub** PII to safe placeholders (IPs → RFC 5737/3849 documentation ranges, MACs → a
   synthetic ``02:00:00`` block, lat/lng → null, location → ``"Lab"``, free-text → "").
 
@@ -51,7 +53,8 @@ PRESERVE_KEYS = frozenset(
         # it would foreclose recording-driven module-install outcome tests. (Device `hardware`,
         # the chassis SKU, is NOT a match key and stays pseudonymized via MODEL_KEYS.)
         "entPhysicalModelName",
-        "os",
+        # NOTE: `os` is NOT preserved — it's pseudonymized to a stable os-<hash> (see
+        # pseudonymize_os) so a recording never advertises the exact platform.
         "device_id",
         "status",
         # serial-port sensor logic-bearing fields (Avocent console servers). parse_port_number
@@ -180,6 +183,33 @@ def _hash(value, salt, length=6):
     return hashlib.sha256(f"{salt}::{value}".encode()).hexdigest()[:length]
 
 
+# A pseudonymized OS token, e.g. "os-1a2b3c". Used to recognize an already-anonymized value.
+_OS_TOKEN_RE = re.compile(r"^os-[0-9a-f]{6}$")
+
+
+def pseudonymize_os(os_name):
+    """
+    Map a LibreNMS OS string to a stable, salt-independent ``os-<hash>`` token (idempotent).
+
+    Every OS is hashed — even common ones — so a recording never advertises the exact platform a
+    contributor runs. The hash is deliberately *unsalted* so the same OS always yields the same
+    token across recordings and contributors, which lets the novelty matcher still compare and
+    relate them (see :mod:`~netbox_librenms_plugin.data_shapes.signature`). Case-insensitive, and a
+    value that is already an ``os-<hash>`` token is returned unchanged so re-anonymizing is a no-op.
+
+    Args:
+        os_name: The raw LibreNMS OS string (or an already-pseudonymized token).
+
+    Returns:
+        The ``os-<hash>`` token, or the input unchanged when it is empty/non-string/already hashed.
+    """
+    if not isinstance(os_name, str) or not os_name:
+        return os_name
+    if _OS_TOKEN_RE.match(os_name):
+        return os_name
+    return f"os-{_hash(os_name.lower(), '')}"
+
+
 def _doc_ip(value, salt):
     """Map an IP (optionally with a /prefix) to a deterministic documentation-range address."""
     addr, sep, prefix = value.partition("/")
@@ -288,6 +318,8 @@ def _anon_value(key, value, salt):
         return f"MODEL-{_hash(value, salt)}"
     if key in VERSION_KEYS:
         return f"fw-{_hash(value, salt)}"
+    if key == "os":
+        return pseudonymize_os(value)
     if key in IP_KEYS:
         return _doc_ip(value, salt)
     if key in MAC_KEYS:
@@ -327,8 +359,13 @@ def anonymize_recording(recording, *, salt=""):
     """
     out = dict(recording)
     out["responses"] = {key: _walk(body, salt) for key, body in recording.get("responses", {}).items()}
-    os_name = (recording.get("meta") or {}).get("os") or "device"
-    out["name"] = f"{os_name}-shape-{_hash(recording.get('name', ''), salt)}"
+    # Pseudonymize meta.os too (it's outside `responses`, so _walk doesn't reach it) and key the
+    # neutral name off the pseudonymized token, so neither the metadata nor the name leaks the OS.
+    meta = dict(recording.get("meta") or {})
+    if meta.get("os"):
+        meta["os"] = pseudonymize_os(meta["os"])
+    out["meta"] = meta
+    out["name"] = f"{meta.get('os') or 'device'}-shape-{_hash(recording.get('name', ''), salt)}"
     out["description"] = "Anonymized LibreNMS data-shape capture."
     return out
 

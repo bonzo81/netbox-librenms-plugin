@@ -3,7 +3,7 @@
   "name": "iosxe-subinterfaces",
   "description": "Real IOS-XE capture (anonymized): dot1q sub-interfaces over physical parents.",
   "meta": {
-    "os": "iosxe"
+    "os": "os-48b51d"
   },
   "device_id": 45,
   "lag_patterns": {},
@@ -40,7 +40,7 @@
           "hardware": "MODEL-2d2274",
           "features": "IOSXE",
           "location_id": 1,
-          "os": "iosxe",
+          "os": "os-48b51d",
           "status": true,
           "status_reason": "",
           "ignore": false,

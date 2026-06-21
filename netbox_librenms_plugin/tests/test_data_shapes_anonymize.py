@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii
+from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
 
@@ -338,7 +338,8 @@ def test_name_and_description_are_scrubbed_of_hostname():
     }
     anon = anonymize_recording(rec)
     assert "core-rtr01" not in anon["name"] and "core-rtr01" not in anon["description"]
-    assert anon["name"].startswith("junos-shape-")
+    # The name keys off the pseudonymized OS token, not the raw OS.
+    assert anon["name"].startswith(f"{pseudonymize_os('junos')}-shape-")
     assert anon["description"] == "Anonymized LibreNMS data-shape capture."
 
 
@@ -359,6 +360,29 @@ def test_version_pseudonymized_to_fw_hash():
     assert dev1["entPhysicalSoftwareRev"].startswith("fw-")
     assert dev1["version"] == dev2["version"]  # deterministic
     assert find_pii(a1) == []
+
+
+def test_os_pseudonymized_to_stable_unsalted_token():
+    """Every OS (even common ones) becomes a stable os-<hash>; meta.os and the name follow, salt-independent."""
+    rec = _ports()
+    rec["meta"] = {"os": "weirdos9000"}
+    rec["responses"]["GET /api/v0/devices/1"] = {"status": "ok", "devices": [{"device_id": 1, "os": "weirdos9000"}]}
+    anon = anonymize_recording(rec)
+
+    body_os = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["os"]
+    assert body_os == pseudonymize_os("weirdos9000")
+    assert "weirdos9000" not in body_os
+    # meta.os (outside `responses`) is pseudonymized too, and the neutral name keys off it.
+    assert anon["meta"]["os"] == body_os
+    assert anon["name"].startswith(f"{body_os}-shape-")
+    # Unsalted: a per-contributor salt must NOT change the OS token, or cross-contributor novelty
+    # comparison would break.
+    assert anonymize_recording(rec, salt="contributor-x")["meta"]["os"] == body_os
+    # Common OSes are hashed the same way (treated equal) — junos doesn't pass through verbatim.
+    common = _ports()
+    common["responses"]["GET /api/v0/devices/1"] = {"status": "ok", "devices": [{"device_id": 1, "os": "junos"}]}
+    out = anonymize_recording(common)["responses"]["GET /api/v0/devices/1"]["devices"][0]["os"]
+    assert out == pseudonymize_os("junos") and out != "junos"
 
 
 def test_find_pii_flags_residual_fqdn_but_not_icon_or_version():
