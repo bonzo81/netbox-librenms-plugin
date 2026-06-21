@@ -352,7 +352,10 @@ class TestUpdateDeviceSerialView:
         view._librenms_api.get_librenms_id.return_value = 5
         view._librenms_api.get_device_info.return_value = (True, {"serial": "SN001"})
         dev = make_device("serial-interr", serial="OLD")
-        dev.full_clean = MagicMock(side_effect=IntegrityError("dup"))
+        # Raise from save(), not full_clean(): full_clean runs first, so mocking it would
+        # exercise the validation branch and let a regression in the actual save-failure
+        # handling pass unnoticed. This test must cover the save IntegrityError path.
+        dev.save = MagicMock(side_effect=IntegrityError("dup"))
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=dev),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
@@ -515,7 +518,10 @@ class TestUpdateDeviceTypeView:
         view._librenms_api.get_device_info.return_value = (True, {"hardware": "Cisco 3750"})
         dev = make_device("type-interr")
         new_dt = self._new_device_type()
-        dev.full_clean = MagicMock(side_effect=IntegrityError("dup"))
+        # Raise from save(), not full_clean(): full_clean runs first, so mocking it would
+        # exercise the validation branch and let a regression in the actual save-failure
+        # handling pass unnoticed. This test must cover the save IntegrityError path.
+        dev.save = MagicMock(side_effect=IntegrityError("dup"))
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=dev),
             patch(

@@ -557,7 +557,7 @@ class TestApplyMergeCandidates:
         assert result["can_import"] is False
 
     def test_sets_is_ready_false(self):
-        """Merge mode blocks import, so a stale is_ready=True (e.g."""
+        """Merge mode blocks import, so a stale is_ready=True (e.g. carried over from hostname-first processing) must be cleared."""
         from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
 
         result = self._base_result()
@@ -628,7 +628,7 @@ class TestApplyMergeCandidates:
         assert "promote_to_host" not in result
 
     def test_recalculate_status_keeps_merge_block(self):
-        """A later recalculation (e.g."""
+        """A later recalculation (e.g. after the rest of the row validates cleanly) must preserve the merge block."""
         from netbox_librenms_plugin.import_validation_helpers import (
             apply_merge_candidates,
             recalculate_validation_status,
