@@ -6,11 +6,13 @@ sync logic actually reads intact, so the anonymized recording still drives the s
 tests. Three strategies, by field:
 
 * **Preserve verbatim** the logic-bearing fields (ifName/ifType/port ids, ENTITY-MIB
-  class/index/position, VLANs, transceiver optics, os). Anonymizing these would destroy the
-  LAG/sub-interface/VC detection the recordings exist to test.
-* **Pseudonymize deterministically** identifiers (serials, hostnames, model SKUs): the same
-  input always maps to the same fake, so cross-references (a device serial that equals a stack
-  member serial) still match after anonymization.
+  class/index/position, VLANs, transceiver optics, os) and the public module-matching SKUs
+  (entPhysicalModelName, transceiver model — keyed to NetBox ModuleType for module install).
+  Anonymizing these would destroy the LAG/sub-interface/VC detection and module-matching the
+  recordings exist to test.
+* **Pseudonymize deterministically** identifiers (serials, hostnames, the device chassis SKU):
+  the same input always maps to the same fake, so cross-references (a device serial that equals a
+  stack member serial) still match after anonymization.
 * **Scrub** PII to safe placeholders (IPs → RFC 5737/3849 documentation ranges, MACs → a
   synthetic ``02:00:00`` block, lat/lng → null, location → ``"Lab"``, free-text → "").
 
@@ -43,9 +45,21 @@ PRESERVE_KEYS = frozenset(
         "entPhysicalIndex",
         "entPhysicalContainedIn",
         "entPhysicalParentRelPos",
+        # The module-matching key: ModuleTypeMapping resolves entPhysicalModelName (and the
+        # transceiver `model`, merged into it) to a NetBox ModuleType to drive module install.
+        # It's a public vendor catalog SKU (not PII), so it's preserved verbatim — pseudonymizing
+        # it would foreclose recording-driven module-install outcome tests. (Device `hardware`,
+        # the chassis SKU, is NOT a match key and stays pseudonymized via MODEL_KEYS.)
+        "entPhysicalModelName",
         "os",
         "device_id",
         "status",
+        # serial-port sensor logic-bearing fields (Avocent console servers). parse_port_number
+        # reads the trailing int from sensor_index; sensor_type gates the AVOCENT filter; sensor_id
+        # forms the synthetic local_port_id. None carry PII (sensor_descr does — see below).
+        "sensor_id",
+        "sensor_index",
+        "sensor_type",
         "vlan",
         "vlan_id",
         "vlan_vlan",
@@ -56,17 +70,27 @@ PRESERVE_KEYS = frozenset(
         "channels",
         "connector",
         "wavelength",
+        # transceiver SKU — merged into entPhysicalModelName for ModuleType matching (see above),
+        # a public part number, preserved so module-install outcomes can be tested from recordings.
+        "model",
     }
 )
 # Interface-name fields: pattern-aware (see _anon_interface_name). The logic-bearing port-name
 # token is preserved; custom names and free-text annotations are dropped/pseudonymized.
 INTERFACE_NAME_KEYS = frozenset({"ifName", "ifDescr"})
+# Serial-port sensor label (Avocent). A default/uncustomised label is a generic port name
+# (no PII); a customised one is the attached device's hostname. Pattern-aware (see
+# _anon_serial_label) so the is_configured outcome (label vs port name) is preserved.
+SERIAL_LABEL_KEYS = frozenset({"sensor_descr"})
 # BGP ASN — identifying, not read by the sync logic. Mapped to a deterministic private ASN.
 BGP_KEYS = frozenset({"bgpLocalAs", "bgpLocalas", "bgp_local_as"})
 SERIAL_KEYS = frozenset({"serial", "entPhysicalSerialNum"})
 # `display` is the LibreNMS device display name — operators often set it to a real FQDN.
 HOSTNAME_KEYS = frozenset({"hostname", "sysName", "remote_hostname", "display"})
-MODEL_KEYS = frozenset({"hardware", "entPhysicalModelName"})
+# Device chassis SKU (e.g. "WS-C3560X-24T-S"). Pseudonymized: it's not a module-matching key, so
+# blanking it loses no testable outcome. (entPhysicalModelName / transceiver `model` ARE matching
+# keys and are preserved via PRESERVE_KEYS instead.)
+MODEL_KEYS = frozenset({"hardware"})
 IP_KEYS = frozenset({"ip", "ipv4", "ipv6", "inet", "ip_address", "overwrite_ip"})
 MAC_KEYS = frozenset({"ifPhysAddress", "mac", "mac_address"})
 GEO_KEYS = frozenset({"lat", "lng", "latitude", "longitude"})
@@ -195,6 +219,39 @@ def _anon_interface_name(value, salt):
     return f"iface-{_hash(value, salt)}"
 
 
+# A default Avocent serial-port label is a generic, device-agnostic port name: a known serial/console
+# prefix + a port number, optionally with LibreNMS's trailing " Status" (e.g. "ttyS49 Status",
+# "Port 7"). Anything else — including a SHORT hostname like "core1" that's structurally just
+# letters+digits — is treated as a customised label and pseudonymized, since a bare letters+digits
+# rule would preserve (leak) such hostnames. The prefix allowlist is what keeps the two apart.
+_SERIAL_DEFAULT_LABEL_RE = re.compile(
+    r"^(?:ttyUSB|ttyS|ttyD|tty|port|serial|console|com)[\s-]?\d+(?: Status)?$",
+    re.IGNORECASE,
+)
+
+
+def _anon_serial_label(value, salt):
+    """
+    Anonymize a serial-port sensor description while preserving the is_configured outcome.
+
+    ``map_sensors_to_serial_links`` derives ``is_configured`` from whether the label (after its
+    " Status" suffix is stripped) differs from the default port name. A generic/default label
+    carries no PII and is kept verbatim so that outcome is preserved; a customised label is the
+    remote device's hostname, so it becomes a deterministic ``device-<hash>`` pseudonym (still a
+    non-empty value distinct from the port name, so is_configured stays True).
+
+    Args:
+        value (str): The raw sensor_descr value.
+        salt (str): Salt mixed into the pseudonym hash.
+
+    Returns:
+        str: The preserved default label, or a stable hostname pseudonym.
+    """
+    if _SERIAL_DEFAULT_LABEL_RE.match(value):
+        return value
+    return f"device-{_hash(value, salt)}"
+
+
 def _anon_asn(value, salt):
     """Map a BGP ASN to a deterministic 16-bit private ASN (64512-65534), preserving int type."""
     if value in (None, "", 0):
@@ -217,6 +274,8 @@ def _anon_value(key, value, salt):
         return value
     if key in INTERFACE_NAME_KEYS:
         return _anon_interface_name(value, salt)
+    if key in SERIAL_LABEL_KEYS:
+        return _anon_serial_label(value, salt)
     if key in SERIAL_KEYS:
         return f"SN-{_hash(value, salt)}"
     if key in HOSTNAME_KEYS:

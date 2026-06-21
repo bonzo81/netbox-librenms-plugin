@@ -98,6 +98,23 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     record(f"devices/{device_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
     record(f"devices/{device_id}/port_stack")
 
+    # 5. Transceivers (optics shape). Per-device route — safe to record verbatim; anonymization
+    #    pseudonymizes the transceiver serial and preserves the optics shape plus the `model` SKU
+    #    (the module-matching key for ModuleType resolution).
+    record(f"devices/{device_id}/transceivers")
+
+    # 6. Serial-port sensors (Avocent console servers). The underlying LibreNMS route,
+    #    /api/v0/resources/sensors, is INSTANCE-WIDE — it returns every sensor on every device, so
+    #    recording it verbatim would embed other devices' data (cross-device PII). Fetch through the
+    #    device-filtered accessor and synthesize a sensors body carrying ONLY this device's serial
+    #    sensors, which is exactly what replay's get_serial_port_sensors pipeline reads back. Recorded
+    #    only when the device actually has serial sensors (most don't), so the instance-wide route is
+    #    never added to unrelated recordings.
+    if hasattr(api, "get_serial_port_sensors"):
+        ss_ok, device_serial_sensors = api.get_serial_port_sensors(device_id)
+        if ss_ok and device_serial_sensors:
+            responses["GET /api/v0/resources/sensors"] = {"status": "ok", "sensors": device_serial_sensors}
+
     return {
         "schema_version": SCHEMA_VERSION,
         "name": name or f"device-{device_id}",

@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii
+from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
 
 
@@ -74,6 +75,20 @@ def test_hostname_and_model_pseudonymized():
     assert dev["sysName"].startswith("device-")
     assert dev["hardware"].startswith("MODEL-")
     assert "WS-C3750X" not in dev["hardware"]
+
+
+def test_inventory_model_name_preserved_as_module_match_key():
+    """The entPhysicalModelName ModuleType match key is preserved verbatim, even though device hardware is pseudonymized."""
+    rec = load_recording("cisco-stackwise-3member")
+    anon = anonymize_recording(rec)
+
+    members = anon["responses"]["GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"][
+        "inventory"
+    ]
+    model_names = [m.get("entPhysicalModelName") for m in members if m.get("entPhysicalModelName")]
+    # The real chassis SKUs survive so a recording can match a provisioned NetBox ModuleType.
+    assert "WS-C3750X-48P" in model_names
+    assert not any(str(name).startswith("MODEL-") for name in model_names)
 
 
 def test_ip_mac_geo_location_freetext_scrubbed():
@@ -379,3 +394,112 @@ def test_anonymization_preserves_port_relationships(recording_server):
     anon_lag, anon_sub = _resolve(anonymize_recording(rec))
     assert raw_lag == anon_lag and raw_sub == anon_sub
     assert raw_lag and raw_sub  # non-vacuous: the recording really exercises both relationships
+
+
+def test_transceiver_serial_pseudonymized_model_and_optics_preserved():
+    """A transceiver's serial is pseudonymized; the optics shape AND the model SKU (ModuleType match key) survive."""
+    rec = {
+        "schema_version": 1,
+        "name": "optics",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/transceivers": {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "port_id": 519,
+                        "entity_physical_index": 1610899520,
+                        "type": "CFP2/QSFP28",
+                        "model": "3HE10550AARA01",
+                        "serial": "X42AU0D",
+                        "channels": 4,
+                        "connector": "LC",
+                        "wavelength": 1301,
+                    }
+                ],
+            }
+        },
+    }
+    t = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/transceivers"]["transceivers"][0]
+    # Serial is a per-unit identifier (not a match key) → pseudonymized.
+    assert t["serial"].startswith("SN-") and "X42AU0D" not in t["serial"]
+    # Model SKU is the ModuleType-matching key (public part number) → preserved verbatim.
+    assert t["model"] == "3HE10550AARA01"
+    # Logic-bearing optics shape (what an outcome test asserts) is untouched.
+    assert t["port_id"] == 519
+    assert t["type"] == "CFP2/QSFP28"
+    assert t["channels"] == 4
+    assert t["connector"] == "LC"
+    assert t["wavelength"] == 1301
+    assert find_pii(anonymize_recording(rec)) == []
+
+
+def test_serial_sensor_label_anonymized_preserving_is_configured():
+    """sensor_descr hostnames are pseudonymized but generic port labels stay, so is_configured is unchanged."""
+    sensors = [
+        {
+            "sensor_id": 1,
+            "device_id": 1,
+            "sensor_type": "acsSerialPortTable",
+            "sensor_index": "acsSerialPortTableStatus.7",
+            "sensor_descr": "ttyS7 Status",
+            "sensor_oid": ".1.3.6.1.4.1.10418.16.2.5.1.5.7",
+        },
+        {
+            "sensor_id": 2,
+            "device_id": 1,
+            "sensor_type": "acsSerialPortTable",
+            "sensor_index": "acsSerialPortTableStatus.8",
+            "sensor_descr": "PROD-LAB03A-RA1 Status",
+            "sensor_oid": ".1.3.6.1.4.1.10418.16.2.5.1.5.8",
+        },
+    ]
+    rec = {
+        "schema_version": 1,
+        "name": "serial",
+        "device_id": 1,
+        "responses": {"GET /api/v0/resources/sensors": {"status": "ok", "sensors": sensors}},
+    }
+    anon = anonymize_recording(rec)
+    asens = anon["responses"]["GET /api/v0/resources/sensors"]["sensors"]
+
+    # Default port label kept verbatim (no PII); customised hostname label pseudonymized.
+    assert asens[0]["sensor_descr"] == "ttyS7 Status"
+    assert asens[1]["sensor_descr"].startswith("device-")
+    assert "PROD-LAB03A-RA1" not in asens[1]["sensor_descr"]
+    # Logic-bearing fields preserved so the mapping still resolves.
+    assert asens[0]["sensor_index"] == "acsSerialPortTableStatus.7"
+    assert asens[0]["sensor_type"] == "acsSerialPortTable"
+
+    # The is_configured OUTCOME resolves identically before and after anonymization.
+    raw_flags = [r["is_configured"] for r in map_sensors_to_serial_links(sensors, device_id=1)]
+    anon_flags = [r["is_configured"] for r in map_sensors_to_serial_links(asens, device_id=1)]
+    assert raw_flags == anon_flags == [False, True]  # default ttyS7 vs custom label — both states exercised
+    # find_pii is clean — incl. no false-positive on the dotted SNMP sensor_oid.
+    assert find_pii(anon) == []
+
+
+def test_serial_sensor_short_hostname_label_is_pseudonymized():
+    """A short hostname label (e.g. "core1") looks like a port name but must be pseudonymized, not kept."""
+    rec = {
+        "schema_version": 1,
+        "name": "serial",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/resources/sensors": {
+                "status": "ok",
+                "sensors": [
+                    {
+                        "sensor_id": 1,
+                        "device_id": 1,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.3",
+                        "sensor_descr": "core1 Status",  # a device shorthand, not a generic port label
+                    }
+                ],
+            }
+        },
+    }
+    descr = anonymize_recording(rec)["responses"]["GET /api/v0/resources/sensors"]["sensors"][0]["sensor_descr"]
+    assert descr.startswith("device-")
+    assert "core1" not in descr

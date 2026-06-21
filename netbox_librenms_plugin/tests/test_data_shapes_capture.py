@@ -8,7 +8,143 @@ capture and replay are faithful.
 from unittest.mock import patch
 
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
+from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
+
+
+def _transceiver_serial_seed():
+    """A synthetic recording with a per-device transceivers route and an INSTANCE-WIDE sensors route.
+
+    The /resources/sensors body carries serial sensors for the target device (2000), a *different*
+    device (3000), and a non-serial sensor — so a capture can prove it records only the target
+    device's serial sensors (no cross-device leak, non-serial types filtered out).
+    """
+    return {
+        "schema_version": 1,
+        "name": "transceiver-serial-seed",
+        "device_id": 2000,
+        "meta": {"os": "sros"},
+        "responses": {
+            "GET /api/v0/devices/2000": {
+                "status": "ok",
+                "devices": [{"device_id": 2000, "os": "sros", "hostname": "acs01.example.net"}],
+            },
+            "GET /api/v0/devices/2000/transceivers": {
+                "status": "ok",
+                "transceivers": [
+                    {
+                        "port_id": 519,
+                        "entity_physical_index": 1610899520,
+                        "type": "CFP2/QSFP28",
+                        "model": "3HE10550AARA01",
+                        "serial": "X42AU0D",
+                        "channels": 4,
+                        "connector": "LC",
+                        "wavelength": 1301,
+                    }
+                ],
+            },
+            "GET /api/v0/resources/sensors": {
+                "status": "ok",
+                "sensors": [
+                    {
+                        "sensor_id": 1,
+                        "device_id": 2000,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.7",
+                        "sensor_descr": "ttyS7 Status",
+                        "sensor_class": "state",
+                    },
+                    {
+                        "sensor_id": 2,
+                        "device_id": 2000,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.8",
+                        "sensor_descr": "PROD-LAB03A-RA1 Status",
+                        "sensor_class": "state",
+                    },
+                    {
+                        "sensor_id": 99,
+                        "device_id": 3000,
+                        "sensor_type": "acsSerialPortTable",
+                        "sensor_index": "acsSerialPortTableStatus.1",
+                        "sensor_descr": "OTHER-DEVICE Status",
+                        "sensor_class": "state",
+                    },
+                    {
+                        "sensor_id": 50,
+                        "device_id": 2000,
+                        "sensor_type": "temperature",
+                        "sensor_index": "tempSensor.1",
+                        "sensor_descr": "CPU temperature",
+                        "sensor_class": "temperature",
+                    },
+                ],
+            },
+        },
+    }
+
+
+def test_capture_records_verbatim_transceiver_body(recording_server):
+    """The per-device transceivers route is recorded byte-for-byte (safe — not instance-wide)."""
+    seed = _transceiver_serial_seed()
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, 2000)
+
+    assert (
+        captured["responses"]["GET /api/v0/devices/2000/transceivers"]
+        == seed["responses"]["GET /api/v0/devices/2000/transceivers"]
+    )
+
+
+def test_capture_serial_sensors_excludes_other_devices(recording_server):
+    """The instance-wide /resources/sensors route is device-filtered before recording (no cross-device PII)."""
+    seed = _transceiver_serial_seed()
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, 2000)
+
+    recorded = captured["responses"]["GET /api/v0/resources/sensors"]["sensors"]
+    # Only the target device's serial sensors survive: device 3000's sensor and the non-serial
+    # temperature sensor are both gone — so the recording can never publish another device's data.
+    assert {s["sensor_id"] for s in recorded} == {1, 2}
+    assert all(s["device_id"] == 2000 for s in recorded)
+    assert all(s["sensor_type"] == "acsSerialPortTable" for s in recorded)
+
+
+def test_capture_serial_sensors_roundtrip_outcome(recording_server):
+    """Replaying the captured recording yields the same serial-link rows the source produced."""
+    seed = _transceiver_serial_seed()
+    _server, api = recording_server(seed)
+    source_ok, source_sensors = api.get_serial_port_sensors(2000)
+    assert source_ok
+    source_links = map_sensors_to_serial_links(source_sensors, device_id=2000)
+
+    captured = capture_device_recording(api, 2000)
+
+    _server2, api2 = recording_server(captured, server_key="replay")
+    replay_ok, replay_sensors = api2.get_serial_port_sensors(2000)
+    assert replay_ok
+    replay_links = map_sensors_to_serial_links(replay_sensors, device_id=2000)
+
+    assert replay_links == source_links
+    # Non-vacuous: the rows really exercise both is_configured states (default ttyS7 vs custom label).
+    assert {row["is_configured"] for row in replay_links} == {True, False}
+
+
+def test_capture_skips_sensors_route_when_device_has_none(recording_server):
+    """A device with no serial sensors must NOT add the instance-wide /resources/sensors route."""
+    seed = _transceiver_serial_seed()
+    # Strip every serial sensor for the target device; only device 3000 remains.
+    seed["responses"]["GET /api/v0/resources/sensors"]["sensors"] = [
+        s for s in seed["responses"]["GET /api/v0/resources/sensors"]["sensors"] if s["device_id"] != 2000
+    ]
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, 2000)
+
+    assert "GET /api/v0/resources/sensors" not in captured["responses"]
 
 
 def test_capture_roundtrip_preserves_vc_outcome(recording_server):
