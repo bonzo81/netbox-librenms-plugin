@@ -26,7 +26,16 @@ def iter_recording_paths():
 def load_recording(name: str) -> dict:
     """Load a single recording by name, with or without the ``.json`` suffix."""
     filename = name if name.endswith(".json") else f"{name}.json"
-    return json.loads((RECORDINGS_DIR / filename).read_text())
+    # Constrain the resolved path to RECORDINGS_DIR so a name like "../../secrets" can't escape
+    # the recordings directory (defensive: callers pass fixed fixture names today, but keep the
+    # loader safe if a name ever becomes caller-derived).
+    base_dir = RECORDINGS_DIR.resolve()
+    candidate = (base_dir / filename).resolve()
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError as exc:
+        raise ValueError(f"Invalid recording name: {name!r}") from exc
+    return json.loads(candidate.read_text())
 
 
 def iter_recordings() -> list[dict]:

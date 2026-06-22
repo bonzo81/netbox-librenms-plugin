@@ -98,6 +98,17 @@ def test_capture_records_verbatim_transceiver_body(recording_server):
     )
 
 
+def test_capture_meta_os_does_not_override_captured_device_os(recording_server):
+    """A caller-supplied meta['os'] must NOT override the OS captured from the device-info response (it scopes signature/novelty); other caller meta keys are preserved."""
+    seed = _transceiver_serial_seed()  # device 2000 reports os "sros"
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, 2000, meta={"os": "SPOOFED", "note": "kept"})
+
+    assert captured["meta"]["os"] == "sros"  # the captured device OS wins over the caller's
+    assert captured["meta"]["note"] == "kept"  # other caller meta survives
+
+
 def test_capture_serial_sensors_excludes_other_devices(recording_server):
     """The instance-wide /resources/sensors route is device-filtered before recording (no cross-device PII)."""
     seed = _transceiver_serial_seed()

@@ -120,7 +120,10 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
 
     # 7. OOB controller ports — a SEPARATE LibreNMS device the interfaces view merges into the host.
     #    Record them under the controller's own /ports route so replay's get_ports(oob_id) serves them.
-    meta_out = {"os": device_os, **(meta or {})}
+    # Spread caller meta first, then stamp the captured device_os last so it always wins — a
+    # caller-supplied meta["os"] must not override the OS we actually captured (it scopes
+    # signature/novelty behavior).
+    meta_out = {**(meta or {}), "os": device_os}
     if oob_id is not None:
         record(f"devices/{oob_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
         meta_out["oob_id"] = oob_id

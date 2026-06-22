@@ -29,6 +29,14 @@ def test_recordings_present():
     assert iter_recording_paths(), "no recording JSON files found in data_shapes/recordings/"
 
 
+def test_load_recording_rejects_path_traversal():
+    """A recording name that escapes the recordings directory must raise ValueError, not read an arbitrary file off disk."""
+    from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+
+    with pytest.raises(ValueError):
+        load_recording("../../../../../../etc/passwd")
+
+
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_recording_carries_no_residual_pii(recording):
     """Every committed recording must be anonymized — the PII safety-net finds nothing.
