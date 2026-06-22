@@ -23,6 +23,14 @@
     auto-submits, so it doesn't reintroduce the live-form problem flagged above.
     {% endcomment %}
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+    {% comment %}
+    Prefer the marker-scoped server_key (the server the donor was migrated under), falling back
+    to the active interface_sync.server_key — the same precedence the migrated Move button uses,
+    so JS handlers reading this input target the right LibreNMS server in either case.
+    {% endcomment %}
+    {% with effective_server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
+    {% if effective_server_key %}<input type="hidden" name="server_key" value="{{ effective_server_key }}">{% endif %}
+    {% endwith %}
 {% else %}
 <form method="post"
     action="{% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk %}?interface_name_field={{ interface_name_field }}">
