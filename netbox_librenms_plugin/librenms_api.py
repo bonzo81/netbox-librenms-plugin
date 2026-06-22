@@ -655,14 +655,20 @@ class LibreNMSAPI:
             from netbox_librenms_plugin.models import PortStackLagPattern
 
             queryset = PortStackLagPattern.objects.all()
-            # device_os comes straight from device_info.get("os"); LibreNMS can return a
-            # truthy non-string (e.g. a number) there, which would raise AttributeError on
-            # .strip(). Only a non-empty string scopes the patterns; anything else falls
-            # back to the full (unscoped) set rather than crashing relationship resolution.
-            os_filter = device_os.strip() if isinstance(device_os, str) else ""
-            if os_filter:
-                queryset = queryset.filter(librenms_os__iexact=os_filter)
-            lag_patterns = {p.librenms_os: p.lag_name_pattern for p in queryset}
+            # Only the legacy OMITTED-OS path (device_os is None) loads the full, unscoped pattern
+            # set. A PRESENT but unusable device_os (non-string, e.g. a number from LibreNMS, or a
+            # blank string) must DISABLE name-pattern matching — falling back to every stored
+            # vendor regex would re-globalize them and could sync an incorrect LAG. Structural
+            # ieee8023adLag detection is unaffected (it doesn't use lag_patterns).
+            if device_os is None:
+                lag_patterns = {p.librenms_os: p.lag_name_pattern for p in queryset}
+            else:
+                os_filter = device_os.strip() if isinstance(device_os, str) else ""
+                if not os_filter:
+                    lag_patterns = {}
+                else:
+                    queryset = queryset.filter(librenms_os__iexact=os_filter)
+                    lag_patterns = {p.librenms_os: p.lag_name_pattern for p in queryset}
 
         # Guard against malformed payload items (non-dict) so a single bad entry from
         # LibreNMS doesn't crash the whole relationship resolution with AttributeError.
