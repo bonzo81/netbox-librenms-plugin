@@ -2405,13 +2405,22 @@ document.addEventListener('click', function (e) {
     // sync POST lands on the member the user actually chose instead of the default member.
     const row = btn.closest('tr');
     const vcMemberSelect = row ? row.querySelector('.vc-member-select') : null;
+    // When the row has a member-select, its value is authoritative even when blank: an empty
+    // selection is a deliberate "no member chosen" state, so it must NOT fall back to the
+    // server-rendered default member (data-object-id) — that would post the sync to the previous
+    // member. Only fall back to data-object-id when there is no select at all (non-VC page).
     const objectId =
-        (vcMemberSelect && vcMemberSelect.value) ? vcMemberSelect.value : (btn.dataset.objectId || '');
+        vcMemberSelect ? vcMemberSelect.value : (btn.dataset.objectId || '');
     const relatedKey = isLag ? 'lag_port_id' : 'parent_port_id';
     const relatedNameKey = isLag ? 'lag_name' : 'parent_name';
     const urlSuffix = isLag ? 'sync-interface-lag' : 'sync-interface-parent';
 
-    if (!portId || !relatedPortId || !objectType || !objectId) return;
+    if (!portId || !relatedPortId || !objectType || !objectId) {
+        // A blank objectId on a VC page means no member is selected — tell the user instead of
+        // silently doing nothing (or posting to a stale member).
+        if (vcMemberSelect && !objectId) btn.title = 'Select a VC member first.';
+        return;
+    }
 
     const url = `/plugins/librenms_plugin/${objectType}/${objectId}/${urlSuffix}/`;
 
