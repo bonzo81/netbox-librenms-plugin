@@ -103,10 +103,13 @@ class TestDeviceValidationDetailsMergeBadge:
                         "name": winner.name,
                         "librenms_link": {"host_id": None, "oob_id": 77, "oob_type": "iDRAC"},
                     },
+                    # The other candidate is host-linked, so NEITHER candidate is genuinely
+                    # unlinked — any "not linked" text would therefore be a mislabel of the
+                    # OOB-only candidate above (the bug this test guards against).
                     "oob_named": {
                         "pk": donor.pk,
                         "name": donor.name,
-                        "librenms_link": {"host_id": None, "oob_id": None},
+                        "librenms_link": {"host_id": 99, "oob_id": None},
                     },
                 },
             },
@@ -134,6 +137,15 @@ class TestDeviceValidationDetailsMergeBadge:
         # The OOB-only candidate must surface its OOB linkage, not fall through to "not linked".
         assert "currently linked to LibreNMS as OOB #77" in html
         assert "(iDRAC)" in html
+        assert "not linked to LibreNMS" not in html  # non-vacuous: must NOT also render the unlinked label
+
+        # The merge POST must carry the naming toggles (use_sysname / strip_domain) so a
+        # user-selected naming mode survives the revalidation the merge triggers. The merge form
+        # is the one carrying the donor_pk input; check its opening tag has the hx-include.
+        merge_chunks = [c for c in html.split("<form") if 'name="donor_pk"' in c]
+        assert merge_chunks, "merge form was not rendered"
+        merge_tag = merge_chunks[0].split(">", 1)[0]
+        assert "use-sysname-toggle" in merge_tag and "strip-domain-toggle" in merge_tag
 
 
 @pytest.mark.django_db

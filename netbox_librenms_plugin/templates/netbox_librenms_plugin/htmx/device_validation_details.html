@@ -430,7 +430,8 @@
       </div>
       <form
         hx-post="{% url 'plugins:netbox_librenms_plugin:device_merge_netbox_devices' device_id=libre_device.device_id %}"
-        hx-swap="none">
+        hx-swap="none"
+        hx-include="#use-sysname-toggle, #strip-domain-toggle">
         {% csrf_token %}
         <input type="hidden" name="server_key" value="{{ server_key }}">
         {# Default to the host-named winner's donor (oob) so a JS failure still posts a valid donor. #}
