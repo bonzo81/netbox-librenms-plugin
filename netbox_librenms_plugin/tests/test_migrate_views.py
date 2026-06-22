@@ -190,6 +190,24 @@ class TestResolveWinnerForDonor:
         # A well-formed positive id whose row is gone is still "deleted".
         assert _winner_unavailable_reason(donor, {"device_id": 999999}) == "deleted"
 
+    def test_numeric_like_winner_id_is_corrupt_not_truncated(self):
+        """int() truncates 1.9 / Decimal('1.9') / '1.9' to 1 — a corrupt marker must NOT resolve the wrong winner; both helpers must reject it."""
+        from decimal import Decimal
+
+        from netbox_librenms_plugin.views.sync.migrate import _resolve_winner_for_donor, _winner_unavailable_reason
+
+        winner = _make_migrate_device("mig-num-winner")  # real device at some pk (e.g. truncation target)
+        donor = _make_migrate_device("mig-num-donor")
+        for bad in (1.9, Decimal("1.9"), "1.9", winner.pk + 0.4):
+            assert _winner_unavailable_reason(donor, {"device_id": bad}) == "corrupt"
+            # _resolve_winner_for_donor must fail closed (no winner), not truncate to a real pk.
+            donor.custom_field_data["librenms_id"] = {
+                "default": {"_migrated_to": {"device_id": bad, "server_key": "default"}}
+            }
+            donor.save()
+            resolved, _marker = _resolve_winner_for_donor(donor, "default")
+            assert resolved is None
+
 
 # ── MoveInterfaceToWinnerView ─────────────────────────────────────────────
 
@@ -1055,6 +1073,38 @@ class TestMigratedContextServerKeyFallback:
         self._post_with_server_key(
             BaseInterfaceTableView, "netbox_librenms_plugin.views.base.interfaces_view", {"server_key": "ghost"}
         )
+
+    def test_interfaces_view_rebind_fail_avoids_lazy_api_property(self):
+        """On rebind failure the migrated-context render must read the cached client key, not the lazy librenms_api property — which can re-construct a missing client and 500 the HTMX error path."""
+        from unittest.mock import MagicMock, PropertyMock, patch
+
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        view = object.__new__(BaseInterfaceTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "sessionkey"
+        request = MagicMock()
+        request.POST = {"server_key": "ghost"}
+
+        with (
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch.object(view, "rebind_api_for_server", return_value=None),  # stale key → error path
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.build_migrated_context", return_value={}) as bmc,
+            # The lazy property must NOT be touched on this path; make it explode if it is.
+            patch.object(
+                BaseInterfaceTableView,
+                "librenms_api",
+                new_callable=PropertyMock,
+                side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
+            ),
+        ):
+            view.post(request, pk=1)
+
+        bmc.assert_called_once()
+        assert bmc.call_args.args[1] == "sessionkey"  # used the cached client key
 
     def test_ip_view_stale_key_fallback_preserves_set_primary_ip(self):
         """The stale-server-key error fallback must carry set_primary_ip so the template doesn't silently uncheck the user's preference."""

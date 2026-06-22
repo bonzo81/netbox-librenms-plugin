@@ -162,13 +162,18 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             # re-enabling sync controls on a migrated donor. Render the partial with migrated
             # context resolved under the active session key (the POSTed key is now known-invalid),
             # mirroring the ip/cables/modules/vlan stale-key error paths.
+            # rebind_api_for_server() returned None precisely to avoid constructing a missing/
+            # misconfigured default client, so don't touch the lazy `librenms_api` property here —
+            # it could raise and turn this HTMX error path back into a 500. Read the already-cached
+            # client's key (else "default").
+            active_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
             return render(
                 request,
                 self.partial_template_name,
                 {
                     "interface_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
                     "interface_name_field": interface_name_field,
-                    **build_migrated_context(obj, self.librenms_api.server_key),
+                    **build_migrated_context(obj, active_server_key),
                 },
             )
 

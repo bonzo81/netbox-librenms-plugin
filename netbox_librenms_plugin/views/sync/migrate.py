@@ -63,6 +63,10 @@ def _resolve_winner_for_donor(donor, server_key="default"):
     # like {"device_id": true} must fail closed as a stale/invalid marker.
     if isinstance(device_id, bool):
         return None, marker
+    # int() truncates numeric-like values (1.9, Decimal("1.9")) to a valid-looking pk, which
+    # would resolve the WRONG winner. Accept only a real int or a plain digit string.
+    if not (isinstance(device_id, int) or (isinstance(device_id, str) and device_id.isdecimal())):
+        return None, marker
     try:
         winner_pk = int(device_id)
     except (TypeError, ValueError):
@@ -92,6 +96,10 @@ def _winner_unavailable_reason(donor, marker):
     """
     device_id = marker.get("device_id")
     if isinstance(device_id, bool):
+        return "corrupt"
+    # Mirror _resolve_winner_for_donor: a numeric-like value int() would truncate (1.9,
+    # Decimal("1.9")) is a corrupt marker, not a deleted winner.
+    if not (isinstance(device_id, int) or (isinstance(device_id, str) and device_id.isdecimal())):
         return "corrupt"
     try:
         winner_pk = int(device_id)
