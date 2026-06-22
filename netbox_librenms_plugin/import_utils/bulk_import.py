@@ -701,10 +701,18 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     from ipam.models import IPAddress
 
                     matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
-                    existing_ip = matching_ips.first()
-                    assigned = getattr(existing_ip, "assigned_object", None) if existing_ip else None
-                    dev = getattr(assigned, "device", None) if assigned else None
-                    if dev is None and existing_ip is not None:
+                    # Scan EVERY row sharing this host address for an interface assignment, not
+                    # just .first(): with duplicate net_host rows the real management IP may be
+                    # assigned to an interface on a different matching row than the first.
+                    dev = None
+                    matching_exists = False
+                    for existing_ip in matching_ips:
+                        matching_exists = True
+                        assigned = getattr(existing_ip, "assigned_object", None)
+                        dev = getattr(assigned, "device", None) if assigned else None
+                        if dev:
+                            break
+                    if dev is None and matching_exists:
                         # Mirror validate_device_for_import(): an IP can be a device's oob_ip
                         # (a direct FK) while assigned to no interface, so the assigned_object
                         # lookup above misses it. Without this fallback a row whose only link is

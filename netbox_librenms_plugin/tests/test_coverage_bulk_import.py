@@ -1171,6 +1171,9 @@ class TestRefreshExistingDevice:
 
         dev = make_device("ref-ip-dev")
         iface = Interface.objects.create(device=dev, name="mgmt0", type="1000base-t")
+        # A decoy row sharing the address, created FIRST and assigned to nothing — so .first()
+        # returns it and the match must come from scanning the whole set, not just the first row.
+        IPAddress.objects.create(address="10.0.0.9/24")
         IPAddress.objects.create(address="10.0.0.9/24", assigned_object=iface)
         validation = self._device_validation()
         libre_device = {"device_id": 52, "hostname": "h2", "sysName": "h2", "ip": "10.0.0.9"}
