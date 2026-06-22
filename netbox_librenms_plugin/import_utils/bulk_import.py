@@ -699,40 +699,59 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # stay in the full validation path; here the contract is simply: block the import.
             from dcim.models import Device as _Device
 
+            # This fallback fails closed on ambiguity exactly like validate_device_for_import():
+            # if the serial OR the management IP resolves to more than one distinct NetBox device,
+            # binding to whichever row sorts first would render the wrong device as the existing
+            # match, so flag the row ambiguous and block instead of picking arbitrarily.
+            ambiguous_fallback = False
             serial = (libre_device.get("serial") or "").strip()
             if serial and serial != "-":
-                dev = _Device.objects.filter(serial=serial).first()
-                if dev:
-                    new_device, match_type = dev, "serial"
+                serial_matches = list(_Device.objects.filter(serial=serial)[:2])
+                if len(serial_matches) > 1:
+                    ambiguous_fallback = True
+                elif serial_matches:
+                    new_device, match_type = serial_matches[0], "serial"
 
-            if not new_device:
+            if not new_device and not ambiguous_fallback:
                 primary_ip = libre_device.get("ip")
                 if primary_ip:
                     from ipam.models import IPAddress
 
                     matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
-                    # Scan EVERY row sharing this host address for an interface assignment, not
-                    # just .first(): with duplicate net_host rows the real management IP may be
-                    # assigned to an interface on a different matching row than the first.
-                    dev = None
+                    # Collect EVERY distinct device this host address resolves to (interface
+                    # assignment + oob_ip FK), across all duplicate net_host rows, so a genuine
+                    # collision fails closed rather than binding to whichever row sorts first. An IP
+                    # can be a device's oob_ip (a direct FK) while assigned to no interface, so the
+                    # assigned_object scan alone would miss an OOB-only link.
+                    candidate_devices = {}
                     matching_exists = False
                     for existing_ip in matching_ips:
                         matching_exists = True
                         assigned = getattr(existing_ip, "assigned_object", None)
                         dev = getattr(assigned, "device", None) if assigned else None
                         if dev:
-                            break
-                    if dev is None and matching_exists:
-                        # Mirror validate_device_for_import(): an IP can be a device's oob_ip
-                        # (a direct FK) while assigned to no interface, so the assigned_object
-                        # lookup above misses it. Without this fallback a row whose only link is
-                        # an OOB address flips to importable and re-imports the existing device.
-                        # Match against EVERY row sharing this host address (duplicate net_host
-                        # entries), not just .first(), so the OOB device is found even when its
-                        # oob_ip is a different one of the matching rows.
-                        dev = _Device.objects.filter(oob_ip__in=matching_ips).first()
-                    if dev:
-                        new_device, match_type = dev, "primary_ip"
+                            candidate_devices[dev.pk] = dev
+                    if matching_exists:
+                        for oob_device in _Device.objects.filter(oob_ip__in=matching_ips):
+                            candidate_devices[oob_device.pk] = oob_device
+                        if len(candidate_devices) > 1:
+                            ambiguous_fallback = True
+                        elif candidate_devices:
+                            new_device, match_type = next(iter(candidate_devices.values())), "primary_ip"
+
+            if ambiguous_fallback:
+                # Block without binding to an arbitrary device: append a blocking issue (the
+                # new_device=None `else` branch below recomputes can_import from the issues list)
+                # and mark the row ambiguous so the UI doesn't render a wrong existing match.
+                msgs = validation.get("issues")
+                if isinstance(msgs, list):
+                    msgs.append(
+                        "Multiple NetBox devices match this device's serial or management IP; "
+                        "resolve the duplicate before importing."
+                    )
+                validation["existing_match_type"] = "ambiguous_hostname_or_serial"
+                validation["can_import"] = False
+                validation["is_ready"] = False
 
         if new_device:
             validation["existing_device"] = new_device

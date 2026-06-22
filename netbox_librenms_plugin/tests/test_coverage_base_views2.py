@@ -437,10 +437,12 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
             mock_cache.get.return_value = None  # force get_ports_data past its cache short-circuit
             result = view.get_links_data(obj)
 
-        # The host fetches are skipped entirely: get_device_links / get_ports are only ever called
-        # for the OOB controller (99), never with the None host id (which would GET /devices/None/...).
-        assert all(c.args[0] is not None for c in view._librenms_api.get_device_links.call_args_list)
-        assert all(c.args[0] is not None for c in view._librenms_api.get_ports.call_args_list)
+        # The host fetches are skipped entirely: get_device_links / get_ports are called exactly
+        # once each, for the OOB controller (99) — never with the None host id (which would GET
+        # /devices/None/...). assert_called_once_with pins both the count and the arg so the OOB
+        # fetch can't be silently skipped (a bare all() would pass vacuously on an empty list).
+        view._librenms_api.get_device_links.assert_called_once_with(99)
+        view._librenms_api.get_ports.assert_called_once_with(99)
         assert result == []  # empty OOB result still flows through as a successful empty refresh
 
     def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):

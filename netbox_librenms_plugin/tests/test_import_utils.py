@@ -5505,10 +5505,40 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
 
         # The exact id owner (the VM) must win over the same-named Device matched by hostname.
-        assert validation["existing_device"].pk == vm.pk
-        assert validation["existing_device"].pk != device.pk
+        # Compare objects, not .pk: VirtualMachine and Device IDs are table-local and can
+        # legitimately coincide, so a pk equality check could pass/fail by accident.
+        assert validation["existing_device"] == vm
+        assert validation["existing_device"] != device
         # found_as_cross_model flips import_as_vm so future refreshes query the right model.
         assert validation["import_as_vm"] is True
+
+    def test_serial_fallback_ambiguity_fails_closed(self):
+        """When the serial fallback resolves more than one NetBox device, the refresh re-check must fail closed (ambiguous match + can_import False), not bind to an arbitrary duplicate."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        make_device("dup-serial-a", serial="DUPSERIAL1")
+        make_device("dup-serial-b", serial="DUPSERIAL1")  # same serial, different device
+        libre_device = {
+            "device_id": 555,
+            "hostname": "no-name-match",  # matches no device name → falls to serial fallback
+            "sysName": "no-name-match",
+            "serial": "DUPSERIAL1",
+        }
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": True,
+            "can_import": True,
+            "issues": [],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["can_import"] is False
+        assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert any("Multiple NetBox devices match" in i for i in validation.get("issues", []))
 
 
 # ---------------------------------------------------------------------------

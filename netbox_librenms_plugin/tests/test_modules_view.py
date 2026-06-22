@@ -44,29 +44,27 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_malformed_transceiver_payload_returns_error_without_crashing(self):
         """A truthy success with a non-list payload (or a list of non-dicts) must surface as an error string — not 500 on txr.get(...) — so the caller skips the cache and warns."""
+        from copy import deepcopy
+
         view = _make_view()
         view.librenms_id = 100
         seed = [{"entPhysicalIndex": 1, "entPhysicalName": "Gi0/1"}]
 
-        # dict payload under success=True
-        view._librenms_api.get_device_transceivers.return_value = (True, {"unexpected": "dict"})
-        inventory, error = view._merge_transceiver_data(list(seed))
-        assert inventory == seed  # untouched
-        assert error and "malformed transceiver payload" in error
+        def assert_malformed(payload):
+            # Deep-copy the seed so a mutation of the SHARED inner dict by _merge_transceiver_data
+            # can't also mutate `seed` and make the "untouched" assertion pass vacuously.
+            candidate = deepcopy(seed)
+            view._librenms_api.get_device_transceivers.return_value = (True, payload)
+            inventory, error = view._merge_transceiver_data(candidate)
+            assert inventory == seed  # untouched, compared against the pristine seed
+            assert error and "malformed transceiver payload" in error
 
-        # list with a non-dict entry
-        view._librenms_api.get_device_transceivers.return_value = (True, [{"entity_physical_index": 2}, "bad"])
-        inventory, error = view._merge_transceiver_data(list(seed))
-        assert inventory == seed
-        assert error and "malformed transceiver payload" in error
-
+        assert_malformed({"unexpected": "dict"})  # dict payload under success=True
+        assert_malformed([{"entity_physical_index": 2}, "bad"])  # list with a non-dict entry
         # empty NON-list payload ({}) is also malformed — it must NOT be treated as a successful
         # "no transceivers" response (which would cache a degraded snapshot). Regression for the
         # emptiness check running before the type check: {} is falsy, so the old order mislabeled it.
-        view._librenms_api.get_device_transceivers.return_value = (True, {})
-        inventory, error = view._merge_transceiver_data(list(seed))
-        assert inventory == seed
-        assert error and "malformed transceiver payload" in error
+        assert_malformed({})
 
     def test_synthetic_item_includes_port_identity_metadata(self):
         view = _make_view()
