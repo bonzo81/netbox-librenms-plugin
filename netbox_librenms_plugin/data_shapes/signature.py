@@ -193,7 +193,14 @@ def classify_novelty(signature, manifest):
 
     similar = None
     for entry in manifest:
-        sig = entry.get("signature", {})
+        # The manifest is an on-disk artifact: a malformed item (a non-dict entry, or a
+        # null/non-dict "signature") must be skipped rather than crash novelty evaluation in
+        # the capture flow.
+        if not isinstance(entry, dict):
+            continue
+        sig = entry.get("signature")
+        if not isinstance(sig, dict):
+            continue
         if _structural_axes(sig) != target_shape:
             continue
         name = entry.get("name")

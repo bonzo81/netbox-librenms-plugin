@@ -140,3 +140,15 @@ def test_classify_novelty_new_for_different_vendor_same_shape():
     sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
     sig["os"] = "junos"  # different vendor family, same VC shape
     assert classify_novelty(sig, manifest)["verdict"] == "new"
+
+
+def test_classify_novelty_skips_malformed_manifest_entries():
+    """A malformed manifest item (a non-dict entry, or a null/non-dict signature) must be skipped, not crash novelty eval — the valid sibling entry is still matched."""
+    good = build_manifest([load_recording("cisco-stackwise-3member")])
+    sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
+    # Mix malformed items (a bare string, a null signature, a missing signature) before the
+    # valid entry so an unguarded .get()/_structural_axes() would raise on the first one.
+    malformed_manifest = ["not-a-dict", {"name": "x", "signature": None}, {"name": "y"}, *good]
+    verdict = classify_novelty(sig, malformed_manifest)  # must not raise
+    assert verdict["verdict"] == "likely-covered"
+    assert verdict["closest"] == "cisco-stackwise-3member"
