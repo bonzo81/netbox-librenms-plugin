@@ -742,6 +742,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         server_key = self.rebind_api_for_server(posted_server_key)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
+            # rebind_api_for_server() returned None to avoid building a missing/misconfigured
+            # default client; reading the lazy `librenms_api` property here would reconstruct it
+            # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
+            active_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
             # Keep migrated-donor context so the template still suppresses the live POST
             # form/button — a stale server_key must not silently re-enable cable sync on a
             # migrated donor. Resolve the marker from the active session key (the POSTed key is
@@ -751,9 +755,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 self.partial_template_name,
                 {
                     "cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
-                    **build_migrated_context(
-                        obj, self.librenms_api.server_key
-                    ),  # session key, not the stale POSTed key
+                    **build_migrated_context(obj, active_server_key),  # session key, not the stale POSTed key
                 },
             )
         context = self._prepare_context(request, obj, fetch_fresh=True, server_key=server_key)

@@ -1106,6 +1106,129 @@ class TestMigratedContextServerKeyFallback:
         bmc.assert_called_once()
         assert bmc.call_args.args[1] == "sessionkey"  # used the cached client key
 
+    def test_vlan_view_rebind_fail_avoids_lazy_api_property(self):
+        """vlan_table_view rebind-fail render must read the cached client key, not the lazy librenms_api property (which can reconstruct a missing client and 500 the HTMX error path)."""
+        from unittest.mock import MagicMock, PropertyMock, patch
+
+        from netbox_librenms_plugin.views.base.vlan_table_view import BaseVLANTableView
+
+        view = object.__new__(BaseVLANTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "sessionkey"
+        view._get_error_context = MagicMock(return_value={})
+        request = MagicMock()
+        request.POST = {"server_key": "ghost"}
+
+        with (
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch.object(view, "rebind_api_for_server", return_value=None),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+            patch("netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}) as bmc,
+            patch.object(
+                BaseVLANTableView,
+                "librenms_api",
+                new_callable=PropertyMock,
+                side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
+            ),
+        ):
+            view.post(request, pk=1)
+
+        bmc.assert_called_once()
+        assert bmc.call_args.args[1] == "sessionkey"
+
+    def test_modules_view_rebind_fail_avoids_lazy_api_property(self):
+        """modules_view rebind-fail render must read the cached client key, not the lazy librenms_api property (which can reconstruct a missing client and 500 the HTMX error path)."""
+        from unittest.mock import MagicMock, PropertyMock, patch
+
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "sessionkey"
+        view.has_write_permission = MagicMock(return_value=True)
+        request = MagicMock()
+        request.POST = {"server_key": "ghost"}
+
+        with (
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch.object(view, "rebind_api_for_server", return_value=None),
+            patch("netbox_librenms_plugin.views.base.modules_view.messages"),
+            patch("netbox_librenms_plugin.views.base.modules_view.render"),
+            patch("netbox_librenms_plugin.views.base.modules_view.build_migrated_context", return_value={}) as bmc,
+            patch.object(
+                BaseModuleTableView,
+                "librenms_api",
+                new_callable=PropertyMock,
+                side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
+            ),
+        ):
+            view.post(request, pk=1)
+
+        bmc.assert_called_once()
+        assert bmc.call_args.args[1] == "sessionkey"
+
+    def test_cables_view_rebind_fail_avoids_lazy_api_property(self):
+        """cables_view rebind-fail render must read the cached client key, not the lazy librenms_api property (which can reconstruct a missing client and 500 the HTMX error path)."""
+        from unittest.mock import MagicMock, PropertyMock, patch
+
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "sessionkey"
+        request = MagicMock()
+        request.POST = {"server_key": "ghost"}
+
+        with (
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch.object(view, "rebind_api_for_server", return_value=None),
+            patch("netbox_librenms_plugin.views.base.cables_view.messages"),
+            patch("netbox_librenms_plugin.views.base.cables_view.render"),
+            patch("netbox_librenms_plugin.views.base.cables_view.build_migrated_context", return_value={}) as bmc,
+            patch.object(
+                BaseCableTableView,
+                "librenms_api",
+                new_callable=PropertyMock,
+                side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
+            ),
+        ):
+            view.post(request, pk=1)
+
+        bmc.assert_called_once()
+        assert bmc.call_args.args[1] == "sessionkey"
+
+    def test_ip_view_rebind_fail_avoids_lazy_api_property(self):
+        """ip_addresses_view rebind-fail render must read the cached client key, not the lazy librenms_api property (which can reconstruct a missing client and 500 the HTMX error path)."""
+        from unittest.mock import MagicMock, PropertyMock, patch
+
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        view = object.__new__(BaseIPAddressTableView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "sessionkey"
+        request = MagicMock()
+        request.POST = {"server_key": "ghost"}
+
+        with (
+            patch.object(view, "get_object", return_value=MagicMock()),
+            patch.object(view, "rebind_api_for_server", return_value=None),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.resolve_set_primary_ip", return_value=False),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context", return_value={}) as bmc,
+            patch.object(
+                BaseIPAddressTableView,
+                "librenms_api",
+                new_callable=PropertyMock,
+                side_effect=AssertionError("lazy librenms_api touched on the rebind-fail path"),
+            ),
+        ):
+            view.post(request, pk=1)
+
+        bmc.assert_called_once()
+        assert bmc.call_args.args[1] == "sessionkey"
+
     def test_ip_view_stale_key_fallback_preserves_set_primary_ip(self):
         """The stale-server-key error fallback must carry set_primary_ip so the template doesn't silently uncheck the user's preference."""
         from unittest.mock import MagicMock, patch

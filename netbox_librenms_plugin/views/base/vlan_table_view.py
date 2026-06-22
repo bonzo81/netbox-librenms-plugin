@@ -47,6 +47,11 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
+            # rebind_api_for_server() returned None precisely to avoid constructing a missing/
+            # misconfigured default client, so don't touch the lazy `librenms_api` property here —
+            # it would reconstruct LibreNMSAPI() and can raise, turning this HTMX error path into a
+            # 500. Read the already-cached client's key (else "default").
+            active_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
             # Pass server_key=None explicitly so the fragment doesn't silently fall back to
             # the session/default server (which would re-render with the wrong server selected
             # and let the next retry sync VLANs against the wrong LibreNMS instance).
@@ -59,7 +64,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
                 # controls on a stale-server refresh until the next full reload. Resolve the
                 # marker under the session/active server key — NOT the POSTed key, which failed
                 # to rebind (stale/unconfigured) and would miss the marker entirely.
-                **build_migrated_context(obj, self.librenms_api.server_key),
+                **build_migrated_context(obj, active_server_key),
             }
             return render(request, self.partial_template_name, context)
         migrated = build_migrated_context(obj, server_key)

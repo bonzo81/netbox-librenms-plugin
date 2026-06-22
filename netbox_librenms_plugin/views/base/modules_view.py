@@ -348,6 +348,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         server_key = self.rebind_api_for_server(request.POST.get("server_key"))
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
+            # rebind_api_for_server() returned None to avoid building a missing/misconfigured
+            # default client; reading the lazy `librenms_api` property here would reconstruct it
+            # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
+            active_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
             return render(
                 request,
                 self.partial_template_name,
@@ -358,7 +362,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     # session/active server key — NOT the POSTed key, which failed to rebind
                     # (stale/unconfigured) and would miss the marker, re-enabling a donor's sync
                     # controls. Mirrors ip_addresses_view / cables_view / vlan_table_view.
-                    **build_migrated_context(obj, self.librenms_api.server_key),
+                    **build_migrated_context(obj, active_server_key),
                 },
             )
         sync_device = self._get_sync_device(obj, server_key=server_key)
