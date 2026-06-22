@@ -163,6 +163,19 @@ def test_find_pii_scans_top_level_fields_not_just_responses():
     assert ("ipv4", "10.4.5.6") in kinds
 
 
+def test_find_pii_flags_compressed_ipv6():
+    """find_pii must catch compressed IPv6 literals (e.g. 2001:4860::1), not only fully-expanded forms — the old regex missed them and they slipped past --validate."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": "uplink to 2001:4860::1"})
+    kinds = {(f["kind"], f["value"]) for f in find_pii(rec)}
+    assert ("ipv6", "2001:4860::1") in kinds
+
+
+def test_find_pii_ipv6_no_false_positive_on_time_or_doc_range():
+    """A plain colon time (12:34:56) is not IPv6, and the documentation range (2001:db8::) is exempt — neither must be flagged."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": "boot 12:34:56 doc 2001:DB8::1"})
+    assert not any(f["kind"] == "ipv6" for f in find_pii(rec))
+
+
 def test_find_pii_ignores_oid_and_version_dotted_decimals():
     """SNMP object IDs and version strings are dotted-decimal but not IPs — the safety-net must not flag them."""
     rec = _ports()

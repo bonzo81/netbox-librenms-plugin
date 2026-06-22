@@ -144,7 +144,24 @@ _SYNTH_MAC_PREFIX = "02:00:00"
 # and followed by a non-word, non-dot boundary — still matches.
 _OCTET = r"(?:25[0-5]|2[0-4]\d|1?\d?\d)"
 _IPV4_RE = re.compile(rf"(?<![\w.]){_OCTET}(?:\.{_OCTET}){{3}}(?![\w.])")
-_IPV6_RE = re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){3,}[0-9a-fA-F]{1,4}\b")
+# Match full AND compressed (::) IPv6 — the old "3+ groups, all present" form missed compressed
+# literals like 2001:4860::1, which then slipped past the residual-PII safety net. This is the
+# standard comprehensive grammar: it requires either 8 groups or a "::" compression marker, so a
+# plain colon-separated decimal sequence (e.g. a "12:34:56" timestamp) is NOT matched.
+_H16 = r"[0-9A-Fa-f]{1,4}"
+_IPV6_RE = re.compile(
+    r"(?<![0-9A-Fa-f:])(?:"
+    rf"(?:{_H16}:){{7}}{_H16}"  # 1:2:3:4:5:6:7:8
+    rf"|(?:{_H16}:){{1,7}}:"  # 1::            1:2:3:4:5:6:7::
+    rf"|(?:{_H16}:){{1,6}}:{_H16}"  # 1::8          1:2:3:4:5:6::8
+    rf"|(?:{_H16}:){{1,5}}(?::{_H16}){{1,2}}"  # 1::7:8        1:2:3:4:5::7:8
+    rf"|(?:{_H16}:){{1,4}}(?::{_H16}){{1,3}}"
+    rf"|(?:{_H16}:){{1,3}}(?::{_H16}){{1,4}}"
+    rf"|(?:{_H16}:){{1,2}}(?::{_H16}){{1,5}}"
+    rf"|{_H16}:(?::{_H16}){{1,6}}"  # 1::3:4:5:6:7:8
+    rf"|:(?:(?::{_H16}){{1,7}}|:)"  # ::2:3:4:5:6:7:8  ::
+    r")(?![0-9A-Fa-f:])"
+)
 _MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b")
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
 # Free-text FQDN safety-net (dotted labels + an alphabetic TLD). Anonymized hostnames are
@@ -448,7 +465,9 @@ def find_pii(recording):
                 if ip_exempt and kind in ("ipv4", "ipv6", "fqdn"):
                     continue
                 for match in regex.findall(obj):
-                    if kind in ("ipv4", "ipv6") and match.startswith(_DOC_IP_PREFIXES):
+                    # IPv6 hex is case-insensitive, so lower-case before the documentation-range
+                    # check (e.g. 2001:DB8::1 must still be exempted like 2001:db8::1).
+                    if kind in ("ipv4", "ipv6") and match.lower().startswith(_DOC_IP_PREFIXES):
                         continue
                     # A 6-octet MAC also satisfies the loose IPv6 pattern; let the dedicated mac
                     # kind handle it so a synthetic MAC isn't double-reported as a bogus IPv6.
