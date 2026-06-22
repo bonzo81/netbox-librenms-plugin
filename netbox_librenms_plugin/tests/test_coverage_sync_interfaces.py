@@ -1366,6 +1366,31 @@ class TestSyncLagAndParentRelationships:
         member.refresh_from_db()
         assert member.lag_id is None  # invalid self-LAG was not persisted
 
+    def test_agg_type_restored_when_a_sharing_member_fails_validation(self, db):
+        """A member whose LAG link fails full_clean must not leave the shared agg_iface.type='lag' dirty: a later valid member sharing that aggregate must still persist it as a LAG in the DB."""
+        device = self._make_device()
+        # A virtual interface cannot be assigned to a LAG, so its link fails full_clean — but only
+        # after agg.type was set to 'lag' in memory on the shared index object.
+        self._iface(device, "virt0", 10, itype="virtual")
+        member2 = self._iface(device, "Gi0/2", 11)
+        agg = self._iface(device, "Po1", 100, itype="1000base-t")  # not yet a LAG
+
+        ports_data = [
+            {"ifName": "virt0", "port_id": 10},
+            {"ifName": "Gi0/2", "port_id": 11},
+            {"ifName": "Po1", "port_id": 100},
+        ]
+        relationships = {"lag_members": {"10": 100, "11": 100}, "sub_interfaces": {}}
+
+        view = self._make_view(name_field="ifName", selected_port_ids={"10", "11"})
+        view._sync_lag_and_parent_relationships(device, [], ports_data, relationships, "default")
+
+        member2.refresh_from_db()
+        agg.refresh_from_db()
+        # Invariant: if the valid member was linked, the aggregate MUST be persisted as a LAG.
+        assert member2.lag_id == agg.pk
+        assert agg.type == "lag"
+
     def test_oob_row_excluded_from_relationship_sync(self, db):
         """An OOB-controller row sharing a selected host display name must not contribute its port_id, or the LAG pass would link the hidden controller interface instead of the host."""
         device = self._make_device()

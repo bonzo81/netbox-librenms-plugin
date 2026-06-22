@@ -314,11 +314,18 @@ class SyncInterfacesView(
                             # validates against it, then commit only on success.
                             member_iface.lag = agg_iface
                             agg_needs_lag_type = isinstance(agg_iface, Interface) and agg_iface.type != "lag"
+                            original_agg_type = agg_iface.type
                             if agg_needs_lag_type:
                                 agg_iface.type = "lag"
                             try:
                                 member_iface.full_clean()
                             except ValidationError as exc:
+                                # agg_iface comes from the SHARED index reused across rows: leaving
+                                # type='lag' on a failed row would make a later valid member skip the
+                                # agg_iface.save() branch and persist its link while the aggregate's
+                                # type stays stale in the DB. Restore it before skipping.
+                                if agg_needs_lag_type:
+                                    agg_iface.type = original_agg_type
                                 logger.warning(
                                     "Bulk sync: skipping invalid LAG link %s -> %s: %s",
                                     member_iface.name,
