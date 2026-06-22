@@ -556,15 +556,20 @@ class BaseInterfaceTableView(
             # The default only applies when the key is missing; a cache entry holding None or a
             # non-dict value (corruption, partial write, format migration) would AttributeError on
             # the .get("lag_members"/"sub_interfaces") calls below. Normalize to {} so it fails soft.
+            # The same hazard applies one level down: a present-but-None/non-dict "lag_members" or
+            # "sub_interfaces" value defeats the .get(..., {}) default (it only fills a *missing*
+            # key) and would AttributeError on .items() — guard each nested map the same way.
             port_stack_relationships = cached_data.get("port_stack_relationships") or {}
             if not isinstance(port_stack_relationships, dict):
                 port_stack_relationships = {}
-            lag_members = {
-                normalize_librenms_port_id(k): v for k, v in port_stack_relationships.get("lag_members", {}).items()
-            }
-            sub_interfaces = {
-                normalize_librenms_port_id(k): v for k, v in port_stack_relationships.get("sub_interfaces", {}).items()
-            }
+            lag_members_raw = port_stack_relationships.get("lag_members") or {}
+            if not isinstance(lag_members_raw, dict):
+                lag_members_raw = {}
+            sub_interfaces_raw = port_stack_relationships.get("sub_interfaces") or {}
+            if not isinstance(sub_interfaces_raw, dict):
+                sub_interfaces_raw = {}
+            lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
+            sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
             # Scope to host rows: ports_data is merged host + OOB, and an OOB controller
             # can reuse a host port_id. Letting an OOB row win here would attach the wrong
             # aggregate/parent to the host interface during lag/parent enrichment.

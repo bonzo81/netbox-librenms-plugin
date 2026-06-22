@@ -467,6 +467,23 @@ class TestInterfaceContextOOBRows:
                 ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)  # must not raise
             assert "table" in ctx
 
+    def test_malformed_nested_relationship_maps_do_not_crash(self):
+        """port_stack_relationships is a dict but its lag_members / sub_interfaces are None / non-dict (the present-but-None key defeats the .get(..., {}) default) — iterating .items() must fail soft, not AttributeError."""
+        view = self._make_view()
+        obj = self._host_with_idrac()
+        req = _make_request()
+
+        for bad in (None, ["not", "a", "dict"], "garbage", 42):
+            fresh = {
+                "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
+                "port_stack_relationships": {"lag_members": bad, "sub_interfaces": bad},
+            }
+            with patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache:
+                mock_cache.get.return_value = None
+                mock_cache.ttl.return_value = None
+                ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)  # must not raise
+            assert "table" in ctx
+
     def test_malformed_cached_port_snapshot_fails_closed(self):
         """A stale/corrupt cached ports snapshot (non-dict, or ports not a list of dicts) must be dropped and re-rendered empty, not 500 the sync tab — and the bad entry purged so a later render re-fetches."""
         view = self._make_view()
