@@ -46,7 +46,7 @@
       },
       "port_stack": false,
       "vlans": false,
-      "transceivers": true
+      "transceivers": false
     }
   },
   {
@@ -196,7 +196,7 @@
       },
       "port_stack": false,
       "vlans": false,
-      "transceivers": true
+      "transceivers": false
     }
   },
   {
@@ -220,7 +220,7 @@
       },
       "port_stack": false,
       "vlans": false,
-      "transceivers": true
+      "transceivers": false
     }
   },
   {

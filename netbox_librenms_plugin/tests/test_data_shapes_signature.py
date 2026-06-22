@@ -63,6 +63,27 @@ def test_signature_vlans_requires_actual_vlan_data():
     assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "vlans": [10, 20]}]))["vlans"] is True
 
 
+def test_signature_transceivers_requires_non_empty_list():
+    """The transceivers axis must reflect an actual non-empty transceivers list, not a captured error/404 body — a present-but-empty body must not inflate the novelty signature."""
+
+    def _rec(transceiver_body):
+        return {
+            "schema_version": 1,
+            "name": "x",
+            "device_id": 1,
+            "responses": {
+                "GET /api/v0/devices/1/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
+                "GET /api/v0/devices/1/transceivers": transceiver_body,
+            },
+        }
+
+    # An error/404 body or an empty list is captured-but-empty → transceivers False.
+    assert compute_shape_signature(_rec({"status": "error", "message": "not found"}))["transceivers"] is False
+    assert compute_shape_signature(_rec({"transceivers": []}))["transceivers"] is False
+    # A real non-empty transceivers list → True.
+    assert compute_shape_signature(_rec({"transceivers": [{"id": 1, "type": "sfp"}]}))["transceivers"] is True
+
+
 def test_signature_stable_under_anonymization():
     """Anonymization preserves all structural fields, so the signature is unchanged."""
     rec = load_recording("cisco-stackwise-3member")

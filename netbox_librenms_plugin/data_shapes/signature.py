@@ -128,6 +128,15 @@ def compute_shape_signature(recording):
     port_stack_body = _body(recording, lambda k: k.endswith("/port_stack"))
     port_stack = bool(isinstance(port_stack_body, dict) and port_stack_body.get("mappings"))
 
+    # Require an actual non-empty transceivers list, not merely a captured /transceivers body:
+    # a JSON error/404 body is still "not None" and would otherwise inflate the novelty signature.
+    transceiver_body = _body(recording, lambda k: k.endswith("/transceivers"))
+    has_transceivers = (
+        isinstance(transceiver_body, dict)
+        and isinstance(transceiver_body.get("transceivers"), list)
+        and bool(transceiver_body["transceivers"])
+    )
+
     return {
         "os": os_name,
         "virtual_chassis": vc,
@@ -135,7 +144,7 @@ def compute_shape_signature(recording):
         "sub_interfaces": {"present": bool(sub_styles), "styles": sorted(sub_styles)},
         "port_stack": port_stack,
         "vlans": any(p.get("ifVlan") not in (None, "") or bool(p.get("vlans")) for p in ports),
-        "transceivers": _body(recording, lambda k: k.endswith("/transceivers")) is not None,
+        "transceivers": has_transceivers,
     }
 
 

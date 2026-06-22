@@ -27,16 +27,20 @@ class Command(BaseCommand):
     help = "Validate, manifest, and list LibreNMS data-shape recordings (issue #95)."
 
     def add_arguments(self, parser):
-        """Register the mutually-useful --validate / --rebuild-manifest / --list options."""
-        parser.add_argument(
+        """Register the mutually-exclusive --validate / --rebuild-manifest / --list actions."""
+        # The three actions are alternatives, not combinable: handle() runs only the first truthy
+        # one, so allowing them together is silently ambiguous in CI. Enforce exactly-one-or-none
+        # at parse time (not required, so a bare invocation still falls through to print_help).
+        action_group = parser.add_mutually_exclusive_group()
+        action_group.add_argument(
             "--validate", metavar="PATH", help="Validate a recording JSON: schema + PII sweep + novelty."
         )
-        parser.add_argument(
+        action_group.add_argument(
             "--rebuild-manifest",
             action="store_true",
             help="Rebuild data_shapes/recordings/manifest.json from the bundled recordings.",
         )
-        parser.add_argument("--list", action="store_true", help="List bundled recordings with their signatures.")
+        action_group.add_argument("--list", action="store_true", help="List bundled recordings with their signatures.")
 
     def handle(self, *args, **options):
         """Dispatch to the requested action (validate / rebuild-manifest / list)."""
@@ -61,7 +65,9 @@ class Command(BaseCommand):
 
         pii = find_pii(recording)
         if pii:
-            lines = "\n  - ".join(f"{p['kind']} {p['value']} at {p['path']}" for p in pii)
+            # Report only the kind + JSON path, never the raw value — this command runs in CI, and
+            # echoing p['value'] would leak the exact sensitive material the scan exists to catch.
+            lines = "\n  - ".join(f"{p['kind']} at {p['path']}" for p in pii)
             raise CommandError(f"Recording still contains PII (anonymize before submitting):\n  - {lines}")
 
         signature = compute_shape_signature(recording)

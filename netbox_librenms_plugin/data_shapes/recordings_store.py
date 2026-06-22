@@ -44,7 +44,9 @@ def load_manifest():
         return []
     try:
         manifest = json.loads(MANIFEST_PATH.read_text())
-    except ValueError:
+    except (OSError, ValueError):
+        # read_text() can raise OSError (permission/IO), not just a JSON ValueError. The
+        # contract here is best-effort: return [] rather than break every caller.
         return []
     return manifest if isinstance(manifest, list) else []
 
