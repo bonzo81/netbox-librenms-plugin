@@ -837,6 +837,27 @@ class TestMergeLibreNMSLinks:
         with pytest.raises(ValueError, match="unsupported librenms_id.*oob shape"):
             merge_librenms_links(winner, donor, "default")
 
+    def test_malformed_winner_oob_id_fails_closed(self):
+        """A winner oob with a non-blank unparseable id ({"oob": {"id": "abc"}} / {"id": 0}) only passes the shape check, so it would look 'occupied' and skip inheriting the donor's real controller — losing it once the donor is marked migrated. It must fail closed instead."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        for bad_id in ("abc", 0):
+            winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": {"id": bad_id, "type": "ipmi"}}})
+            donor = self._make_dev("idrac-jhw6nc4", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
+            with pytest.raises(ValueError, match="unparseable librenms_id.*oob id"):
+                merge_librenms_links(winner, donor, "default")
+
+    def test_blank_winner_oob_id_is_lenient(self):
+        """A blank/whitespace winner oob id must NOT fail closed (matches the lenient host-id handling) — the merge proceeds without raising."""
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42, "oob": {"id": "  ", "type": "ipmi"}}})
+        donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}})
+        # Must not raise; the winner already has an oob slot, so the donor host id is not demoted.
+        merge_librenms_links(winner, donor, "default")
+
     def test_donor_oob_id_coerced_to_int_on_inherit(self):
         """A numeric-string donor oob id is normalized to int when inherited."""
         from netbox_librenms_plugin.utils import merge_librenms_links

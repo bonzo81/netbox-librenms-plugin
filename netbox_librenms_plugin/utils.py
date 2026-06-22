@@ -2024,6 +2024,21 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
             f"{_raw_donor_id!r} — expected a positive integer or numeric string."
         )
     winner_oob = _extract_oob_entry("winner", winner.name, winner_entry)
+    # _extract_oob_entry only validates the oob *shape* (dict/null), not its id. A corrupt
+    # non-blank winner oob id (e.g. "abc", 0) would otherwise make the slot look "occupied"
+    # (winner_oob is not None) below, skipping donor OOB inheritance/demotion and silently
+    # losing the donor's real controller link once the donor is marked migrated — while the
+    # winner keeps an unusable oob. Fail closed, mirroring the winner_id/donor_id checks above;
+    # a blank/whitespace id is treated leniently as "no id".
+    if winner_oob is not None:
+        _raw_winner_oob_id = winner_oob.get("id")
+        if isinstance(_raw_winner_oob_id, str) and not _raw_winner_oob_id.strip():
+            _raw_winner_oob_id = None
+        if _raw_winner_oob_id is not None and coerce_librenms_id(_raw_winner_oob_id) is None:
+            raise ValueError(
+                f"winner '{winner.name}' has an unparseable librenms_id[{server_key!r}] oob id "
+                f"{_raw_winner_oob_id!r} — expected a positive integer or numeric string."
+            )
 
     if winner_id is None and donor_id is not None:
         winner_entry["id"] = donor_id
