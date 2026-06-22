@@ -414,6 +414,35 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         assert view._links_fetch_error is not None
         assert view.librenms_id is None
 
+    def test_oob_only_skips_wasteful_host_link_and_port_calls(self):
+        """An OOB-only device (no host librenms_id) must not issue host get_device_links(None)/get_ports(None) — those GET /devices/None/... and always 404; only the OOB controller id is fetched, and the OOB rows still render."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False
+        view._librenms_api.get_librenms_id.return_value = None
+        # Only the OOB controller (99) should ever reach the link/port fetches.
+        view._librenms_api.get_device_links.return_value = (True, {"links": []})
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="k"),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value={"id": 99}),
+        ):
+            mock_cache.get.return_value = None  # force get_ports_data past its cache short-circuit
+            result = view.get_links_data(obj)
+
+        # The host fetches are skipped entirely: get_device_links / get_ports are only ever called
+        # for the OOB controller (99), never with the None host id (which would GET /devices/None/...).
+        assert all(c.args[0] is not None for c in view._librenms_api.get_device_links.call_args_list)
+        assert all(c.args[0] is not None for c in view._librenms_api.get_ports.call_args_list)
+        assert result == []  # empty OOB result still flows through as a successful empty refresh
+
     def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):
         """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded."""
         view = self._make_view()

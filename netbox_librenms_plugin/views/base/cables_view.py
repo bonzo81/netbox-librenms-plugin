@@ -145,6 +145,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
         if cached_data:
             return cached_data
+        # No host LibreNMS id (OOB-only device): there is nothing to fetch — calling
+        # get_ports(None) would issue a GET /devices/None/ports that always 404s. Return the
+        # same empty shape a failed fetch yields so callers are unaffected.
+        if self.librenms_id is None:
+            return {"ports": []}
         success, data = self.librenms_api.get_ports(self.librenms_id)
         if not success:
             return {"ports": []}
@@ -168,7 +173,15 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # member's cables and cache them under another member's key (mismatched verify/sync).
         lookup_device = get_librenms_sync_device(obj, server_key=server_key) or obj
         self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
-        success, data = self.librenms_api.get_device_links(self.librenms_id)
+        if self.librenms_id is None:
+            # OOB-only / unmapped device: skip the host LLDP call. get_device_links(None) would
+            # GET /devices/None/links and always 404 for no benefit. Synthesize the same not-ok
+            # result the reconciliation below already handles — an OOB-only mapping still falls
+            # through to render its rows; a device with neither host id nor OOB still resolves to
+            # "No links found".
+            success, data = False, "Device has no LibreNMS host mapping."
+        else:
+            success, data = self.librenms_api.get_device_links(self.librenms_id)
         # A failed/garbled host LLDP call (including an OOB-only device whose host
         # librenms_id is None) must not abort the whole fetch: fall through (don't return
         # None) so the OOB merge below still runs and OOB-only devices render their rows.
