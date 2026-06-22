@@ -5476,6 +5476,41 @@ class TestRefreshExistingDeviceSysNameFallback:
         assert validation["existing_device"] is mock_device
 
 
+@pytest.mark.django_db
+class TestRefreshExistingDeviceCrossModelIdWins:
+    """An exact cross-model librenms_id owner must win over a same-named preferred-model object."""
+
+    def test_cross_model_id_match_beats_same_name_device(self):
+        """librenms_id belongs to a VM only (no Device owns it), but a same-named Device exists: the refresh must bind to the VM (the true id owner), not name-match the Device and silently re-home the row."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        libre_id = 778899
+        # The id's true owner is a VirtualMachine (the cross model for a device import).
+        vm = make_vm("b3-shared-name")
+        vm.custom_field_data["librenms_id"] = {"default": libre_id}
+        vm.save()
+        # A *different* Device shares the same name but holds no librenms_id link.
+        device = make_device("b3-shared-name")
+
+        libre_device = {"device_id": libre_id, "hostname": "b3-shared-name", "sysName": "b3-shared-name"}
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,  # Model=Device, CrossModel=VirtualMachine
+            "is_ready": False,
+            "can_import": False,
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # The exact id owner (the VM) must win over the same-named Device matched by hostname.
+        assert validation["existing_device"].pk == vm.pk
+        assert validation["existing_device"].pk != device.pk
+        # found_as_cross_model flips import_as_vm so future refreshes query the right model.
+        assert validation["import_as_vm"] is True
+
+
 # ---------------------------------------------------------------------------
 # Tests for _get_hostname_for_action helper
 # ---------------------------------------------------------------------------

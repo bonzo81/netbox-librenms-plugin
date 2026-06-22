@@ -669,8 +669,18 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 raise AmbiguousLibreNMSIdError(
                     f"LibreNMS ID {librenms_id} matches both {Model.__name__} and {CrossModel.__name__}"
                 )
+            # An exact librenms_id owner must win over any name/hostname fallback: if the id now
+            # belongs to the opposite model only, binding by name to a same-named preferred-model
+            # object would silently re-home the row to the wrong device. Prefer the id match here,
+            # before _lookup_in_model(Model) can return a name hit.
+            if model_id_match:
+                new_device, match_type = model_id_match, "librenms_id"
+            elif cross_id_match:
+                new_device, match_type = cross_id_match, "librenms_id"
+                found_as_cross_model = True
 
-        new_device, match_type = _lookup_in_model(Model)
+        if not new_device:
+            new_device, match_type = _lookup_in_model(Model)
 
         if not new_device:
             # Try the opposite model: catches cross-model imports that happened
