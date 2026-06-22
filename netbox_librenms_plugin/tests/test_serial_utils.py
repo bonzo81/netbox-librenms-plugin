@@ -43,7 +43,7 @@ class TestStripStatusSuffix:
     def test_strips_status(self):
         from netbox_librenms_plugin.serial_utils import strip_status_suffix
 
-        assert strip_status_suffix("PROD-LAB03A-RA1 Status") == "PROD-LAB03A-RA1"
+        assert strip_status_suffix("rdev-d9b298-RA1 Status") == "rdev-d9b298-RA1"
 
     def test_strips_default_port_name(self):
         from netbox_librenms_plugin.serial_utils import strip_status_suffix
@@ -71,7 +71,7 @@ class TestMapSensorsToSerialLinks:
                 "device_id": 12,
                 "sensor_type": "acsSerialPortTable",
                 "sensor_index": "acsSerialPortTableStatus.11",
-                "sensor_descr": "PROD-LAB03A-RA1 Status",
+                "sensor_descr": "rdev-d9b298-RA1 Status",
                 "sensor_current": 2,
                 "group": "Serial Ports",
             }
@@ -81,7 +81,7 @@ class TestMapSensorsToSerialLinks:
         row = links[0]
         assert row["local_port"] == "ttyS11"
         assert row["local_port_id"] == "serial:1975"
-        assert row["remote_device"] == "PROD-LAB03A-RA1"
+        assert row["remote_device"] == "rdev-d9b298-RA1"
         assert row["remote_port"] is None
         assert row["remote_device_id"] is None
         assert row["is_configured"] is True
@@ -185,7 +185,7 @@ class TestMapSensorsToSerialLinks:
                 "device_id": 12,
                 "sensor_type": "acsSerialPortTable",
                 "sensor_index": "acsSerialPortTableStatus",  # no trailing .N
-                "sensor_descr": "PROD-LAB03A-RA1 Status",
+                "sensor_descr": "rdev-d9b298-RA1 Status",
                 "sensor_current": 2,
                 "group": "Serial Ports",
             }
@@ -319,15 +319,15 @@ class TestMapSensorsWithFixture:
         links = map_sensors_to_serial_links(fixture_sensors)
         assert [r["sensor_index_int"] for r in links] == list(range(1, 50))
 
-    def test_port_11_is_prod_lab03a_ra1(self, fixture_sensors):
-        """Index 11 = PROD-LAB03A-RA1 — the clearest resolvable label in the fixture."""
+    def test_port_11_resolves_configured_remote_device(self, fixture_sensors):
+        """Index 11 = rdev-d9b298-RA1 — the clearest resolvable label in the fixture."""
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
         links = map_sensors_to_serial_links(fixture_sensors)
         row = links[10]  # 0-indexed, port 11
         assert row["sensor_index_int"] == 11
         assert row["local_port"] == "ttyS11"
-        assert row["remote_device"] == "PROD-LAB03A-RA1"
+        assert row["remote_device"] == "rdev-d9b298-RA1"
         assert row["is_configured"] is True
 
     def test_port_49_is_default_unconfigured(self, fixture_sensors):
