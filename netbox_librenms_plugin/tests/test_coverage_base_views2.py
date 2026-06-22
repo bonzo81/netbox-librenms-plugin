@@ -947,11 +947,12 @@ class TestCablePartialSnapshotNotCached:
         view.enrich_links_data = MagicMock(side_effect=lambda d, o, server_key=None: d)
         return view
 
-    def _links_cache_sets(self, *, oob_failed, links_error, librenms_id):
+    def _links_cache_sets(self, *, oob_failed, links_error, librenms_id, serial_failed=False):
         view = self._make_view()
 
         def fake_get_links(obj, server_key=None, sync_device=None):
             view._oob_links_fetch_failed = oob_failed
+            view._serial_links_fetch_failed = serial_failed
             view._links_fetch_error = links_error
             view.librenms_id = librenms_id
             return [{"local_port": "Gi0/0", "remote_port": "Gi0/1", "_source": "host"}]
@@ -973,6 +974,11 @@ class TestCablePartialSnapshotNotCached:
 
     def test_host_fetch_failure_with_host_id_not_cached(self):
         assert self._links_cache_sets(oob_failed=False, links_error="auth failed", librenms_id=42) == []
+
+    def test_serial_fetch_failure_not_cached(self):
+        # A serial-sensor outage drops serial rows; caching the host/OOB-only snapshot as complete
+        # would hide them (and the warning) until the cache expires.
+        assert self._links_cache_sets(oob_failed=False, links_error=None, librenms_id=42, serial_failed=True) == []
 
     def test_oob_only_mapping_still_cached(self):
         # librenms_id None + a host "failure" is an OOB-only mapping (absent host) → still cache it.

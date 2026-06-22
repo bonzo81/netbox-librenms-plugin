@@ -876,12 +876,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         cache_key = self.get_cache_key(cache_device, "links", server_key)
         # Don't persist or enrich a PARTIAL fresh snapshot: a host fetch failure on a device that
-        # has a host id, or any OOB fetch failure, drops one side's cable rows. An OOB-only mapping
-        # (no host id) legitimately records _links_fetch_error for the absent host, so keep caching
-        # that successful OOB refresh (mirrors the host_mapping_absent_but_oob_scoped guard above).
+        # has a host id, any OOB fetch failure, or a serial-sensor fetch failure drops one side's
+        # cable rows. An OOB-only mapping (no host id) legitimately records _links_fetch_error for
+        # the absent host, so keep caching that successful OOB refresh (mirrors the
+        # host_mapping_absent_but_oob_scoped guard above).
         partial_fetch_failed = fetch_fresh and (
             bool(getattr(self, "_oob_links_fetch_failed", False))
             or bool(getattr(self, "_librenms_id_unresolved", False))
+            or bool(getattr(self, "_serial_links_fetch_failed", False))
             or (bool(getattr(self, "_links_fetch_error", None)) and getattr(self, "librenms_id", None) is not None)
         )
         if partial_fetch_failed:
