@@ -1172,6 +1172,32 @@ class TestValidateDeviceForImportEdgeCases:
         assert result["existing_device"].pk == dev.pk
         assert result.get("existing_match_type") == "primary_ip"
 
+    def test_primary_ip_ambiguity_across_devices_fails_closed(self):
+        """When duplicate net_host rows resolve to MORE THAN ONE distinct device, validation must fail closed (blocking issue + can_import False) rather than bind to an arbitrary one."""
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+
+        dev_a = make_device("amb-host-a")
+        dev_b = make_device("amb-host-b")
+        ip_on(dev_a, "192.168.9.1/24", "eth0")
+        ip_on(dev_b, "192.168.9.1/24", "eth0")  # same host address on a DIFFERENT device
+
+        libre_device = {
+            "device_id": 88,
+            "hostname": "amb-router",  # matches neither device name → IP branch
+            "sysName": "amb-router",
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "ip": "192.168.9.1",
+        }
+        result = self._validate(libre_device)
+
+        assert any("Multiple NetBox devices use IP address 192.168.9.1" in i for i in result.get("issues", []))
+        assert result.get("can_import") is False
+        # Must NOT have arbitrarily bound to either device.
+        assert result.get("existing_device") is None
+
     def test_no_hostname_adds_issue(self):
         """Empty hostname/sysName → _determine_device_name falls back to 'device-{id}'."""
         libre_device = {

@@ -971,21 +971,35 @@ def validate_device_for_import(
                     # already does).
                     device = None
                     matching_exists = False
+                    # Collect EVERY distinct device this host address resolves to, from both the
+                    # interface-assignment and oob_ip-FK paths, so we can fail closed on a genuine
+                    # collision instead of binding to whichever duplicate net_host row sorts first.
+                    candidate_devices = {}
                     for existing_ip in matching_ips:
                         matching_exists = True
                         assigned = existing_ip.assigned_object
                         if assigned is not None and hasattr(assigned, "device") and assigned.device:
-                            device = assigned.device
-                            break
+                            candidate_devices[assigned.device.pk] = assigned.device
                     if matching_exists:
                         # Device.oob_ip is a direct FK independent of assigned_object: an IP can be
                         # a device's OOB address while assigned to no interface (e.g. a NAT'd OOB IP
-                        # whose assigned_object is None). Fall back to the oob_ip FK so the OOB
-                        # detection below still finds such devices. Match against EVERY row sharing
-                        # this host address, not just .first(), so the OOB device is found even when
-                        # its oob_ip is a different one of the duplicate net_host rows.
-                        if device is None:
-                            device = Device.objects.filter(oob_ip__in=matching_ips).first()
+                        # whose assigned_object is None). Match against EVERY row sharing this host
+                        # address so an OOB device is found even when its oob_ip is a different one
+                        # of the duplicate net_host rows.
+                        for oob_device in Device.objects.filter(oob_ip__in=matching_ips):
+                            candidate_devices[oob_device.pk] = oob_device
+                        if len(candidate_devices) > 1:
+                            # Duplicate net_host rows point at >1 distinct NetBox device — binding to
+                            # an arbitrary one could re-home the import to the wrong device, so fail
+                            # closed (mirrors the librenms_id cross-model ambiguity guard above).
+                            result["issues"].append(
+                                f"Multiple NetBox devices use IP address {primary_ip}; "
+                                "resolve the duplicate assignment before importing."
+                            )
+                            result["can_import"] = False
+                            result["is_ready"] = False
+                        elif candidate_devices:
+                            device = next(iter(candidate_devices.values()))
                         if device:
                             # Surface any existing host/OOB linkage so the import UI renders the
                             # correct row state (the librenms_id / serial branches do the same;
