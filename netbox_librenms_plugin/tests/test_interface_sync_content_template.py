@@ -225,28 +225,26 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         assert "mdi-transfer-right" in html
         assert 'hx-vals=\'{"server_key": "edgelondon"}\'' in html
 
-    def test_move_button_omits_server_key_hx_vals_when_marker_has_no_key(self):
-        # Mirror the form-mode guard (lines 29/35): when the marker has no server_key, the Move
-        # button must omit hx-vals entirely rather than POST an empty {"server_key": ""}, which
-        # would override the active/default server with a blank key on a non-default install.
+    def test_move_button_falls_back_to_active_server_key_when_marker_has_no_key(self):
+        # When the marker carries no server_key, the Move button must fall back to the active
+        # interface_sync.server_key (the server the donor is being viewed under) rather than drop
+        # the discriminator: omitting it lets the move resolve the marker against the session/default
+        # server, which on a multi-server install can be the WRONG server. Never POST an empty key.
         from netbox_librenms_plugin.tests.conftest import make_device
 
         winner = make_device("iface-tmpl-winner-nokey")
         html = self._render(
-            migrated={"device_id": 1, "at": "now"},  # no server_key
+            migrated={"device_id": 1, "at": "now"},  # marker has NO server_key
             winner=winner,
             netbox_only=[{"id": 1, "name": "eth-only"}],
             has_write=True,
         )
-        # The Move button still renders...
+        # The Move button still renders, and never with an empty server_key payload.
         assert "mdi-transfer-right" in html
-        # ...but never with an empty server_key payload.
-        assert '"server_key": ""' not in html
         assert 'hx-vals=\'{"server_key": ""}\'' not in html
-        # Scope to the move button's own opening tag: with no marker server_key it must omit the
-        # hx-vals attribute ENTIRELY (the checks above would still pass if it rendered any other
-        # non-empty hx-vals), so the POST falls back to the active/default server.
+        # Scope to the move button's own opening tag: it must carry the active server_key
+        # (interface_sync.server_key == "default" in this harness) as the fallback discriminator.
         move_idx = html.index("mdi-transfer-right")
         btn_start = html.rindex("<button", 0, move_idx)
         move_button_tag = html[btn_start : html.index(">", btn_start)]
-        assert "hx-vals" not in move_button_tag
+        assert 'hx-vals=\'{"server_key": "default"}\'' in move_button_tag
