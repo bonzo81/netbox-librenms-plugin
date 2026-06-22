@@ -1146,6 +1146,32 @@ class TestValidateDeviceForImportEdgeCases:
         assert result.get("existing_device").pk == dev.pk
         assert result.get("existing_match_type") == "primary_ip"
 
+    def test_primary_ip_match_with_decoy_duplicate_net_host_row(self):
+        """The interface-assigned device must be found by scanning EVERY duplicate net_host row, not just .first(): a decoy unassigned row created first must not hide the real assigned device (mirrors the bulk_import.py fix)."""
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_ip
+
+        dev = make_device("decoy-host-router")
+        # Decoy row sharing the host address, created FIRST and assigned to nothing — so .first()
+        # returns it and the match must come from scanning the whole matching-IP set.
+        make_ip("192.168.5.1/32")
+        ip_on(dev, "192.168.5.1/24", "eth0")  # the REAL management IP, on an interface
+
+        libre_device = {
+            "device_id": 77,
+            "hostname": "router-decoy",  # does not match dev.name → falls to the IP branch
+            "sysName": "router-decoy",
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "ip": "192.168.5.1",
+        }
+        result = self._validate(libre_device)
+
+        assert result.get("existing_device") is not None
+        assert result["existing_device"].pk == dev.pk
+        assert result.get("existing_match_type") == "primary_ip"
+
     def test_no_hostname_adds_issue(self):
         """Empty hostname/sysName → _determine_device_name falls back to 'device-{id}'."""
         libre_device = {

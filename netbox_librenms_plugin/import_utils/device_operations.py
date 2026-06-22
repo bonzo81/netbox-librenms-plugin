@@ -964,13 +964,20 @@ def validate_device_for_import(
                     from ipam.models import IPAddress
 
                     matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
-                    existing_ip = matching_ips.first()
-                    if existing_ip:
-                        device = (
-                            existing_ip.assigned_object.device
-                            if existing_ip.assigned_object and hasattr(existing_ip.assigned_object, "device")
-                            else None
-                        )
+                    # Scan EVERY row sharing this host address for an interface assignment, not
+                    # just .first(): with duplicate net_host rows the real management IP may be
+                    # assigned to an interface on a different matching row than the first (mirrors
+                    # _refresh_existing_device in bulk_import.py, which the oob_ip fallback below
+                    # already does).
+                    device = None
+                    matching_exists = False
+                    for existing_ip in matching_ips:
+                        matching_exists = True
+                        assigned = existing_ip.assigned_object
+                        if assigned is not None and hasattr(assigned, "device") and assigned.device:
+                            device = assigned.device
+                            break
+                    if matching_exists:
                         # Device.oob_ip is a direct FK independent of assigned_object: an IP can be
                         # a device's OOB address while assigned to no interface (e.g. a NAT'd OOB IP
                         # whose assigned_object is None). Fall back to the oob_ip FK so the OOB
