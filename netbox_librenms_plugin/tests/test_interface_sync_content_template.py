@@ -221,9 +221,14 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             netbox_only=[{"id": 1, "name": "eth-only"}],
             has_write=True,
         )
-        # The Move button renders for the NetBox-only row and carries the server_key.
+        # The Move button renders for the NetBox-only row and carries the server_key. Scope the
+        # hx-vals assertion to the Move button's own tag (mirroring the fallback test) so a
+        # different element carrying the key can't mask the button dropping its hx-vals.
         assert "mdi-transfer-right" in html
-        assert 'hx-vals=\'{"server_key": "edgelondon"}\'' in html
+        move_idx = html.index("mdi-transfer-right")
+        btn_start = html.rindex("<button", 0, move_idx)
+        move_button_tag = html[btn_start : html.index(">", btn_start)]
+        assert 'hx-vals=\'{"server_key": "edgelondon"}\'' in move_button_tag
 
     def test_move_button_falls_back_to_active_server_key_when_marker_has_no_key(self):
         # When the marker carries no server_key, the Move button must fall back to the active
