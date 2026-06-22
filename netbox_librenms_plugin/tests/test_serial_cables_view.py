@@ -199,6 +199,26 @@ class TestGetLinksDataSerial:
 
         assert view._serial_links_fetch_failed is False
 
+    def test_serial_fetch_success_with_non_list_payload_is_skipped(self):
+        """A malformed non-list payload on the success path is skipped by the call-site isinstance(list) guard (a non-iterable would otherwise crash the mapper), not flagged as a failure."""
+        view = _make_view()
+        obj = _mock_obj(has_csps=True)
+
+        for bad in (42, "garbage", {"sensor_id": 1}):  # truthy but not a list
+            view._librenms_api.get_device_links.return_value = (True, {"links": []})
+            view._librenms_api.get_librenms_id.return_value = 12
+            view._librenms_api.get_serial_port_sensors.return_value = (True, bad)
+            with (
+                patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_oob", return_value=None),
+                patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=None),
+                patch.object(view, "get_ports_data", return_value={"ports": []}),
+            ):
+                result = view.get_links_data(obj)  # must not raise
+
+            serial_rows = [r for r in (result or []) if r.get("_source") == "serial"]
+            assert serial_rows == []  # malformed payload skipped, no rows mapped
+            assert view._serial_links_fetch_failed is False  # success, just an unusable payload
+
     def test_serial_row_shape(self):
         """Each appended row has the expected keys."""
         view = _make_view()

@@ -513,7 +513,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                     self.librenms_id,
                     serial_sensors,
                 )
-            elif serial_sensors:
+            elif serial_sensors and isinstance(serial_sensors, list):
+                # get_serial_port_sensors() guarantees a list on success, but guard the call site
+                # with isinstance(list) like every other LibreNMS payload handled in this method
+                # (host links, OOB ports, OOB links): a malformed non-list success payload is then
+                # skipped rather than iterated — a non-iterable would otherwise crash mapping.
                 links_data.extend(map_sensors_to_serial_links(serial_sensors, device_id=lookup_device.id))
 
         # Distinguish a *successful* zero-row refresh ([] — flows through to the success path in
