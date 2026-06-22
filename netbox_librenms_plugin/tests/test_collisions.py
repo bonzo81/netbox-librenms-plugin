@@ -146,6 +146,30 @@ def test_invalid_libre_id_is_skipped():
     assert detect_bulk_collisions(devices) == []
 
 
+def test_numeric_like_libre_id_is_skipped_not_truncated():
+    """A float/numeric-like device_id (1.9) must be skipped, not int()-truncated to a valid-looking pk — otherwise it keys a phantom row and fabricates a collision against the real row."""
+    nb_device = Device(pk=30, name="nb-float")
+    devices = [
+        _row(1.9, "float-row", {"existing_device": nb_device}),  # must NOT become 1
+        _row(900, "real-row", {"existing_device": nb_device}),
+    ]
+    # The float row is dropped → only one valid LibreNMS id touches the NB device → no collision.
+    assert detect_bulk_collisions(devices) == []
+
+
+def test_digit_string_libre_id_is_accepted():
+    """A plain digit-string device_id ('200') is still coerced and counted (regression guard for the coerce switch)."""
+    nb_device = Device(pk=31, name="nb-strid")
+    devices = [
+        _row("200", "str-row", {"existing_device": nb_device}),
+        _row(201, "int-row", {"existing_device": nb_device}),
+    ]
+    groups = detect_bulk_collisions(devices)
+    # Two distinct valid ids on one NB device → a real collision (string id was not dropped).
+    assert len(groups) == 1
+    assert {r["device_id"] for r in groups[0]["librenms_rows"]} == {200, 201}
+
+
 def test_groups_sorted_by_nb_pk_for_stable_render():
     nb_high = Device(pk=999, name="z")
     nb_low = Device(pk=1, name="a")

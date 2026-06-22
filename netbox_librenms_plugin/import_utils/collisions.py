@@ -113,6 +113,8 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
                     ],
                 }
     """
+    from netbox_librenms_plugin.utils import coerce_librenms_id
+
     # Key by (model_name, nb_pk) to avoid false collisions when a Device
     # and a VirtualMachine happen to share the same integer pk.
     by_nb_pk: dict[tuple[str, int], dict] = {}
@@ -125,9 +127,11 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
         validation = entry.get("validation")
         if not isinstance(validation, dict):
             validation = {}
-        try:
-            libre_id = int(entry.get("device_id"))
-        except (TypeError, ValueError):
+        # coerce_librenms_id rejects bools, floats (1.9 would otherwise truncate to a valid-looking
+        # but WRONG pk), non-positive and non-numeric ids, and coerces a digit string — so a
+        # malformed row is skipped rather than silently mis-keyed under a truncated device id.
+        libre_id = coerce_librenms_id(entry.get("device_id"))
+        if libre_id is None:
             continue
         hostname = entry.get("device_name") or f"device-{libre_id}"
 
