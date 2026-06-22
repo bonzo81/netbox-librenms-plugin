@@ -293,6 +293,7 @@ def _hx_request(post=None):
     req.htmx = True  # pin branch intent: implementations may check `if request.htmx`
     req.META = {"HTTP_REFERER": "/back"}
     req.user = MagicMock(is_superuser=True)
+    req._messages = MagicMock()  # parity with _nonhtmx_request: HTMX rejection paths call messages.error()
     return req
 
 
