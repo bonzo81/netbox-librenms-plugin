@@ -198,7 +198,7 @@ class TestBaseCableTableViewGetLinksData:
         assert result[0]["remote_device"] == "switch-b"
 
     def test_get_links_data_oob_only_device_still_renders_oob_rows(self):
-        """An OOB-only sync device has no host LibreNMS id (get_librenms_id -> None), so the host links fetch fails."""
+        """An OOB-only sync device has no host LibreNMS id (get_librenms_id -> None), so the host links fetch is skipped and only the OOB controller is fetched."""
         view = self._make_view()
         # Clear the seeded host id so the fixture unambiguously represents the OOB-only
         # scenario (get_links_data reassigns self.librenms_id from get_librenms_id() at use,
@@ -206,11 +206,15 @@ class TestBaseCableTableViewGetLinksData:
         view.librenms_id = None
         obj = _mock_obj()
 
-        # Host has no LibreNMS id; only the OOB controller is mapped.
+        # Host has no LibreNMS id; only the OOB controller is mapped. Key the side_effect on the
+        # device id rather than call order: the host fetch is now skipped entirely (no
+        # get_device_links(None)), so only the OOB controller id (99) reaches the API.
         view._librenms_api.get_librenms_id.return_value = None
-        view._librenms_api.get_device_links.side_effect = [
-            (False, {"error": "device not found in librenms"}),  # host (id=None) fetch fails
-            (
+
+        def _links(dev_id):
+            if dev_id is None:  # host fetch — must not happen now (guarded out)
+                return (False, {"error": "device not found in librenms"})
+            return (
                 True,
                 {
                     "links": [
@@ -223,8 +227,9 @@ class TestBaseCableTableViewGetLinksData:
                         }
                     ]
                 },
-            ),  # OOB controller (id=99) fetch succeeds
-        ]
+            )  # OOB controller (id=99) fetch succeeds
+
+        view._librenms_api.get_device_links.side_effect = _links
         view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 5, "ifName": "console0"}]})
 
         with (
@@ -235,13 +240,15 @@ class TestBaseCableTableViewGetLinksData:
         ):
             result = view.get_links_data(obj)
 
-        # Pre-fix this returned None (hard return on the failed host fetch); now the OOB merge
-        # runs and surfaces the OOB-side cable row.
+        # The OOB merge runs and surfaces the OOB-side cable row even though the host has no id.
         assert result is not None
         assert len(result) == 1
         assert result[0]["_source"] == "oob"
         assert result[0]["remote_device"] == "peer-sw"
         assert result[0]["local_port"] == "console0"
+        # The wasteful host link fetch is skipped: get_device_links is only ever called for the
+        # OOB controller (99), never with the None host id.
+        assert all(c.args[0] is not None for c in view._librenms_api.get_device_links.call_args_list)
 
     def test_get_links_data_successful_empty_returns_list_not_none(self):
         """A successful refresh with zero rows must return [] (not None) so _prepare_context() flows it through the success path instead of mislabeling it 'No links found'."""
