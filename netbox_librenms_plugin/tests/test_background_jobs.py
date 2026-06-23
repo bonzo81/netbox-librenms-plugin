@@ -378,6 +378,9 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock()
+        # The collision pre-check fetches each device; return "not found" so it skips cleanly
+        # (collision detection is covered by its own real-DB tests).
+        mock_api_class.return_value.get_device_info.return_value = (False, None)
 
         # Mock successful device imports
         mock_device_1 = MagicMock()
@@ -561,6 +564,8 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock()
+        # Collision pre-check fetches each device; "not found" → skip cleanly.
+        mock_api_class.return_value.get_device_info.return_value = (False, None)
 
         mock_bulk_devices.return_value = {
             "success": [],
@@ -678,6 +683,8 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock()
+        # Collision pre-check fetches each device; "not found" → skip cleanly.
+        mock_api_class.return_value.get_device_info.return_value = (False, None)
 
         mock_bulk_devices.return_value = {
             "success": [],

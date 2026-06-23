@@ -26,6 +26,7 @@ from netbox_librenms_plugin.import_utils import (
     bulk_import_devices,
     bulk_import_vms,
     detect_bulk_collisions,
+    detect_collisions_for_device_ids,
     fetch_device_with_cache,
     get_import_device_cache_key,
     get_librenms_device_by_id,
@@ -39,6 +40,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     apply_role_to_validation,
     extract_device_selections,
     fetch_model_by_id,
+    merge_candidate_pks,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import (
@@ -894,7 +896,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return render(
                 request,
                 "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                {"collisions": collisions, "device_count": len(devices)},
+                {"collisions": collisions},
             )
 
         return render(
@@ -1054,6 +1056,34 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             for key, cached_device in cache.get_many(list(key_to_device_id)).items()
             if cached_device
         }
+
+        # Re-run the same-NetBox-device collision check the confirm modal performs. The confirm
+        # preview is advisory only — a re-submitted stale confirm form, a scripted POST, or the
+        # "run as background job" path reaches this view directly. Block a colliding batch here
+        # (and again in ImportDevicesJob) so it can't be imported by bypassing the preview.
+        # A single selected device can never collide (collisions need two distinct LibreNMS ids
+        # on one NetBox device), so skip the extra validation pass for the common single-row case.
+        collisions = (
+            detect_collisions_for_device_ids(
+                parsed_ids, self.librenms_api, libre_devices_cache=libre_devices_cache, sync_options=sync_options
+            )
+            if len(parsed_ids) >= 2
+            else []
+        )
+        if collisions:
+            if is_htmx:
+                # 200, like the confirm step: HTMX skips the swap on non-2xx.
+                return render(
+                    request,
+                    "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+                    {"collisions": collisions},
+                )
+            messages.error(
+                request,
+                "Bulk import blocked: two or more selected LibreNMS devices resolve to the same "
+                "NetBox device. Resolve each colliding device individually, or deselect the duplicates.",
+            )
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         # Check if we should use background job for import
         total_import_count = len(parsed_ids)
@@ -3386,12 +3416,7 @@ class MergeNetBoxDevicesView(
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
-        merge_candidates = (validation or {}).get("merge_candidates") or {}
-        candidate_pks = {
-            (merge_candidates.get("host_named") or {}).get("pk"),
-            (merge_candidates.get("oob_named") or {}).get("pk"),
-        }
-        candidate_pks.discard(None)
+        candidate_pks = merge_candidate_pks(validation)
         # Derive the donor from the selected winner. The merge is always between this fixed pair
         # of candidates, so the donor is unambiguously the other candidate and no client-supplied
         # donor state is needed. This also enforces that the winner is one of the two candidates.

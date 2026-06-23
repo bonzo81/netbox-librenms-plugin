@@ -15,6 +15,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
+    coerce_positive_int as _coerce_positive_int,
     find_by_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
@@ -169,17 +170,6 @@ class _SerialConflictUnavailable(Exception):
 def _get_sync_device_for_inventory(device, server_key):
     """Return the VC sync device used for module inventory cache keys."""
     return get_librenms_sync_device(device, server_key=server_key) or device
-
-
-def _coerce_positive_int(value):
-    """Return ``value`` as a positive int, or ``None`` when invalid."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        int_value = int(value)
-    except (TypeError, ValueError):
-        return None
-    return int_value if int_value > 0 else None
 
 
 def _get_item_port_identity(item):

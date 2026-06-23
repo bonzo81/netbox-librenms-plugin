@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -5508,6 +5509,7 @@ class TestImportActionRebindGuard:
         assert response.status_code != 500
 
 
+@pytest.mark.django_db
 class TestBulkImportConfirmCollisions:
     """Tests for Stage 3 collision-blocking behaviour."""
 
@@ -5518,13 +5520,22 @@ class TestBulkImportConfirmCollisions:
         view._librenms_api = _make_api()
         return view
 
-    def _run_with_two_devices(self, validation_a, validation_b):
-        """Drive BulkImportConfirmView.post with two LibreNMS rows whose validations are stubbed to whatever the test wants."""
+    def _run_with_two_devices(self, validation_a, validation_b, *, real_render):
+        """Drive the real BulkImportConfirmView.post over two LibreNMS rows.
+
+        ``validation_a/b`` carry real NetBox Device objects so the real
+        detect_bulk_collisions + _model_name_of run; only validate_device_for_import (an
+        expensive VC-detection call covered by its own tests) is stubbed. When
+        ``real_render`` is True the real template engine renders (returning an HttpResponse);
+        otherwise render() is captured so the chosen template can be asserted without
+        building the full confirm-table context.
+        """
         view = self._make_view()
         request = _make_request(post={"select": ["1", "2"]})
         request.POST.getlist = MagicMock(return_value=["1", "2"])
         request.GET = MagicMock()
         request.GET.get = MagicMock(return_value=None)
+        request.user = AnonymousUser()
 
         libre_devices = {
             1: {"device_id": 1, "hostname": "alpha"},
@@ -5535,38 +5546,38 @@ class TestBulkImportConfirmCollisions:
         def fake_validate(libre_device, **_kwargs):
             return validations[libre_device["device_id"]]
 
-        with patch.object(view, "require_write_permission", return_value=None):
-            with patch(
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
                 "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
                 side_effect=lambda did, _api: libre_devices.get(did),
-            ):
-                with patch(
-                    "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
-                    return_value={"cluster_id": None, "role_id": None, "rack_id": None},
-                ):
-                    with patch(
-                        "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
-                        side_effect=fake_validate,
-                    ):
-                        with patch(
-                            "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
-                            return_value=(True, False),
-                        ):
-                            with patch(
-                                "netbox_librenms_plugin.views.imports.actions.render",
-                            ) as mock_render:
-                                mock_render.side_effect = lambda req, tpl, ctx, status=200: MagicMock(
-                                    status_code=status,
-                                    template_name=tpl,
-                                    context=ctx,
-                                )
-                                response = view.post(request)
-        return response
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.extract_device_selections",
+                return_value={"cluster_id": None, "role_id": None, "rack_id": None},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.validate_device_for_import",
+                side_effect=fake_validate,
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences",
+                return_value=(True, False),
+            ),
+        ):
+            if real_render:
+                return view.post(request)
+            with patch("netbox_librenms_plugin.views.imports.actions.render") as mock_render:
+                mock_render.side_effect = lambda req, tpl, ctx, status=200: MagicMock(
+                    status_code=status, template_name=tpl, context=ctx
+                )
+                return view.post(request)
 
     def test_collision_path_renders_collision_template(self):
-        from types import SimpleNamespace
+        """A host row and an OOB row resolving to one real NetBox device render the collision modal."""
+        from django.urls import reverse
 
-        nb_device = SimpleNamespace(pk=42, name="srv-collide")
+        nb_device = make_device("srv-collide-confirm")
         validation_a = {
             "status": "importable",
             "resolved_name": "alpha",
@@ -5579,35 +5590,119 @@ class TestBulkImportConfirmCollisions:
             "virtual_chassis": {},
             "oob_candidate": {"device": nb_device, "type": "idrac"},
         }
-        response = self._run_with_two_devices(validation_a, validation_b)
-        # Collision modal is an interstitial swapped into #htmx-modal-content,
-        # so it must render at 200 -- a non-2xx status makes HTMX skip the swap.
-        assert response is not None, "view.post returned None instead of a rendered response"
-        assert "bulk_import_collision.html" in response.template_name
+        # Real render: the real collision template + real detect_bulk_collisions + real
+        # _model_name_of(real Device) must produce a dcim:device link for the colliding device.
+        response = self._run_with_two_devices(validation_a, validation_b, real_render=True)
         assert response.status_code == 200
-        assert len(response.context["collisions"]) == 1
-        assert response.context["collisions"][0]["nb_device_pk"] == 42
+        html = response.content.decode()
+        assert "Bulk import blocked" in html
+        assert reverse("dcim:device", kwargs={"pk": nb_device.pk}) in html
+        assert "srv-collide-confirm" in html
 
     def test_clean_batch_renders_normal_confirm_template(self):
-        from types import SimpleNamespace
-
+        """Two rows resolving to distinct real NetBox devices fall through to the confirm template."""
         validation_a = {
             "status": "importable",
             "resolved_name": "alpha",
             "virtual_chassis": {},
-            "existing_device": SimpleNamespace(pk=1, name="nb-a"),
+            "existing_device": make_device("nb-clean-a"),
         }
         validation_b = {
             "status": "importable",
             "resolved_name": "beta",
             "virtual_chassis": {},
-            "existing_device": SimpleNamespace(pk=2, name="nb-b"),
+            "existing_device": make_device("nb-clean-b"),
         }
-        response = self._run_with_two_devices(validation_a, validation_b)
-        assert response is not None, "view.post returned None instead of a rendered response"
+        # render captured (not the heavy confirm table) — assert no collision block fired and the
+        # confirm template was chosen.
+        response = self._run_with_two_devices(validation_a, validation_b, real_render=False)
+        assert response is not None
         assert "bulk_import_confirm.html" in response.template_name
-        # Default render() status is 200.
         assert response.status_code == 200
+
+
+@pytest.mark.django_db
+class TestBulkImportDevicesViewCollisionGate:
+    """The direct-import view re-runs the collision check the confirm preview can be bypassed on."""
+
+    def _make_view(self):
+        from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
+
+        view = object.__new__(BulkImportDevicesView)
+        view._librenms_api = _make_api()
+        return view
+
+    def test_colliding_batch_blocked_before_import(self):
+        """Two selected LibreNMS rows resolving to one real device → collision modal, importer never called."""
+        from django.urls import reverse
+
+        view = self._make_view()
+        request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.user = AnonymousUser()
+
+        nb = make_device("gate-collide-host")
+        libre = {
+            1: {"device_id": 1, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
+            2: {"device_id": 2, "sysName": "gate-collide-host", "hostname": "gate-collide-host"},
+        }
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre.get(did),
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
+        ):
+            response = view.post(request)
+
+        # Real validate + real detect via the gate → real collision template, importer never reached.
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert "Bulk import blocked" in html
+        assert reverse("dcim:device", kwargs={"pk": nb.pk}) in html
+        mock_import.assert_not_called()
+
+    def test_clean_batch_passes_gate_and_imports(self):
+        """Two rows resolving to distinct real devices clear the gate and reach the importer."""
+        view = self._make_view()
+        request = _make_request(post={"select": ["1", "2"]})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.user = AnonymousUser()
+
+        make_device("gate-clean-a")
+        make_device("gate-clean-b")
+        libre = {
+            1: {"device_id": 1, "sysName": "gate-clean-a", "hostname": "gate-clean-a"},
+            2: {"device_id": 2, "sysName": "gate-clean-b", "hostname": "gate-clean-b"},
+        }
+        import_result = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre.get(did),
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_devices", return_value=import_result
+            ) as mock_import,
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.bulk_import_vms",
+                return_value={"success": [], "failed": [], "skipped": []},
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.messages"),
+            patch("netbox_librenms_plugin.views.imports.actions.redirect", return_value=MagicMock(status_code=302)),
+        ):
+            view.post(request)
+
+        # Gate cleared (distinct devices) → the importer ran.
+        mock_import.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

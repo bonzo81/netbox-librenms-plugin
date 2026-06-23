@@ -1120,11 +1120,17 @@ def validate_device_for_import(
                                     "pk": _hostname_match.pk,
                                     "name": _hostname_match.name,
                                     "librenms_link": host_link,
+                                    # Carry the concrete model so bulk-collision detection keys the
+                                    # right bucket. Stage-2 merge is Device-only today (gated on
+                                    # not import_as_vm), but reading it from the object future-proofs
+                                    # a VM-side merge instead of assuming "device".
+                                    "model_name": _hostname_match._meta.model_name,
                                 },
                                 oob_named={
                                     "pk": _serial_match.pk,
                                     "name": _serial_match.name,
                                     "librenms_link": oob_link,
+                                    "model_name": _serial_match._meta.model_name,
                                 },
                                 warning=(
                                     f"Two NetBox devices appear to represent this physical box: "

@@ -127,6 +127,33 @@ def test_same_libre_row_under_multiple_roles_does_not_collide_with_itself():
     assert detect_bulk_collisions(devices) == []
 
 
+def test_terminal_ambiguous_row_does_not_block_legit_sibling():
+    """A terminally-blocked ambiguous row must not count as a collision participant."""
+    # existing_device on an ambiguous_hostname_or_serial row is an ARBITRARY duplicate match the
+    # validator already failed-closed (can_import=False, actions cleared); it will never write, so
+    # it must not block an otherwise-valid sibling that genuinely targets the same pk.
+    nb_device = Device(pk=70, name="dup")
+    devices = [
+        _row(
+            1100,
+            "ambiguous",
+            {"existing_device": nb_device, "existing_match_type": "ambiguous_hostname_or_serial"},
+        ),
+        _row(1101, "legit-oob", {"oob_candidate": {"device": nb_device}}),
+    ]
+    assert detect_bulk_collisions(devices) == []
+
+
+def test_two_ambiguous_rows_on_same_pk_do_not_collide():
+    """Two terminal-ambiguous rows sharing an arbitrary pk must not fabricate a collision."""
+    nb_device = Device(pk=71, name="dup2")
+    devices = [
+        _row(1200, "amb-a", {"existing_device": nb_device, "existing_match_type": "ambiguous_hostname_or_serial"}),
+        _row(1201, "amb-b", {"existing_device": nb_device, "existing_match_type": "ambiguous_hostname_or_serial"}),
+    ]
+    assert detect_bulk_collisions(devices) == []
+
+
 def test_invalid_pks_are_skipped():
     devices = [
         _row(700, "a", {"existing_device": Device(pk=None, name="bad")}),
@@ -243,7 +270,7 @@ def test_collision_payload_carries_model_name_for_link_targeting():
     )
     assert len(groups) == 1
     assert groups[0]["nb_device_pk"] == 77
-    assert groups[0]["nb_model_name"] == "VirtualMachine"
+    assert groups[0]["nb_model_name"] == "virtualmachine"
 
 
 @pytest.mark.django_db
@@ -269,7 +296,7 @@ def test_real_validator_output_feeds_detector_end_to_end():
     groups = detect_bulk_collisions(devices)
     assert len(groups) == 1
     assert groups[0]["nb_device_pk"] == nb_device.pk
-    assert groups[0]["nb_model_name"] == "Device"
+    assert groups[0]["nb_model_name"] == "device"
     assert {r["device_id"] for r in groups[0]["librenms_rows"]} == {5001, 5002}
 
 
@@ -282,7 +309,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
         {
             "nb_device_pk": 42,
             "nb_device_name": "srv-collide",
-            "nb_model_name": "Device",
+            "nb_model_name": "device",
             "librenms_rows": [
                 {"device_id": 1, "hostname": "<script>alpha</script>", "role": "host"},
                 {"device_id": 2, "hostname": "beta", "role": "oob"},
@@ -291,7 +318,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
         {
             "nb_device_pk": 7,
             "nb_device_name": "vm-collide",
-            "nb_model_name": "VirtualMachine",
+            "nb_model_name": "virtualmachine",
             "librenms_rows": [
                 {"device_id": 3, "hostname": "gamma", "role": "merge_host_named"},
                 {"device_id": 4, "hostname": "delta", "role": "merge_oob_named"},
@@ -300,7 +327,7 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     ]
     html = render_to_string(
         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-        {"collisions": collisions, "device_count": 2},
+        {"collisions": collisions},
     )
 
     # Each group links to the correct object type — a VM collision must not get a device URL.

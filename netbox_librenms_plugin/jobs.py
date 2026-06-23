@@ -186,6 +186,7 @@ class ImportDevicesJob(JobRunner):
 
         from netbox_librenms_plugin.import_utils import (
             bulk_import_devices_shared,
+            detect_collisions_for_device_ids,
         )
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -206,16 +207,36 @@ class ImportDevicesJob(JobRunner):
             "virtual_chassis_created": 0,
         }
         if device_ids:
-            self.logger.info(f"Importing {len(device_ids)} devices...")
-            device_result = bulk_import_devices_shared(
-                device_ids=device_ids,
-                server_key=api.server_key,
-                sync_options=sync_options,
-                manual_mappings_per_device=manual_mappings_per_device,
-                libre_devices_cache=libre_devices_cache,
-                job=self,  # Pass job context for logging and cancellation
-                user=self.job.user,  # Pass user for permission checks
+            # Defense-in-depth: block a batch where two LibreNMS rows resolve to the same NetBox
+            # device, mirroring the confirm-preview/sync-view gate so the async path can't import a
+            # colliding batch either. A single device can never collide, so skip the extra pass.
+            collisions = (
+                detect_collisions_for_device_ids(
+                    device_ids, api, libre_devices_cache=libre_devices_cache, sync_options=sync_options
+                )
+                if len(device_ids) >= 2
+                else []
             )
+            if collisions:
+                pks = ", ".join(str(group["nb_device_pk"]) for group in collisions)
+                msg = (
+                    f"Import blocked: {len(collisions)} NetBox device collision(s) in this batch "
+                    f"(pk(s): {pks}). Two or more selected LibreNMS devices resolve to the same "
+                    f"NetBox device; resolve each individually."
+                )
+                self.logger.error(msg)
+                device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
+            else:
+                self.logger.info(f"Importing {len(device_ids)} devices...")
+                device_result = bulk_import_devices_shared(
+                    device_ids=device_ids,
+                    server_key=api.server_key,
+                    sync_options=sync_options,
+                    manual_mappings_per_device=manual_mappings_per_device,
+                    libre_devices_cache=libre_devices_cache,
+                    job=self,  # Pass job context for logging and cancellation
+                    user=self.job.user,  # Pass user for permission checks
+                )
 
         # Import VMs
         vm_result = {"success": [], "failed": [], "skipped": []}

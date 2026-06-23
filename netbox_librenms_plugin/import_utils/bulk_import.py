@@ -18,11 +18,11 @@ from ..utils import (
     AmbiguousLibreNMSIdError,
     coerce_librenms_id,
     find_by_librenms_id,
-    get_librenms_oob,
     normalize_serial,
     preload_normalization_rules,
 )
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
+from .collisions import detect_bulk_collisions
 from .device_operations import (
     _describe_existing_librenms_link,
     import_single_device,
@@ -84,6 +84,59 @@ def _is_job_cancelled(job) -> bool:
     except Exception:
         logger.warning("Unexpected error checking RQ job cancellation state", exc_info=True)
         return False
+
+
+def detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=None, sync_options=None) -> list[dict]:
+    """
+    Detect same-NetBox-device collisions for a batch of LibreNMS device ids.
+
+    Validates each device just enough to read the collision-relevant match fields
+    (``include_vc_detection=False`` — DB-only, no VC API call), then groups rows that
+    target the same NetBox device. Reuses ``libre_devices_cache`` so it adds no LibreNMS
+    API calls when the caller already pre-fetched device data.
+
+    This enforces the bulk-confirm collision block on the import paths that do NOT pass
+    through the confirm modal — the direct ``BulkImportDevicesView`` POST and the
+    background ``ImportDevicesJob`` — so a colliding batch can't be imported by bypassing
+    the preview.
+
+    Args:
+        device_ids: LibreNMS device ids about to be imported.
+        api: A LibreNMS API client (only ``server_key`` and ``get_device_info`` are used;
+            ``get_device_info`` is called only for ids missing from the cache).
+        libre_devices_cache: Optional ``{device_id: libre_device}`` pre-fetched data.
+        sync_options: Optional sync options (``use_sysname`` / ``strip_domain``).
+
+    Returns:
+        list[dict]: Collision groups as produced by :func:`detect_bulk_collisions`
+            (empty when the batch is clean).
+    """
+    use_sysname = (sync_options or {}).get("use_sysname", True)
+    strip_domain = (sync_options or {}).get("strip_domain", False)
+    cache = libre_devices_cache or {}
+    devices = []
+    for device_id in device_ids:
+        libre_device = cache.get(device_id)
+        if libre_device is None:
+            success, libre_device = api.get_device_info(device_id)
+            if not success or not libre_device:
+                continue
+        validation = validate_device_for_import(
+            libre_device,
+            api=api,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
+            server_key=api.server_key,
+            include_vc_detection=False,
+        )
+        devices.append(
+            {
+                "device_id": device_id,
+                "device_name": validation.get("resolved_name") or f"device-{device_id}",
+                "validation": validation,
+            }
+        )
+    return detect_bulk_collisions(devices)
 
 
 def bulk_import_devices_shared(
@@ -416,8 +469,9 @@ def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, serv
     validation["existing_librenms_link"] = link
 
     scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
-    oob = get_librenms_oob(device, server_key=server_key)
-    oob_id = coerce_librenms_id(oob.get("id")) if oob else None
+    # _describe_existing_librenms_link already read the OOB sub-object via get_librenms_oob and
+    # exposes the coerced positive-int id as link["oob_id"]; reuse it instead of re-reading.
+    oob_id = link["oob_id"]
 
     # Promote to a *current* librenms-id / OOB link first, regardless of the cached match type.
     # A row cached as a serial/hostname conflict may since have gained the matching host/OOB
@@ -564,6 +618,19 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # is reflected in the badge (DB-only; no LibreNMS API call).
                 prior_match = validation.get("existing_match_type")
                 _refresh_librenms_linkage(validation, refreshed, libre_device, server_key)
+                if prior_match not in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") in (
+                    "librenms_id",
+                    "librenms_oob",
+                ):
+                    # _refresh_librenms_linkage just PROMOTED a row cached under a non-link match
+                    # (serial/hostname/primary_ip) to a current librenms_id/OOB link. The
+                    # serial/merge/oob/promote actions derived for that old match are now stale and
+                    # would render a destructive "Merge two NetBox devices" form (the template
+                    # checks serial_action == "merge_netbox_devices" before the match_type chain)
+                    # or a misleading "Add as OOB" badge (device_status keys that on serial_action,
+                    # independent of match_type) on a row that is actually host/OOB-linked. Drop
+                    # them; a row already cached as a link type keeps its link-derived fields.
+                    _clear_existing_match_derived_fields(validation)
                 if prior_match in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") is None:
                     # The librenms-id/OOB link that made this the cached match is gone
                     # (removed/repointed in NetBox since caching). Treat it like a vanished

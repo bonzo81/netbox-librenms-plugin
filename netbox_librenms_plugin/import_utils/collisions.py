@@ -15,8 +15,37 @@ block the import and let the user adjust their selection.
 
 from __future__ import annotations
 
+from netbox_librenms_plugin.import_validation_helpers import MERGE_CANDIDATE_SLOTS
 
-def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str, str, str]]:
+# Terminal match types where ``existing_device`` is an ARBITRARY duplicate the validator already
+# failed closed (can_import=False, actions cleared). Such a row will never write, so it must not
+# contend for a NetBox pk and block an otherwise-valid sibling import on that same pk.
+_TERMINAL_AMBIGUOUS_MATCH_TYPES = frozenset({"ambiguous_hostname_or_serial", "ambiguous_librenms_id"})
+
+# Maps each merge_candidates slot to the role label used in collision groups.
+_MERGE_SLOT_ROLES = {"host_named": "merge_host_named", "oob_named": "merge_oob_named"}
+
+
+def _model_name_of(obj) -> str:
+    """
+    Return the NetBox model name (``"device"`` / ``"virtualmachine"``) for *obj*.
+
+    Prefers Django's lowercase ``_meta.model_name`` to match the convention used across
+    the codebase (so a copied ``== "virtualmachine"`` check stays correct); falls back to
+    the lowercased class name for lightweight test stubs that have no ``_meta``.
+
+    Args:
+        obj: A NetBox object (Device / VirtualMachine) or a test stand-in.
+
+    Returns:
+        str: The lowercase model name.
+    """
+    meta = getattr(obj, "_meta", None)
+    model_name = getattr(meta, "model_name", None)
+    return model_name if model_name else type(obj).__name__.lower()
+
+
+def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str | None, str, str]]:
     """
     Return the NetBox-device candidates a single LibreNMS row would touch.
 
@@ -32,55 +61,56 @@ def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str, str, str]]:
     * ``"promote_target"`` — the row should be promoted to host of an existing NetBox
       device that currently only has an OOB link (``promote_to_host``).
 
-    ``model_name`` is the Python class name of the NetBox object (e.g. ``"Device"``,
-    ``"VirtualMachine"``) so that two objects of different types that happen to share
-    the same pk are not grouped as collisions.
+    ``model_name`` is the NetBox model name (``"device"`` / ``"virtualmachine"``) so that
+    two objects of different types that happen to share the same pk are not grouped as
+    collisions. Merge-candidate slots carry their own ``model_name`` (defaulting to
+    ``"device"`` — Stage-2 merge is Device-only today).
 
     Args:
         validation (dict): The per-row validation result to inspect.
 
     Returns:
-        list[tuple[int, str, str, str]]: ``(nb_device_pk, nb_device_name, role,
-            model_name)`` candidates, de-duplicated on ``(pk, role, model_name)`` (a
-            single row may legitimately surface the same pk under different roles).
+        list[tuple[int, str | None, str, str]]: ``(nb_device_pk, nb_device_name, role,
+            model_name)`` candidates. Each of the (at most five) sources emits a distinct
+            role, so no intra-row de-duplication is needed.
     """
-    candidates: list[tuple[int, str, str, str]] = []
-    seen: set[tuple[int, str, str]] = set()
+    from netbox_librenms_plugin.utils import coerce_positive_int
 
-    def _add(pk, name, role, model_name="Device"):
-        try:
-            pk_int = int(pk)
-        except (TypeError, ValueError):
+    candidates: list[tuple[int, str | None, str, str]] = []
+
+    def _add(pk, name, role, model_name="device"):
+        pk_int = coerce_positive_int(pk)
+        if pk_int is None:
             return
-        key = (pk_int, role, model_name)
-        if key in seen:
-            return
-        seen.add(key)
-        candidates.append((pk_int, str(name or f"device-{pk_int}"), role, model_name))
+        candidates.append((pk_int, name, role, model_name))
 
     existing = validation.get("existing_device")
-    if existing is not None and getattr(existing, "pk", None) is not None:
-        _add(existing.pk, getattr(existing, "name", None), "host", type(existing).__name__)
+    if (
+        existing is not None
+        and getattr(existing, "pk", None) is not None
+        and validation.get("existing_match_type") not in _TERMINAL_AMBIGUOUS_MATCH_TYPES
+    ):
+        _add(existing.pk, getattr(existing, "name", None), "host", _model_name_of(existing))
 
     oob_candidate = validation.get("oob_candidate") or {}
     oob_device = oob_candidate.get("device") if isinstance(oob_candidate, dict) else None
     if oob_device is not None and getattr(oob_device, "pk", None) is not None:
-        _add(oob_device.pk, getattr(oob_device, "name", None), "oob", type(oob_device).__name__)
+        _add(oob_device.pk, getattr(oob_device, "name", None), "oob", _model_name_of(oob_device))
 
     merge = validation.get("merge_candidates") or {}
     if isinstance(merge, dict):
-        for slot, role in (("host_named", "merge_host_named"), ("oob_named", "merge_oob_named")):
+        for slot in MERGE_CANDIDATE_SLOTS:
             entry = merge.get(slot) or {}
-            pk = entry.get("pk") if isinstance(entry, dict) else None
-            name = entry.get("name") if isinstance(entry, dict) else None
-            if pk is not None:
-                _add(pk, name, role)
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("pk") is not None:
+                _add(entry.get("pk"), entry.get("name"), _MERGE_SLOT_ROLES[slot], entry.get("model_name") or "device")
 
     promote = validation.get("promote_to_host") or {}
     if isinstance(promote, dict):
         target = promote.get("existing_device")
         if target is not None and getattr(target, "pk", None) is not None:
-            _add(target.pk, getattr(target, "name", None), "promote_target", type(target).__name__)
+            _add(target.pk, getattr(target, "name", None), "promote_target", _model_name_of(target))
 
     return candidates
 
@@ -141,10 +171,11 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
                 bucket_key,
                 {"nb_device_pk": nb_pk, "nb_device_name": nb_name, "nb_model_name": model_name, "_rows": {}},
             )
-            # Keep the first non-default name we see — rows often disagree
-            # on the cached display string, but the underlying pk is the
-            # source of truth.
-            if bucket["nb_device_name"].startswith("device-") and not nb_name.startswith("device-"):
+            # Keep the first non-empty name we see — rows often disagree on (or omit) the cached
+            # display string, but the underlying pk is the source of truth. The synthetic
+            # "device-<pk>" fallback is applied only at output, so a device legitimately named
+            # "device-*" is never mistaken for a placeholder.
+            if not bucket["nb_device_name"] and nb_name:
                 bucket["nb_device_name"] = nb_name
 
             row = bucket["_rows"].setdefault(
@@ -164,9 +195,11 @@ def detect_bulk_collisions(devices: list[dict] | None) -> list[dict]:
         collisions.append(
             {
                 "nb_device_pk": bucket["nb_device_pk"],
-                "nb_device_name": bucket["nb_device_name"],
-                # Class name ("Device"/"VirtualMachine") so the template links to the right
-                # object type — a VM collision must not render a dcim:device URL.
+                # Synthesize the "device-<pk>" placeholder only here, when no row supplied a real
+                # name — so a device actually named "device-*" keeps its real name above.
+                "nb_device_name": bucket["nb_device_name"] or f"device-{bucket['nb_device_pk']}",
+                # Model name ("device"/"virtualmachine") so the template links to the right object
+                # type — a VM collision must not render a dcim:device URL.
                 "nb_model_name": bucket["nb_model_name"],
                 "librenms_rows": [
                     {

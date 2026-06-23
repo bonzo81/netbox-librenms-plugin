@@ -1076,6 +1076,71 @@ class TestRefreshExistingDevice:
 
         assert validation["existing_match_type"] == "serial"
 
+    def test_serial_oob_candidate_promoted_to_host_clears_stale_action(self):
+        """A serial->librenms_id promotion drops the now-stale serial_action/oob_candidate."""
+        # Otherwise device_status.py renders a purple "Add as OOB controller" badge
+        # (is_oob_candidate = serial_action == "oob_candidate", match-type-independent) on a
+        # row that is actually host-linked.
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-serial-oob-now-linked", librenms_cf={"default": {"id": 6001}})
+        validation = self._device_validation(
+            existing_device=dev,
+            existing_match_type="serial",
+            serial_action="oob_candidate",
+            oob_candidate={"device": dev, "type": "idrac"},
+            device_role={"found": True, "role": dev.role},
+        )
+
+        _refresh_existing_device(validation, libre_device={"device_id": 6001, "hostname": "h"}, server_key="default")
+
+        assert validation["existing_match_type"] == "librenms_id"
+        assert validation.get("serial_action") is None
+        assert validation.get("oob_candidate") is None
+
+    def test_serial_merge_promoted_to_oob_clears_merge_candidates(self):
+        """A serial->librenms_oob promotion drops the now-stale serial_action/merge_candidates."""
+        # Otherwise device_validation_details.html (which checks serial_action ==
+        # "merge_netbox_devices" BEFORE the existing_match_type chain) renders a destructive
+        # "Merge two NetBox devices" form on a row that is already correctly OOB-linked.
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-serial-merge-now-linked", librenms_cf={"default": {"oob": {"id": 6002}}})
+        validation = self._device_validation(
+            existing_device=dev,
+            existing_match_type="serial",
+            serial_action="merge_netbox_devices",
+            merge_candidates={
+                "host_named": {"pk": 1, "name": "other"},
+                "oob_named": {"pk": dev.pk, "name": dev.name},
+            },
+            device_role={"found": True, "role": dev.role},
+        )
+
+        _refresh_existing_device(validation, libre_device={"device_id": 6002, "hostname": "h"}, server_key="default")
+
+        assert validation["existing_match_type"] == "librenms_oob"
+        assert validation.get("serial_action") is None
+        assert validation.get("merge_candidates") is None
+
+    def test_already_linked_row_promotion_preserves_derived_fields(self):
+        """A re-confirmed librenms_id row keeps its link-derived fields (no over-clear)."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        dev = make_device("ref-already-linked", librenms_cf={"default": {"id": 6003}})
+        validation = self._device_validation(
+            existing_device=dev,
+            existing_match_type="librenms_id",
+            serial_action="update_serial",  # a legitimate link-context action
+            device_role={"found": True, "role": dev.role},
+        )
+
+        _refresh_existing_device(validation, libre_device={"device_id": 6003, "hostname": "h"}, server_key="default")
+
+        assert validation["existing_match_type"] == "librenms_id"
+        # prior match was already a link type → no spurious clear of the link-context action.
+        assert validation.get("serial_action") == "update_serial"
+
     # ------------------------------------------------------------------
     # Deleted match → readiness recompute
     # ------------------------------------------------------------------
@@ -2787,21 +2852,16 @@ class TestRefreshLibreNMSLinkage:
         validation = {"existing_match_type": match_type}
         device = MagicMock()
         libre_device = {"device_id": scanned_id}
-        oob = {"id": oob_id} if oob_id is not None else None
-        with (
-            patch.object(
-                bulk_import,
-                "_describe_existing_librenms_link",
-                return_value={"host_id": host_id, "oob_id": oob_id, "oob_type": None},
-            ) as mock_describe,
-            patch.object(bulk_import, "get_librenms_oob", return_value=oob) as mock_oob,
-        ):
+        with patch.object(
+            bulk_import,
+            "_describe_existing_librenms_link",
+            return_value={"host_id": host_id, "oob_id": oob_id, "oob_type": None},
+        ) as mock_describe:
             bulk_import._refresh_librenms_linkage(validation, device, libre_device, "default")
-        # Both linkage reads must be scoped to the active server_key — a regression that
-        # dropped server_key would re-classify against the wrong server's mapping.
+        # The linkage read (which itself reads the OOB sub-object) must be scoped to the active
+        # server_key — a regression that dropped server_key would re-classify against the wrong
+        # server's mapping. The OOB id is taken from this describe result, not a second read.
         mock_describe.assert_called_once_with(device, "default")
-        if mock_oob.called:
-            mock_oob.assert_called_with(device, server_key="default")
         return validation
 
     def test_host_id_match_classifies_librenms_id(self):
@@ -2881,3 +2941,47 @@ class TestRefreshExistingDeviceVMMatch:
         assert validation["cluster"]["found"] is False
         assert validation["cluster"]["cluster"] is None
         assert validation["cluster"]["available_clusters"] == ["keep-me"]
+
+
+@pytest.mark.django_db
+class TestDetectCollisionsForDeviceIds:
+    """Real-DB coverage for ``detect_collisions_for_device_ids`` (the import-path gate helper)."""
+
+    @staticmethod
+    def _api():
+        from types import SimpleNamespace
+
+        # server_key only — get_device_info is never reached because the cache is pre-populated.
+        return SimpleNamespace(server_key="default")
+
+    def test_two_rows_resolving_to_one_device_collide(self):
+        """Two LibreNMS rows whose real validation resolves to one NetBox device → a collision."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        nb = make_device("collide-batch-host")
+        cache = {
+            8001: {"device_id": 8001, "sysName": "collide-batch-host", "hostname": "collide-batch-host"},
+            8002: {"device_id": 8002, "sysName": "collide-batch-host", "hostname": "collide-batch-host"},
+        }
+        collisions = detect_collisions_for_device_ids(
+            [8001, 8002], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert len(collisions) == 1
+        assert collisions[0]["nb_device_pk"] == nb.pk
+        assert collisions[0]["nb_model_name"] == "device"
+        assert {r["device_id"] for r in collisions[0]["librenms_rows"]} == {8001, 8002}
+
+    def test_distinct_devices_do_not_collide(self):
+        """Rows resolving to different NetBox devices → no collision."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        make_device("clean-a-host")
+        make_device("clean-b-host")
+        cache = {
+            8003: {"device_id": 8003, "sysName": "clean-a-host", "hostname": "clean-a-host"},
+            8004: {"device_id": 8004, "sysName": "clean-b-host", "hostname": "clean-b-host"},
+        }
+        result = detect_collisions_for_device_ids(
+            [8003, 8004], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert result == []

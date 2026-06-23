@@ -1311,6 +1311,31 @@ def resolve_server_mapping_display_id(entry) -> tuple[int | None, bool]:
     return coerce_librenms_id(entry), False
 
 
+def coerce_positive_int(value):
+    """
+    Coerce a value to a strictly-positive ``int``, or ``None`` when invalid.
+
+    Rejects ``None`` and ``bool`` (``bool`` is an ``int`` subclass, so ``int(True)``
+    would silently become ``1``), then attempts ``int(value)`` and keeps the result
+    only when ``> 0``. Shared by the NetBox-pk coercion sites — bulk-import collision
+    detection and module-inventory port identity — so the positive-int rule lives in
+    one place.
+
+    Args:
+        value: The raw value to coerce (a NetBox pk or similar identifier).
+
+    Returns:
+        int | None: The positive integer, or None if it can't be coerced.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        int_value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return int_value if int_value > 0 else None
+
+
 def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):
     """
     Get the LibreNMS device/port ID for a specific server from the JSON custom field.
