@@ -47,6 +47,21 @@ def test_recording_schema_errors_rejects_bool_int_fields():
     assert any("device_id must be an integer" in e for e in errors)
 
 
+def test_get_ports_real_fetch_and_parse_via_recording(recording_server):
+    """Real-HTTP de-mock demo: get_ports() fetches and parses a real captured recording through the live LibreNMSAPI client (real `requests` → MockLibreNMSServer → real parse), so a regression in the request build or response parsing is caught — unlike test_librenms_api.py::test_get_ports_all, which mocks requests.get and feeds canned JSON straight back."""
+    from netbox_librenms_plugin.tests.recordings import load_recording
+
+    _server, api = recording_server(load_recording("cisco-lag-and-subinterface"))
+    success, data = api.get_ports(device_id=1002)
+
+    assert success is True
+    ports = data.get("ports")
+    assert isinstance(ports, list) and len(ports) == 4  # the recording's real port count
+    # The columns get_ports() actually requests survive the real fetch+parse round-trip.
+    assert all(isinstance(p, dict) and "port_id" in p and "ifName" in p for p in ports)
+    assert "Port-channel1" in {p["ifName"] for p in ports}
+
+
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_recording_carries_no_residual_pii(recording):
     """Every committed recording must be anonymized — the PII safety-net finds nothing.
