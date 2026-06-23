@@ -333,6 +333,11 @@ class CarrierAutoInstallRuleTable(NetBoxTable):
 class PortStackLagPatternTable(NetBoxTable):
     """Table for displaying PortStackLagPattern data."""
 
+    # Explicit selection column with name="select": the shared selection JS keys on
+    # input[name="select"], so relying on NetBoxTable's default pk toggle (name="pk") would
+    # break bulk selection for this table.
+    pk = columns.ToggleColumn(attrs={"input": {"name": "select"}})
+
     librenms_os = tables.Column(verbose_name="LibreNMS OS", linkify=True)
     lag_name_pattern = tables.Column(verbose_name="LAG Name Pattern (regex)")
     description = tables.Column(verbose_name="Description", linkify=False)

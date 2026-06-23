@@ -2378,6 +2378,20 @@ class TestResolvePortRelationships:
         )
         assert result["lag_members"] == {301: 302}
 
+    def test_non_numeric_dotted_suffix_not_stripped_to_base(self, mock_librenms_api):
+        """A dotted interface name with a NON-numeric suffix is a legitimate physical name, not a Junos sub-unit (.N), and must NOT be remapped to its base port during LAG physical-resolution."""
+        ports = [
+            {"port_id": 301, "ifName": "xe-0/0/0", "ifType": "ethernetCsmacd"},  # the base port
+            {"port_id": 302, "ifName": "xe-0/0/0.foo", "ifType": "ethernetCsmacd"},  # non-numeric suffix
+            {"port_id": 303, "ifName": "ae1", "ifType": "ieee8023adLag"},
+        ]
+        stack = [{"high_port_id": 303, "low_port_id": 302}]  # ae1 <- xe-0/0/0.foo
+        result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns={})
+        # The member is the actual port 302, NOT the base 301 (which the old .N-agnostic strip
+        # would have wrongly resolved "xe-0/0/0.foo" to).
+        assert result["lag_members"] == {302: 303}
+        assert 301 not in result["lag_members"]
+
     def test_cisco_ios_sub_interface(self, mock_librenms_api, ios_lag_patterns):
         """Cisco IOS: Po10 -> Po10.100 detected as sub-interface."""
         result = mock_librenms_api.resolve_port_relationships(

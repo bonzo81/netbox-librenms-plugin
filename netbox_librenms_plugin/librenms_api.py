@@ -710,10 +710,13 @@ class LibreNMSAPI:
             return any(pat.search(name) for pat in compiled_patterns)
 
         def _resolve_physical(name: str):
-            """Strip .N suffix and return the physical-level port if its base name exists."""
+            """Strip a numeric .N sub-unit suffix and return the physical-level port if its base exists."""
             if "." in name:
-                base = name.rsplit(".", 1)[0]
-                if base in by_name:
+                base, suffix = name.rsplit(".", 1)
+                # Only treat a NUMERIC suffix as a sub-unit (e.g. Gi0/1.100). A dotted name whose
+                # suffix isn't a number is a legitimate physical name, not a sub-interface, so it
+                # must not be remapped to a spurious base.
+                if suffix.isdigit() and base in by_name:
                     return by_name[base]
             return by_name.get(name)
 
