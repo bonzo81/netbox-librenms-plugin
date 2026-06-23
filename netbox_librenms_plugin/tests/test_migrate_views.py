@@ -264,6 +264,34 @@ class TestMoveInterfaceToWinnerView:
         interface.refresh_from_db()
         assert interface.device_id == donor.pk  # not moved
 
+    def test_reconcile_family_mismatch_fails_closed_and_rolls_back_move(self):
+        """If reconciling a moved interface's donor FK hits a corrupt family (primary_ip4 → IPv6), the whole move fails closed with a 409 and rolls back, never a 500."""
+        view = self._setup_view()
+        donor = make_device("mi-fam-donor")
+        winner = make_device("mi-fam-winner")
+        self._mark(donor, winner)
+        # eth0 on the donor carries an IPv6 address that is (corruptly) the donor's primary_ip4.
+        bad_ip = ip_on(donor, "2001:db8::7/128", "eth0")
+        iface = bad_ip.assigned_object
+        donor.primary_ip4 = bad_ip
+        donor.save()
+        req = _hx_request({"server_key": "default"})
+
+        resp = view.post(req, pk=iface.pk)
+
+        assert resp.status_code == 200
+        assert b"django-messages" in resp.content
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
+        # Whole move rolled back: interface stays on the donor, the donor FK is intact, and
+        # the winner never claimed the mismatched address.
+        iface.refresh_from_db()
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert iface.device_id == donor.pk
+        assert donor.primary_ip4_id == bad_ip.pk
+        assert winner.primary_ip4_id is None
+
     def test_corrupt_self_pointing_marker_reports_stale_not_deleted(self):
         """A self-pointing _migrated_to marker is corrupt state, not a deleted winner — the error must say so for recovery."""
         view = self._setup_view()
@@ -565,6 +593,32 @@ class TestTransferDeviceIPView:
         winner.refresh_from_db()
         assert winner.oob_ip_id is None  # winner never claimed the donor-attached address
         assert donor.oob_ip_id == oob_ip.pk  # donor FK untouched
+
+    def test_family_mismatch_fails_closed_not_500(self):
+        """A corrupt donor FK (primary_ip4 referencing an IPv6 address) makes set_device_ip_fk refuse the claim; the view returns a graceful 409 toast and rolls back, never a 500."""
+        view = self._setup_view()
+        donor = make_device("tx-fam-donor")
+        winner = make_device("tx-fam-winner")
+        self._mark(donor, winner)
+        # An IPv6 address on a WINNER interface, wrongly designated as the donor's primary_ip4
+        # (save() skips full_clean(), so the family-mismatched FK persists).
+        bad_ip = ip_on(winner, "2001:db8::5/128", "mgmt6")
+        donor.primary_ip4 = bad_ip
+        donor.save()
+        req = _hx_request({"server_key": "default"})
+
+        resp = view.post(req, pk=donor.pk, ip_kind="primary4")
+
+        # Graceful HTMX error toast, not an uncaught 500.
+        assert resp.status_code == 200
+        assert b"django-messages" in resp.content
+        assert resp.headers.get("HX-Reswap") == "none"
+        assert resp.headers.get("HX-Refresh") is None
+        # Rolled back: donor still holds the (corrupt) FK, winner never claimed it.
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.primary_ip4_id == bad_ip.pk
+        assert winner.primary_ip4_id is None
 
     def test_rejects_when_assignment_is_not_an_interface(self):
         """A non-Interface assignment (e.g. a VMInterface) must fail closed: the device_id check sees None and the transfer is refused."""

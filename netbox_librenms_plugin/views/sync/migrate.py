@@ -508,7 +508,14 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             # The moved interface may carry an address the donor still points at via
             # primary_ip4/primary_ip6/oob_ip; reconcile those device FKs so the donor isn't
             # left referencing an address now on a winner-owned interface.
-            notes = _reconcile_donor_device_ip_fks(donor, winner)
+            try:
+                notes = _reconcile_donor_device_ip_fks(donor, winner)
+            except ValueError as exc:
+                # A corrupt donor IP FK (e.g. a primary_ip4 referencing an IPv6 address) makes
+                # set_device_ip_fk() refuse the transfer. Fail closed — roll back the whole move
+                # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
+                transaction.set_rollback(True)
+                return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
 
         message = f"Moved interface '{interface.name}' to {winner.name}."
         if notes:
@@ -610,7 +617,14 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             # The moved address may itself be the donor's primary_ip4/primary_ip6/oob_ip;
             # reconcile those device FKs so the donor isn't left referencing an address now on a
             # winner-owned interface.
-            notes = _reconcile_donor_device_ip_fks(donor, winner)
+            try:
+                notes = _reconcile_donor_device_ip_fks(donor, winner)
+            except ValueError as exc:
+                # A corrupt donor IP FK (e.g. a primary_ip4 referencing an IPv6 address) makes
+                # set_device_ip_fk() refuse the transfer. Fail closed — roll back the whole move
+                # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
+                transaction.set_rollback(True)
+                return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
 
         message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
         if notes:
@@ -732,8 +746,15 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             # the bare update_fields save would skip. device.primary_ip4/6 / oob_ip are UNIQUE
             # per address, so the donor must release the FK (saved first, below) BEFORE the
             # winner claims it — the reverse order trips the unique constraint.
-            set_device_ip_fk(donor, field, None)
-            set_device_ip_fk(winner, field, donor_ip)
+            try:
+                set_device_ip_fk(donor, field, None)
+                set_device_ip_fk(winner, field, donor_ip)
+            except ValueError as exc:
+                # A corrupt donor FK (e.g. a primary_ip4 referencing an IPv6 address) makes
+                # set_device_ip_fk() refuse the claim. Roll back the donor release rather than
+                # 500ing or leaving the donor's FK cleared with the winner's left unset.
+                transaction.set_rollback(True)
+                return self._fail(request, f"Cannot transfer {human}: {exc}", status=409)
 
         return _hx_response(
             request,
