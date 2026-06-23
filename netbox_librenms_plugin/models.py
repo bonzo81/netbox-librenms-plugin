@@ -960,6 +960,13 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         if not lag_pattern:
             raise ValidationError({"lag_name_pattern": "Pattern must not be blank."})
         self.lag_name_pattern = lag_pattern
+        # ReDoS note (low severity, accepted): lag_name_pattern is admin-supplied (change
+        # permission) and run via re.search() per port on every interface refresh
+        # (resolve_port_relationships). Python's re has no per-evaluation timeout, so a
+        # catastrophic-backtracking pattern could block the worker. Accepted as an admin-only
+        # risk bounded by the field's max_length; a real guard needs a timeout-capable engine
+        # the plugin doesn't depend on. (Adopts the shared utils.validate_regex_field — which
+        # documents the same — once fix/develop-hardening lands on develop and the stack rebases.)
         try:
             re.compile(self.lag_name_pattern)
         except re.error as exc:
