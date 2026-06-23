@@ -164,6 +164,48 @@ class BaseInterfaceTableView(
             "by_librenms_id": by_librenms_id,
         }
 
+    @staticmethod
+    def _build_relationship_maps(cached_data):
+        """
+        Build the normalized LAG/sub-interface maps and host-scoped port index from a cached snapshot.
+
+        Returns ``(lag_members, sub_interfaces, by_port_id)``. Shared by get_context_data
+        and SingleInterfaceVerifyView so the corruption guard, the key normalization, and
+        the host-scoping live in exactly one place instead of being re-derived per call site.
+
+        Fail-soft against a corrupt / partial-write / format-migrated cache: a None or
+        non-dict ``port_stack_relationships`` (or a present-but-None nested ``lag_members`` /
+        ``sub_interfaces``) collapses to ``{}`` — the ``.get(key, {})`` default only fills a
+        *missing* key, so a present-but-None value would otherwise AttributeError on
+        ``.items()``. Keys are normalized via ``normalize_librenms_port_id`` so the int-keyed
+        lookups in ``_enrich_port_with_lag_parent`` never miss a stringified cache key, and
+        ``by_port_id`` is scoped to host (``_source != "oob"``) rows so an OOB controller
+        reusing a host port_id can't attach the wrong aggregate/parent during enrichment.
+
+        Args:
+            cached_data (dict): The cached LibreNMS snapshot (ports + port_stack_relationships).
+
+        Returns:
+            tuple: ``(lag_members, sub_interfaces, by_port_id)`` — all normalized-int keyed.
+        """
+        relationships = cached_data.get("port_stack_relationships") or {}
+        if not isinstance(relationships, dict):
+            relationships = {}
+        lag_members_raw = relationships.get("lag_members") or {}
+        if not isinstance(lag_members_raw, dict):
+            lag_members_raw = {}
+        sub_interfaces_raw = relationships.get("sub_interfaces") or {}
+        if not isinstance(sub_interfaces_raw, dict):
+            sub_interfaces_raw = {}
+        lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
+        sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
+        by_port_id = {
+            normalize_librenms_port_id(p.get("port_id")): p
+            for p in cached_data.get("ports", [])
+            if normalize_librenms_port_id(p.get("port_id")) is not None and p.get("_source") != "oob"
+        }
+        return lag_members, sub_interfaces, by_port_id
+
     def post(self, request, pk):
         """Handle POST request to fetch and cache LibreNMS interface data for an object."""
         obj = self.get_object(pk)
@@ -548,36 +590,11 @@ class BaseInterfaceTableView(
                 ports_data = []
             matched_interface_ids = set()
 
-            # Build port_stack relationship maps from cached data. Normalize the keys once
-            # here rather than per-port inside _enrich_port_with_lag_parent (called once per
-            # non-OOB port): a JSON cache round-trip stringifies dict keys while the port_id
-            # values on the port dicts stay int, so without normalizing the .get() lookups
-            # silently miss and valid LAG/parent relationships vanish from the table.
-            # The default only applies when the key is missing; a cache entry holding None or a
-            # non-dict value (corruption, partial write, format migration) would AttributeError on
-            # the .get("lag_members"/"sub_interfaces") calls below. Normalize to {} so it fails soft.
-            # The same hazard applies one level down: a present-but-None/non-dict "lag_members" or
-            # "sub_interfaces" value defeats the .get(..., {}) default (it only fills a *missing*
-            # key) and would AttributeError on .items() — guard each nested map the same way.
-            port_stack_relationships = cached_data.get("port_stack_relationships") or {}
-            if not isinstance(port_stack_relationships, dict):
-                port_stack_relationships = {}
-            lag_members_raw = port_stack_relationships.get("lag_members") or {}
-            if not isinstance(lag_members_raw, dict):
-                lag_members_raw = {}
-            sub_interfaces_raw = port_stack_relationships.get("sub_interfaces") or {}
-            if not isinstance(sub_interfaces_raw, dict):
-                sub_interfaces_raw = {}
-            lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
-            sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
-            # Scope to host rows: ports_data is merged host + OOB, and an OOB controller
-            # can reuse a host port_id. Letting an OOB row win here would attach the wrong
-            # aggregate/parent to the host interface during lag/parent enrichment.
-            by_port_id = {
-                normalize_librenms_port_id(p.get("port_id")): p
-                for p in ports_data
-                if normalize_librenms_port_id(p.get("port_id")) is not None and p.get("_source") != "oob"
-            }
+            # Build the normalized, host-scoped LAG/sub-interface maps from the cached snapshot.
+            # _build_relationship_maps is the single home for the corruption guard + key
+            # normalization + host-scoping, shared with SingleInterfaceVerifyView so the table
+            # and the inline verify response can never diverge on how they read this cache.
+            lag_members, sub_interfaces, by_port_id = self._build_relationship_maps(cached_data)
 
             # Pre-fetch all interfaces for all potential chassis members
             # (_build_interface_lookup_maps select_relateds lag/parent for devices).

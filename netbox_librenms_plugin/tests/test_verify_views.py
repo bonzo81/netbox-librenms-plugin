@@ -12,6 +12,7 @@ import pytest
 from django.test import RequestFactory
 
 from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView as _RealBase
 from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
 
@@ -268,6 +269,11 @@ class TestSingleInterfaceVerifyView:
         device.interfaces.filter.return_value.first.return_value = None
         mock_get_obj.return_value = device
 
+        # _build_relationship_maps is the shared prep both the table and verify paths use; run
+        # the REAL one (only _enrich_port_with_lag_parent stays a capturable mock) so this test
+        # exercises the actual normalization rather than a stubbed-out map.
+        mock_base._build_relationship_maps.side_effect = _RealBase._build_relationship_maps
+
         mock_cache.get.return_value = {
             "ports": [{"port_id": 10, "ifName": "Et1", "_source": "host"}],
             "port_stack_relationships": {
@@ -303,6 +309,8 @@ class TestSingleInterfaceVerifyView:
         device.interfaces.filter.return_value.first.return_value = None
         mock_get_obj.return_value = device
         mock_table_cls.return_value.format_interface_data.return_value = {"ok": True}
+        # Run the REAL shared prep so this exercises the actual corruption guard, not a stub.
+        mock_base._build_relationship_maps.side_effect = _RealBase._build_relationship_maps
 
         view = self._make_view()
         view.require_object_permissions_json = MagicMock(return_value=None)

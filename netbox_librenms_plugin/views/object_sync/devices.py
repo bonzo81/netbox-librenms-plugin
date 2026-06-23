@@ -228,45 +228,29 @@ class SingleInterfaceVerifyView(
                 # a name lookup breaks whenever the current naming mode differs from the one the
                 # interface was synced under. Fall back to the name only for interfaces created
                 # without a librenms_id.
-                target_port_id = port_data.get("port_id")
-                target_int = int(target_port_id) if str(target_port_id).isdigit() else None
+                # Normalize both sides through the canonical normalizer (like
+                # _enrich_port_with_lag_parent's stored-id match): get_librenms_device_id can
+                # return a string-backed custom-field value, so a bare int compare could miss a
+                # stable id that actually agrees and drop to the fragile name fallback.
+                target_int = normalize_librenms_port_id(port_data.get("port_id"))
                 nb_iface = None
                 if target_int is not None:
                     for iface in selected_device.interfaces.all():
-                        if get_librenms_device_id(iface, server_key, auto_save=False) == target_int:
+                        if (
+                            normalize_librenms_port_id(get_librenms_device_id(iface, server_key, auto_save=False))
+                            == target_int
+                        ):
                             nb_iface = iface
                             break
                 if nb_iface is None:
                     nb_iface = selected_device.interfaces.filter(name=interface_name).first()
                 port_data["netbox_interface"] = nb_iface
-                # Mirror get_context_data's hardening (interfaces_view.py): a cache entry
-                # holding None or a non-dict (corruption / partial write / format migration)
-                # defeats the .get(key, {}) default — that only fills a *missing* key, so a
-                # present-but-None value still reaches .items() and AttributeErrors into a 500.
-                # The table path survives this (test_malformed_port_stack_relationships_does_not_crash);
-                # the verify path must too. Guard both the outer map and each nested map.
-                relationships = cached_data.get("port_stack_relationships") or {}
-                if not isinstance(relationships, dict):
-                    relationships = {}
-                lag_members_raw = relationships.get("lag_members") or {}
-                if not isinstance(lag_members_raw, dict):
-                    lag_members_raw = {}
-                sub_interfaces_raw = relationships.get("sub_interfaces") or {}
-                if not isinstance(sub_interfaces_raw, dict):
-                    sub_interfaces_raw = {}
-                # Normalize the relationship-map keys (mirror get_context_data):
-                # _enrich_port_with_lag_parent looks them up by normalized port_id, so a
-                # cached map with stringified keys would otherwise drop valid Parent/LAG
-                # context on the inline verify response even though the table renders it.
-                lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
-                sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
-                # Host-scope the map (mirror get_context_data): an OOB controller reusing a
-                # host port_id must not override the host row during lag/parent enrichment.
-                by_port_id = {
-                    normalize_librenms_port_id(p.get("port_id")): p
-                    for p in cached_data.get("ports", [])
-                    if normalize_librenms_port_id(p.get("port_id")) is not None and p.get("_source") != "oob"
-                }
+                # Reuse the exact prep the table path uses (normalize keys + corruption guard +
+                # host-scoping all live in _build_relationship_maps): the inline verify response
+                # must read the cache identically to get_context_data, or the Parent/LAG cell it
+                # repaints would diverge from the table — including failing soft on a malformed /
+                # partial-write snapshot rather than 500-ing on a present-but-None map.
+                lag_members, sub_interfaces, by_port_id = BaseInterfaceTableView._build_relationship_maps(cached_data)
                 BaseInterfaceTableView._enrich_port_with_lag_parent(
                     port_data,
                     lag_members,
