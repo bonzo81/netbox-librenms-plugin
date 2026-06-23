@@ -3161,15 +3161,7 @@ class PromoteToHostView(
         server_key = self.librenms_api.server_key
 
         # Reject legacy bare-int librenms_id form (caller should migrate first).
-        stored_id = existing_device.custom_field_data.get("librenms_id")
-        _is_legacy = isinstance(stored_id, int) and not isinstance(stored_id, bool)
-        if not _is_legacy and isinstance(stored_id, str):
-            try:
-                int(stored_id)
-                _is_legacy = True
-            except (ValueError, TypeError):
-                pass
-        if _is_legacy:
+        if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
             return _htmx_error_response(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
@@ -3392,15 +3384,7 @@ class MergeNetBoxDevicesView(
         # Reject legacy bare-int librenms_id form on either side. The merge
         # helpers refuse to operate on legacy data to prevent silent migration.
         for label, obj in (("winner", winner), ("donor", donor)):
-            stored = obj.custom_field_data.get("librenms_id")
-            is_legacy = isinstance(stored, int) and not isinstance(stored, bool)
-            if not is_legacy and isinstance(stored, str):
-                try:
-                    int(stored)
-                    is_legacy = True
-                except (ValueError, TypeError):
-                    pass
-            if is_legacy:
+            if is_legacy_librenms_id(obj.custom_field_data.get("librenms_id")):
                 return _htmx_error_response(
                     f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
                     "use 'Convert mapping' to migrate before merging."

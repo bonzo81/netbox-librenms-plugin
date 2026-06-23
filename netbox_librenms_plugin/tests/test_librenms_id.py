@@ -280,6 +280,23 @@ class TestFindByLibreNMSId:
         mock_model.objects.filter.assert_not_called()
 
 
+class TestIsLegacyLibreNMSId:
+    """is_legacy_librenms_id(): detect the pre-migration bare-int/int-string librenms_id format."""
+
+    def test_legacy_forms_are_detected(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        for legacy in (42, "42", "007", -3, "-3"):
+            assert is_legacy_librenms_id(legacy) is True, legacy
+
+    def test_modern_and_invalid_forms_are_not_legacy(self):
+        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+
+        # Multi-server dict (modern), bool (not a real id), None, and non-numeric strings.
+        for modern in ({"default": {"id": 42}}, {}, True, False, None, "abc", "4.2", 4.2):
+            assert is_legacy_librenms_id(modern) is False, modern
+
+
 @pytest.mark.django_db
 class TestMigrateLegacyLibreNMSId:
     """Tests for migrate_legacy_librenms_id() — mutates custom_field_data, never saves."""
