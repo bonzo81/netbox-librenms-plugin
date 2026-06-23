@@ -3383,16 +3383,27 @@ class MergeNetBoxDevicesView(
             # is re-homed (via the migrate "move IP/interface" actions).
             oob_ip_transferred = False
             if donor.oob_ip_id and not winner.oob_ip_id:
-                oob_assigned = donor.oob_ip.assigned_object
-                if getattr(oob_assigned, "device_id", None) == winner.pk:
-                    # Capture before clearing the donor; set_device_ip_fk() re-checks the
-                    # address is on a winner interface (it is, per the guard above) and assigns
-                    # without saving — the batched donor-then-winner save below preserves the
-                    # release-before-claim ordering the UNIQUE oob_ip FK requires.
-                    transferred_oob_ip = donor.oob_ip
-                    set_device_ip_fk(winner, "oob_ip", transferred_oob_ip, save=False)
-                    set_device_ip_fk(donor, "oob_ip", None, save=False)
-                    oob_ip_transferred = True
+                # Lock the IP row AND its owning interface before reading the assignment and
+                # transferring. The Device-row lock above does NOT stabilize the interface's
+                # device_id, so without these locks a concurrent interface move between the
+                # check and commit could leave winner.oob_ip pointing at an interface no longer
+                # on the winner — the invalid state set_device_ip_fk()'s contract requires the
+                # caller to lock against, exactly as migrate._reconcile_donor_device_ip_fks does.
+                from dcim.models import Interface
+                from ipam.models import IPAddress
+
+                locked_oob_ip = IPAddress.objects.select_for_update().filter(pk=donor.oob_ip_id).first()
+                oob_assigned = locked_oob_ip.assigned_object if locked_oob_ip is not None else None
+                if isinstance(oob_assigned, Interface):
+                    locked_iface = Interface.objects.select_for_update().filter(pk=oob_assigned.pk).first()
+                    if locked_iface is not None and locked_iface.device_id == winner.pk:
+                        # set_device_ip_fk() re-checks the address is on a winner interface
+                        # (verified above under lock) and assigns without saving — the batched
+                        # donor-then-winner save below preserves the release-before-claim
+                        # ordering the UNIQUE oob_ip FK requires.
+                        set_device_ip_fk(winner, "oob_ip", locked_oob_ip, save=False)
+                        set_device_ip_fk(donor, "oob_ip", None, save=False)
+                        oob_ip_transferred = True
 
             # Clear donor's active link and stamp migration marker.
             mark_librenms_migrated(donor, winner.pk, server_key=server_key)

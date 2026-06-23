@@ -6250,6 +6250,41 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         assert donor.oob_ip_id == oob_ip.pk
         assert winner.oob_ip_id is None
 
+    def test_oob_ip_and_owning_interface_locked_for_update(self):
+        """The oob_ip transfer must SELECT ... FOR UPDATE the IPAddress and its owning interface so a concurrent interface move can't leave winner.oob_ip on an interface no longer on the winner."""
+        from django.db import connection
+        from django.http import HttpResponse
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        view = self._make_view()
+        winner = make_device("merge-winner-lock", librenms_cf={"default": {"id": 20}})
+        donor = make_device("merge-donor-lock", librenms_cf={"default": {"id": 10}})
+        oob_ip = ip_on(winner, "192.0.2.9/32", "mgmt0")  # IP on a WINNER interface → transfer path runs
+        donor.oob_ip = oob_ip
+        donor.save()
+
+        request = _make_request(post={"winner_pk": str(winner.pk), "donor_pk": str(donor.pk)})
+        validation = {"merge_candidates": {"host_named": {"pk": winner.pk}, "oob_named": {"pk": donor.pk}}}
+        view.get_validated_device_with_selections = MagicMock(return_value=({"device_id": 99}, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        with CaptureQueriesContext(connection) as ctx:
+            resp = view.post(request, device_id=99)
+        assert resp.status_code == 200
+
+        def _locked(table):
+            return any(table in q["sql"].lower() and "for update" in q["sql"].lower() for q in ctx.captured_queries)
+
+        assert _locked("ipam_ipaddress"), "the transferred oob_ip must be SELECT ... FOR UPDATE"
+        assert _locked("dcim_interface"), "the oob_ip's owning interface must be SELECT ... FOR UPDATE"
+        # And the transfer still completes.
+        winner.refresh_from_db()
+        donor.refresh_from_db()
+        assert winner.oob_ip_id == oob_ip.pk
+        assert donor.oob_ip_id is None
+
     def test_save_failure_rolls_back_donor_oob_release_and_marker(self):
         """Forced persist failure mid-merge must roll back the donor's already-executed save."""
         from dcim.models import Device
