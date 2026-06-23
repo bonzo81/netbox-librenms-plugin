@@ -388,6 +388,23 @@ def test_custom_ifname_pseudonymized(custom):
     assert out == anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
 
 
+@pytest.mark.parametrize(
+    "raw, token",
+    [
+        ("eth0_customerA", "eth0"),
+        ("ae42_lab03", "ae42"),
+        ("xe-0/0/0.100_tenantX", "xe-0/0/0.100"),
+        ("GigabitEthernet0/0/0_core-rtr", "GigabitEthernet0/0/0"),
+    ],
+)
+def test_port_token_underscore_annotation_is_dropped(raw, token):
+    """A port token with an underscore-joined annotation keeps only the token — the trailing annotation (which can carry customer/tenant/host names) must not survive verbatim."""
+    rec = _ports({"port_id": 1, "ifName": raw, "ifType": "ethernetCsmacd"})
+    out = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
+    assert out == token
+    assert raw.split("_", 1)[1] not in out  # the annotation tail is gone
+
+
 def test_ifdescr_keeps_port_token_drops_freetext_annotation():
     """An ifDescr with a leading port token + free-text annotation keeps only the token (no infra leak)."""
     rec = _ports(

@@ -212,11 +212,14 @@ _IF_PREFIXES = (
 _DIGITLESS_IF_NAMES = "jsrv|irb|dsc|lsi|mtun|pimd|pime|tap"
 # A logic-bearing port-name token at the START of the string. Three shapes: a digit-less Junos
 # special (above), slot notation (optional leading letter, then digit groups separated by '/'), or a
-# known prefix + '-?' + digit. The trailing run stays within name chars (no spaces/commas) so a
-# free-text tail is excluded.
+# known prefix + '-?' + digit. The trailing run is restricted to slot-path characters — digits and
+# the separators '/', '.', ':', '-' — so it captures the rest of the slot/sub-unit but STOPS at the
+# first letter or '_' that begins a free-text annotation (e.g. "eth0_customerA" -> "eth0"). Any
+# letters that are legitimately part of a port name live in the prefix or in a '/'-delimited slot
+# component (matched above), never in the bare trailing run.
 _PORT_TOKEN_RE = re.compile(
     rf"^(?:(?:{_DIGITLESS_IF_NAMES})(?:\.\d+)?(?![\w/.:-])"
-    rf"|(?:[A-Za-z]?\d+(?:/[A-Za-z]*\d+)+|[A-Za-z]/\d+|(?:{_IF_PREFIXES})-?\d)[\w/.:-]*)"
+    rf"|(?:[A-Za-z]?\d+(?:/[A-Za-z]*\d+)+|[A-Za-z]/\d+|(?:{_IF_PREFIXES})-?\d)[\d/.:-]*)"
 )
 
 
