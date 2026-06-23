@@ -73,11 +73,15 @@ def recording_schema_errors(recording):
     errors = []
     if not isinstance(recording, dict):
         return ["recording must be a JSON object"]
-    if recording.get("schema_version") != 1:
+    schema_version = recording.get("schema_version")
+    # Reject bool explicitly: bool is an int subclass, so True/False would otherwise slip through
+    # an `isinstance(..., int)` / `!= 1` check and let a malformed recording validate.
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
         errors.append("schema_version must be 1")
     if not isinstance(recording.get("name"), str) or not recording.get("name"):
         errors.append("name must be a non-empty string")
-    if not isinstance(recording.get("device_id"), int):
+    device_id = recording.get("device_id")
+    if not isinstance(device_id, int) or isinstance(device_id, bool):
         errors.append("device_id must be an integer")
     responses = recording.get("responses")
     if not isinstance(responses, dict) or not responses:

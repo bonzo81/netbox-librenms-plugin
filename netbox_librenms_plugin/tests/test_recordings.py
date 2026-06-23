@@ -37,6 +37,16 @@ def test_load_recording_rejects_path_traversal():
         load_recording("../../../../../../etc/passwd")
 
 
+def test_recording_schema_errors_rejects_bool_int_fields():
+    """Bool is an int subclass; True/False for schema_version or device_id must be rejected — a bare `!= 1` / `isinstance(int)` check would otherwise let a malformed recording validate."""
+    from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
+
+    rec = {"schema_version": True, "name": "x", "device_id": False, "responses": {"GET /x": {"status": "ok"}}}
+    errors = recording_schema_errors(rec)
+    assert any("schema_version must be 1" in e for e in errors)
+    assert any("device_id must be an integer" in e for e in errors)
+
+
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_recording_carries_no_residual_pii(recording):
     """Every committed recording must be anonymized — the PII safety-net finds nothing.
