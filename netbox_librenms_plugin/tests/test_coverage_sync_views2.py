@@ -164,6 +164,55 @@ class TestSyncCablesViewSuccessPath:
         assert Cable.objects.filter(pk=local.cable_id).exists()
 
 
+@pytest.mark.django_db
+class TestSyncCablesViewSkipsOOBRows:
+    def test_oob_sourced_link_is_never_cabled(self):
+        """An OOB-controller cable row (_source="oob") merged into the host list must never create a cable on the host interface — it's context-only (shared-LOM detection), mirroring the interface- and module-sync OOB guards."""
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        view = object.__new__(SyncCablesView)
+        view.require_all_permissions = MagicMock(return_value=None)
+        view.get_cache_key = MagicMock(return_value="key")
+        view._post_server_key = "default"
+
+        dev_local = make_device("oob-cable-local")
+        local = make_interface(dev_local, "mgmt0")
+        dev_remote = make_device("oob-cable-remote")
+        remote = make_interface(dev_remote, "Gi0/2")
+
+        view.request = _make_request(post_data={"select": ["portOOB"]})
+        # A fully-resolved OOB row (both NetBox interface ids set) so ONLY the _source guard
+        # can stop the cable being created on the host interface.
+        link_data = {
+            "local_port_id": "portOOB",
+            "local_port": "mgmt0",
+            "netbox_local_interface_id": local.pk,
+            "netbox_remote_interface_id": remote.pk,
+            "_source": "oob",
+        }
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.cables.get_object_or_404", return_value=dev_local),
+            patch("netbox_librenms_plugin.views.sync.cables.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.cables.messages") as mock_msgs,
+            patch("netbox_librenms_plugin.views.sync.cables.redirect"),
+            patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
+            patch.object(
+                type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
+            ),
+        ):
+            mock_cache.get.return_value = {"links": [link_data]}
+            view.post(view.request, pk=dev_local.pk)
+
+        # No cable was created on the host interface, and it was not reported as a success.
+        local.refresh_from_db()
+        assert local.cable_id is None
+        assert Cable.objects.count() == 0
+        mock_msgs.success.assert_not_called()
+
+
 class TestSyncCablesViewDuplicateCable:
     def test_duplicate_cable_shows_warning(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
