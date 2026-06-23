@@ -300,6 +300,21 @@ class TestGetPortsDataFailure:
         assert result is cached
         view._librenms_api.get_ports.assert_not_called()
 
+    def test_oob_only_no_host_id_returns_empty_before_cache(self):
+        """An OOB-only device (librenms_id None) must return empty ports BEFORE consulting the cache, so a stale host-ports snapshot from a prior mapped refresh can't resurface into the new render."""
+        view = self._make_view()
+        view.librenms_id = None
+        obj = _mock_obj()
+
+        with patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache:
+            mock_cache.get.return_value = {"ports": [{"port_id": 7, "ifName": "STALE-HOST-PORT"}]}
+            with patch.object(view, "get_cache_key", return_value="test-key"):
+                result = view.get_ports_data(obj)
+
+        assert result == {"ports": []}  # the stale cached host ports must NOT be served
+        mock_cache.get.assert_not_called()  # the cache is not even consulted for a hostless device
+        view._librenms_api.get_ports.assert_not_called()
+
 
 # =============================================================================
 # TestGetLinksDataPortNameNone  — continue branch when port_name is None (line 98)

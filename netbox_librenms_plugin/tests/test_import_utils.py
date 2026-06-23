@@ -5540,6 +5540,37 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
         assert any("Multiple NetBox devices match" in i for i in validation.get("issues", []))
 
+    def test_stale_serial_ip_ambiguity_blocker_cleared_on_refresh(self):
+        """A cached serial/IP ambiguity blocker must be cleared on refresh re-check once the duplicate is resolved (now a single match), so the row isn't stuck blocked on the stale issue until cache expiry."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        make_device("now-unique-host", serial="UNIQSERIAL9")  # only ONE device has this serial now
+        libre_device = {
+            "device_id": 321,
+            "hostname": "no-name-match",
+            "sysName": "no-name-match",
+            "serial": "UNIQSERIAL9",
+        }
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+            # Stale ambiguity state cached from a prior refresh when the serial was duplicated.
+            "existing_match_type": "ambiguous_hostname_or_serial",
+            "issues": [
+                "Multiple NetBox devices match this device's serial or management IP; resolve the duplicate before importing."
+            ],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # The stale ambiguity blocker is purged (the duplicate is gone — now a clean single match).
+        assert not any("serial or management IP" in i for i in validation.get("issues", []))
+        assert validation["existing_match_type"] != "ambiguous_hostname_or_serial"
+
 
 # ---------------------------------------------------------------------------
 # Tests for _get_hostname_for_action helper

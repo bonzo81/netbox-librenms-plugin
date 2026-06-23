@@ -139,17 +139,18 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # Scope to the POST-resolved server when provided; else the shared degrading resolver
         # (avoids a GET 500 on a missing/misconfigured default).
         server_key = server_key or self._render_server_key()
+        # No host LibreNMS id (OOB-only device): return empty BEFORE consulting the cache. A stale
+        # host-ports snapshot cached from a previous (mapped) refresh must not resurface and feed
+        # the new render now that the host mapping is gone. There is also nothing to fetch —
+        # get_ports(None) would issue a GET /devices/None/ports that always 404s.
+        if self.librenms_id is None:
+            return {"ports": []}
         ports_cache_key = self.get_cache_key(obj, "ports", server_key)
         # Shape-guard the cached entry (mirrors _extract_cached_links): a truthy but
         # malformed value would AttributeError-500 get_links_data's .get("ports") reads.
         cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
         if cached_data:
             return cached_data
-        # No host LibreNMS id (OOB-only device): there is nothing to fetch — calling
-        # get_ports(None) would issue a GET /devices/None/ports that always 404s. Return the
-        # same empty shape a failed fetch yields so callers are unaffected.
-        if self.librenms_id is None:
-            return {"ports": []}
         success, data = self.librenms_api.get_ports(self.librenms_id)
         if not success:
             return {"ports": []}

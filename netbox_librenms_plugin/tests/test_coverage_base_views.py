@@ -246,9 +246,10 @@ class TestBaseCableTableViewGetLinksData:
         assert result[0]["_source"] == "oob"
         assert result[0]["remote_device"] == "peer-sw"
         assert result[0]["local_port"] == "console0"
-        # The wasteful host link fetch is skipped: get_device_links is only ever called for the
-        # OOB controller (99), never with the None host id.
-        assert all(c.args[0] is not None for c in view._librenms_api.get_device_links.call_args_list)
+        # The wasteful host link fetch is skipped: get_device_links is called exactly once, for the
+        # OOB controller (99) — never with the None host id or any other value. Pin the exact arg
+        # list (not merely "non-None"), since _links() treats every non-None id as the OOB success.
+        assert [c.args[0] for c in view._librenms_api.get_device_links.call_args_list] == [99]
 
     def test_get_links_data_successful_empty_returns_list_not_none(self):
         """A successful refresh with zero rows must return [] (not None) so _prepare_context() flows it through the success path instead of mislabeling it 'No links found'."""
