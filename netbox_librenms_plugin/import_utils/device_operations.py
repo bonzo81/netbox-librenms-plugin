@@ -95,6 +95,51 @@ def _describe_existing_librenms_link(obj, server_key):
     return info
 
 
+def resolve_device_by_host_ip(primary_ip):
+    """
+    Resolve the unique NetBox device whose interface or oob_ip carries a host address.
+
+    Scans EVERY ``IPAddress`` row sharing ``primary_ip`` as its host address (duplicate
+    net_host rows are possible) across both the interface-assignment path and the ``oob_ip``
+    direct-FK path, so a genuine collision fails closed instead of binding to whichever
+    duplicate row sorts first. An IP can be a device's ``oob_ip`` while assigned to no
+    interface, so the assigned_object scan alone would miss an OOB-only link.
+
+    Shared by :func:`validate_device_for_import` and ``bulk_import._refresh_existing_device``
+    so the two paths can't drift on which device a management IP resolves to.
+
+    Args:
+        primary_ip: The management IP (host form) to resolve.
+
+    Returns:
+        tuple: ``(device | None, ambiguous: bool, matching_ips: QuerySet)``.
+            ``device`` is the single matching device, or ``None`` when none or more than one
+            match; ``ambiguous`` is ``True`` only when >1 distinct device shares the address
+            (the caller must block the import); ``matching_ips`` is the net_host queryset so
+            callers can reuse it (e.g. for the ``oob_ip`` membership check).
+    """
+    from dcim.models import Device
+    from ipam.models import IPAddress
+
+    matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
+    candidate_devices = {}
+    matching_exists = False
+    for existing_ip in matching_ips:
+        matching_exists = True
+        assigned = getattr(existing_ip, "assigned_object", None)
+        dev = getattr(assigned, "device", None) if assigned else None
+        if dev:
+            candidate_devices[dev.pk] = dev
+    if matching_exists:
+        for oob_device in Device.objects.filter(oob_ip__in=matching_ips):
+            candidate_devices[oob_device.pk] = oob_device
+    if len(candidate_devices) > 1:
+        return None, True, matching_ips
+    if candidate_devices:
+        return next(iter(candidate_devices.values())), False, matching_ips
+    return None, False, matching_ips
+
+
 def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: dict | None = None):
     """
     Attempt device type matching using chassis inventory fields.
@@ -959,116 +1004,89 @@ def validate_device_for_import(
             if not result["existing_device"]:
                 primary_ip = libre_device.get("ip")
                 if primary_ip and not import_as_vm:
-                    from ipam.models import IPAddress
-
-                    matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
-                    # Scan EVERY row sharing this host address for an interface assignment, not
-                    # just .first(): with duplicate net_host rows the real management IP may be
-                    # assigned to an interface on a different matching row than the first (mirrors
-                    # _refresh_existing_device in bulk_import.py, which the oob_ip fallback below
-                    # already does).
-                    device = None
-                    matching_exists = False
-                    # Collect EVERY distinct device this host address resolves to, from both the
-                    # interface-assignment and oob_ip-FK paths, so we can fail closed on a genuine
-                    # collision instead of binding to whichever duplicate net_host row sorts first.
-                    candidate_devices = {}
-                    for existing_ip in matching_ips:
-                        matching_exists = True
-                        assigned = existing_ip.assigned_object
-                        if assigned is not None and hasattr(assigned, "device") and assigned.device:
-                            candidate_devices[assigned.device.pk] = assigned.device
-                    if matching_exists:
-                        # Device.oob_ip is a direct FK independent of assigned_object: an IP can be
-                        # a device's OOB address while assigned to no interface (e.g. a NAT'd OOB IP
-                        # whose assigned_object is None). Match against EVERY row sharing this host
-                        # address so an OOB device is found even when its oob_ip is a different one
-                        # of the duplicate net_host rows.
-                        for oob_device in Device.objects.filter(oob_ip__in=matching_ips):
-                            candidate_devices[oob_device.pk] = oob_device
-                        if len(candidate_devices) > 1:
-                            # Duplicate net_host rows point at >1 distinct NetBox device — binding to
-                            # an arbitrary one could re-home the import to the wrong device, so fail
-                            # closed (mirrors the librenms_id cross-model ambiguity guard above).
-                            result["issues"].append(
-                                f"Multiple NetBox devices use IP address {primary_ip}; "
-                                "resolve the duplicate assignment before importing."
+                    # Shared resolver: scans every net_host row across the interface-assignment and
+                    # oob_ip-FK paths and fails closed on >1 distinct device (mirrors
+                    # _refresh_existing_device in bulk_import.py via the same helper).
+                    device, ip_ambiguous, matching_ips = resolve_device_by_host_ip(primary_ip)
+                    if ip_ambiguous:
+                        # Duplicate net_host rows point at >1 distinct NetBox device — binding to
+                        # an arbitrary one could re-home the import to the wrong device, so fail
+                        # closed (mirrors the librenms_id cross-model ambiguity guard above).
+                        result["issues"].append(
+                            f"Multiple NetBox devices use IP address {primary_ip}; "
+                            "resolve the duplicate assignment before importing."
+                        )
+                        result["can_import"] = False
+                        result["is_ready"] = False
+                    elif device:
+                        # Surface any existing host/OOB linkage so the import UI renders the
+                        # correct row state (the librenms_id / serial branches do the same;
+                        # without this an already-linked device shows as "not linked" here).
+                        result["existing_librenms_link"] = _describe_existing_librenms_link(device, server_key)
+                        # Check if this is an OOB candidate via the IP path.
+                        # The OOB controller's IP may already be the device's oob_ip, or the
+                        # LibreNMS device may identify itself as an OOB type (iDRAC/iLO/etc.).
+                        oob_type = normalize_oob_type(
+                            libre_device.get("os", ""),
+                            libre_device.get("hardware", ""),
+                        )
+                        # Check the device's oob_ip against EVERY row sharing this host address,
+                        # not just existing_ip (.first()): with duplicate net_host rows the device's
+                        # oob_ip may be a different matching row, and comparing only the first would
+                        # wrongly read is_oob_ip as False.
+                        is_oob_ip = device.oob_ip_id is not None and matching_ips.filter(pk=device.oob_ip_id).exists()
+                        has_primary_ip = bool(device.primary_ip4_id or device.primary_ip6_id)
+                        # When the incoming IP already IS the device's oob_ip this is an OOB
+                        # candidate regardless of whether the LibreNMS os/hardware tokens let us
+                        # classify a type. Requiring oob_type here silently downgrades such a row
+                        # to a plain primary-IP match and loses the OOB action flow, so infer a
+                        # type from the hostname (or a generic "oob" fallback), mirroring the
+                        # serial-match branch above.
+                        inferred_oob_type = (
+                            oob_type
+                            or _detect_oob_type_from_name(
+                                libre_device.get("hostname") or libre_device.get("sysName") or ""
                             )
-                            result["can_import"] = False
-                            result["is_ready"] = False
-                        elif candidate_devices:
-                            device = next(iter(candidate_devices.values()))
-                        if device:
-                            # Surface any existing host/OOB linkage so the import UI renders the
-                            # correct row state (the librenms_id / serial branches do the same;
-                            # without this an already-linked device shows as "not linked" here).
-                            result["existing_librenms_link"] = _describe_existing_librenms_link(device, server_key)
-                            # Check if this is an OOB candidate via the IP path.
-                            # The OOB controller's IP may already be the device's oob_ip, or the
-                            # LibreNMS device may identify itself as an OOB type (iDRAC/iLO/etc.).
-                            oob_type = normalize_oob_type(
-                                libre_device.get("os", ""),
-                                libre_device.get("hardware", ""),
-                            )
-                            # Check the device's oob_ip against EVERY row sharing this host address,
-                            # not just existing_ip (.first()): with duplicate net_host rows the device's
-                            # oob_ip may be a different matching row, and comparing only the first would
-                            # wrongly read is_oob_ip as False.
-                            is_oob_ip = (
-                                device.oob_ip_id is not None and matching_ips.filter(pk=device.oob_ip_id).exists()
-                            )
-                            has_primary_ip = bool(device.primary_ip4_id or device.primary_ip6_id)
-                            # When the incoming IP already IS the device's oob_ip this is an OOB
-                            # candidate regardless of whether the LibreNMS os/hardware tokens let us
-                            # classify a type. Requiring oob_type here silently downgrades such a row
-                            # to a plain primary-IP match and loses the OOB action flow, so infer a
-                            # type from the hostname (or a generic "oob" fallback), mirroring the
-                            # serial-match branch above.
-                            inferred_oob_type = (
-                                oob_type
-                                or _detect_oob_type_from_name(
-                                    libre_device.get("hostname") or libre_device.get("sysName") or ""
-                                )
-                                or "oob"
-                            )
-                            if is_oob_ip or (oob_type and not has_primary_ip):
-                                existing_oob = get_librenms_oob(device, server_key=server_key)
-                                if existing_oob is None:
-                                    result["existing_device"] = device
-                                    result["existing_match_type"] = "primary_ip"
-                                    result["serial_action"] = "oob_candidate"
-                                    result["oob_candidate"] = {
-                                        "device": device,
-                                        "type": inferred_oob_type,
-                                        "version": libre_device.get("version") or None,
-                                        "ip": libre_device.get("ip") or None,
-                                    }
-                                    result["can_import"] = False
-                                else:
-                                    result["existing_device"] = device
-                                    result["existing_match_type"] = "primary_ip"
-                                    result["warnings"].append(
-                                        f"IP address {primary_ip} already assigned to device '{device.name}' "
-                                        f"(OOB already linked)"
-                                    )
-                                    result["can_import"] = False
+                            or "oob"
+                        )
+                        if is_oob_ip or (oob_type and not has_primary_ip):
+                            existing_oob = get_librenms_oob(device, server_key=server_key)
+                            if existing_oob is None:
+                                result["existing_device"] = device
+                                result["existing_match_type"] = "primary_ip"
+                                result["serial_action"] = "oob_candidate"
+                                result["oob_candidate"] = {
+                                    "device": device,
+                                    "type": inferred_oob_type,
+                                    "version": libre_device.get("version") or None,
+                                    "ip": libre_device.get("ip") or None,
+                                }
+                                result["can_import"] = False
                             else:
                                 result["existing_device"] = device
                                 result["existing_match_type"] = "primary_ip"
-                                # Line 728 may already have populated a host/OOB
-                                # linkage; describe it accurately instead of always
-                                # claiming "not linked to LibreNMS".
-                                existing_link = result.get("existing_librenms_link") or {}
-                                if existing_link.get("host_id"):
-                                    link_note = f"currently linked to LibreNMS device #{existing_link['host_id']}"
-                                elif existing_link.get("oob_id"):
-                                    link_note = "OOB already linked"
-                                else:
-                                    link_note = "not linked to LibreNMS"
                                 result["warnings"].append(
-                                    f"IP address {primary_ip} already assigned to device '{device.name}' ({link_note})"
+                                    f"IP address {primary_ip} already assigned to device '{device.name}' "
+                                    f"(OOB already linked)"
                                 )
                                 result["can_import"] = False
+                        else:
+                            result["existing_device"] = device
+                            result["existing_match_type"] = "primary_ip"
+                            # Line 728 may already have populated a host/OOB
+                            # linkage; describe it accurately instead of always
+                            # claiming "not linked to LibreNMS".
+                            existing_link = result.get("existing_librenms_link") or {}
+                            if existing_link.get("host_id"):
+                                link_note = f"currently linked to LibreNMS device #{existing_link['host_id']}"
+                            elif existing_link.get("oob_id"):
+                                link_note = "OOB already linked"
+                            else:
+                                link_note = "not linked to LibreNMS"
+                            result["warnings"].append(
+                                f"IP address {primary_ip} already assigned to device '{device.name}' ({link_note})"
+                            )
+                            result["can_import"] = False
 
         # Refresh local mode after ALL detection branches. The refresh at the top of the
         # unmatched-device block only runs when nothing matched by librenms_id; an existing

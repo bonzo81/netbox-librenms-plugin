@@ -2475,3 +2475,36 @@ class TestDetectSerialMatchRole:
         assert out["serial_action"] == "oob_already_linked"
         assert out["serial_action"] != "link"
         assert any("already has an OOB controller linked" in w for w in out["warnings"])
+
+
+@pytest.mark.django_db
+class TestResolveDeviceByHostIP:
+    """resolve_device_by_host_ip: the shared host-IP resolver must fail closed when a management IP maps to more than one distinct device (interface assignment + oob_ip FK), so neither import path binds to an arbitrary one."""
+
+    def test_fails_closed_when_two_devices_share_the_host_ip(self):
+        from netbox_librenms_plugin.import_utils.device_operations import resolve_device_by_host_ip
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_ip
+
+        dev_a = make_device("host-ip-a")
+        ip_on(dev_a, "198.51.100.5/24", "eth0")  # assigned to dev_a's interface
+        dev_b = make_device("host-ip-b")
+        # A second IP row with the SAME host address, set as dev_b's oob_ip (FK, not assigned).
+        dev_b.oob_ip = make_ip("198.51.100.5/32")
+        dev_b.save()
+
+        device, ambiguous, _matching = resolve_device_by_host_ip("198.51.100.5")
+
+        assert ambiguous is True
+        assert device is None
+
+    def test_resolves_the_single_owning_device(self):
+        from netbox_librenms_plugin.import_utils.device_operations import resolve_device_by_host_ip
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+
+        dev = make_device("host-ip-single")
+        ip_on(dev, "198.51.100.9/24", "eth0")
+
+        device, ambiguous, _matching = resolve_device_by_host_ip("198.51.100.9")
+
+        assert ambiguous is False
+        assert device.pk == dev.pk

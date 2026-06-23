@@ -13,6 +13,7 @@ from .cache import get_cache_metadata_key, get_import_device_cache_key, get_vali
 from .device_operations import (
     _describe_existing_librenms_link,
     import_single_device,
+    resolve_device_by_host_ip,
     validate_device_for_import,
 )
 from .filters import _safe_disabled, get_librenms_devices_for_import
@@ -730,29 +731,14 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if not new_device and not ambiguous_fallback:
                 primary_ip = libre_device.get("ip")
                 if primary_ip:
-                    from ipam.models import IPAddress
-
-                    matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
-                    # Collect EVERY distinct device this host address resolves to (interface
-                    # assignment + oob_ip FK), across all duplicate net_host rows, so a genuine
-                    # collision fails closed rather than binding to whichever row sorts first. An IP
-                    # can be a device's oob_ip (a direct FK) while assigned to no interface, so the
-                    # assigned_object scan alone would miss an OOB-only link.
-                    candidate_devices = {}
-                    matching_exists = False
-                    for existing_ip in matching_ips:
-                        matching_exists = True
-                        assigned = getattr(existing_ip, "assigned_object", None)
-                        dev = getattr(assigned, "device", None) if assigned else None
-                        if dev:
-                            candidate_devices[dev.pk] = dev
-                    if matching_exists:
-                        for oob_device in _Device.objects.filter(oob_ip__in=matching_ips):
-                            candidate_devices[oob_device.pk] = oob_device
-                        if len(candidate_devices) > 1:
-                            ambiguous_fallback = True
-                        elif candidate_devices:
-                            new_device, match_type = next(iter(candidate_devices.values())), "primary_ip"
+                    # Shared resolver (scans interface-assignment + oob_ip-FK across all duplicate
+                    # net_host rows, fails closed on >1 distinct device) — same helper
+                    # validate_device_for_import() uses, so the two paths can't drift.
+                    device, ip_ambiguous, _matching_ips = resolve_device_by_host_ip(primary_ip)
+                    if ip_ambiguous:
+                        ambiguous_fallback = True
+                    elif device:
+                        new_device, match_type = device, "primary_ip"
 
             if ambiguous_fallback:
                 # Block without binding to an arbitrary device: append a blocking issue (the
