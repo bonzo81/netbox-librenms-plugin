@@ -1450,6 +1450,9 @@ class TestPrepareContextInterfaceNameFieldNone:
         mock_mgmt.assert_not_called()  # bail before the live mgmt-ip lookup
         mock_enrich.assert_not_called()  # never enrich a malformed payload
         mock_cache.set.assert_not_called()  # never cache the empty snapshot as complete
+        # ...and purge any prior valid snapshot so the fail-closed takes effect (no stale rows
+        # served on the next GET until TTL).
+        mock_cache.delete.assert_any_call("ck")
 
     def test_fetch_fresh_dict_row_missing_ip_fields_returns_none(self):
         """A dict row that passes the container-shape check but lacks the address/prefix and port_id fields _create_base_ip_entry() reads would KeyError mid-enrichment and 500 the fresh-refresh path."""

@@ -368,6 +368,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                 )
 
             if not success or not isinstance(ip_data, list) or any(not _valid_ip_row(item) for item in ip_data):
+                # Purge any prior valid snapshot so this fail-closed actually takes effect: without
+                # it, a bad-but-successful refresh leaves the previous rows in cache and the next GET
+                # serves them as stale until the TTL expires.
+                cache.delete(self.get_cache_key(obj, "ip_addresses", server_key))
                 return None
             # Resolve the management IP once here (live LibreNMS call) and cache it
             # below so cached renders don't re-hit the API.
