@@ -6005,6 +6005,52 @@ class TestAddAsOOBViewPost:
         assert oob == {"id": 17, "type": "ilo"}
 
 
+@pytest.mark.django_db
+class TestGetValidatedDeviceLibreDeviceReuse:
+    """get_validated_device_with_selections reuses a supplied libre_device (the post-commit refresh path)."""
+
+    def test_supplied_libre_device_skips_the_fetch(self):
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
+
+        view = object.__new__(PromoteToHostView)
+        view._librenms_api = _make_api()
+        request = _make_request(post={})
+        supplied = {"device_id": 4242, "hostname": "reuse-host", "sysName": "reuse-host"}
+
+        def _boom(*a, **k):
+            raise AssertionError("fetch_device_with_cache must not run when libre_device is supplied")
+
+        with (
+            patch("netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache", side_effect=_boom),
+            patch.object(view, "_should_enable_vc_detection", return_value=False),
+        ):
+            libre_device, validation, _selections = view.get_validated_device_with_selections(
+                4242, request, libre_device=supplied
+            )
+
+        # The supplied device flowed through and validate_device_for_import still ran for real.
+        assert libre_device is supplied
+        assert validation is not None
+
+    def test_without_libre_device_still_fetches(self):
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
+
+        view = object.__new__(PromoteToHostView)
+        view._librenms_api = _make_api()
+        request = _make_request(post={})
+
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"device_id": 7},
+            ) as mock_fetch,
+            patch.object(view, "_should_enable_vc_detection", return_value=False),
+        ):
+            view.get_validated_device_with_selections(7, request)
+
+        mock_fetch.assert_called_once()
+
+
 class TestRebindApiForPostedServer:
     """_rebind_api_for_posted_server: rebind on a posted server_key, or return the HTMX error for an unknown one."""
 

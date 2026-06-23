@@ -505,7 +505,9 @@ def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> s
 class DeviceImportHelperMixin:
     """Mixin providing common validation and rendering helpers for device import views."""
 
-    def get_validated_device_with_selections(self, device_id: int, request) -> tuple[dict | None, dict | None, dict]:
+    def get_validated_device_with_selections(
+        self, device_id: int, request, *, libre_device: dict | None = None
+    ) -> tuple[dict | None, dict | None, dict]:
         """
         Get LibreNMS device, validate it, and apply user selections.
 
@@ -514,13 +516,20 @@ class DeviceImportHelperMixin:
         Args:
             device_id: LibreNMS device ID
             request: Django request object
+            libre_device: Optional pre-fetched LibreNMS device data. The LibreNMS side is
+                invariant within a single request, so the post-commit re-validation after a
+                promote/merge can pass the device fetched earlier to skip a redundant
+                ``fetch_device_with_cache`` call. The NetBox-side ``validate_device_for_import``
+                is still re-run so the refreshed row reflects the just-committed state.
 
         Returns:
             Tuple of (libre_device, validation, selections)
             Returns (None, None, selections) if device not found
         """
-        # Try to use cached device data from table load (eliminates redundant API calls)
-        libre_device = fetch_device_with_cache(device_id, self.librenms_api)
+        # Reuse a caller-supplied device, else use cached device data from the table load
+        # (both eliminate redundant API calls).
+        if libre_device is None:
+            libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
         if not libre_device:
             return None, None, extract_device_selections(request, device_id)
@@ -3292,7 +3301,11 @@ class PromoteToHostView(
         cache_key = get_import_device_cache_key(device_id, server_key)
         cache.delete(cache_key)
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        # Reuse the LibreNMS device already fetched above (invariant within this request); only the
+        # NetBox-side validation needs to re-run to reflect the just-committed promotion/merge.
+        libre_device, validation, selections = self.get_validated_device_with_selections(
+            device_id, request, libre_device=libre_device
+        )
         if not libre_device:
             # Promotion already committed; a post-commit reload miss must not report failure.
             return self.post_commit_refresh_fallback(
@@ -3485,7 +3498,11 @@ class MergeNetBoxDevicesView(
         cache_key = get_import_device_cache_key(device_id, server_key)
         cache.delete(cache_key)
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        # Reuse the LibreNMS device already fetched above (invariant within this request); only the
+        # NetBox-side validation needs to re-run to reflect the just-committed promotion/merge.
+        libre_device, validation, selections = self.get_validated_device_with_selections(
+            device_id, request, libre_device=libre_device
+        )
         if not libre_device:
             # Merge already committed; a post-commit reload miss must not report failure
             # (the donor is already absorbed — a retry would target stale/invalid state).
