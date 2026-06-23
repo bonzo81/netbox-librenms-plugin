@@ -541,11 +541,14 @@ class LibreNMSInterfaceTable(tables.Table):
             badge_text,
         )
 
-        # On a migrated donor page the inline sync controls are suppressed: the per-row
-        # .lag-sync-btn/.parent-sync-btn POST directly via librenms_sync.js, so leaving them
-        # active would let a migrated donor mutate parent/LAG state despite the bulk form
-        # being hidden. Render only the status badge in that mode.
-        if sync_status == "missing_nb" and lnms_port_id and not self.migrated_to_marker:
+        # Show the inline sync button when LibreNMS has a relationship to apply (lnms_port_id
+        # set) and NetBox either lacks it (missing_nb) or holds a DIFFERENT one (mismatch) —
+        # in both cases the row can be reconciled to the LibreNMS value from here. missing_lnms
+        # is excluded by the lnms_port_id guard (nothing to sync to), and a migrated donor page
+        # suppresses the control entirely: the per-row .lag-sync-btn/.parent-sync-btn POST
+        # directly via librenms_sync.js, so leaving it active would let a migrated donor mutate
+        # parent/LAG state despite the bulk form being hidden.
+        if sync_status in ("missing_nb", "mismatch") and lnms_port_id and not self.migrated_to_marker:
             port_id = record.get("port_id", "")
             nb_iface = record.get("netbox_interface")
             row_object_id = record.get("selected_object_id")
@@ -567,12 +570,19 @@ class LibreNMSInterfaceTable(tables.Table):
             else:
                 object_id = self.device.pk if self.device else ""
             object_type = record.get("selected_object_type") or self.sync_object_type
+            # A mismatch click OVERWRITES the differing NetBox lag/parent with the LibreNMS
+            # value, so spell that out in the tooltip rather than the generic "Sync".
+            sync_title = (
+                f"Update {type_label or 'relationship'} to match LibreNMS"
+                if sync_status == "mismatch"
+                else "Sync relationship"
+            )
             btn = format_html(
                 ' <button type="button" class="btn btn-sm btn-link p-0 {}" '
                 'data-port-id="{}" {}="{}" '
                 'data-related-name="{}" '
                 'data-object-type="{}" data-object-id="{}" '
-                'title="Sync relationship">'
+                'title="{}">'
                 '<i class="mdi mdi-sync"></i></button>',
                 btn_class,
                 port_id,
@@ -581,6 +591,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 lnms_name or "",
                 object_type,
                 object_id,
+                sync_title,
             )
             # text-nowrap keeps the pill + sync button on one line (no mid-line wrap); lh-sm keeps
             # the LAG/Parent lines tightly stacked.

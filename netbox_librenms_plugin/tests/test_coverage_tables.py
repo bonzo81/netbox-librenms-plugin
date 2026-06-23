@@ -1953,6 +1953,62 @@ class TestRelationshipBadgeCompactLayout:
         # Type label lives inside the pill now, not in a separate muted prefix span.
         assert "text-muted small" not in html
 
+    def test_mismatch_renders_reconcile_sync_button(self):
+        """A 'mismatch' (LibreNMS aggregate/parent differs from NetBox) must expose the inline sync button so the row can be reconciled to LibreNMS — not just an amber pill the user can't act on. The LibreNMS port_id is set for a mismatch, so the control has a target."""
+        table = self._table()
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="ae9",
+                lnms_port_id=42,
+                sync_status="mismatch",
+                record={"port_id": 7},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        # The reconcile button is present and wired to the LibreNMS aggregate port_id.
+        assert "lag-sync-btn" in html
+        assert "mdi-sync" in html
+        assert 'data-lag-port-id="42"' in html
+        # The tooltip spells out that the click overwrites NetBox with the LibreNMS value.
+        assert 'title="Update LAG to match LibreNMS"' in html
+
+    def test_missing_lnms_renders_badge_only_no_button(self):
+        """missing_lnms (NetBox has the relationship, LibreNMS doesn't) has no LibreNMS port_id to sync TO, so the lnms_port_id guard keeps the button off — only the status pill renders."""
+        table = self._table()
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="",
+                lnms_port_id=None,
+                sync_status="missing_lnms",
+                record={"port_id": 7},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        assert "mdi-sync" not in html
+        assert "lag-sync-btn" not in html
+
+    def test_mismatch_button_suppressed_on_migrated_donor(self):
+        """Even a mismatch must NOT render the inline control on a migrated donor page (the bulk form is hidden; a direct POST would mutate donor state)."""
+        table = self._table()
+        table.migrated_to_marker = True
+        html = str(
+            table._render_relationship_column(
+                type_label="LAG",
+                lnms_name="ae9",
+                lnms_port_id=42,
+                sync_status="mismatch",
+                record={"port_id": 7},
+                btn_class="lag-sync-btn",
+                data_related_key="data-lag-port-id",
+            )
+        )
+        assert "mdi-sync" not in html
+        assert "lag-sync-btn" not in html
+
 
 class TestLibreNMSInterfaceTableInit:
     """Tests for LibreNMSInterfaceTable.__init__()."""
