@@ -122,6 +122,22 @@ class TestBuildMigratedContext:
 # ── helper: _resolve_winner_for_donor ─────────────────────────────────────
 
 
+class TestParseMarkerWinnerPk:
+    """The shared marker device_id parser used by _resolve_winner_for_donor + _winner_unavailable_reason."""
+
+    def test_accepts_int_and_digit_string(self):
+        from netbox_librenms_plugin.views.sync.migrate import _parse_marker_winner_pk
+
+        assert _parse_marker_winner_pk(5) == 5
+        assert _parse_marker_winner_pk("5") == 5
+
+    def test_rejects_bool_numeric_like_and_non_positive(self):
+        from netbox_librenms_plugin.views.sync.migrate import _parse_marker_winner_pk
+
+        for bad in (True, False, 1.9, "1.9", "  5 ", 0, -3, "0", None, "x", {}):
+            assert _parse_marker_winner_pk(bad) is None, bad
+
+
 @pytest.mark.django_db
 class TestResolveWinnerForDonor:
     def test_returns_winner_and_marker_when_both_exist(self):

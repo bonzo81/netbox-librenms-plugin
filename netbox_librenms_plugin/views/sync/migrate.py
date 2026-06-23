@@ -26,7 +26,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
 
-from netbox_librenms_plugin.utils import get_migrated_to_marker, set_device_ip_fk
+from netbox_librenms_plugin.utils import DEVICE_IP_FK_FIELDS, get_migrated_to_marker, set_device_ip_fk
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
@@ -34,6 +34,27 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_marker_winner_pk(device_id):
+    """
+    Parse a ``_migrated_to`` marker's ``device_id`` to a positive int pk, or None if invalid.
+
+    bool is rejected (it subclasses int, so ``int(True) == 1`` would misroute a move), and only a
+    real int or a plain digit string is accepted (``int()`` would truncate ``1.9`` / ``Decimal('1.9')``
+    to a valid-looking but wrong pk). A non-positive result is rejected too — it can never be a real
+    Device row. Shared by :func:`_resolve_winner_for_donor` and :func:`_winner_unavailable_reason`
+    so the two can't drift on what counts as a parseable winner id.
+    """
+    if isinstance(device_id, bool):
+        return None
+    if not (isinstance(device_id, int) or (isinstance(device_id, str) and device_id.isdecimal())):
+        return None
+    try:
+        pk = int(device_id)
+    except (TypeError, ValueError):
+        return None
+    return pk if pk > 0 else None
 
 
 def _resolve_winner_for_donor(donor, server_key="default"):
@@ -57,19 +78,8 @@ def _resolve_winner_for_donor(donor, server_key="default"):
     marker = get_migrated_to_marker(donor, server_key)
     if not marker:
         return None, None
-    device_id = marker.get("device_id")
-    # Reject bools explicitly: bool is a subclass of int, so int(True) == 1 would
-    # otherwise resolve Device(pk=1) and misroute a move operation. A corrupt marker
-    # like {"device_id": true} must fail closed as a stale/invalid marker.
-    if isinstance(device_id, bool):
-        return None, marker
-    # int() truncates numeric-like values (1.9, Decimal("1.9")) to a valid-looking pk, which
-    # would resolve the WRONG winner. Accept only a real int or a plain digit string.
-    if not (isinstance(device_id, int) or (isinstance(device_id, str) and device_id.isdecimal())):
-        return None, marker
-    try:
-        winner_pk = int(device_id)
-    except (TypeError, ValueError):
+    winner_pk = _parse_marker_winner_pk(marker.get("device_id"))
+    if winner_pk is None:
         return None, marker
     winner = Device.objects.filter(pk=winner_pk).first()
     if winner is None:
@@ -94,21 +104,10 @@ def _winner_unavailable_reason(donor, marker):
         str: ``"deleted"`` (well-formed positive id, winner row gone) or ``"corrupt"``
             (bool/unparseable/non-positive ``device_id``, or self-pointing).
     """
-    device_id = marker.get("device_id")
-    if isinstance(device_id, bool):
-        return "corrupt"
-    # Mirror _resolve_winner_for_donor: a numeric-like value int() would truncate (1.9,
-    # Decimal("1.9")) is a corrupt marker, not a deleted winner.
-    if not (isinstance(device_id, int) or (isinstance(device_id, str) and device_id.isdecimal())):
-        return "corrupt"
-    try:
-        winner_pk = int(device_id)
-    except (TypeError, ValueError):
-        return "corrupt"
-    # A non-positive pk is never a real Device row, so int() succeeding doesn't make it a
-    # "deleted winner" — it's a corrupt marker. Classify it as such so recovery isn't sent
-    # chasing a device that never existed.
-    if winner_pk <= 0 or winner_pk == donor.pk:
+    # A parseable positive pk (shared parser rejects bool/numeric-like/non-positive) that isn't
+    # the donor itself means the winner row was deleted; anything else is a corrupt marker.
+    winner_pk = _parse_marker_winner_pk(marker.get("device_id"))
+    if winner_pk is None or winner_pk == donor.pk:
         return "corrupt"
     return "deleted"
 
@@ -264,11 +263,12 @@ def _reconcile_donor_device_ip_fks(donor, winner):
             message).
     """
     notes = []
-    for field, human in (
-        ("primary_ip4", "primary IPv4"),
-        ("primary_ip6", "primary IPv6"),
-        ("oob_ip", "OOB IP"),
-    ):
+    # Drive the loop off utils.DEVICE_IP_FK_FIELDS — the canonical list set_device_ip_fk()
+    # validates against — so a fourth device IP FK added there is reconciled here too instead of
+    # being silently skipped by a stale hardcoded copy. The labels are display-only.
+    _human_labels = {"primary_ip4": "primary IPv4", "primary_ip6": "primary IPv6", "oob_ip": "OOB IP"}
+    for field in DEVICE_IP_FK_FIELDS:
+        human = _human_labels.get(field, field)
         donor_ip_id = getattr(donor, f"{field}_id", None)
         # Real FK columns are plain ints; the isinstance guard also makes this a clean no-op
         # against the mock-based unit tests (a MagicMock id is not an int).
