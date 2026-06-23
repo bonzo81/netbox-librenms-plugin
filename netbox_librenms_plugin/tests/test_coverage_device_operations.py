@@ -1193,10 +1193,51 @@ class TestValidateDeviceForImportEdgeCases:
         }
         result = self._validate(libre_device)
 
-        assert any("Multiple NetBox devices use IP address 192.168.9.1" in i for i in result.get("issues", []))
+        # The collision message carries the shared "serial or management IP" marker (so the
+        # bulk-import refresh cleanup can strip it once resolved) while still naming the IP, and
+        # the row enters the terminal ambiguity match_type the cleanup keys on.
+        assert any("serial or management IP" in i and "192.168.9.1" in i for i in result.get("issues", []))
+        assert result.get("existing_match_type") == "ambiguous_hostname_or_serial"
         assert result.get("can_import") is False
         # Must NOT have arbitrarily bound to either device.
         assert result.get("existing_device") is None
+
+    def test_cached_primary_ip_collision_cleared_on_refresh_after_resolution(self):
+        """Refresh clears a cached primary-IP collision blocker once the duplicate IP is resolved."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+
+        dev_a = make_device("clr-host-a")
+        dev_b = make_device("clr-host-b")
+        ip_on(dev_a, "192.168.9.7/24", "eth0")
+        ip_b = ip_on(dev_b, "192.168.9.7/24", "eth0")  # duplicate host address on a 2nd device
+
+        libre_device = {
+            "device_id": 91,
+            "hostname": "clr-router",  # matches neither device name → IP branch
+            "sysName": "clr-router",
+            "hardware": "-",
+            "serial": "-",
+            "os": "-",
+            "location": "-",
+            "ip": "192.168.9.7",
+        }
+        validation = self._validate(libre_device)
+        # The collision blocks the row with exactly the state the refresh cleanup keys on.
+        assert validation.get("existing_match_type") == "ambiguous_hostname_or_serial"
+        assert any("serial or management IP" in i for i in validation.get("issues", []))
+
+        # Resolve the duplicate: dev_b no longer carries the shared host address.
+        ip_b.delete()
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # The stale collision blocker is purged (not left to block the row until cache expiry), and
+        # the row rebinds to the single remaining device.
+        assert not any("Multiple NetBox devices" in i and "IP address" in i for i in validation.get("issues", []))
+        assert not any("serial or management IP" in i for i in validation.get("issues", []))
+        assert validation.get("existing_match_type") == "primary_ip"
+        assert validation.get("existing_device") is not None and validation["existing_device"].pk == dev_a.pk
 
     def test_no_hostname_adds_issue(self):
         """Empty hostname/sysName → _determine_device_name falls back to 'device-{id}'."""

@@ -1012,9 +1012,16 @@ def validate_device_for_import(
                         # Duplicate net_host rows point at >1 distinct NetBox device — binding to
                         # an arbitrary one could re-home the import to the wrong device, so fail
                         # closed (mirrors the librenms_id cross-model ambiguity guard above).
+                        # Put this collision into the same terminal ambiguity state the
+                        # hostname/serial guard uses, so a cached primary-IP collision can be
+                        # cleared by _refresh_existing_device() once the duplicate IP assignment is
+                        # resolved. The message carries the shared "serial or management IP" marker
+                        # the refresh cleanup strips on; without the match_type + marker the stale
+                        # blocker would survive refresh and keep the row blocked until cache expiry.
+                        result["existing_match_type"] = "ambiguous_hostname_or_serial"
                         result["issues"].append(
-                            f"Multiple NetBox devices use IP address {primary_ip}; "
-                            "resolve the duplicate assignment before importing."
+                            f"Multiple NetBox devices match this device's serial or management IP "
+                            f"(IP address {primary_ip}); resolve the duplicate assignment before importing."
                         )
                         result["can_import"] = False
                         result["is_ready"] = False
