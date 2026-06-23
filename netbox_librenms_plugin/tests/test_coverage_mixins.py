@@ -66,6 +66,32 @@ class TestLibreNMSAPIMixinActiveServerKey:
         mock_api_cls.assert_not_called()
 
 
+class TestRenderSyncPartial:
+    """render_sync_partial: the chokepoint that injects migrated-context into every partial render."""
+
+    def test_merges_migrated_context_into_view_context(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m.partial_template_name = "tmpl.html"
+        obj = MagicMock()
+        with (
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
+            patch(
+                "netbox_librenms_plugin.utils.build_migrated_context",
+                return_value={"migrated_to_marker": "M", "migrated_to_winner": "W"},
+            ) as mock_bmc,
+        ):
+            m.render_sync_partial("REQ", obj, "prod", {"vlan_sync": "X"})
+
+        mock_bmc.assert_called_once_with(obj, "prod")
+        _req, template, context = mock_render.call_args.args
+        assert template == "tmpl.html"
+        # The view's payload AND the migrated-context flags are both present — a partial-render
+        # exit routed through here can never silently drop the migration controls.
+        assert context == {"vlan_sync": "X", "migrated_to_marker": "M", "migrated_to_winner": "W"}
+
+
 class TestLibreNMSAPIMixinRebindApiForServer:
     """LibreNMSAPIMixin.rebind_api_for_server: POST-scoped API client for base views."""
 

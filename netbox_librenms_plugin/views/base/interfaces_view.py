@@ -2,12 +2,11 @@ import logging
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
-    build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
@@ -167,13 +166,13 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             # it could raise and turn this HTMX error path back into a 500. Read the already-cached
             # client's key (else "default").
             active_server_key = self.active_server_key
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                active_server_key,
                 {
                     "interface_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
                     "interface_name_field": interface_name_field,
-                    **build_migrated_context(obj, active_server_key),
                 },
             )
 
@@ -357,11 +356,9 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         )
         context = {"interface_sync": context}
         context["interface_name_field"] = interface_name_field
-        # Keep migrated-donor mode (hidden sync button + Migrate column) consistent
-        # with the full page after an HTMX tab refresh.
-        context.update(build_migrated_context(obj, _server_key))
-
-        return render(request, self.partial_template_name, context)
+        # render_sync_partial injects the migrated-donor flags (hidden sync button + Migrate
+        # column) so the HTMX tab refresh stays consistent with the full page.
+        return self.render_sync_partial(request, obj, _server_key, context)
 
     def _enrich_ports_with_vlan_data(self, ports, interface_name_field):
         """

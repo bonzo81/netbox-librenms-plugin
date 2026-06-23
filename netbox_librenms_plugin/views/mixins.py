@@ -5,7 +5,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import get_script_prefix
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
@@ -491,6 +491,29 @@ class LibreNMSAPIMixin:
             str: The bound client's resolved server key, or ``"default"``.
         """
         return getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
+
+    def render_sync_partial(self, request, obj, server_key, context):
+        """
+        Render the view's ``partial_template_name`` with migrated-context flags always merged in.
+
+        Every partial-render exit of the sync tab views needs the ``_migrated_to`` marker
+        context (``migrated_to_marker`` / ``migrated_to_winner``) so a migrated donor keeps its
+        migration controls and doesn't re-expose ordinary sync buttons. Routing all exits through
+        this one chokepoint makes the spread impossible to forget on a new error/success branch.
+
+        Args:
+            request: The current HTTP request.
+            obj: The device/VM whose migration marker is resolved.
+            server_key (str): The server key the marker is namespaced under (use
+                :attr:`active_server_key` on the rebind-failure path).
+            context (dict): The view-specific partial context (e.g. ``{"vlan_sync": ...}``).
+
+        Returns:
+            HttpResponse: The rendered partial.
+        """
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        return render(request, self.partial_template_name, {**context, **build_migrated_context(obj, server_key)})
 
     def rebind_api_for_server(self, server_key):
         """

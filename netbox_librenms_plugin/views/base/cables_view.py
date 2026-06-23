@@ -8,7 +8,7 @@ from django.core.exceptions import MultipleObjectsReturned
 from django.db.models import Q
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import escape
@@ -18,7 +18,6 @@ from netbox_librenms_plugin.constants import OOB_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     build_librenms_id_qs,
-    build_migrated_context,
     coerce_librenms_id,
     get_interface_name_field,
     get_librenms_oob,
@@ -746,17 +745,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             # default client; reading the lazy `librenms_api` property here would reconstruct it
             # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
             active_server_key = self.active_server_key
-            # Keep migrated-donor context so the template still suppresses the live POST
-            # form/button — a stale server_key must not silently re-enable cable sync on a
-            # migrated donor. Resolve the marker from the active session key (the POSTed key is
-            # now known-invalid after the failed rebind).
-            return render(
+            # render_sync_partial injects the migrated-donor context (resolved from the active
+            # session key, since the POSTed key is now known-invalid) so a stale server_key can't
+            # silently re-enable cable sync on a migrated donor.
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
-                    **build_migrated_context(obj, active_server_key),  # session key, not the stale POSTed key
-                },
+                obj,
+                active_server_key,
+                {"cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None}},
             )
         context = self._prepare_context(request, obj, fetch_fresh=True, server_key=server_key)
 
@@ -767,18 +763,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 messages.error(request, f"Failed to fetch links from LibreNMS: {self._links_fetch_error}")
             else:
                 messages.error(request, "No links found in LibreNMS")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
-                {
-                    "cable_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": server_key,
-                    },
-                    **build_migrated_context(obj, server_key),
-                },
+                obj,
+                server_key,
+                {"cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
         messages.success(request, "Cable data refreshed successfully.")
@@ -803,11 +792,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 "Cables refreshed, but OOB controller links fetch failed; "
                 "showing host cables only. See server logs for details.",
             )
-        return render(
-            request,
-            self.partial_template_name,
-            {"cable_sync": context, **build_migrated_context(obj, server_key)},
-        )
+        return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
 
 class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):

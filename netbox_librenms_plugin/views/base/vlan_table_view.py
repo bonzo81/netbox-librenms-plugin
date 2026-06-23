@@ -1,13 +1,12 @@
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
-    build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
     is_list_of_dicts,
@@ -55,19 +54,19 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             # Pass server_key=None explicitly so the fragment doesn't silently fall back to
             # the session/default server (which would re-render with the wrong server selected
             # and let the next retry sync VLANs against the wrong LibreNMS instance).
-            context = {
-                "vlan_sync": self._get_error_context(
-                    obj, "Selected LibreNMS server is no longer configured.", server_key=None
-                ),
-                # Preserve migrated-context flags on this error exit too (every other POST
-                # path includes them); otherwise a donor/winner device loses its migration
-                # controls on a stale-server refresh until the next full reload. Resolve the
-                # marker under the session/active server key — NOT the POSTed key, which failed
-                # to rebind (stale/unconfigured) and would miss the marker entirely.
-                **build_migrated_context(obj, active_server_key),
-            }
-            return render(request, self.partial_template_name, context)
-        migrated = build_migrated_context(obj, server_key)
+            # Resolve the marker under the session/active server key — NOT the POSTed key, which
+            # failed to rebind (stale/unconfigured) and would miss the marker entirely. render_sync_partial
+            # always injects the migrated-context flags so the donor keeps its migration controls.
+            return self.render_sync_partial(
+                request,
+                obj,
+                active_server_key,
+                {
+                    "vlan_sync": self._get_error_context(
+                        obj, "Selected LibreNMS server is no longer configured.", server_key=None
+                    )
+                },
+            )
 
         # Get librenms_id (now scoped to the POSTed server). coerce_librenms_id fails closed on a
         # poisoned cached value (bool/zero/negative/garbage) — the device-id cache path of
@@ -82,11 +81,12 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
             messages.error(request, "Device not found in LibreNMS.")
-            context = {
-                "vlan_sync": self._get_error_context(obj, "Device not found in LibreNMS", server_key=server_key),
-                **migrated,
-            }
-            return render(request, self.partial_template_name, context)
+            return self.render_sync_partial(
+                request,
+                obj,
+                server_key,
+                {"vlan_sync": self._get_error_context(obj, "Device not found in LibreNMS", server_key=server_key)},
+            )
 
         # Fetch VLAN data from LibreNMS
         success, error_msg = self._fetch_and_cache_vlan_data(obj, server_key)
@@ -94,13 +94,15 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             cache.delete(self.get_cache_key(obj, "vlans", server_key))
             cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
             messages.error(request, error_msg)
-            context = {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key), **migrated}
-            return render(request, self.partial_template_name, context)
+            return self.render_sync_partial(
+                request, obj, server_key, {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key)}
+            )
 
         messages.success(request, "VLAN data refreshed successfully.")
 
-        context = {"vlan_sync": self.get_vlan_context(request, obj, server_key), **migrated}
-        return render(request, self.partial_template_name, context)
+        return self.render_sync_partial(
+            request, obj, server_key, {"vlan_sync": self.get_vlan_context(request, obj, server_key)}
+        )
 
     def _fetch_and_cache_vlan_data(self, obj, server_key=None):
         """

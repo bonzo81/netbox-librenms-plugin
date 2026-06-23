@@ -511,11 +511,9 @@ class TestVLANPostServerKeyScoping:
         with (
             # The POST rebinds the API to the posted server before anything else.
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
-            patch(
-                "netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}
-            ) as mock_bmc,
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}) as mock_bmc,
             patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
-            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+            patch("netbox_librenms_plugin.views.mixins.render"),
         ):
             view.post(req, pk=1)
 
@@ -549,10 +547,10 @@ class TestVLANPostServerKeyScoping:
 
         with (
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
-            patch("netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.cache"),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
-            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+            patch("netbox_librenms_plugin.views.mixins.render"),
         ):
             view.post(req, pk=1)
 
@@ -602,10 +600,10 @@ class TestVlanRefreshFailureClearsCache:
 
         with (
             patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=rebound_api),
-            patch("netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
-            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
+            patch("netbox_librenms_plugin.views.mixins.render"),
         ):
             view.post(req, pk=1)
         return view, mock_cache

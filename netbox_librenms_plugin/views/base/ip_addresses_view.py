@@ -6,7 +6,7 @@ from dcim.models import Device
 from django.contrib import messages
 from django.core.cache import cache
 from django.http import Http404, JsonResponse
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 from ipam.models import VRF, IPAddress
@@ -14,7 +14,6 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
-    build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
@@ -517,12 +516,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # default client; reading the lazy `librenms_api` property here would reconstruct it
             # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
             active_server_key = self.active_server_key
-            # Keep migrated-donor context (resolved from the active session key, since the POSTed
-            # key is now known-invalid) so the template still suppresses the live sync form/button —
-            # a stale server_key must not silently re-enable IP sync on a migrated donor. Mirrors cables_view.
-            return render(
+            # render_sync_partial injects the migrated-donor context (resolved from the active
+            # session key, since the POSTed key is now known-invalid) so a stale server_key can't
+            # silently re-enable IP sync on a migrated donor.
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                active_server_key,
                 {
                     "ip_sync": {
                         "object": obj,
@@ -534,7 +534,6 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                         # on this error re-render.
                         "set_primary_ip": resolve_set_primary_ip(request),
                     },
-                    **build_migrated_context(obj, active_server_key),  # session key, not the stale POSTed key
                 },
             )
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=True, server_key=server_key)
@@ -544,9 +543,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # LibreNMS fetch failed (a genuine empty result yields a context with an
             # empty table). Report the failure rather than a misleading "no data".
             messages.error(request, "Failed to fetch IP addresses from LibreNMS; see server logs for details.")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                server_key,
                 {
                     "ip_sync": {
                         "object": obj,
@@ -557,16 +557,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                         # (the template binds it to ip_sync.set_primary_ip).
                         "set_primary_ip": resolve_set_primary_ip(request),
                     },
-                    **build_migrated_context(obj, server_key),
                 },
             )
 
         messages.success(request, "IP address data refreshed successfully.")
-        return render(
-            request,
-            self.partial_template_name,
-            {"ip_sync": context, **build_migrated_context(obj, server_key)},
-        )
+        return self.render_sync_partial(request, obj, server_key, {"ip_sync": context})
 
 
 class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionMixin, CacheMixin, View):

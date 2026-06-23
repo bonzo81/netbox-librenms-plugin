@@ -1067,10 +1067,8 @@ class TestVlanStaleServerMigratedContext:
 
         with (
             patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
-            patch(
-                "netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}
-            ) as mock_mig,
-            patch("netbox_librenms_plugin.views.base.vlan_table_view.render", return_value="rendered"),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}) as mock_mig,
+            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered"),
         ):
             result = view.post(request, pk=1)
 
@@ -1078,71 +1076,87 @@ class TestVlanStaleServerMigratedContext:
         assert result == "rendered"
 
 
+@pytest.mark.django_db
 class TestMigratedContextServerKeyFallback:
-    """When the POSTed server_key is None (malformed/stale request) and the API rebind fails, the cable/IP sync error render must still resolve the migrated marker — by falling back to the session server key — so a migrated donor's sync controls stay suppressed instead of being silently re-enabled."""
+    """When the POSTed server_key fails to rebind (malformed/stale), the cable/IP/interface sync error
+    render must still resolve the migrated marker — under the SESSION key, not the failed posted key —
+    so a migrated donor's sync controls stay suppressed instead of being silently re-enabled.
 
-    def _post_with_server_key(self, view_cls, module_path, posted):
-        from unittest.mock import MagicMock, patch
+    Real-DB: a real donor+winner+marker and the real build_migrated_context exercise the resolution;
+    only the NetBox template render (needs full request context) and the external LibreNMS rebind are
+    stubbed. Asserts the actual resolved winner, not merely that the helper was called.
+    """
+
+    _counter = 0
+
+    def _assert_resolves_under_session(self, view_cls, posted):
+        from dcim.models import Device
+
+        type(self)._counter += 1
+        n = type(self)._counter
+        winner = make_device(f"sk-winner-{n}")
+        donor = make_device(
+            f"sk-donor-{n}",
+            librenms_cf={
+                "sessionkey": {"_migrated_to": {"device_id": winner.pk, "server_key": "sessionkey", "at": "x"}}
+            },
+        )
 
         view = object.__new__(view_cls)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "sessionkey"
+        view.model = Device
+        view._librenms_api = MagicMock(server_key="sessionkey")
+        # The posted key fails to rebind (unconfigured/stale) — the external-config boundary.
+        view.rebind_api_for_server = MagicMock(return_value=None)
+        request = _hx_request(posted)
 
-        request = MagicMock()
-        request.POST = posted
-
-        obj = MagicMock()
+        # Stub only the NetBox template render (it needs full request context unavailable in a unit
+        # test); build_migrated_context runs for REAL against the donor's marker.
         with (
-            patch.object(view, "get_object", return_value=obj),
-            patch.object(view, "rebind_api_for_server", return_value=None),  # rebind fails
-            patch(f"{module_path}.messages"),
-            patch(f"{module_path}.render"),
-            patch(f"{module_path}.build_migrated_context", return_value={}) as bmc,
+            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered") as mock_render,
+            patch("netbox_librenms_plugin.views.base.cables_view.messages"),
+            patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
         ):
-            view.post(request, pk=1)
+            result = view.post(request, pk=donor.pk)
 
-        bmc.assert_called_once()
-        # Always resolve under the session key, never the (failed-to-rebind) POSTed key — a None
-        # key would skip the marker, a non-empty stale key would look it up under the wrong server.
-        assert bmc.call_args.args[1] == "sessionkey"
+        assert result == "rendered"
+        _req, _template, ctx = mock_render.call_args.args
+        # Resolved under the SESSION key → the real winner is found. A wrong/None key would resolve
+        # no winner (migrated_to_winner None), re-enabling the donor's sync controls.
+        assert ctx["migrated_to_marker"]["device_id"] == winner.pk
+        assert ctx["migrated_to_winner"].pk == winner.pk
 
     def test_cables_view_empty_key_uses_session_key(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-        self._post_with_server_key(BaseCableTableView, "netbox_librenms_plugin.views.base.cables_view", {})
+        self._assert_resolves_under_session(BaseCableTableView, {})
 
     def test_cables_view_stale_nonempty_key_uses_session_key(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-        self._post_with_server_key(
-            BaseCableTableView, "netbox_librenms_plugin.views.base.cables_view", {"server_key": "ghost"}
-        )
+        self._assert_resolves_under_session(BaseCableTableView, {"server_key": "ghost"})
 
     def test_ip_view_empty_key_uses_session_key(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
 
-        self._post_with_server_key(BaseIPAddressTableView, "netbox_librenms_plugin.views.base.ip_addresses_view", {})
+        self._assert_resolves_under_session(BaseIPAddressTableView, {})
 
     def test_ip_view_stale_nonempty_key_uses_session_key(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
 
-        self._post_with_server_key(
-            BaseIPAddressTableView, "netbox_librenms_plugin.views.base.ip_addresses_view", {"server_key": "ghost"}
-        )
+        self._assert_resolves_under_session(BaseIPAddressTableView, {"server_key": "ghost"})
 
     def test_interfaces_view_empty_key_uses_session_key(self):
         # interfaces_view previously redirected on a stale key (dropping migrated context); it must
-        # now render the partial with migrated context, so build_migrated_context is reached.
+        # now render the partial with migrated context resolved under the session key.
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
 
-        self._post_with_server_key(BaseInterfaceTableView, "netbox_librenms_plugin.views.base.interfaces_view", {})
+        self._assert_resolves_under_session(BaseInterfaceTableView, {})
 
     def test_interfaces_view_stale_nonempty_key_uses_session_key(self):
         from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
 
-        self._post_with_server_key(
-            BaseInterfaceTableView, "netbox_librenms_plugin.views.base.interfaces_view", {"server_key": "ghost"}
-        )
+        self._assert_resolves_under_session(BaseInterfaceTableView, {"server_key": "ghost"})
 
     def test_interfaces_view_rebind_fail_avoids_lazy_api_property(self):
         """On rebind failure the migrated-context render must read the cached client key, not the lazy librenms_api property — which can re-construct a missing client and 500 the HTMX error path."""
@@ -1161,8 +1175,8 @@ class TestMigratedContextServerKeyFallback:
             patch.object(view, "rebind_api_for_server", return_value=None),  # stale key → error path
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.build_migrated_context", return_value={}) as bmc,
+            patch("netbox_librenms_plugin.views.mixins.render"),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}) as bmc,
             # The lazy property must NOT be touched on this path; make it explode if it is.
             patch.object(
                 BaseInterfaceTableView,
@@ -1193,8 +1207,8 @@ class TestMigratedContextServerKeyFallback:
             patch.object(view, "get_object", return_value=MagicMock()),
             patch.object(view, "rebind_api_for_server", return_value=None),
             patch("netbox_librenms_plugin.views.base.vlan_table_view.messages"),
-            patch("netbox_librenms_plugin.views.base.vlan_table_view.render"),
-            patch("netbox_librenms_plugin.views.base.vlan_table_view.build_migrated_context", return_value={}) as bmc,
+            patch("netbox_librenms_plugin.views.mixins.render"),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}) as bmc,
             patch.object(
                 BaseVLANTableView,
                 "librenms_api",
@@ -1224,8 +1238,8 @@ class TestMigratedContextServerKeyFallback:
             patch.object(view, "get_object", return_value=MagicMock()),
             patch.object(view, "rebind_api_for_server", return_value=None),
             patch("netbox_librenms_plugin.views.base.modules_view.messages"),
-            patch("netbox_librenms_plugin.views.base.modules_view.render"),
-            patch("netbox_librenms_plugin.views.base.modules_view.build_migrated_context", return_value={}) as bmc,
+            patch("netbox_librenms_plugin.views.mixins.render"),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}) as bmc,
             patch.object(
                 BaseModuleTableView,
                 "librenms_api",
@@ -1254,8 +1268,8 @@ class TestMigratedContextServerKeyFallback:
             patch.object(view, "get_object", return_value=MagicMock()),
             patch.object(view, "rebind_api_for_server", return_value=None),
             patch("netbox_librenms_plugin.views.base.cables_view.messages"),
-            patch("netbox_librenms_plugin.views.base.cables_view.render"),
-            patch("netbox_librenms_plugin.views.base.cables_view.build_migrated_context", return_value={}) as bmc,
+            patch("netbox_librenms_plugin.views.mixins.render"),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}) as bmc,
             patch.object(
                 BaseCableTableView,
                 "librenms_api",
@@ -1284,9 +1298,9 @@ class TestMigratedContextServerKeyFallback:
             patch.object(view, "get_object", return_value=MagicMock()),
             patch.object(view, "rebind_api_for_server", return_value=None),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render"),
+            patch("netbox_librenms_plugin.views.mixins.render"),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.resolve_set_primary_ip", return_value=False),
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context", return_value={}) as bmc,
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}) as bmc,
             patch.object(
                 BaseIPAddressTableView,
                 "librenms_api",
@@ -1315,8 +1329,8 @@ class TestMigratedContextServerKeyFallback:
             patch.object(view, "get_object", return_value=MagicMock()),
             patch.object(view, "rebind_api_for_server", return_value=None),  # rebind fails → stale-key fallback
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render") as mock_render,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
 
@@ -1341,8 +1355,8 @@ class TestMigratedContextServerKeyFallback:
             patch.object(view, "rebind_api_for_server", return_value="good"),  # rebind OK
             patch.object(view, "_prepare_context", return_value=None),  # live fetch failed
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages"),
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render") as mock_render,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
 

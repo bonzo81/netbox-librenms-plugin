@@ -1204,7 +1204,7 @@ class TestBaseCableTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "_prepare_context", return_value=None),
             patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.cables_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)
@@ -1223,7 +1223,7 @@ class TestBaseCableTableViewPost:
             patch.object(view, "get_object", return_value=obj),
             patch.object(view, "_prepare_context", return_value=fake_context),
             patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.cables_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)
@@ -1374,10 +1374,10 @@ class TestBaseInterfaceTableViewBasics:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="name"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
             patch(
-                "netbox_librenms_plugin.views.base.interfaces_view.build_migrated_context",
+                "netbox_librenms_plugin.utils.build_migrated_context",
                 return_value={"migrated_to_marker": {"device_id": 7}},
             ) as mock_migrated,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render", return_value="rendered") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered") as mock_render,
         ):
             result = view.post(req, pk=1)
 
@@ -1411,10 +1411,10 @@ class TestBaseInterfaceTableViewBasics:
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.get_interface_name_field", return_value="name"),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
             patch(
-                "netbox_librenms_plugin.views.base.ip_addresses_view.build_migrated_context",
+                "netbox_librenms_plugin.utils.build_migrated_context",
                 return_value={"migrated_to_marker": {"device_id": 7}},
             ) as mock_migrated,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render", return_value="rendered") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered") as mock_render,
         ):
             result = view.post(req, pk=1)
 
@@ -1709,7 +1709,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1748,7 +1748,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1791,7 +1791,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1829,7 +1829,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1885,7 +1885,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -1927,7 +1927,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -2009,7 +2009,7 @@ class TestBaseInterfaceTableViewPost:
             # isn't entangled with VC-routing (cache_device == obj for non-VC anyway).
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
@@ -3259,7 +3259,7 @@ class TestBaseIPAddressTableViewPost:
                 return_value="ifName",
             ),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)
@@ -3282,7 +3282,7 @@ class TestBaseIPAddressTableViewPost:
                 return_value="ifName",
             ),
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.ip_addresses_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
         ):
             mock_render.return_value = MagicMock()
             view.post(request, pk=1)

@@ -3,12 +3,11 @@ import re
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
-    build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
     get_librenms_device_id,
@@ -352,17 +351,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # default client; reading the lazy `librenms_api` property here would reconstruct it
             # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
             active_server_key = self.active_server_key
-            return render(
+            # render_sync_partial injects the donor-mode flags, resolved under the session/active
+            # key — NOT the POSTed key, which failed to rebind and would miss the marker and
+            # re-enable a donor's sync controls.
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                active_server_key,
                 {
                     "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None},
                     "has_write_permission": self.has_write_permission(),
-                    # Keep donor-mode flags on this render too. Resolve the marker under the
-                    # session/active server key — NOT the POSTed key, which failed to rebind
-                    # (stale/unconfigured) and would miss the marker, re-enabling a donor's sync
-                    # controls. Mirrors ip_addresses_view / cables_view / vlan_table_view.
-                    **build_migrated_context(obj, active_server_key),
                 },
             )
         sync_device = self._get_sync_device(obj, server_key=server_key)
@@ -374,18 +372,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if self.librenms_id is None:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             messages.error(request, "Device not found in LibreNMS.")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                server_key,
                 {
-                    "module_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": server_key,
-                    },
+                    "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key},
                     "has_write_permission": self.has_write_permission(),
-                    **build_migrated_context(obj, server_key),
                 },
             )
 
@@ -403,18 +396,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
             messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
-            return render(
+            return self.render_sync_partial(
                 request,
-                self.partial_template_name,
+                obj,
+                server_key,
                 {
-                    "module_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": server_key,
-                    },
+                    "module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key},
                     "has_write_permission": self.has_write_permission(),
-                    **build_migrated_context(obj, server_key),
                 },
             )
 
@@ -547,14 +535,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             )
         if not txr_error and not oob_failed and not ports_error:
             messages.success(request, "Inventory data refreshed successfully.")
-        return render(
+        return self.render_sync_partial(
             request,
-            self.partial_template_name,
-            {
-                "module_sync": context,
-                "has_write_permission": self.has_write_permission(),
-                **build_migrated_context(obj, server_key),
-            },
+            obj,
+            server_key,
+            {"module_sync": context, "has_write_permission": self.has_write_permission()},
         )
 
     def get_context_data(self, request, obj):

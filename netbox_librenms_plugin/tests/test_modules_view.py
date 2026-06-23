@@ -360,7 +360,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache"),
             patch("netbox_librenms_plugin.views.base.modules_view.messages"),
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch.object(view, "_merge_transceiver_data", wraps=view._merge_transceiver_data) as mock_merge,
             patch.object(
                 view, "_enrich_inventory_port_identity", wraps=view._enrich_inventory_port_identity
@@ -389,8 +389,8 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.modules_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
 
@@ -417,10 +417,10 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.messages"),
             patch(
-                "netbox_librenms_plugin.views.base.modules_view.build_migrated_context",
+                "netbox_librenms_plugin.utils.build_migrated_context",
                 return_value={"migrated_to_marker": None},
             ) as mock_migrated,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value="rendered"),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value="rendered"),
         ):
             result = view.post(request, pk=1)
 
@@ -445,8 +445,8 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
-            patch("netbox_librenms_plugin.views.base.modules_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
 
@@ -555,7 +555,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache"),
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
         ):
             view.post(request, pk=1)
 
@@ -589,7 +589,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
         ):
             view.post(request, pk=1)
@@ -629,7 +629,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
         ):
             view.post(request, pk=1)
@@ -669,7 +669,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 999}),
         ):
             view.post(request, pk=1)
@@ -850,7 +850,7 @@ class TestMergeTransceiverDataPortIdentity:
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.messages"),
-            patch("netbox_librenms_plugin.views.base.modules_view.render", return_value=MagicMock()),
+            patch("netbox_librenms_plugin.views.mixins.render", return_value=MagicMock()),
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
         ):
             view.post(request, pk=1)
