@@ -2082,7 +2082,7 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob", return_value={"id": 99}),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.mixins.render") as mock_render,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
         ):
