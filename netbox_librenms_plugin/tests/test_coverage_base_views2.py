@@ -1016,8 +1016,8 @@ class TestCablePostSerialFetchWarning:
         view._prepare_context = MagicMock(side_effect=_prep)
         with (
             patch("netbox_librenms_plugin.views.base.cables_view.messages") as mock_msgs,
-            patch("netbox_librenms_plugin.views.base.cables_view.render"),
-            patch("netbox_librenms_plugin.views.base.cables_view.build_migrated_context", return_value={}),
+            patch("netbox_librenms_plugin.views.mixins.render"),
+            patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
             view.post(request, pk=1)
         return [c.args[1] for c in mock_msgs.warning.call_args_list]
