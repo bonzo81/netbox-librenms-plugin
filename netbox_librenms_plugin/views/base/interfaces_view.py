@@ -838,10 +838,17 @@ class BaseInterfaceTableView(
         Used to trigger the lazy port_stack API fetch only when needed. Detects:
 
           - ifType == 'ieee8023adLag' (definitive)
-          - ifType == 'propVirtual' (Cisco IOS port-channels / Junos sub-units)
           - Name matches any PortStackLagPattern regex
           - Any port name ends with '.<digits>' AND the base name also exists
             (sub-interface detection, e.g. ge-0/0/0.100 with ge-0/0/0 present)
+
+        'propVirtual' is deliberately NOT a signal: loopbacks, SVIs and tunnels are all
+        propVirtual, so gating on it fired the extra get_port_stack()/get_device_info()
+        round-trips for nearly every device. It also bought no real coverage — the resolver's
+        _is_lag_aggregate() never treats propVirtual as an aggregate (only ieee8023adLag or a
+        name-pattern match), so a propVirtual port-channel still has to match a configured
+        PortStackLagPattern (e.g. the Po-channel regex) to be resolved, and that name-pattern
+        check already gates it here.
 
         Name-based checks scan the user-selected ``interface_name_field`` as well as
         ifName/ifDescr: on an ifDescr-driven device the LAG/sub-interface name (which
@@ -878,7 +885,7 @@ class BaseInterfaceTableView(
 
         for port in ports:
             if_type = port.get("ifType", "")
-            if if_type in ("ieee8023adLag", "propVirtual"):
+            if if_type == "ieee8023adLag":
                 return True
             names = _names(port)
             if any(pat.search(name) for pat in lag_patterns for name in names):

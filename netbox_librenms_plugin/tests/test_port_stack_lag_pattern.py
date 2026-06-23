@@ -2,60 +2,58 @@
 
 import pytest
 from django.core.exceptions import ValidationError
-from unittest.mock import patch
 
 
+@pytest.mark.django_db
 class TestPortStackLagPattern:
-    def _make(self, librenms_os="ios", lag_name_pattern=r"^Po\d+$"):
+    """Exercise the real ORM path: save() -> FullCleanOnSaveMixin.full_clean() -> clean() plus the unique librenms_os constraint, rather than a __new__ + patched-clean stand-in that bypasses validation entirely."""
+
+    def _model(self):
         from netbox_librenms_plugin.models import PortStackLagPattern
 
-        obj = PortStackLagPattern.__new__(PortStackLagPattern)
-        obj.librenms_os = librenms_os
-        obj.lag_name_pattern = lag_name_pattern
-        obj.description = ""
-        return obj
+        return PortStackLagPattern
+
+    def test_migration_seeded_the_lowercased_default_patterns(self):
+        """Migration 0011's RunPython seed actually committed rows through the ORM (e.g. the lower-cased 'ios' default) — a real-DB check the __new__/patched-clean stand-in could never make."""
+        assert self._model().objects.filter(librenms_os="ios", lag_name_pattern=r"^Po\d+$").exists()
+
+    def test_save_normalizes_os_and_pattern(self):
+        """A real save lower-cases/strips librenms_os and strips lag_name_pattern; the normalized row round-trips from the DB."""
+        obj = self._model().objects.create(librenms_os="  ZZNORM  ", lag_name_pattern=r"  ^Po\d+$  ")
+        obj.refresh_from_db()
+        assert obj.librenms_os == "zznorm"
+        assert obj.lag_name_pattern == r"^Po\d+$"
 
     def test_str_representation(self):
-        obj = self._make(librenms_os="ios", lag_name_pattern=r"^Po\d+$")
+        obj = self._model()(librenms_os="ios", lag_name_pattern=r"^Po\d+$")
         assert str(obj) == r"ios -> ^Po\d+$"
 
-    def test_clean_rejects_invalid_regex(self):
-        obj = self._make(lag_name_pattern="[invalid(regex")
-        with patch("netbox.models.NetBoxModel.clean"):
-            with pytest.raises(ValidationError) as exc_info:
-                obj.clean()
+    def test_save_rejects_invalid_regex_and_does_not_persist(self):
+        """An invalid regex must raise on save (via full_clean) AND leave no row behind."""
+        model = self._model()
+        with pytest.raises(ValidationError) as exc_info:
+            model.objects.create(librenms_os="zzbadregex", lag_name_pattern="[invalid(regex")
         assert "lag_name_pattern" in exc_info.value.message_dict
+        assert not model.objects.filter(librenms_os="zzbadregex").exists()
 
-    def test_clean_accepts_valid_regex(self):
-        obj = self._make()
-        with patch("netbox.models.NetBoxModel.clean"):
-            obj.clean()  # should not raise
-
-    def test_clean_rejects_blank_os(self):
-        obj = self._make(librenms_os="")
-        with patch("netbox.models.NetBoxModel.clean"):
-            with pytest.raises(ValidationError) as exc_info:
-                obj.clean()
+    def test_save_rejects_blank_os(self):
+        with pytest.raises(ValidationError) as exc_info:
+            self._model().objects.create(librenms_os="   ", lag_name_pattern=r"^Po\d+$")
         assert "librenms_os" in exc_info.value.message_dict
 
-    def test_clean_rejects_blank_pattern(self):
-        obj = self._make(lag_name_pattern="")
-        with patch("netbox.models.NetBoxModel.clean"):
-            with pytest.raises(ValidationError) as exc_info:
-                obj.clean()
+    def test_save_rejects_blank_pattern(self):
+        with pytest.raises(ValidationError) as exc_info:
+            self._model().objects.create(librenms_os="zzblankpat", lag_name_pattern="   ")
         assert "lag_name_pattern" in exc_info.value.message_dict
 
-    def test_clean_normalizes_os(self):
-        obj = self._make(librenms_os="  IOS  ")
-        with patch("netbox.models.NetBoxModel.clean"):
-            obj.clean()
-        assert obj.librenms_os == "ios"
-
-    def test_clean_normalizes_lag_pattern(self):
-        obj = self._make(lag_name_pattern=r"  ^Po\d+$  ")
-        with patch("netbox.models.NetBoxModel.clean"):
-            obj.clean()
-        assert obj.lag_name_pattern == r"^Po\d+$"
+    def test_unique_librenms_os_rejects_case_variant_duplicate(self):
+        """librenms_os is unique AND lower-cased in clean(), so a case-variant duplicate ('ZZDUP' for an existing 'zzdup') must be rejected by full_clean's unique check — not silently inserted as a second row."""
+        model = self._model()
+        model.objects.create(librenms_os="zzdup", lag_name_pattern=r"^Po\d+$")
+        with pytest.raises(ValidationError) as exc_info:
+            model.objects.create(librenms_os="ZZDUP", lag_name_pattern=r"^Bundle-Ether\d+$")
+        assert "librenms_os" in exc_info.value.message_dict
+        assert model.objects.filter(librenms_os="zzdup").count() == 1
 
 
 @pytest.mark.django_db
@@ -98,3 +96,19 @@ class TestHasLagSignalsFieldSelection:
             {"ifName": "Gi0/1", "ifDescr": "GigabitEthernet0/1", "ifType": "ethernetCsmacd"},
         ]
         assert view._has_lag_signals(ports, "ifDescr") is False
+
+    def test_propvirtual_alone_does_not_trigger_fetch(self):
+        """A propVirtual ifType is NOT a LAG signal: loopbacks/SVIs/tunnels are propVirtual, so gating on it fired the lazy port_stack/device_info round-trips for nearly every device. Only ieee8023adLag, a name-pattern match, or a real sub-interface should gate the fetch — matching what the resolver can actually classify."""
+        view = self._make_view()
+        # Lone propVirtual ports whose names match no PortStackLagPattern and have no
+        # sub-interface child: must NOT trigger the fetch (the old code returned True here).
+        virtuals = [
+            {"ifName": "Loopback0", "ifType": "propVirtual"},
+            {"ifName": "Vlan100", "ifType": "propVirtual"},
+        ]
+        assert view._has_lag_signals(virtuals) is False
+        # A structural aggregate (ieee8023adLag) still triggers it, regardless of name.
+        assert view._has_lag_signals([{"ifName": "agg-x", "ifType": "ieee8023adLag"}]) is True
+        # A propVirtual port-channel whose name matches a seeded pattern (^Po\\d+$) still
+        # triggers it via the name-pattern branch — so real IOS LAGs are unaffected.
+        assert view._has_lag_signals([{"ifName": "Po10", "ifType": "propVirtual"}]) is True
