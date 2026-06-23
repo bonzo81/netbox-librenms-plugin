@@ -275,39 +275,25 @@ class SyncInterfacesView(
                     continue
                 expected_owner = _interface_owner_for_object(target_device)
 
-                # LAG membership: this interface is a member of a LAG aggregate
+                # LAG membership: this interface is a member of a LAG aggregate. Both ends are
+                # resolved/validated/persisted by the shared helpers below (same flow as the
+                # parent pass), differing only in the Interface-only source guard and the
+                # aggregate type=lag promotion.
                 raw_lag = lag_members.get(normalize_librenms_port_id(port_id))
                 if raw_lag is not None:
-                    lag_port_id = str(raw_lag)
-                    lag_entry = port_by_id.get(lag_port_id, {})
-                    # Use the active display field for the name fallback: in ifDescr mode the
-                    # NetBox interface name matches ifDescr, so hinting ifName would look up the
-                    # wrong name and silently skip the LAG link. Fall back to ifName if absent.
-                    lag_name = lag_entry.get(interface_name_field) or lag_entry.get("ifName", "")
-
-                    member_iface, err = _resolve_interface_by_port_id(
-                        obj, port_id, server_key, expected_owner=expected_owner, index=iface_index
-                    )
-                    if err:
-                        logger.debug("LAG member lookup failed during bulk sync: %s", err)
-                        continue
-
-                    if not isinstance(member_iface, Interface):
-                        continue  # VMInterface does not support lag
-
-                    agg_iface, err = _resolve_interface_by_port_id(
+                    member_iface, agg_iface = self._resolve_relationship_ends(
                         obj,
-                        lag_port_id,
+                        port_id,
+                        raw_lag,
+                        port_by_id,
+                        iface_index,
                         server_key,
-                        name_hint=lag_name,
-                        expected_owner=expected_owner,
-                        index=iface_index,
+                        expected_owner,
+                        interface_name_field,
+                        "LAG",
+                        require_interface_source=True,  # VMInterface has no lag field
                     )
-                    if err:
-                        logger.debug("LAG aggregate lookup failed during bulk sync: %s", err)
-                        continue
-
-                    if member_iface.lag_id != agg_iface.pk:
+                    if member_iface and member_iface.lag_id != agg_iface.pk:
                         if not _interfaces_same_owner(member_iface, agg_iface):
                             logger.warning(
                                 "Bulk sync: skipping cross-member LAG link %s -> %s (different devices)",
@@ -315,65 +301,25 @@ class SyncInterfacesView(
                                 agg_iface.name,
                             )
                         else:
-                            # Validate before persisting: _interfaces_same_owner only checks the
-                            # device, so stale port_stack data (or a port mapped as its own
-                            # aggregate) could otherwise persist a self-LAG or other link that
-                            # Interface.clean() rejects. Set the lag type in memory so full_clean()
-                            # validates against it, then commit only on success.
-                            member_iface.lag = agg_iface
-                            agg_needs_lag_type = isinstance(agg_iface, Interface) and agg_iface.type != "lag"
-                            original_agg_type = agg_iface.type
-                            if agg_needs_lag_type:
-                                agg_iface.type = "lag"
-                            try:
-                                member_iface.full_clean()
-                            except ValidationError as exc:
-                                # agg_iface comes from the SHARED index reused across rows: leaving
-                                # type='lag' on a failed row would make a later valid member skip the
-                                # agg_iface.save() branch and persist its link while the aggregate's
-                                # type stays stale in the DB. Restore it before skipping.
-                                if agg_needs_lag_type:
-                                    agg_iface.type = original_agg_type
-                                logger.warning(
-                                    "Bulk sync: skipping invalid LAG link %s -> %s: %s",
-                                    member_iface.name,
-                                    agg_iface.name,
-                                    _validation_error_detail(exc),
-                                )
-                                continue
-                            if agg_needs_lag_type:
-                                agg_iface.save()
-                            member_iface.save()
-                            logger.info("Bulk sync: set %s.lag = %s", member_iface.name, agg_iface.name)
+                            self._apply_relationship_edge(
+                                member_iface, "lag", agg_iface, self._prepare_bulk_lag_aggregate, "LAG"
+                            )
 
-                # Sub-interface parent: this interface is a child of a parent interface
+                # Sub-interface parent: this interface is a child of a parent interface.
                 raw_parent = sub_interfaces.get(normalize_librenms_port_id(port_id))
                 if raw_parent is not None:
-                    parent_port_id = str(raw_parent)
-                    parent_entry = port_by_id.get(parent_port_id, {})
-                    # Active display field for the name fallback (see the LAG branch above).
-                    parent_name = parent_entry.get(interface_name_field) or parent_entry.get("ifName", "")
-
-                    child_iface, err = _resolve_interface_by_port_id(
-                        obj, port_id, server_key, expected_owner=expected_owner, index=iface_index
-                    )
-                    if err:
-                        logger.debug("Sub-iface child lookup failed during bulk sync: %s", err)
-                        continue
-
-                    parent_iface, err = _resolve_interface_by_port_id(
+                    child_iface, parent_iface = self._resolve_relationship_ends(
                         obj,
-                        parent_port_id,
+                        port_id,
+                        raw_parent,
+                        port_by_id,
+                        iface_index,
                         server_key,
-                        name_hint=parent_name,
-                        expected_owner=expected_owner,
-                        index=iface_index,
+                        expected_owner,
+                        interface_name_field,
+                        "parent",
                     )
-                    if err:
-                        logger.debug("Sub-iface parent lookup failed during bulk sync: %s", err)
-                        continue
-
-                    if child_iface.parent_id != parent_iface.pk:
+                    if child_iface and child_iface.parent_id != parent_iface.pk:
                         if not _interfaces_same_owner(child_iface, parent_iface):
                             logger.warning(
                                 "Bulk sync: skipping cross-member parent link %s -> %s (different devices)",
@@ -381,21 +327,101 @@ class SyncInterfacesView(
                                 parent_iface.name,
                             )
                         else:
-                            # Validate before persisting (see the LAG branch above): guards against
-                            # a self-parent or other relationship Interface.clean() would reject.
-                            child_iface.parent = parent_iface
-                            try:
-                                child_iface.full_clean()
-                            except ValidationError as exc:
-                                logger.warning(
-                                    "Bulk sync: skipping invalid parent link %s -> %s: %s",
-                                    child_iface.name,
-                                    parent_iface.name,
-                                    _validation_error_detail(exc),
-                                )
-                                continue
-                            child_iface.save()
-                            logger.info("Bulk sync: set %s.parent = %s", child_iface.name, parent_iface.name)
+                            self._apply_relationship_edge(child_iface, "parent", parent_iface, None, "parent")
+
+    @staticmethod
+    def _prepare_bulk_lag_aggregate(agg_iface):
+        """
+        LAG-pass hook: promote the aggregate to type=lag, returning ``(persist, restore)`` or None.
+
+        member_iface.full_clean() only accepts the link when the aggregate is type=lag, so it
+        is bumped in memory before validation. The aggregate object is reused across rows via
+        the shared interface index, so a member whose link later fails validation must restore
+        the in-memory type — otherwise a subsequent valid member sharing this aggregate would
+        skip the save() and leave the aggregate's type stale in the DB.
+        """
+        if not (isinstance(agg_iface, Interface) and agg_iface.type != "lag"):
+            return None
+        original_type = agg_iface.type
+        agg_iface.type = "lag"
+        return (lambda: agg_iface.save(), lambda: setattr(agg_iface, "type", original_type))
+
+    def _resolve_relationship_ends(
+        self,
+        obj,
+        port_id,
+        related_raw,
+        port_by_id,
+        iface_index,
+        server_key,
+        expected_owner,
+        interface_name_field,
+        log_kind,
+        *,
+        require_interface_source=False,
+    ):
+        """
+        Resolve the ``(source, related)`` interface pair for one bulk LAG/parent edge.
+
+        Both ends are resolved by stable LibreNMS port_id (owner-pinned, via the shared index).
+        Returns ``(None, None)`` — skip the row — on any lookup failure (logged at debug) or,
+        when *require_interface_source* is set, when the source isn't an Interface (a
+        VMInterface has no lag field).
+        """
+        related_port_id = str(related_raw)
+        related_entry = port_by_id.get(related_port_id, {})
+        # Use the active display field for the name fallback: in ifDescr mode the NetBox
+        # interface name matches ifDescr, so hinting ifName would look up the wrong name and
+        # silently skip the link. Fall back to ifName if absent.
+        related_name = related_entry.get(interface_name_field) or related_entry.get("ifName", "")
+
+        source_iface, err = _resolve_interface_by_port_id(
+            obj, port_id, server_key, expected_owner=expected_owner, index=iface_index
+        )
+        if err:
+            logger.debug("%s source lookup failed during bulk sync: %s", log_kind, err)
+            return None, None
+        if require_interface_source and not isinstance(source_iface, Interface):
+            return None, None  # VMInterface does not support lag
+
+        related_iface, err = _resolve_interface_by_port_id(
+            obj, related_port_id, server_key, name_hint=related_name, expected_owner=expected_owner, index=iface_index
+        )
+        if err:
+            logger.debug("%s related lookup failed during bulk sync: %s", log_kind, err)
+            return None, None
+        return source_iface, related_iface
+
+    def _apply_relationship_edge(self, source_iface, relation_field, related_iface, prepare_related, log_kind):
+        """
+        Set ``source_iface.<relation_field> = related_iface`` and persist, validating first.
+
+        Shared by the LAG and parent bulk passes. Validation guards against a self-link or
+        other relationship Interface.clean() rejects (``_interfaces_same_owner`` only checks the
+        device). ``prepare_related(related_iface)`` may set required related-side state in
+        memory and return ``(persist_fn, restore_fn)`` — the LAG pass uses it to bump the
+        aggregate to type=lag and undo that on failure. A validation failure is logged and
+        skipped so the batch continues, never raised.
+        """
+        setattr(source_iface, relation_field, related_iface)
+        prepared = prepare_related(related_iface) if prepare_related else None
+        try:
+            source_iface.full_clean()
+        except ValidationError as exc:
+            if prepared:
+                prepared[1]()  # restore the in-memory related-side mutation
+            logger.warning(
+                "Bulk sync: skipping invalid %s link %s -> %s: %s",
+                log_kind,
+                source_iface.name,
+                related_iface.name,
+                _validation_error_detail(exc),
+            )
+            return
+        if prepared:
+            prepared[0]()  # persist the related-side mutation (e.g. aggregate type=lag)
+        source_iface.save()
+        logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
 
     def sync_selected_interfaces(
         self,
