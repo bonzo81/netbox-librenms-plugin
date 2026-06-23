@@ -81,19 +81,17 @@ def _describe_existing_librenms_link(obj, server_key):
     host_id = get_librenms_device_id(obj, server_key, auto_save=False)
     if host_id is not None and host_id > 0:
         info["host_id"] = host_id
-    # The OOB sub-object isn't covered by the accessor, so parse it locally from the dict form:
-    # {"<server_key>": {"id": ..., "oob": {"id": <int|str>, "type": <str>}}}.
-    cf_value = obj.cf.get("librenms_id") if hasattr(obj, "cf") else None
-    entry = cf_value.get(server_key) if isinstance(cf_value, dict) else None
-    if isinstance(entry, dict):
-        oob = entry.get("oob")
-        if isinstance(oob, dict):
-            oob_id = coerce_librenms_id(oob.get("id"))
-            if oob_id is not None and oob_id > 0:
-                info["oob_id"] = oob_id
-            oob_type = oob.get("type")
-            if isinstance(oob_type, str) and oob_type:
-                info["oob_type"] = oob_type
+    # The OOB sub-object via the canonical accessor (mirrors the host-id read above): it returns
+    # the raw oob dict ({"id": <int|str>, "type": <str>, ...}) or None, encapsulating the
+    # dict-form navigation {"<server_key>": {"id": ..., "oob": {...}}}.
+    oob = get_librenms_oob(obj, server_key)
+    if oob is not None:
+        oob_id = coerce_librenms_id(oob.get("id"))
+        if oob_id is not None and oob_id > 0:
+            info["oob_id"] = oob_id
+        oob_type = oob.get("type")
+        if isinstance(oob_type, str) and oob_type:
+            info["oob_type"] = oob_type
     return info
 
 
