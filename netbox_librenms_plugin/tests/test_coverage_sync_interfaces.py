@@ -1765,6 +1765,8 @@ class TestSyncInterfaceLagViewRealDB:
 
     def test_cross_member_aggregate_rejected(self):
         """The aggregate port_id resolving onto a *different* VC member must not link across devices — the expected_owner pin (obj = the posted member) rejects it at resolution."""
+        import json
+
         from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
         member1 = make_device("vc-lag-m1")
@@ -1779,6 +1781,11 @@ class TestSyncInterfaceLagViewRealDB:
         req = _make_request({"port_id": "40", "lag_port_id": "50", "server_key": "default"})
         resp = view.post(req, object_type="device", object_id=member1.pk)
 
-        assert resp.status_code in (404, 409)
+        # Pin the rejection to the expected_owner path: a bare `in (404, 409)` would still pass if
+        # post() stopped pinning expected_owner and only the later cross-device guard (409) caught
+        # it. The owner pin rejects at resolution with 404 + a "different owner" message.
+        assert resp.status_code == 404
+        body = json.loads(resp.content)
+        assert "different owner" in body["error"]
         local.refresh_from_db()
         assert local.lag_id is None

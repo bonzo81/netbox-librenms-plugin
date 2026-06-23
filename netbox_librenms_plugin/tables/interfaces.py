@@ -731,6 +731,11 @@ class LibreNMSInterfaceTable(tables.Table):
             "mtu": self.render_mtu(port_data["ifMtu"], port_data),
             "enabled": self.render_enabled(port_data["ifAdminStatus"], port_data),
             "description": self.render_description(port_data["ifAlias"], port_data),
+            # The librenms_id badge's colour is member-specific (it compares this port_id
+            # against the resolved NetBox interface's device librenms_id), so a VC member
+            # switch must repaint it too — otherwise it keeps the previous member's
+            # match/mismatch state. The column accessor is "port_id" (see the column def).
+            "librenms_id": self.render_librenms_id(port_data.get("port_id"), port_data),
             # Renders from the lag/parent enrichment keys the caller stamps onto
             # port_data; absent enrichment it returns "" (safe empty cell).
             "parent": self.render_parent(None, port_data),

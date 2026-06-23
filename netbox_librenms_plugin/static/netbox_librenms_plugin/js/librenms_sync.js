@@ -1318,6 +1318,13 @@ function handleInterfaceChange(select, value) {
                 row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
                 row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
                 row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
+                // The LibreNMS ID badge's colour is member-specific (it compares this port_id
+                // against the resolved member's stored librenms_id), so refresh it too —
+                // otherwise it keeps the previously-selected member's match/mismatch state.
+                const librenmsIdCell = row.querySelector('td[data-col="librenms_id"]');
+                if (librenmsIdCell && typeof formattedRow.librenms_id !== 'undefined') {
+                    librenmsIdCell.innerHTML = formattedRow.librenms_id;
+                }
                 // Parent/LAG relationship is device-specific, so refresh it too — otherwise
                 // it keeps the previously-selected member's status and sync button.
                 const parentCell = row.querySelector('td[data-col="parent"]');
