@@ -6169,6 +6169,39 @@ class TestPromoteToHostViewPost:
         assert entry["id"] == 17
         assert entry["oob"] == {"id": 10, "type": "oob"}
 
+    def test_override_platform_manufacturer_mismatch_rejected(self):
+        """An override platform whose manufacturer differs from the device type's is rejected (update_fields skips full_clean, so the cross-field invariant is enforced explicitly), and nothing is committed."""
+        from dcim.models import Device, Manufacturer, Platform
+        from django.http import HttpResponse
+
+        view = self._make_view()
+        existing_device = make_device("promote-badplat", librenms_cf={"default": {"id": 10}})
+        # A platform under a DIFFERENT manufacturer than the device's device_type.
+        other_mfr, _ = Manufacturer.objects.get_or_create(name="OtherMfr-3001", slug="othermfr-3001")
+        bad_platform, _ = Platform.objects.get_or_create(
+            name="BadPlat-3001", slug="badplat-3001", defaults={"manufacturer": other_mfr}
+        )
+        assert bad_platform.manufacturer_id != existing_device.device_type.manufacturer_id
+
+        request = _make_request(
+            post={"existing_device_id": str(existing_device.pk), "override_platform_id": str(bad_platform.pk)}
+        )
+        libre_device = {"device_id": 17}
+        promote = {"existing_libre_id": 10, "existing_oob_type": "oob"}
+        validation = {"promote_to_host": promote, "existing_device": existing_device}
+        view.get_validated_device_with_selections = MagicMock(return_value=(libre_device, validation, {}))
+        view.render_device_row = MagicMock(return_value=HttpResponse("row"))
+
+        response = view.post(request, device_id=17)
+
+        # Rejected with a clear cross-field message; the promote is not committed.
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert b"not compatible" in response.content
+        reloaded = Device.objects.get(pk=existing_device.pk)
+        assert reloaded.platform_id is None  # the bad override was never persisted
+        assert reloaded.custom_field_data["librenms_id"]["default"] == {"id": 10}  # host swap not committed
+
     def test_aborts_when_incoming_host_id_owned_by_another_device(self):
         """The incoming host id must not already belong to another NetBox device."""
         from dcim.models import Device
