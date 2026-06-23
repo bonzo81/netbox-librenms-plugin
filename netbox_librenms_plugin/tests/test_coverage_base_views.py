@@ -152,6 +152,36 @@ class TestBaseCableTableViewGetLinksData:
         assert ctx is not None
         assert view._oob_links_fetch_failed is True
 
+    def test_prepare_context_deletes_stale_links_cache_on_partial_fetch(self):
+        """A partial fresh fetch must DELETE any prior full links snapshot, not leave it cached."""
+        from django.core.cache import cache as real_cache
+
+        view = self._make_view()
+        view._librenms_api.cache_timeout = 300
+        obj = _mock_obj()
+        cache_key = "links-partial-stale-test"
+        # A prior FULL snapshot is already cached (what verify/sync would resolve rows from).
+        real_cache.set(cache_key, {"links": [{"local_port": "Gi0/1", "local_port_id": 11}]})
+
+        def _fake_links(o, server_key=None):
+            view._oob_links_fetch_failed = True  # partial: the OOB-side fetch failed
+            return [{"local_port": "Gi0/2", "local_port_id": 22}]  # fresh PARTIAL set
+
+        try:
+            with (
+                patch.object(view, "get_links_data", side_effect=_fake_links),
+                patch.object(view, "get_cache_key", return_value=cache_key),
+                patch.object(view, "enrich_links_data", side_effect=lambda d, *a, **k: d),
+                patch.object(view, "get_table", return_value=MagicMock()),
+                patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            ):
+                view._prepare_context(view.request, obj, fetch_fresh=True, server_key="default")
+
+            # The stale full snapshot must be gone so downstream verify/sync can't serve it.
+            assert real_cache.get(cache_key) is None
+        finally:
+            real_cache.delete(cache_key)
+
     def test_get_links_data_treats_status_error_payload_as_failure(self):
         """get_device_links returns the raw JSON body, so a 200 {"status": "error", ...} must be treated as a fetch failure (with its message), not silently fall through to 'No links found'."""
         view = self._make_view()

@@ -662,7 +662,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             or (bool(getattr(self, "_links_fetch_error", None)) and getattr(self, "librenms_id", None) is not None)
         )
         if fetch_fresh:
-            if not partial_fetch_failed:
+            if partial_fetch_failed:
+                # Don't just skip writing the partial snapshot — also drop any prior FULL snapshot.
+                # The rendered table is built from the new partial links_data, but verify/sync
+                # actions resolve rows from this cache key, so a leftover full snapshot would let a
+                # user act on cable data the partial refresh just superseded.
+                cache.delete(cache_key)
+            else:
                 cache.set(
                     cache_key,
                     {"links": links_data},
