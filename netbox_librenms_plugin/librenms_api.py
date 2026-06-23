@@ -1816,9 +1816,21 @@ class LibreNMSAPI:
         """
         cache_key = f"librenms_serial_sensors_{self.server_key}"
         cached = cache.get(cache_key)
-        if cached is not None:
+        # Validate the cached shape before trusting it: the device filter below calls .get() on
+        # every item, so a malformed cache value (not a list of dicts — e.g. a corrupt backend or
+        # foreign writer) would raise AttributeError and break every serial refresh until the TTL
+        # expires. _fetch_serial_port_sensors() already guarantees a list-of-dicts, so only the
+        # cache path needs this guard; a bad value is dropped and re-fetched as a cache miss.
+        if isinstance(cached, list) and all(isinstance(s, dict) for s in cached):
             all_serial_sensors = cached
         else:
+            if cached is not None:
+                logger.warning(
+                    "Ignoring malformed cached serial sensor payload for server %s: %r",
+                    self.server_key,
+                    cached,
+                )
+                cache.delete(cache_key)
             success, all_serial_sensors = self._fetch_serial_port_sensors()
             if not success:
                 # all_serial_sensors is the error string here; never cache a failure so a

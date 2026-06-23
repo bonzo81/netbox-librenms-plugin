@@ -3286,3 +3286,24 @@ class TestGetSerialPortSensors:
         assert ok1 is False and "boom" in msg1
         assert mock_get.call_count == 2  # error wasn't cached, so the second call re-fetched
         assert ok2 is True and [s["device_id"] for s in data2] == [12]
+
+    def test_malformed_cached_payload_is_dropped_and_refetched(self, mock_librenms_api, mock_response_factory):
+        """A malformed cached payload (a list whose items aren't dicts — a corrupt backend or foreign writer) must be treated as a cache miss: the device filter calls .get() on every item, so using it directly would raise AttributeError and break every serial refresh until the TTL expired. It must be dropped and re-fetched instead."""
+        import unittest.mock as mock
+
+        from django.core.cache import cache
+
+        cache_key = f"librenms_serial_sensors_{mock_librenms_api.server_key}"
+        cache.set(cache_key, ["not-a-dict", 123])  # passes `is not None` + isinstance(list); items aren't dicts
+
+        good = [self._make_sensor(12, port_num=7)]
+        ok_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": good})
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=ok_resp) as mock_get:
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        # Didn't crash on the malformed cache; re-fetched and returned the device's rows.
+        assert success is True
+        assert [s["device_id"] for s in data] == [12]
+        assert mock_get.call_count == 1  # the malformed cache value forced a single re-fetch
+        # The bad value was dropped and replaced with the validated fresh payload.
+        assert cache.get(cache_key) == good
