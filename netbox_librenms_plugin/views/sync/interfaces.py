@@ -1042,179 +1042,185 @@ class _PortIdResolveMixin:
         return _resolve_interface_by_port_id(obj, port_id, server_key, name_hint, expected_owner)
 
 
-class SyncInterfaceLagView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
-    """Set Interface.lag (member -> aggregate) based on LibreNMS port_stack data."""
+class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """
+    Shared skeleton for the inline single-row relationship-sync endpoints (LAG / parent).
 
-    # The owner device is resolved through a restricted queryset (see _get_object), so state
-    # that read here: a missing grant is an explicit 403, not a puzzling 404 at the lookup.
-    required_object_permissions = {"POST": [("view", Device), ("change", Interface)]}
+    SyncInterfaceLagView and SyncInterfaceParentView were ~90% identical — permission gate,
+    resolve both ends by stable port_id (owner-pinned), same-owner guard, then a
+    validate-then-persist under one transaction — differing only in the FK attribute set,
+    the POST field/label wording, VM support, and the LAG-only aggregate type bump. Keeping
+    one flow here stops the two endpoints drifting (a fix to the resolve/validate/persist
+    sequence applies once, not twice).
 
-    def _get_object(self, object_type, object_id):
+    Subclass contract (class attributes):
+        relation_field   -- the Interface FK attribute set ("lag" | "parent").
+        related_port_param / related_name_param -- the POST fields carrying the related
+            port_id and its display-name hint.
+        relation_label   -- human label in messages ("LAG" | "parent").
+        source_label / related_label -- the two interfaces' roles ("Member"/"Aggregate",
+            "Child"/"Parent"), used in the resolution error prefixes.
+        supports_vm      -- whether VMInterface is a valid target (parent: yes; lag: no,
+            VMInterface has no `lag` field).
+    """
+
+    relation_field: str
+    related_port_param: str
+    related_name_param: str
+    relation_label: str
+    source_label: str
+    related_label: str
+    supports_vm: bool = False
+
+    def _required_permissions(self, object_type):
+        """Object-type-scoped POST permissions; raise Http404 for an unsupported type."""
+        # The owner is resolved through a restricted queryset (_get_object), so its view
+        # permission belongs here: a missing grant is an explicit 403, not a 404 at the lookup.
         if object_type == "device":
-            return self.restrict_object_or_404(Device, pk=object_id)
-        # VMInterface has no `lag` field, so LAG membership sync is device-only. Reject
-        # VMs up front rather than resolving one and failing later — that path also ran a
-        # mismatched ("change", Interface) permission check. Keeps the view honestly
-        # device-only and consistent with required_object_permissions.
-        raise Http404("LAG membership sync is only supported for device interfaces.")
-
-    def post(self, request, object_type, object_id):
-        # JSON endpoint (the fetch() caller parses an error JSON body): require_all_permissions
-        # would return the mixin's HTML/redirect on denial, breaking that path. Use the _json
-        # variant like the sibling DeleteNetBoxInterfacesView.
-        if error := self.require_all_permissions_json("POST"):
-            return error
-
-        obj = self._get_object(object_type, object_id)
-        server_key = request.POST.get("server_key") or self.librenms_api.server_key
-        port_id = request.POST.get("port_id", "").strip()
-        lag_port_id = request.POST.get("lag_port_id", "").strip()
-        lag_name = request.POST.get("lag_name", "").strip()
-
-        if not port_id or not lag_port_id:
-            return JsonResponse({"error": "port_id and lag_port_id are required"}, status=400)
-
-        # obj is the VC member the JS posted (vcMemberSelect), so both ends of the LAG must
-        # belong to it — pin the owner so a stale librenms_id can't resolve onto another member.
-        expected_owner = _interface_owner_for_object(obj)
-        member_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
-            self, obj, port_id, server_key, expected_owner=expected_owner
-        )
-        if err:
-            return JsonResponse({"error": f"Member interface: {err}"}, status=404)
-
-        agg_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
-            self, obj, lag_port_id, server_key, name_hint=lag_name, expected_owner=expected_owner
-        )
-        if err:
-            return JsonResponse({"error": f"Aggregate interface: {err}"}, status=404)
-
-        if not _interfaces_same_owner(member_iface, agg_iface):
-            return JsonResponse({"error": "Member and aggregate interfaces are on different devices."}, status=409)
-
-        with transaction.atomic():
-            # obj is always a Device here (VMs are 404'd above), so both resolved
-            # interfaces are Interface instances.
-            # Validate before persisting: a crafted POST with port_id == lag_port_id resolves
-            # member == aggregate and passes the same-owner check, so full_clean() is what
-            # rejects the resulting self-LAG. Set the lag type in memory first so the relation
-            # validates, then commit only on success; surface failures as 409.
-            member_iface.lag = agg_iface
-            agg_needs_lag_type = agg_iface.type != "lag"
-            if agg_needs_lag_type:
-                agg_iface.type = "lag"
-            try:
-                member_iface.full_clean()
-            except ValidationError as exc:
-                # Log the validation detail server-side and return a fixed message — don't
-                # echo exception text to the client (CodeQL py/stack-trace-exposure). The
-                # cross-device case is already rejected above, so this is the self-LAG /
-                # NetBox-constraint case.
-                logger.warning(
-                    "LAG link validation failed (%s -> %s): %s",
-                    member_iface.name,
-                    agg_iface.name,
-                    _validation_error_detail(exc),
-                )
-                return JsonResponse(
-                    {
-                        "error": (
-                            f"Cannot link {member_iface.name} to LAG {agg_iface.name}: "
-                            "invalid LAG relationship (an interface cannot be its own LAG)."
-                        )
-                    },
-                    status=409,
-                )
-            if agg_needs_lag_type:
-                agg_iface.save()
-                logger.info("Set interface %s type=lag", agg_iface.name)
-            member_iface.save()
-            logger.info("Set %s.lag = %s", member_iface.name, agg_iface.name)
-
-        return JsonResponse({"status": "success", "message": f"Linked {member_iface.name} to LAG {agg_iface.name}"})
-
-
-class SyncInterfaceParentView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
-    """Set Interface.parent (sub-interface -> parent) based on LibreNMS port_stack data."""
-
-    # Permissions are set dynamically in post() based on object_type — both Devices
-    # (Interface) and VMs (VMInterface, which also has a parent field) are supported.
-
-    def _get_object(self, object_type, object_id):
-        if object_type == "device":
-            return self.restrict_object_or_404(Device, pk=object_id)
+            return {"POST": [("view", Device), ("change", Interface)]}
+        if object_type == "virtualmachine" and self.supports_vm:
+            return {"POST": [("view", VirtualMachine), ("change", VMInterface)]}
         if object_type == "virtualmachine":
+            # VMInterface has no `lag` field, so LAG membership sync is device-only. Reject up
+            # front rather than resolving a VM and failing later on a mismatched permission.
+            raise Http404(f"{self.relation_label} sync is only supported for device interfaces.")
+        raise Http404("Invalid object type.")
+
+    def _get_object(self, object_type, object_id):
+        """Resolve the owner the row belongs to, scoped to what the caller may see."""
+        if object_type == "device":
+            return self.restrict_object_or_404(Device, pk=object_id)
+        if object_type == "virtualmachine" and self.supports_vm:
             return self.restrict_object_or_404(VirtualMachine, pk=object_id)
         raise Http404("Invalid object type.")
 
-    def post(self, request, object_type, object_id):
-        # The owner is resolved through a restricted queryset (_get_object), so its view
-        # permission belongs in the gate too.
-        if object_type == "device":
-            self.required_object_permissions = {"POST": [("view", Device), ("change", Interface)]}
-        elif object_type == "virtualmachine":
-            self.required_object_permissions = {"POST": [("view", VirtualMachine), ("change", VMInterface)]}
-        else:
-            raise Http404("Invalid object type.")
+    def _prepare_related(self, related_iface):
+        """
+        Hook: mutate the related interface in memory before the source is validated.
 
-        # JSON endpoint — use the _json permission variant so a denied POST returns a JSON 403
-        # the fetch() caller can parse, not the mixin's HTML/redirect. Mirrors SyncInterfaceLagView.
+        Returns a no-arg callable that persists that mutation (invoked only after the source
+        interface validates) or None when there's nothing to do. SyncInterfaceLagView
+        overrides this to bump the aggregate's type to 'lag'; parent has no equivalent.
+        """
+        return None
+
+    def post(self, request, object_type, object_id):
+        # Set the object-type-scoped permissions BEFORE the gate (an unsupported type raises
+        # Http404 here). JSON endpoint: require_all_permissions would return the mixin's
+        # HTML/redirect on denial, breaking the fetch() caller, so use the _json variant.
+        self.required_object_permissions = self._required_permissions(object_type)
         if error := self.require_all_permissions_json("POST"):
             return error
 
         obj = self._get_object(object_type, object_id)
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
         port_id = request.POST.get("port_id", "").strip()
-        parent_port_id = request.POST.get("parent_port_id", "").strip()
-        parent_name = request.POST.get("parent_name", "").strip()
+        related_port_id = request.POST.get(self.related_port_param, "").strip()
+        related_name = request.POST.get(self.related_name_param, "").strip()
 
-        if not port_id or not parent_port_id:
-            return JsonResponse({"error": "port_id and parent_port_id are required"}, status=400)
+        if not port_id or not related_port_id:
+            return JsonResponse({"error": f"port_id and {self.related_port_param} are required"}, status=400)
 
-        # obj is the VC member the JS posted, so both child and parent must belong to it.
+        # obj is the VC member the JS posted (vcMemberSelect), so both ends must belong to it —
+        # pin the owner so a stale librenms_id can't resolve onto another member.
         expected_owner = _interface_owner_for_object(obj)
-        child_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
+        source_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
             self, obj, port_id, server_key, expected_owner=expected_owner
         )
         if err:
-            return JsonResponse({"error": f"Child interface: {err}"}, status=404)
+            return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
 
-        parent_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
-            self, obj, parent_port_id, server_key, name_hint=parent_name, expected_owner=expected_owner
+        related_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
+            self, obj, related_port_id, server_key, name_hint=related_name, expected_owner=expected_owner
         )
         if err:
-            return JsonResponse({"error": f"Parent interface: {err}"}, status=404)
+            return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
 
-        if not _interfaces_same_owner(child_iface, parent_iface):
-            return JsonResponse({"error": "Child and parent interfaces are on different devices."}, status=409)
+        if not _interfaces_same_owner(source_iface, related_iface):
+            return JsonResponse(
+                {"error": f"{self.source_label} and {self.related_label.lower()} interfaces are on different devices."},
+                status=409,
+            )
 
         with transaction.atomic():
-            # Validate before persisting (see SyncInterfaceLagView): full_clean() rejects a
-            # self-parent (port_id == parent_port_id) or other invalid relationship.
-            child_iface.parent = parent_iface
+            # Validate before persisting: a crafted POST with port_id == related_port_id
+            # resolves source == related and passes the same-owner check, so full_clean() is
+            # what rejects the resulting self-relationship. _prepare_related sets any required
+            # related-side state (e.g. the aggregate's type=lag) in memory first so the
+            # relation validates, and is persisted only on success.
+            setattr(source_iface, self.relation_field, related_iface)
+            persist_related = self._prepare_related(related_iface)
             try:
-                child_iface.full_clean()
+                source_iface.full_clean()
             except ValidationError as exc:
-                # See SyncInterfaceLagView: log the detail, return a fixed message so
-                # exception text isn't echoed to the client (CodeQL py/stack-trace-exposure).
+                # Log the validation detail server-side and return a fixed message — don't echo
+                # exception text to the client (CodeQL py/stack-trace-exposure). The
+                # cross-device case is already rejected above, so this is the self-relationship
+                # / NetBox-constraint case.
                 logger.warning(
-                    "Parent link validation failed (%s -> %s): %s",
-                    child_iface.name,
-                    parent_iface.name,
+                    "%s link validation failed (%s -> %s): %s",
+                    self.relation_label,
+                    source_iface.name,
+                    related_iface.name,
                     _validation_error_detail(exc),
                 )
                 return JsonResponse(
                     {
                         "error": (
-                            f"Cannot link {child_iface.name} to parent {parent_iface.name}: "
-                            "invalid relationship (an interface cannot be its own parent)."
+                            f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
+                            f"invalid {self.relation_label} relationship "
+                            f"(an interface cannot be its own {self.relation_label})."
                         )
                     },
                     status=409,
                 )
-            child_iface.save()
-            logger.info("Set %s.parent = %s", child_iface.name, parent_iface.name)
+            if persist_related is not None:
+                persist_related()
+            source_iface.save()
+            logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
 
         return JsonResponse(
-            {"status": "success", "message": f"Linked {child_iface.name} to parent {parent_iface.name}"}
+            {
+                "status": "success",
+                "message": f"Linked {source_iface.name} to {self.relation_label} {related_iface.name}",
+            }
         )
+
+
+class SyncInterfaceLagView(_BaseRelationshipSyncView):
+    """Set Interface.lag (member -> aggregate) based on LibreNMS port_stack data."""
+
+    required_object_permissions = {"POST": [("change", Interface)]}
+    relation_field = "lag"
+    related_port_param = "lag_port_id"
+    related_name_param = "lag_name"
+    relation_label = "LAG"
+    source_label = "Member"
+    related_label = "Aggregate"
+    supports_vm = False  # VMInterface has no `lag` field
+
+    def _prepare_related(self, related_iface):
+        """Promote the aggregate to type=lag so member_iface.full_clean() accepts the link."""
+        if related_iface.type != "lag":
+            related_iface.type = "lag"
+
+            def _persist():
+                related_iface.save()
+                logger.info("Set interface %s type=lag", related_iface.name)
+
+            return _persist
+        return None
+
+
+class SyncInterfaceParentView(_BaseRelationshipSyncView):
+    """Set Interface.parent (sub-interface -> parent) based on LibreNMS port_stack data."""
+
+    # Both Devices (Interface) and VMs (VMInterface, which also has a parent field) are
+    # supported; permissions are resolved per object_type in the shared post().
+    relation_field = "parent"
+    related_port_param = "parent_port_id"
+    related_name_param = "parent_name"
+    relation_label = "parent"
+    source_label = "Child"
+    related_label = "Parent"
+    supports_vm = True
