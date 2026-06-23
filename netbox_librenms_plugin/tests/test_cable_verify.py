@@ -419,3 +419,24 @@ class TestVerifyDualNameFallback:
         # Resolved via the alternate name → local_port rendered as a link to the interface.
         local_port_html = payload["formatted_row"]["local_port"]
         assert f"/interfaces/{iface.pk}/" in local_port_html
+
+
+@pytest.mark.django_db
+class TestRemoteDeviceResolutionExcludesOOB:
+    """A cable's remote device_id is the remote device's OWN LibreNMS identity, so resolving it must not also match a different device that merely references that id as its OOB controller — that over-match raises MultipleObjectsReturned and blocks the (valid) resolution."""
+
+    def test_remote_device_id_does_not_match_an_oob_controller_reference(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        host = make_device("remote-host", librenms_cf={"default": {"id": 42}})
+        # A DIFFERENT device references LibreNMS id 42 as its OOB controller (not its own id).
+        make_device("oob-referencer", librenms_cf={"default": {"oob": {"id": 42}}})
+
+        view = object.__new__(BaseCableTableView)
+        device, found, error = view.get_device_by_id_or_name(42, "remote-host", "default")
+
+        # Resolves to the device whose own LibreNMS id is 42, not MultipleObjectsReturned.
+        assert found is True
+        assert error is None
+        assert device.pk == host.pk

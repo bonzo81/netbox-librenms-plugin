@@ -32,7 +32,7 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
-def _librenms_id_q(server_key: str, value) -> Q:
+def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
     """
     Return a combined Q matching JSON-field and legacy bare-int librenms_id.
 
@@ -45,6 +45,12 @@ def _librenms_id_q(server_key: str, value) -> Q:
     Args:
         server_key (str): The LibreNMS server key whose JSON sub-key is matched.
         value: The LibreNMS id to match (int or string form).
+        include_oob (bool): When True (default), also match the OOB-controller
+            sub-key (``{server_key: {"oob": {"id": value}}}``). Pass ``False`` when
+            resolving a device by its *own* LibreNMS identity (e.g. a cable's remote
+            ``device_id``): the OOB path matches a *different* device that merely
+            references this id as its controller, so including it would match both the
+            real device and that referencer and raise ``MultipleObjectsReturned``.
 
     Returns:
         Q: A combined lookup matching any stored form of the id (matches nothing for
@@ -68,12 +74,14 @@ def _librenms_id_q(server_key: str, value) -> Q:
         pass
 
     def _paths(v) -> Q:
-        return (
+        q = (
             Q(**{f"custom_field_data__librenms_id__{server_key}": v})
             | Q(**{f"custom_field_data__librenms_id__{server_key}__id": v})
-            | Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
             | Q(custom_field_data__librenms_id=v)
         )
+        if include_oob:
+            q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
+        return q
 
     q = _paths(value)
     try:
@@ -381,10 +389,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         """Try to find device in NetBox first by librenms_id custom field, then by name"""
         if server_key is None:
             server_key = self._render_server_key()
-        # First try matching by LibreNMS ID
+        # First try matching by LibreNMS ID. The remote device_id is the remote device's OWN
+        # identity, so exclude the OOB-controller path: matching it would also select a different
+        # device that references this id as its controller, tripping MultipleObjectsReturned.
         if remote_device_id is not None:
             try:
-                device = Device.objects.get(_librenms_id_q(server_key, remote_device_id))
+                device = Device.objects.get(_librenms_id_q(server_key, remote_device_id, include_oob=False))
                 return device, True, None
             except Device.DoesNotExist:
                 pass

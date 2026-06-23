@@ -170,6 +170,15 @@ class TestLibreNMSIdQ:
         assert ("custom_field_data__librenms_id__default__oob__id", 42) in leaves
         assert ("custom_field_data__librenms_id__default__oob__id", "42") in leaves
 
+    def test_include_oob_false_drops_oob_path(self):
+        """Device resolution must exclude the OOB-controller path: a device's own LibreNMS id is not a reference to its OOB controller's id, so include_oob=False keeps the host/id/legacy paths but no __oob__id leaf."""
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+
+        leaves = _q_leaves(_librenms_id_q("default", 42, include_oob=False))
+        assert ("custom_field_data__librenms_id__default__id", 42) in leaves
+        assert ("custom_field_data__librenms_id__default", 42) in leaves
+        assert all("oob" not in str(path) for path, _ in leaves)
+
     def test_non_int_string_value_except_caught(self):
         """Non-convertible string 'abc' → ValueError caught, base Q returned (lines 42-43)."""
         from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
