@@ -291,6 +291,47 @@ class TestSingleInterfaceVerifyView:
         assert 10 in lag_members and "10" not in lag_members
         assert 10 in sub_interfaces and "10" not in sub_interfaces
 
+    @patch("netbox_librenms_plugin.views.object_sync.devices.BaseInterfaceTableView")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.object_sync.devices.cache")
+    def test_verify_handles_malformed_relationship_cache(self, mock_cache, mock_get_obj, mock_table_cls, mock_base):
+        """A cached port_stack_relationships that is None / a non-dict (or whose lag_members/sub_interfaces is None / a non-dict) must fail soft like the table path (test_malformed_port_stack_relationships_does_not_crash) — the .get(key, {}) default only fills a *missing* key, so a present-but-None value would AttributeError on .items() and 500 the verify endpoint."""
+        device = MagicMock()
+        device.virtual_chassis = None
+        device.interfaces.all.return_value = []
+        device.interfaces.filter.return_value.first.return_value = None
+        mock_get_obj.return_value = device
+        mock_table_cls.return_value.format_interface_data.return_value = {"ok": True}
+
+        view = self._make_view()
+        view.require_object_permissions_json = MagicMock(return_value=None)
+        view.get_cache_key = MagicMock(return_value="ck")
+
+        malformed_relationships = [
+            None,
+            ["not", "a", "dict"],
+            "garbage",
+            {"lag_members": None, "sub_interfaces": None},
+            {"lag_members": "nope", "sub_interfaces": 42},
+        ]
+        for bad in malformed_relationships:
+            mock_base.reset_mock()
+            mock_cache.get.return_value = {
+                "ports": [{"port_id": 10, "ifName": "Et1", "_source": "host"}],
+                "port_stack_relationships": bad,
+            }
+            request = _make_request(
+                {"device_id": 5, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 10}
+            )
+            response = view.post(request)  # must not raise
+
+            assert response.status_code == 200, f"malformed relationships {bad!r} should not 500"
+            # The guard collapses every malformed map to {}, so enrichment still runs with empties.
+            _, lag_members, sub_interfaces, *_ = mock_base._enrich_port_with_lag_parent.call_args.args
+            assert lag_members == {}
+            assert sub_interfaces == {}
+
 
 # ---------------------------------------------------------------------------
 # SingleIPAddressVerifyView — object-permission gate (real DB, real has_perm)

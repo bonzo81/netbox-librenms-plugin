@@ -239,17 +239,27 @@ class SingleInterfaceVerifyView(
                 if nb_iface is None:
                     nb_iface = selected_device.interfaces.filter(name=interface_name).first()
                 port_data["netbox_interface"] = nb_iface
-                relationships = cached_data.get("port_stack_relationships", {})
+                # Mirror get_context_data's hardening (interfaces_view.py): a cache entry
+                # holding None or a non-dict (corruption / partial write / format migration)
+                # defeats the .get(key, {}) default — that only fills a *missing* key, so a
+                # present-but-None value still reaches .items() and AttributeErrors into a 500.
+                # The table path survives this (test_malformed_port_stack_relationships_does_not_crash);
+                # the verify path must too. Guard both the outer map and each nested map.
+                relationships = cached_data.get("port_stack_relationships") or {}
+                if not isinstance(relationships, dict):
+                    relationships = {}
+                lag_members_raw = relationships.get("lag_members") or {}
+                if not isinstance(lag_members_raw, dict):
+                    lag_members_raw = {}
+                sub_interfaces_raw = relationships.get("sub_interfaces") or {}
+                if not isinstance(sub_interfaces_raw, dict):
+                    sub_interfaces_raw = {}
                 # Normalize the relationship-map keys (mirror get_context_data):
                 # _enrich_port_with_lag_parent looks them up by normalized port_id, so a
                 # cached map with stringified keys would otherwise drop valid Parent/LAG
                 # context on the inline verify response even though the table renders it.
-                lag_members = {
-                    normalize_librenms_port_id(k): v for k, v in relationships.get("lag_members", {}).items()
-                }
-                sub_interfaces = {
-                    normalize_librenms_port_id(k): v for k, v in relationships.get("sub_interfaces", {}).items()
-                }
+                lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
+                sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
                 # Host-scope the map (mirror get_context_data): an OOB controller reusing a
                 # host port_id must not override the host row during lag/parent enrichment.
                 by_port_id = {
