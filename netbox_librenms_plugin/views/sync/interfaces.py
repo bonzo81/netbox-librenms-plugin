@@ -218,8 +218,16 @@ class SyncInterfacesView(
         if not relationships:
             return
 
-        lag_members = relationships.get("lag_members", {})
-        sub_interfaces = relationships.get("sub_interfaces", {})
+        # Normalize the relationship-map keys once at load (mirror get_context_data /
+        # SingleInterfaceVerifyView). resolve_port_relationships emits normalized int keys, but
+        # a JSON cache round-trip stringifies dict keys, so the cached map can arrive str- or
+        # int-keyed. Re-normalizing here lets every lookup below use a single
+        # normalize_librenms_port_id(port_id) call instead of a hand-rolled get(str)/get(int)
+        # fallback that silently skips a write whenever one form is missing.
+        lag_members = {normalize_librenms_port_id(k): v for k, v in (relationships.get("lag_members") or {}).items()}
+        sub_interfaces = {
+            normalize_librenms_port_id(k): v for k, v in (relationships.get("sub_interfaces") or {}).items()
+        }
         if not lag_members and not sub_interfaces:
             return
 
@@ -268,7 +276,7 @@ class SyncInterfacesView(
                 expected_owner = _interface_owner_for_object(target_device)
 
                 # LAG membership: this interface is a member of a LAG aggregate
-                raw_lag = lag_members.get(port_id, lag_members.get(int(port_id) if port_id.isdigit() else None))
+                raw_lag = lag_members.get(normalize_librenms_port_id(port_id))
                 if raw_lag is not None:
                     lag_port_id = str(raw_lag)
                     lag_entry = port_by_id.get(lag_port_id, {})
@@ -339,9 +347,7 @@ class SyncInterfacesView(
                             logger.info("Bulk sync: set %s.lag = %s", member_iface.name, agg_iface.name)
 
                 # Sub-interface parent: this interface is a child of a parent interface
-                raw_parent = sub_interfaces.get(
-                    port_id, sub_interfaces.get(int(port_id) if port_id.isdigit() else None)
-                )
+                raw_parent = sub_interfaces.get(normalize_librenms_port_id(port_id))
                 if raw_parent is not None:
                     parent_port_id = str(raw_parent)
                     parent_entry = port_by_id.get(parent_port_id, {})

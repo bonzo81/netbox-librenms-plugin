@@ -625,8 +625,9 @@ class LibreNMSAPI:
              aggregate is on the 'high' side is still mapped member->aggregate correctly.
           2. Skip any pair where either port name contains ':' (Nokia SAP entries).
           3. Strip '.N' suffix to resolve Junos sub-unit names to physical-level ports.
-          4. Sub-interface detection: if low_name starts with high_name + '.' and the
-             suffix is numeric, it is a sub-interface parent/child pair.
+          4. Sub-interface detection: a pair where one name is the other plus a numeric '.N'
+             suffix is a parent/child pair — and, like the LAG rule, the relationship is
+             position-independent, so the child may be on either the high or the low side.
 
         Configurable via PortStackLagPattern model:
           - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
@@ -645,7 +646,9 @@ class LibreNMSAPI:
                        stored patterns are loaded (legacy, unscoped behaviour).
 
         Returns:
-            dict with keys:
+            dict with keys (port_ids are canonical normalized positive ints, so every
+            consumer can look up by ``normalize_librenms_port_id(...)`` without re-deriving
+            str/int fallbacks):
                 'lag_members':    {member_port_id: aggregate_port_id}
                 'sub_interfaces': {child_port_id: parent_port_id}
         """
@@ -700,6 +703,8 @@ class LibreNMSAPI:
                 # detection silently isn't working for that OS.
                 logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
+        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
         lag_members: dict = {}
         sub_interfaces: dict = {}
 
@@ -708,6 +713,22 @@ class LibreNMSAPI:
                 return True
             name = port.get("ifName", "")
             return any(pat.search(name) for pat in compiled_patterns)
+
+        def _relate(mapping: dict, key_port: dict, value_port: dict) -> None:
+            """
+            Store a normalized ``port_id -> port_id`` edge in ``mapping``.
+
+            The maps are keyed AND valued by the canonical normalized port_id (a positive int
+            via ``normalize_librenms_port_id``), so every consumer can look up by the same
+            normalizer without re-deriving str/int fallbacks per call. ports and port_stack are
+            independent LibreNMS payloads (one may carry string ids, the other ints);
+            normalizing both sides at the source makes the maps type-agnostic and
+            self-consistent. A side whose id won't normalize is dropped rather than stored raw.
+            """
+            key_id = normalize_librenms_port_id(key_port.get("port_id"))
+            value_id = normalize_librenms_port_id(value_port.get("port_id"))
+            if key_id is not None and value_id is not None:
+                mapping[key_id] = value_id
 
         def _resolve_physical(name: str):
             """Strip a numeric .N sub-unit suffix and return the physical-level port if its base exists."""
@@ -719,6 +740,12 @@ class LibreNMSAPI:
                 if suffix.isdigit() and base in by_name:
                     return by_name[base]
             return by_name.get(name)
+
+        def _is_sub_unit_of(child_name: str, parent_name: str) -> bool:
+            """True when child_name is parent_name + '.<digits>' (a numeric sub-interface)."""
+            if not child_name.startswith(parent_name + "."):
+                return False
+            return child_name[len(parent_name) + 1 :].isdigit()
 
         for entry in port_stack:
             if not isinstance(entry, dict):
@@ -742,20 +769,18 @@ class LibreNMSAPI:
             if ":" in h_name or ":" in l_name:
                 continue
 
-            # Sub-interface detection: low is child of high when name follows parent.N pattern
-            if l_name.startswith(h_name + "."):
-                suffix = l_name[len(h_name) + 1 :]
-                try:
-                    int(suffix)  # Only numeric suffixes qualify as sub-interfaces
-                    # Store the canonical port-record ids, not the raw port_stack ids. The two
-                    # are independent LibreNMS payloads: port_stack may carry string ids while
-                    # ports carry ints (or vice versa). The LAG branch below already keys on
-                    # port["port_id"]; mirror it here so the map's types match the port records
-                    # and downstream port-id lookups don't silently miss the parent mapping.
-                    sub_interfaces[low_port["port_id"]] = high_port["port_id"]
-                    continue
-                except ValueError:
-                    pass  # Non-numeric suffix — fall through to LAG check
+            # Sub-interface detection: the child name is parent + '.<digits>'. port_stack
+            # ordering is NOT guaranteed (the LAG branch below is already position-independent,
+            # and ifStack can emit the sub-interface as either the high or the low side), so
+            # check BOTH directions. Without the reverse check a parent=low/child=high pair
+            # falls through to the LAG branch, where _resolve_physical collapses both names to
+            # the same base and the self-reference guard silently drops the relationship.
+            if _is_sub_unit_of(l_name, h_name):
+                _relate(sub_interfaces, low_port, high_port)  # low is the child, high the parent
+                continue
+            if _is_sub_unit_of(h_name, l_name):
+                _relate(sub_interfaces, high_port, low_port)  # high is the child, low the parent
+                continue
 
             # LAG membership: resolve physical-level names (strips Junos sub-unit .N suffix)
             high_phys = _resolve_physical(h_name)
@@ -763,18 +788,31 @@ class LibreNMSAPI:
             if not high_phys or not low_phys:
                 continue
 
-            high_phys_id = high_phys["port_id"]
-            low_phys_id = low_phys["port_id"]
-            if high_phys_id == low_phys_id:
+            if normalize_librenms_port_id(high_phys.get("port_id")) == normalize_librenms_port_id(
+                low_phys.get("port_id")
+            ):
                 continue  # Same port after physical resolution — skip self-references
 
             low_is_agg = _is_lag_aggregate(low_phys)
             high_is_agg = _is_lag_aggregate(high_phys)
 
-            if low_is_agg and not high_is_agg:
-                lag_members[high_phys_id] = low_phys_id
-            elif high_is_agg and not low_is_agg:
-                lag_members[low_phys_id] = high_phys_id
+            if low_is_agg and high_is_agg:
+                # Both sides look like aggregates — a too-broad configured lag_name_pattern
+                # matched the member's name too (e.g. 'bond' matching both bond0 and
+                # bond0-slave). Disambiguate with the authoritative STRUCTURAL signal: the port
+                # whose ifType is ieee8023adLag is the real aggregate. Resolve only when exactly
+                # one side is structural; if neither (or both) is, we genuinely can't tell which
+                # is the aggregate, so skip rather than guess a wrong membership.
+                low_struct = low_phys.get("ifType") == "ieee8023adLag"
+                high_struct = high_phys.get("ifType") == "ieee8023adLag"
+                if low_struct and not high_struct:
+                    _relate(lag_members, high_phys, low_phys)
+                elif high_struct and not low_struct:
+                    _relate(lag_members, low_phys, high_phys)
+            elif low_is_agg:
+                _relate(lag_members, high_phys, low_phys)  # high is the member, low the aggregate
+            elif high_is_agg:
+                _relate(lag_members, low_phys, high_phys)  # low is the member, high the aggregate
 
         return {"lag_members": lag_members, "sub_interfaces": sub_interfaces}
 
