@@ -6624,6 +6624,26 @@ class TestMergeNetBoxDevicesViewOOBTransfer:
         ]
         assert locked, "OOB IP transfer did not lock the IPAddress row (no SELECT ... FOR UPDATE on ipam_ipaddress)"
 
+    def test_oob_ip_transfer_locks_the_owning_interface(self):
+        """The transfer must also SELECT ... FOR UPDATE the owning Interface row: locking the IPAddress alone leaves Interface.device_id free to change under a concurrent interface move, so the winner.oob_ip FK could be persisted onto an interface no longer owned by the winner (TOCTOU)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            winner, _donor, oob_ip = self._run(oob_on_winner=True)
+
+        # The transfer still works through the locked interface read.
+        assert winner.oob_ip_id == oob_ip.pk
+        # A row-level lock on the owning Interface must have been issued during the merge.
+        locked = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "dcim_interface" in q["sql"].lower() and "for update" in q["sql"].lower()
+        ]
+        assert locked, (
+            "OOB IP transfer did not lock the owning Interface row (no SELECT ... FOR UPDATE on dcim_interface)"
+        )
+
     def test_save_failure_rolls_back_donor_oob_release_and_marker(self):
         """Forced persist failure mid-merge must roll back the donor's already-executed save."""
         from dcim.models import Device
