@@ -36,7 +36,13 @@ def remove_patterns(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("extras", "0138_customfieldchoiceset_choice_colors"),
+        # Pinned to the NetBox 4.2 floor declared by ``min_version`` in
+        # ``netbox_librenms_plugin/__init__.py`` (and the 4.2–4.5 range in README), matching
+        # sibling 0010. PortStackLagPattern is a plain NetBoxModel that only references
+        # ``extras.Tag``/``TaggedItem`` (via taggit) — all present in 4.2.x — so it needs
+        # nothing from the 4.3-era 0138. ``makemigrations`` will try to bump this to the dev
+        # environment's NetBox tip; revert it unless we actually start depending on a newer field.
+        ("extras", "0122_charfield_null_choices"),
         ("netbox_librenms_plugin", "0010_inventory_and_mapping_models"),
     ]
 
