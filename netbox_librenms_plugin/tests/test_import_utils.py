@@ -5571,6 +5571,39 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert not any("serial or management IP" in i for i in validation.get("issues", []))
         assert validation["existing_match_type"] != "ambiguous_hostname_or_serial"
 
+    def test_stale_hostname_serial_ambiguity_blocker_cleared_on_refresh(self):
+        """A cached 'hostname/serial' ambiguity blocker must also be cleared on refresh once resolved."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        make_device("now-unique-host2", serial="UNIQSERIALX")  # only ONE device has this serial now
+        libre_device = {
+            "device_id": 654,
+            "hostname": "no-name-match2",
+            "sysName": "no-name-match2",
+            "serial": "UNIQSERIALX",
+        }
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+            # Stale ambiguity state cached when the name/serial was duplicated — this wording is
+            # emitted by validate_device_for_import's duplicate-name/serial guard, NOT the refresh
+            # serial/IP fallback, so it does not contain the "serial or management IP" substring.
+            "existing_match_type": "ambiguous_hostname_or_serial",
+            "issues": [
+                "Multiple NetBox devices share this device's hostname/serial; resolve the duplicate before importing or linking."
+            ],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        # The broadened marker set must strip the hostname/serial blocker too (the duplicate is gone).
+        assert not any("hostname/serial" in i for i in validation.get("issues", []))
+        assert validation["existing_match_type"] != "ambiguous_hostname_or_serial"
+
 
 # ---------------------------------------------------------------------------
 # Tests for _get_hostname_for_action helper

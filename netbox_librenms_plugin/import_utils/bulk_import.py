@@ -31,9 +31,16 @@ logger = logging.getLogger(__name__)
 # _refresh_existing_device) so a resolved duplicate's stale message is reliably removed
 # regardless of which librenms_id value was interpolated into it.
 _AMBIGUOUS_LIBRENMS_ID_MARKER = "matches more than one existing NetBox record"
-# Substring of the serial/IP ambiguity blocker the refresh fallback appends, used to strip a stale
-# instance once the duplicate is resolved (mirrors the librenms_id marker above).
-_AMBIGUOUS_SERIAL_IP_MARKER = "serial or management IP"
+# Substrings of the ambiguity blockers that carry the "ambiguous_hostname_or_serial" match type,
+# used to strip a stale instance once the duplicate is resolved (mirrors the librenms_id marker
+# above). The blocker can be appended by either the refresh serial/IP fallback below ("serial or
+# management IP") or validate_device_for_import's duplicate name/serial guard ("hostname/serial"),
+# so the cleanup must recognise either wording — otherwise a hostname/serial blocker survives the
+# match_type reset and keeps the row blocked until cache expiry.
+_AMBIGUOUS_SERIAL_IP_MARKERS = (
+    "serial or management IP",
+    "hostname/serial",
+)
 
 
 def _is_job_cancelled(job) -> bool:
@@ -638,7 +645,9 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 msgs = validation.get(_key)
                 if isinstance(msgs, list):
                     validation[_key] = [
-                        m for m in msgs if not (isinstance(m, str) and _AMBIGUOUS_SERIAL_IP_MARKER in m)
+                        m
+                        for m in msgs
+                        if not (isinstance(m, str) and any(marker in m for marker in _AMBIGUOUS_SERIAL_IP_MARKERS))
                     ]
 
         new_device = None
