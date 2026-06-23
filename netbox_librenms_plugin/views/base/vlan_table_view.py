@@ -51,7 +51,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             # misconfigured default client, so don't touch the lazy `librenms_api` property here —
             # it would reconstruct LibreNMSAPI() and can raise, turning this HTMX error path into a
             # 500. Read the already-cached client's key (else "default").
-            active_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
+            active_server_key = self.active_server_key
             # Pass server_key=None explicitly so the fragment doesn't silently fall back to
             # the session/default server (which would re-render with the wrong server selected
             # and let the next retry sync VLANs against the wrong LibreNMS instance).

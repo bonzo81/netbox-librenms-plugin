@@ -476,6 +476,22 @@ class LibreNMSAPIMixin:
         """
         return self.librenms_api.get_device_info(librenms_id, use_cache=False)
 
+    @property
+    def active_server_key(self):
+        """
+        The server key of the currently-bound API client, or ``"default"``.
+
+        Reads ``self._librenms_api.server_key`` WITHOUT going through the lazy
+        :attr:`librenms_api` property — used on rebind-failure render paths where the
+        rebind already returned None and constructing a fresh default client (which the
+        property would do, and which can raise on a misconfigured default) is exactly
+        what must be avoided. Falls back to ``"default"`` when no client is bound yet.
+
+        Returns:
+            str: The bound client's resolved server key, or ``"default"``.
+        """
+        return getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
+
     def rebind_api_for_server(self, server_key):
         """
         Rebind ``self.librenms_api`` to the POST-scoped *server_key*.

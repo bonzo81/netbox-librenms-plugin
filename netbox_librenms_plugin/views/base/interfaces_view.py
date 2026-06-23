@@ -166,7 +166,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             # misconfigured default client, so don't touch the lazy `librenms_api` property here —
             # it could raise and turn this HTMX error path back into a 500. Read the already-cached
             # client's key (else "default").
-            active_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
+            active_server_key = self.active_server_key
             return render(
                 request,
                 self.partial_template_name,

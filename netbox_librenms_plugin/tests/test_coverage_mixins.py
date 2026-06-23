@@ -44,6 +44,28 @@ class TestCacheRemainingTtl:
 # =============================================================================
 
 
+class TestLibreNMSAPIMixinActiveServerKey:
+    """LibreNMSAPIMixin.active_server_key: the bound client's key or 'default', never building a client."""
+
+    def _mixin(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        return object.__new__(LibreNMSAPIMixin)
+
+    def test_returns_bound_client_server_key(self):
+        m = self._mixin()
+        m._librenms_api = MagicMock(server_key="prod")
+        assert m.active_server_key == "prod"
+
+    def test_returns_default_without_building_client_when_unbound(self):
+        """On the rebind-fail render path no client is bound; the property must return 'default' WITHOUT constructing a LibreNMSAPI (the lazy librenms_api property would, and can raise on a misconfigured default)."""
+        m = self._mixin()
+        m._librenms_api = None
+        with patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls:
+            assert m.active_server_key == "default"
+        mock_api_cls.assert_not_called()
+
+
 class TestLibreNMSAPIMixinRebindApiForServer:
     """LibreNMSAPIMixin.rebind_api_for_server: POST-scoped API client for base views."""
 

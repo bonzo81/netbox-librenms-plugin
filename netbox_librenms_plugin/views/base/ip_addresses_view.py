@@ -516,7 +516,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # rebind_api_for_server() returned None to avoid building a missing/misconfigured
             # default client; reading the lazy `librenms_api` property here would reconstruct it
             # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
-            active_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
+            active_server_key = self.active_server_key
             # Keep migrated-donor context (resolved from the active session key, since the POSTed
             # key is now known-invalid) so the template still suppresses the live sync form/button —
             # a stale server_key must not silently re-enable IP sync on a migrated donor. Mirrors cables_view.

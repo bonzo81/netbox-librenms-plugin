@@ -745,7 +745,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             # rebind_api_for_server() returned None to avoid building a missing/misconfigured
             # default client; reading the lazy `librenms_api` property here would reconstruct it
             # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
-            active_server_key = getattr(getattr(self, "_librenms_api", None), "server_key", None) or "default"
+            active_server_key = self.active_server_key
             # Keep migrated-donor context so the template still suppresses the live POST
             # form/button — a stale server_key must not silently re-enable cable sync on a
             # migrated donor. Resolve the marker from the active session key (the POSTed key is
