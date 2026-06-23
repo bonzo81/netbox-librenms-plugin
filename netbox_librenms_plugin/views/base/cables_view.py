@@ -124,6 +124,24 @@ def _extract_cached_links(cached, cache_key=None):
     return links
 
 
+# The raw (un-enriched) link fields a cached/replayed link is stripped down to before
+# re-enrichment — derived fields (netbox_*_id, *_url, cable_status, …) are dropped so stale
+# IDs/URLs can't cause DoesNotExist after the underlying NetBox objects are deleted. Defined
+# once so the strip in _prepare_context and in SingleCableVerifyView stay in lock-step.
+_RAW_LINK_KEYS = frozenset(
+    {
+        "local_port",
+        "local_port_alt",
+        "local_port_id",
+        "remote_port",
+        "remote_device",
+        "remote_port_id",
+        "remote_device_id",
+        "_source",
+    }
+)
+
+
 class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for synchronizing cable information from LibreNMS.
@@ -627,17 +645,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             # Strip derived fields so re-enrichment starts from raw link data;
             # without this, stale IDs/URLs persist when NetBox objects are
             # deleted and cause DoesNotExist in check_cable_status().
-            _raw_keys = {
-                "local_port",
-                "local_port_alt",
-                "local_port_id",
-                "remote_port",
-                "remote_device",
-                "remote_port_id",
-                "remote_device_id",
-                "_source",
-            }
-            links_data = [{k: v for k, v in link.items() if k in _raw_keys} for link in links_data]
+            links_data = [{k: v for k, v in link.items() if k in _RAW_LINK_KEYS} for link in links_data]
 
         # Enrich data in both cases to ensure current NetBox state
         links_data = self.enrich_links_data(links_data, obj, server_key=server_key)
@@ -837,17 +845,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                 if link_data:
                     # Strip derived fields from cached data to avoid stale
                     # IDs/URLs when NetBox objects are deleted after caching.
-                    _raw_keys = {
-                        "local_port",
-                        "local_port_alt",
-                        "local_port_id",
-                        "remote_port",
-                        "remote_device",
-                        "remote_port_id",
-                        "remote_device_id",
-                        "_source",
-                    }
-                    link_data = {k: v for k, v in link_data.items() if k in _raw_keys}
+                    link_data = {k: v for k, v in link_data.items() if k in _RAW_LINK_KEYS}
 
                     # The verify response returns formatted_row HTML directly (it does not pass
                     # through LibreNMSCableTable.render_local_port), so re-apply the OOB badge
