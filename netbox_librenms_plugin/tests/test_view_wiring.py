@@ -430,6 +430,17 @@ class TestRequiredObjectPermissionsWiring:
         assert NetBoxObjectPermissionMixin in SingleIPAddressVerifyView.__mro__
         assert ("view", Device) in SingleIPAddressVerifyView.required_object_permissions.get("POST", [])
 
+    def test_capture_data_shape_has_required_object_permissions(self):
+        # GET-gated (not POST): the capture view reads a device's LibreNMS data, so it must carry
+        # the permission mixins and require view-Device. A dropped mixin would 500 or silently
+        # stop enforcing the gate — TestCaptureDataShapePermissionGate verifies the live has_perm.
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
+
+        self._assert_has_mixins(CaptureDataShapeView)
+        assert CaptureDataShapeView.required_object_permissions.get("GET") == [("view", Device)]
+
 
 class TestViewPropertyLazyInit:
     """The LibreNMS API starts as None, and its property descriptor exists on the class."""
@@ -738,6 +749,40 @@ class TestSingleCableVerifyServerKey:
             assert mock_sync_device.call_args[1]["server_key"] == "fallback-server"
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "fallback-server" in cache_key_arg
+
+
+@pytest.mark.django_db
+class TestCaptureDataShapePermissionGate:
+    """The capture view's object-permission gate is enforced via the live user.has_perm, not just wiring."""
+
+    def _view_for_user(self, user):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
+
+        view = CaptureDataShapeView()
+        request = RequestFactory().get("/")
+        request.user = user
+        view.request = request
+        return view
+
+    def test_user_without_view_device_is_denied(self):
+        """A user lacking dcim.view_device fails the GET gate (real has_perm, not a mock)."""
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create(username="cap-noperm", is_active=True)
+        has_all, missing = self._view_for_user(user).check_object_permissions("GET")
+        assert has_all is False
+        assert "dcim.view_device" in missing
+
+    def test_user_with_view_device_is_permitted(self):
+        """A superuser (has dcim.view_device) passes the GET gate."""
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create(username="cap-super", is_active=True, is_superuser=True)
+        has_all, missing = self._view_for_user(user).check_object_permissions("GET")
+        assert has_all is True
+        assert missing == []
 
 
 class TestGatedViewsResolveThroughRestrictedQuerysets:

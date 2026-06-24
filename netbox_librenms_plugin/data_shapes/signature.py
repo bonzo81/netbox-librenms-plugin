@@ -71,9 +71,31 @@ def _inventory_items(body):
     return []
 
 
+def port_has_vlan(port):
+    """
+    Return whether a port row carries real VLAN data (the signature's ``vlans`` axis predicate).
+
+    Keyed on the VALUE, not mere key presence: ``ifVlan`` ``None``/``""``/``0`` (LibreNMS's
+    no-/default-VLAN sentinels) do NOT count, only a real id or a non-empty ``vlans`` list. The
+    compressor's port fingerprint imports this so its VLAN axis stays in lockstep with the signature
+    (otherwise two same-shape ports — one with ``ifVlan: 0``/``None`` — could collapse to a
+    representative whose value flips the signature's vlans axis).
+    """
+    return port.get("ifVlan") not in (None, "", 0) or bool(port.get("vlans"))
+
+
 def _ports(recording):
-    """Return the ports list from the ports response body, or []."""
-    body = _body(recording, lambda k: k.endswith("/ports"))
+    """Return the HOST device's ports list (anchored on devices/<device_id>/ports), or []."""
+    # Anchor on the host device_id exactly as compress.py does, so an OOB recording carrying a second
+    # /ports route (the controller's, devices/<oob_id>/ports) can't be fingerprinted instead of the
+    # host's just because it happens to come first in dict order. Fall back to any /ports route when
+    # the recording has no device_id or a differently-keyed host route.
+    device_id = recording.get("device_id")
+    body = None
+    if device_id is not None:
+        body = _body(recording, lambda k: k.split("?", 1)[0].endswith(f"devices/{device_id}/ports"))
+    if body is None:
+        body = _body(recording, lambda k: k.split("?", 1)[0].endswith("/ports"))
     if isinstance(body, dict) and isinstance(body.get("ports"), list):
         return [p for p in body["ports"] if isinstance(p, dict)]
     return []
@@ -94,7 +116,10 @@ def compute_shape_signature(recording):
     """
     device_id = recording.get("device_id")
     dev_body = _body(recording, lambda k: k == f"GET /api/v0/devices/{device_id}")
-    os_name = recording.get("meta", {}).get("os")
+    # `recording.get("meta", {})` returns None when "meta" is present-but-null (the default only
+    # applies when the key is absent), so guard with `or {}` before .get — a community recording can
+    # carry "meta": null (the schema doesn't validate meta) and must not crash --validate/--list.
+    os_name = (recording.get("meta") or {}).get("os")
     if os_name is None and isinstance(dev_body, dict):
         devices = dev_body.get("devices")
         if isinstance(devices, list) and devices and isinstance(devices[0], dict):
@@ -143,7 +168,7 @@ def compute_shape_signature(recording):
         "lag": {"present": bool(lag_ports), "ieee8023ad": bool(lag_ports), "name_prefix": name_prefix},
         "sub_interfaces": {"present": bool(sub_styles), "styles": sorted(sub_styles)},
         "port_stack": port_stack,
-        "vlans": any(p.get("ifVlan") not in (None, "") or bool(p.get("vlans")) for p in ports),
+        "vlans": any(port_has_vlan(p) for p in ports),
         "transceivers": has_transceivers,
     }
 

@@ -86,6 +86,10 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 "signature": signature,
                 "recording_json": recording_json,
                 "residual_pii": residual_pii,
+                # The download filename must use the ANONYMIZED recording name (os-<hash>-shape-<hash>),
+                # never the real device name — the contributor attaches this file to the public issue,
+                # so its name must not leak the hostname the JSON scrubbed (mirrors the issue title).
+                "anonymized_name": anonymized.get("name", ""),
                 "issue_url": self._issue_url(anonymized.get("name", "")),
             },
         )

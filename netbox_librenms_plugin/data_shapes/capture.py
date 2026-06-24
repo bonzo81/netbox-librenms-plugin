@@ -64,16 +64,57 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     """
     responses = {}
 
+    def _route_key(path, key_params):
+        key = f"GET /api/v0/{path}"
+        if key_params:
+            key += "?" + "&".join(f"{k}={v}" for k, v in key_params.items())
+        return key
+
     def record(path, request_params=None, *, key_params="__same__"):
         """Issue one raw GET and store it under its route key (key_params=None → path-only)."""
         status, body = api._raw_get(path, request_params)
         if key_params == "__same__":
             key_params = request_params
-        key = f"GET /api/v0/{path}"
-        if key_params:
-            key += "?" + "&".join(f"{k}={v}" for k, v in key_params.items())
-        responses[key] = body if 200 <= status < 300 else [status, body]
+        # A transport error yields status 0 (no HTTP response was received). Recording it as
+        # [0, body] would bake an un-replayable route into the recording — the mock replay server
+        # calls send_response(0), an out-of-range HTTP status — so skip any route that never produced
+        # a real HTTP status. A genuine non-2xx (e.g. 404) IS a real status and is still recorded.
+        if not (100 <= status < 600):
+            return status, body
+        responses[_route_key(path, key_params)] = body if 200 <= status < 300 else [status, body]
         return status, body
+
+    _all_inventory = []  # memoized /inventory/{id}/all body, fetched lazily at most once
+
+    def record_inventory_filtered(query_params, *, contained_in=None, ent_class=None):
+        """
+        Record a filtered inventory query, mirroring ``get_inventory_filtered``'s ``/all`` fallback.
+
+        A LibreNMS server that does not honor the ``entPhysical*`` query params returns an empty
+        filtered inventory but still populates ``/inventory/{id}/all``; production's
+        ``get_inventory_filtered`` falls back to that endpoint + client-side filtering. Reproduce the
+        SAME entities under the FILTERED key here — which both ``compute_shape_signature`` and the
+        production replay read — otherwise a Virtual-Chassis device is silently captured as a plain
+        one. When the filtered query already returns data (the common case), nothing changes.
+        """
+        _, body = record(f"inventory/{device_id}", query_params)
+        items = body.get("inventory") if isinstance(body, dict) else None
+        if items:
+            return items
+        if not _all_inventory:
+            _, all_body = api._raw_get(f"inventory/{device_id}/all")
+            all_items = all_body.get("inventory") if isinstance(all_body, dict) else None
+            _all_inventory.append(all_items if isinstance(all_items, list) else [])
+        filtered = [i for i in _all_inventory[0] if isinstance(i, dict)]
+        if ent_class is not None:
+            filtered = [i for i in filtered if i.get("entPhysicalClass") == ent_class]
+        if contained_in is not None:
+            filtered = [i for i in filtered if str(i.get("entPhysicalContainedIn")) == str(contained_in)]
+        if filtered:
+            # Overwrite the empty filtered response with the client-filtered entities so the recording
+            # looks as if captured from a filter-honoring server (faithful signature + replay).
+            responses[_route_key(f"inventory/{device_id}", query_params)] = {"status": "ok", "inventory": filtered}
+        return filtered
 
     # 1. Device info (also the source of the os metadata).
     _, dev_body = record(f"devices/{device_id}")
@@ -83,16 +124,16 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         if isinstance(devices, list) and devices and isinstance(devices[0], dict):
             device_os = devices[0].get("os")
 
-    # 2. VC detection inventory: root, then the chassis children at the resolved parent index.
-    #    These two query variants share a path, so they MUST be keyed with their query so the
-    #    loader can disambiguate them.
-    _, root_body = record(f"inventory/{device_id}", {"entPhysicalContainedIn": "0"})
-    root_items = root_body.get("inventory") if isinstance(root_body, dict) else None
+    # 2. VC detection inventory: root, then the chassis children at the resolved parent index. Both
+    #    query variants share a path, so they MUST be keyed with their query for the loader to
+    #    disambiguate them; each mirrors get_inventory_filtered's /all fallback (see helper).
+    root_items = record_inventory_filtered({"entPhysicalContainedIn": "0"}, contained_in="0")
     parent_index = _select_parent_index(root_items)
     if parent_index is not None:
-        record(
-            f"inventory/{device_id}",
+        record_inventory_filtered(
             {"entPhysicalClass": "chassis", "entPhysicalContainedIn": str(parent_index)},
+            contained_in=str(parent_index),
+            ent_class="chassis",
         )
 
     # 3. Ports (request VLAN data so the body matches what get_ports reads) and 4. port_stack
@@ -124,7 +165,10 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     # caller-supplied meta["os"] must not override the OS we actually captured (it scopes
     # signature/novelty behavior).
     meta_out = {**(meta or {}), "os": device_os}
-    if oob_id is not None:
+    # Skip a (misconfigured) OOB controller whose LibreNMS id equals the host's own id: its ports
+    # route devices/<oob_id>/ports is the SAME key as the host's, so recording it would overwrite the
+    # host's ports — and a device is not its own out-of-band controller.
+    if oob_id is not None and oob_id != device_id:
         record(f"devices/{oob_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
         meta_out["oob_id"] = oob_id
 

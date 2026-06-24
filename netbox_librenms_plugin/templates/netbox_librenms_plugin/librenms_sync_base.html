@@ -155,8 +155,10 @@
             {% include "netbox_librenms_plugin/inc/_server_selector.html" %}
             {% if not server_selection_blocked and object|meta:"model_name" == "device" %}
             {# Capture an anonymized LibreNMS data shape for community-contributed outcome tests (issue #95). #}
+            {# server_key is read from the page URL at request time (js hx-vals), like the interface-sync controls — the base page context has no top-level server_key, so a {% if server_key %} guard here would always be false and capture would hit the default server. #}
             <button type="button" class="btn btn-sm btn-outline-secondary"
-                hx-get="{% url 'plugins:netbox_librenms_plugin:capture_data_shape' device_id=object.pk %}{% if server_key %}?server_key={{ server_key|urlencode }}{% endif %}"
+                hx-get="{% url 'plugins:netbox_librenms_plugin:capture_data_shape' device_id=object.pk %}"
+                hx-vals="js:{server_key: new URLSearchParams(window.location.search).get('server_key') || ''}"
                 hx-target="#htmx-modal-content" hx-swap="innerHTML"
                 title="Capture an anonymized LibreNMS data shape to contribute as a test">
                 <i class="mdi mdi-camera-outline"></i> Capture data shape

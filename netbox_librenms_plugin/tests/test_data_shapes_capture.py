@@ -8,8 +8,24 @@ capture and replay are faithful.
 from unittest.mock import patch
 
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
+from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
+
+
+class _StubApi:
+    """Minimal LibreNMS API serving recorded ``(status, body)`` per path — for capture-logic tests.
+
+    Lets a test inject a transport error (status 0) or differing OOB ports without an HTTP server.
+    No ``get_serial_port_sensors`` attribute, so capture skips the serial-sensor route.
+    """
+
+    def __init__(self, routes):
+        self.routes = routes  # {path (no /api/v0/ prefix, no query): (status, body)}
+        self.server_key = "stub"
+
+    def _raw_get(self, path, params=None):
+        return self.routes.get(path, (200, {"status": "ok"}))
 
 
 def _transceiver_serial_seed():
@@ -219,3 +235,90 @@ def test_capture_records_verbatim_port_body(recording_server):
 
     captured_ports = captured["responses"]["GET /api/v0/devices/1002/ports"]
     assert captured_ports == seed["responses"]["GET /api/v0/devices/1002/ports"]
+
+
+def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(recording_server):
+    """A server that returns empty filtered inventory but populates /all must still capture the VC."""
+    root = [{"entPhysicalIndex": 1, "entPhysicalClass": "stack", "entPhysicalContainedIn": 0}]
+    members = [
+        {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "chassis",
+            "entPhysicalContainedIn": 1,
+            "entPhysicalParentRelPos": 1,
+        },
+        {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "chassis",
+            "entPhysicalContainedIn": 1,
+            "entPhysicalParentRelPos": 2,
+        },
+    ]
+    seed = {
+        "schema_version": 1,
+        "name": "no-filter-srv",
+        "device_id": 1000,
+        "meta": {"os": "ios"},
+        "responses": {
+            "GET /api/v0/devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
+            # The server ignores the entPhysical* filter params → empty filtered inventory...
+            "GET /api/v0/inventory/1000?entPhysicalContainedIn=0": {"status": "ok", "inventory": []},
+            "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
+                "status": "ok",
+                "inventory": [],
+            },
+            # ...but /inventory/{id}/all is populated (the get_inventory_filtered fallback source).
+            "GET /api/v0/inventory/1000/all": {"status": "ok", "inventory": root + members},
+            "GET /api/v0/devices/1000/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "Gi1/0/1", "ifType": "ethernetCsmacd"}],
+            },
+            "GET /api/v0/devices/1000/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+    _server, api = recording_server(seed)
+    captured = capture_device_recording(api, 1000, name="captured-fallback")
+
+    # Without the fallback the filtered inventory is empty → the VC is silently downgraded to a plain
+    # device. The capture must reproduce the entities under the filtered key the signature/replay read.
+    sig = compute_shape_signature(captured)
+    assert sig["virtual_chassis"]["present"] is True
+    assert sig["virtual_chassis"]["member_count"] == 2
+
+
+def test_capture_skips_route_with_transport_error_status():
+    """A route that fails at the transport layer (status 0) must not be baked into the recording (it would replay as an invalid send_response(0))."""
+    routes = {
+        "devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
+        "inventory/1000": {"status": "ok", "inventory": []},
+        "inventory/1000/all": {"status": "ok", "inventory": []},
+        "devices/1000/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
+        "devices/1000/port_stack": {"status": "ok", "mappings": []},
+    }
+    api = _StubApi({k: (200, v) for k, v in routes.items()})
+    api.routes["devices/1000/transceivers"] = (0, None)  # transport error on this route
+
+    captured = capture_device_recording(api, 1000)
+
+    assert "GET /api/v0/devices/1000/transceivers" not in captured["responses"]
+    # Other routes are still recorded — only the un-replayable status-0 route is skipped.
+    assert "GET /api/v0/devices/1000/ports" in captured["responses"]
+
+
+def test_capture_skips_oob_ports_when_oob_id_equals_host():
+    """When a (misconfigured) OOB controller id equals the host device id, the OOB ports fetch must be skipped so it can't overwrite the host's ports under the shared key."""
+    routes = {
+        "devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
+        "inventory/1000": {"status": "ok", "inventory": []},
+        "inventory/1000/all": {"status": "ok", "inventory": []},
+        "devices/1000/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
+        "devices/1000/port_stack": {"status": "ok", "mappings": []},
+        "devices/1000/transceivers": {"status": "ok", "transceivers": []},
+    }
+    api = _StubApi({k: (200, v) for k, v in routes.items()})
+
+    captured = capture_device_recording(api, 1000, oob_id=1000)
+
+    # The host id is not recorded as its own OOB controller, so no self-collision on the ports key.
+    assert "oob_id" not in captured["meta"]
+    assert captured["responses"]["GET /api/v0/devices/1000/ports"]["ports"] == [{"port_id": 1, "ifName": "Gi0/1"}]

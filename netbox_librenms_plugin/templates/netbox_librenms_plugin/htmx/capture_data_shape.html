@@ -29,7 +29,7 @@
     {% endif %}
 
     <label class="form-label mt-3 mb-1"><strong>Anonymized recording</strong></label>
-    <pre id="capture-json" class="border rounded p-2 small mb-2" data-filename="{{ object.name|slugify }}-shape.json"
+    <pre id="capture-json" class="border rounded p-2 small mb-2" data-filename="{{ anonymized_name|default:'data-shape'|slugify }}.json"
          style="max-height:300px;overflow:auto">{{ recording_json }}</pre>
     <div class="d-flex gap-2 align-items-center">
       <button type="button" class="btn btn-sm btn-outline-secondary" id="capture-copy-btn">

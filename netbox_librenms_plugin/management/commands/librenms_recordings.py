@@ -76,7 +76,19 @@ class Command(BaseCommand):
         self.stdout.write(f"Novelty: {verdict['verdict']} ({verdict['why']}).")
 
     def _rebuild_manifest(self):
-        manifest = build_manifest(recordings_store.load_bundled_recordings())
+        recordings = recordings_store.load_bundled_recordings()
+        if not recordings:
+            # Refuse to overwrite the shipped manifest with an empty one. The recordings are dev/test
+            # fixtures that are NOT packaged in the wheel (only manifest.json ships), so a wheel
+            # install has no recordings to rebuild from — writing "[]" here would wipe the manifest
+            # the in-plugin novelty view reads, making every future capture report "new". Rebuild
+            # only from a source checkout where the recordings are present.
+            raise CommandError(
+                f"No recordings found under {recordings_store.RECORDINGS_DIR}; refusing to overwrite "
+                f"{recordings_store.MANIFEST_PATH.name} with an empty manifest. Run --rebuild-manifest "
+                f"from a source checkout (the recordings are not packaged in the wheel)."
+            )
+        manifest = build_manifest(recordings)
         recordings_store.MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
         self.stdout.write(
             self.style.SUCCESS(f"Wrote {len(manifest)} signature(s) to {recordings_store.MANIFEST_PATH}.")

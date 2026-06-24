@@ -4,9 +4,12 @@ Locate and load the bundled data-shape recordings and the novelty manifest.
 Single source of truth for where recordings live and how they're loaded, shared by the test
 suite, the management command (which writes the manifest), and the in-plugin capture view (which
 reads it for the novelty verdict). The recordings live INSIDE the package
-(``data_shapes/recordings/``) — not under ``tests/`` — so they ship in the wheel (the tests
-package is excluded from the build). Reading the manifest is best-effort: a missing manifest
-yields an empty list so the novelty check degrades to "new" rather than erroring.
+(``data_shapes/recordings/``) — not under ``tests/`` — but only ``manifest.json`` is packaged in
+the wheel (see ``[tool.setuptools.package-data]``); the full recording fixtures are dev/test-time
+only, so ``iter_recording_paths()`` is empty in a wheel install. The runtime capture view needs
+only the manifest; ``--rebuild-manifest`` therefore runs from a source checkout (and refuses to
+overwrite the manifest when no recordings are present). Reading the manifest is best-effort: a
+missing manifest yields an empty list so the novelty check degrades to "new" rather than erroring.
 """
 
 import json

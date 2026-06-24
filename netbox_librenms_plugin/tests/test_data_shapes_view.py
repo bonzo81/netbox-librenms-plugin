@@ -19,6 +19,29 @@ def test_capture_data_shape_url_reverses():
     assert url.endswith("/device/7/capture-data-shape/")
 
 
+def test_capture_button_reads_server_key_from_url_in_shipped_template():
+    """The sync-page capture button must read server_key from the page URL (js hx-vals), like the interface-sync controls, since the base context has no top-level server_key — a {% if server_key %} URL guard would be dead and capture would always hit the default server."""
+    from pathlib import Path
+
+    import netbox_librenms_plugin
+
+    source = (
+        Path(netbox_librenms_plugin.__file__).parent
+        / "templates"
+        / "netbox_librenms_plugin"
+        / "librenms_sync_base.html"
+    ).read_text()
+    # Scope to the capture button block (assert on the SHIPPED source so the test fails if the wiring
+    # regresses, rather than a hand-copied snippet that can drift — mirrors TestMigratedTransferIpDeviceOnlyGate).
+    idx = source.find("capture_data_shape")
+    assert idx != -1, "capture button missing from librenms_sync_base.html"
+    block = source[idx : idx + 600]
+    # Reads server_key from the URL at request time (the interface-sync sibling pattern)...
+    assert "URLSearchParams(window.location.search).get('server_key')" in block
+    # ...and does NOT depend on a top-level {% if server_key %} the base context never sets.
+    assert "{% if server_key %}" not in block
+
+
 def _superuser_request(query=""):
     request = RequestFactory().get(f"/{query}")
     request.user = get_user_model().objects.create(username="cap-admin", is_superuser=True, is_active=True)
@@ -31,19 +54,29 @@ def _view_with_api(api):
     return view
 
 
+def _run_capture(view, server, device, *, query="?server_key=test"):
+    """Drive CaptureDataShapeView.get exercising the REAL rebind_api_for_server, get_librenms_id and
+    get_librenms_sync_device — no owned view/api method is patched. Only the plugin-config lookup (a
+    true external boundary, the NetBox settings registry) is patched, mapping the 'test' server to the
+    running mock URL, so the real rebind rebuilds a mock-bound client and the real get_librenms_id
+    reads the device's seeded librenms_id CF (scoped to the resolved server key).
+    """
+    servers_config = {
+        "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
+    }
+    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
+        mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
+        return view.get(_superuser_request(query), device_id=device.pk)
+
+
 @pytest.mark.django_db
 def test_capture_view_renders_modal_with_anonymized_json_and_issue_link(recording_server):
     """The modal shows the novelty verdict, the anonymized (PII-scrubbed) JSON, and a prefilled issue link."""
-    _server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("cap-dev")
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("cap-dev", librenms_cf={"test": {"id": 1000}})
     view = _view_with_api(api)
 
-    with (
-        patch.object(view, "rebind_api_for_server", return_value="test"),
-        patch.object(api, "get_librenms_id", return_value=1000),
-        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
-    ):
-        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+    response = _run_capture(view, server, device)
 
     html = response.content.decode()
     assert "Capture data shape: cap-dev" in html
@@ -59,16 +92,11 @@ def test_capture_view_renders_modal_with_anonymized_json_and_issue_link(recordin
 @pytest.mark.django_db
 def test_capture_view_reports_novelty_verdict(recording_server):
     """A shape already covered by the manifest is reported as likely-covered."""
-    _server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("cap-dev-2")
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("cap-dev-2", librenms_cf={"test": {"id": 1000}})
     view = _view_with_api(api)
 
-    with (
-        patch.object(view, "rebind_api_for_server", return_value="test"),
-        patch.object(api, "get_librenms_id", return_value=1000),
-        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
-    ):
-        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+    response = _run_capture(view, server, device)
 
     assert "Likely already covered" in response.content.decode()
 
@@ -80,16 +108,11 @@ def test_capture_view_reports_similar_for_related_os_variant(recording_server):
     # Same VC shape, but a different cisco OS variant (iosxr) — behaves differently, so 'similar'.
     rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["os"] = "iosxr"
     rec["meta"] = {**rec.get("meta", {}), "os": "iosxr"}
-    _server, api = recording_server(rec)
-    device = make_device("cap-dev-similar")
+    server, api = recording_server(rec)
+    device = make_device("cap-dev-similar", librenms_cf={"test": {"id": 1000}})
     view = _view_with_api(api)
 
-    with (
-        patch.object(view, "rebind_api_for_server", return_value="test"),
-        patch.object(api, "get_librenms_id", return_value=1000),
-        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
-    ):
-        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+    response = _run_capture(view, server, device)
 
     html = response.content.decode()
     assert "Similar to an existing shape" in html
@@ -123,16 +146,11 @@ def test_capture_view_compresses_redundant_ports(recording_server):
             },
         },
     }
-    _server, api = recording_server(rec)
-    device = make_device("cap-big")
+    server, api = recording_server(rec)
+    device = make_device("cap-big", librenms_cf={"test": {"id": 1000}})
     view = _view_with_api(api)
 
-    with (
-        patch.object(view, "rebind_api_for_server", return_value="test"),
-        patch.object(api, "get_librenms_id", return_value=1000),
-        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
-    ):
-        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+    response = _run_capture(view, server, device)
 
     html = response.content.decode()
     # The displayed JSON is HTML-escaped (quotes → &quot;), so assert on quote-free substrings.
@@ -148,16 +166,11 @@ def test_capture_view_issue_url_uses_anonymized_name_not_device_name(recording_s
     """The prefilled GitHub issue title must carry the anonymized recording name, not the real device name."""
     import re
 
-    _server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("supersecret-rtr01.dc1.internal")  # a realistic, infra-revealing name
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("supersecret-rtr01.dc1.internal", librenms_cf={"test": {"id": 1000}})
     view = _view_with_api(api)
 
-    with (
-        patch.object(view, "rebind_api_for_server", return_value="test"),
-        patch.object(api, "get_librenms_id", return_value=1000),
-        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
-    ):
-        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+    response = _run_capture(view, server, device)
 
     html = response.content.decode()
     issue_url = re.search(r"https://github.com/[^\"']*issues/new[^\"']*", html)
@@ -165,6 +178,25 @@ def test_capture_view_issue_url_uses_anonymized_name_not_device_name(recording_s
     # The real device name must NOT reach the public issue URL; the anonymized shape name is used.
     assert "supersecret-rtr01" not in issue_url.group(0)
     assert "shape" in issue_url.group(0)
+
+
+@pytest.mark.django_db
+def test_capture_view_download_filename_uses_anonymized_name_not_device_name(recording_server):
+    """The downloaded file's name must carry the anonymized shape name, not the real device name."""
+    import re
+
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("supersecret-rtr01.dc1.internal", librenms_cf={"test": {"id": 1000}})
+    view = _view_with_api(api)
+
+    response = _run_capture(view, server, device)
+
+    html = response.content.decode()
+    filename = re.search(r'data-filename="([^"]*)"', html)
+    assert filename, "data-filename attribute not found"
+    # The file attached to the public issue must not leak the hostname the JSON scrubbed.
+    assert "supersecret-rtr01" not in filename.group(1)
+    assert filename.group(1).endswith(".json") and "shape" in filename.group(1)
 
 
 @pytest.mark.django_db
@@ -179,17 +211,13 @@ def test_capture_view_includes_oob_controller_ports(recording_server):
             {"port_id": 7002, "ifName": "eth0", "ifType": "ethernetCsmacd"},
         ],
     }
-    _server, api = recording_server(rec)
-    # Seed the device's librenms_id CF with an OOB controller under the 'test' server key.
+    server, api = recording_server(rec)
+    # Seed the device's librenms_id CF with an OOB controller under the 'test' server key. The real
+    # get_librenms_id (CF read), rebind_api_for_server and get_librenms_oob all run — no owned patches.
     device = make_device("cap-oob", librenms_cf={"test": {"id": 1000, "oob": {"id": 2500, "type": "drac"}}})
     view = _view_with_api(api)
 
-    with (
-        patch.object(view, "rebind_api_for_server", return_value="test"),
-        patch.object(api, "get_librenms_id", return_value=1000),
-        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
-    ):
-        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+    response = _run_capture(view, server, device)
 
     html = response.content.decode()
     # The recording records meta.oob_id and the controller's own /ports route (quotes are HTML-escaped).
@@ -200,16 +228,13 @@ def test_capture_view_includes_oob_controller_ports(recording_server):
 @pytest.mark.django_db
 def test_capture_view_errors_when_device_not_linked(recording_server):
     """A device with no LibreNMS id shows an error panel instead of capturing."""
-    _server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    # No librenms_id CF and no primary IP → the real get_librenms_id finds no stored id and no
+    # API-discovery identity, so it returns None and the view shows the not-linked error.
     device = make_device("cap-dev-3")
     view = _view_with_api(api)
 
-    with (
-        patch.object(view, "rebind_api_for_server", return_value="test"),
-        patch.object(api, "get_librenms_id", return_value=None),
-        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
-    ):
-        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+    response = _run_capture(view, server, device)
 
     html = response.content.decode()
     assert "not linked to LibreNMS" in html
@@ -219,12 +244,13 @@ def test_capture_view_errors_when_device_not_linked(recording_server):
 @pytest.mark.django_db
 def test_capture_view_errors_on_stale_server_key(recording_server):
     """A stale/unconfigured server key shows an error panel."""
-    _server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
     device = make_device("cap-dev-4")
     view = _view_with_api(api)
 
-    with patch.object(view, "rebind_api_for_server", return_value=None):
-        response = view.get(_superuser_request("?server_key=ghost"), device_id=device.pk)
+    # 'ghost' is not in the configured servers (only 'test' is), so the real rebind_api_for_server
+    # resolves to None and the view shows the stale-server error — no owned method patched.
+    response = _run_capture(view, server, device, query="?server_key=ghost")
 
     assert "no longer configured" in response.content.decode()
 
@@ -237,16 +263,11 @@ def test_capture_view_warns_on_residual_pii(recording_server):
     # Plant an IP in a PRESERVED label so it survives anonymization and trips the safety-net.
     root_key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=0"
     rec["responses"][root_key]["inventory"][0]["entPhysicalName"] = "stack mgmt 10.7.8.9"
-    _server, api = recording_server(rec)
-    device = make_device("cap-dev-5")
+    server, api = recording_server(rec)
+    device = make_device("cap-dev-5", librenms_cf={"test": {"id": 1000}})
     view = _view_with_api(api)
 
-    with (
-        patch.object(view, "rebind_api_for_server", return_value="test"),
-        patch.object(api, "get_librenms_id", return_value=1000),
-        patch("netbox_librenms_plugin.views.data_shapes.get_librenms_sync_device", return_value=None),
-    ):
-        response = view.get(_superuser_request("?server_key=test"), device_id=device.pk)
+    response = _run_capture(view, server, device)
 
     html = response.content.decode()
     assert "possible PII value" in html

@@ -58,9 +58,49 @@ def test_signature_vlans_requires_actual_vlan_data():
         is False
     )
     assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": ""}]))["vlans"] is False
+    # ifVlan 0 is LibreNMS's no-/default-VLAN sentinel on an access port, not real VLAN data → False.
+    assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": 0}]))["vlans"] is False
     # Real VLAN data → vlans True.
     assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "ifVlan": 10}]))["vlans"] is True
     assert compute_shape_signature(_rec([{"port_id": 1, "ifName": "Gi0/1", "vlans": [10, 20]}]))["vlans"] is True
+
+
+def test_signature_handles_null_meta():
+    """A recording with explicit meta:null must not crash; os falls back to the device row."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "meta": None,  # the recording schema does not validate meta, so a null can reach here
+        "responses": {
+            "GET /api/v0/devices/1": {"status": "ok", "devices": [{"device_id": 1, "os": "ios"}]},
+            "GET /api/v0/devices/1/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
+        },
+    }
+    sig = compute_shape_signature(rec)  # must not raise AttributeError on meta.get(...)
+    assert sig["os"] == "ios"
+
+
+def test_signature_reads_host_ports_not_oob_controller_ports():
+    """With a host and an OOB-controller /ports route, the signature fingerprints the host's ports (anchored on device_id), not whichever route comes first in dict order."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "responses": {
+            # OOB controller's ports FIRST — a loose .endswith('/ports') would fingerprint these.
+            "GET /api/v0/devices/2500/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 9001, "ifName": "Bundle-Ether1", "ifType": "ieee8023adLag"}],
+            },
+            "GET /api/v0/devices/1/ports": {
+                "status": "ok",
+                "ports": [{"port_id": 1, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}],
+            },
+        },
+    }
+    # Only the OOB controller carries a LAG; the host does not. Anchoring on the host → lag absent.
+    assert compute_shape_signature(rec)["lag"]["present"] is False
 
 
 def test_signature_transceivers_requires_non_empty_list():

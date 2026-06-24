@@ -55,6 +55,14 @@ PRESERVE_KEYS = frozenset(
         # it would foreclose recording-driven module-install outcome tests. (Device `hardware`,
         # the chassis SKU, is NOT a match key and stays pseudonymized via MODEL_KEYS.)
         "entPhysicalModelName",
+        # entPhysicalName/entPhysicalDescr are logic-bearing and preserved verbatim like the model
+        # SKU above: module-type matching reads entPhysicalName first (device_operations), VC member
+        # name/description come from both (virtual_chassis), and slot/MDA + transceiver matching
+        # fullmatch entPhysicalName / read entPhysicalDescr (modules_view). Scrubbing them would
+        # destroy the module-install / VC-detection outcomes the recordings exist to test; residual
+        # free-text PII in them is the find_pii safety net's responsibility, not a field scrub.
+        "entPhysicalName",
+        "entPhysicalDescr",
         # NOTE: `os` is NOT preserved — it's pseudonymized to a stable os-<hash> (see
         # pseudonymize_os) so a recording never advertises the exact platform.
         "device_id",
@@ -96,6 +104,10 @@ HOSTNAME_KEYS = frozenset({"hostname", "sysName", "remote_hostname", "display"})
 # blanking it loses no testable outcome. (entPhysicalModelName / transceiver `model` ARE matching
 # keys and are preserved via PRESERVE_KEYS instead.)
 MODEL_KEYS = frozenset({"hardware"})
+# entPhysicalMfgName is the ENTITY-MIB manufacturer name (e.g. "Cisco Systems Inc."). It names the
+# vendor the os-hash deliberately masks and is read by no sync logic, so it's pseudonymized to a
+# deterministic MFG-<hash> — the field shape (present, non-empty) survives without the vendor.
+MFG_KEYS = frozenset({"entPhysicalMfgName"})
 # Firmware / software version strings. Identifying (pin an exact build → deployment fingerprint /
 # CVE surface) and read by no sync logic, so pseudonymized to a deterministic fw-<hash>. (Device
 # chassis HARDWARE revision is left alone — it's not a firmware version.)
@@ -108,7 +120,18 @@ LOCATION_KEYS = frozenset({"location", "sysLocation"})
 # and entPhysicalAlias (manager-assigned alias) can carry internal asset tags / rack codes; neither
 # is read by the sync logic.
 FREETEXT_KEYS = frozenset(
-    {"ifAlias", "sysContact", "sysDescr", "purpose", "notes", "entPhysicalAssetID", "entPhysicalAlias"}
+    {
+        "ifAlias",
+        "sysContact",
+        "sysDescr",
+        "purpose",
+        "notes",
+        "entPhysicalAssetID",
+        "entPhysicalAlias",
+        # ENTITY-MIB manufacture date (e.g. "2021-03-15,12:00:00.0") — an identifying build date read
+        # by no sync logic, scrubbed to empty.
+        "entPhysicalMfgDate",
+    }
 )
 # OID-valued fields whose enterprise arc (1.3.6.1.4.1.<N>) names the vendor — e.g. sysObjectID
 # 1.3.6.1.4.1.6527… (Nokia), sensor_oid …10418… (Avocent). They re-reveal the platform that
@@ -367,6 +390,8 @@ def _anon_value(key, value, salt):
         return f"device-{_hash(value, salt)}"
     if key in MODEL_KEYS:
         return f"MODEL-{_hash(value, salt)}"
+    if key in MFG_KEYS:
+        return f"MFG-{_hash(value, salt)}"
     if key in VERSION_KEYS:
         return f"fw-{_hash(value, salt)}"
     if key == "os":

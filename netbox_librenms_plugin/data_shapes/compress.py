@@ -23,6 +23,8 @@ lockstep if that signature grows.
 
 import re
 
+from netbox_librenms_plugin.data_shapes.signature import port_has_vlan
+
 _SUB_RE = re.compile(r"\.\d+$")
 
 
@@ -94,7 +96,10 @@ def _fingerprint(port):
     return (
         port.get("ifType"),
         bool(_SUB_RE.search(name)),  # sub-interface naming style (drives signature sub_interfaces)
-        "ifVlan" in port or "vlans" in port,  # carries VLAN data (drives signature vlans)
+        # VLAN axis — use the signature's own value-based predicate (not key presence) so a
+        # no-VLAN port (ifVlan None/0) and a real-VLAN port get distinct fingerprints and the
+        # representative kept can't flip compute_shape_signature's vlans axis.
+        port_has_vlan(port),
     )
 
 

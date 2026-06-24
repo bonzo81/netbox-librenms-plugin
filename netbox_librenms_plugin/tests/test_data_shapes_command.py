@@ -114,3 +114,21 @@ def test_rebuild_manifest_excludes_manifest_itself(tmp_path, monkeypatch):
 
     manifest = json.loads((rec_dir / "manifest.json").read_text())
     assert [e["name"] for e in manifest] == ["cisco-stackwise-3member"]
+
+
+def test_rebuild_manifest_refuses_to_wipe_when_no_recordings(tmp_path, monkeypatch):
+    """In a wheel install the recordings aren't packaged (only manifest.json ships), so --rebuild-manifest finds zero recordings; it must refuse rather than overwrite the shipped manifest with an empty list."""
+    rec_dir = tmp_path / "recordings"
+    rec_dir.mkdir()
+    manifest_path = rec_dir / "manifest.json"
+    original = [{"name": "cisco-stackwise-3member", "signature": {"os": "os-abc123"}}]
+    manifest_path.write_text(json.dumps(original))  # a populated, shipped manifest...
+    # ...but NO recording JSON fixtures alongside it (the wheel-install situation).
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", manifest_path)
+
+    with pytest.raises(CommandError, match="No recordings found"):
+        _run(**{"rebuild_manifest": True})
+
+    # The shipped manifest is left intact, not wiped to [].
+    assert json.loads(manifest_path.read_text()) == original

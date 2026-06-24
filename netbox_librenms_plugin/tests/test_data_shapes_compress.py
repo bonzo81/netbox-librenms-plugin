@@ -146,3 +146,29 @@ def test_compression_targets_main_device_not_oob_controller():
     assert len(comp["responses"]["GET /api/v0/devices/39/ports"]["ports"]) == 1
     assert len(comp["responses"]["GET /api/v0/devices/25/ports"]["ports"]) == 10
     assert comp["meta"]["compressed_ports"] == {"from": 20, "to": 1}
+
+
+def test_compression_vlan_axis_stays_in_lockstep_with_signature():
+    """A no-VLAN port (ifVlan None) must not share a fingerprint with a real-VLAN port and collapse it; the compressed recording's vlans signature must equal the full one's."""
+    rec = {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 7,
+        "meta": {"os": "ios"},
+        "responses": {
+            "GET /api/v0/devices/7": {"status": "ok", "devices": [{"device_id": 7, "os": "ios"}]},
+            "GET /api/v0/devices/7/ports": {
+                "status": "ok",
+                "ports": [
+                    # Same ifType/naming, differing only in VLAN value. A key-presence fingerprint would
+                    # treat them as one shape and keep only the first (no-VLAN) representative.
+                    _port(1, "Gi0/1", "ethernetCsmacd", ifVlan=None),
+                    _port(2, "Gi0/2", "ethernetCsmacd", ifVlan=10),
+                ],
+            },
+        },
+    }
+    full = compute_shape_signature(rec)
+    comp = compute_shape_signature(compress_recording(rec))
+    assert full["vlans"] is True  # the recording genuinely carries VLAN data (Gi0/2)
+    assert comp["vlans"] == full["vlans"]  # compression must not flip the vlans axis to False

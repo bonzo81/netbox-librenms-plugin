@@ -248,6 +248,45 @@ def test_find_pii_still_flags_a_real_ip_next_to_text():
     assert any(f["kind"] == "ipv4" and f["value"] == "10.7.8.9" for f in find_pii(anon))
 
 
+def test_entphysical_mfg_name_and_date_anonymized():
+    """Vendor entPhysicalMfgName is pseudonymized (hides the platform the os hash masks) and the identifying entPhysicalMfgDate is scrubbed; neither is read by sync logic."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"] = {
+        "status": "ok",
+        "inventory": [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalClass": "chassis",
+                "entPhysicalMfgName": "Cisco Systems Inc.",
+                "entPhysicalMfgDate": "2021-03-15,12:00:00.0",
+            }
+        ],
+    }
+    key = "GET /api/v0/inventory/1?entPhysicalContainedIn=0"
+    item = anonymize_recording(rec)["responses"][key]["inventory"][0]
+    assert item["entPhysicalMfgName"] != "Cisco Systems Inc."  # vendor name no longer verbatim
+    assert item["entPhysicalMfgName"].startswith("MFG-")
+    assert item["entPhysicalMfgDate"] == ""  # identifying mfg date scrubbed
+    # Deterministic, and the safety net stays clean (the pseudonym carries no PII).
+    assert (
+        anonymize_recording(rec)["responses"][key]["inventory"][0]["entPhysicalMfgName"] == item["entPhysicalMfgName"]
+    )
+    assert find_pii(anonymize_recording(rec)) == []
+
+
+def test_entphysical_name_and_descr_preserved_for_matching():
+    """Logic-bearing entPhysicalName/entPhysicalDescr (module-type, VC-member and transceiver matching read them) survive verbatim; residual free-text PII there is the find_pii net's job, not a scrub."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"] = {
+        "status": "ok",
+        "inventory": [{"entPhysicalIndex": 1, "entPhysicalName": "FPC 1", "entPhysicalDescr": "10GBASE-LR SFP+"}],
+    }
+    key = "GET /api/v0/inventory/1?entPhysicalContainedIn=0"
+    item = anonymize_recording(rec)["responses"][key]["inventory"][0]
+    assert item["entPhysicalName"] == "FPC 1"
+    assert item["entPhysicalDescr"] == "10GBASE-LR SFP+"
+
+
 def test_snmp_credentials_scrubbed():
     """SNMP community / v3 auth+priv secrets in the device row are scrubbed to empty, not leaked."""
     rec = _ports()
