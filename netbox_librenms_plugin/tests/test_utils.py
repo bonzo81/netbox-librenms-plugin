@@ -1719,3 +1719,33 @@ class TestGetVirtualChassisMemberNoneName:
         dev.refresh_from_db()
 
         assert get_virtual_chassis_member(dev, None) is dev
+
+
+class TestCoercePositiveInt:
+    """coerce_positive_int accepts only positive int / int-string and rejects non-integer types (no float truncation)."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (5, 5),
+            ("7", 7),
+            (1, 1),
+            (0, None),
+            (-3, None),
+            ("0", None),
+            ("-3", None),
+            (None, None),
+            (True, None),  # bool is an int subclass — must not become 1
+            (False, None),
+            (1.9, None),  # float must NOT int()-truncate to 1
+            (1.0, None),  # even a whole float is rejected (non-integer type)
+            ("1.9", None),  # non-integer string
+            ("abc", None),
+            ([], None),
+            ({}, None),
+        ],
+    )
+    def test_coercion(self, value, expected):
+        from netbox_librenms_plugin.utils import coerce_positive_int
+
+        assert coerce_positive_int(value) == expected

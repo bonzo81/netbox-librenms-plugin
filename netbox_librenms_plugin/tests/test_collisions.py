@@ -184,6 +184,16 @@ def test_numeric_like_libre_id_is_skipped_not_truncated():
     assert detect_bulk_collisions(devices) == []
 
 
+def test_float_nb_pk_is_skipped_not_truncated():
+    """A float NetBox pk (1.9) must be dropped by coerce_positive_int, not int()-truncated to 1 — otherwise it fabricates a collision against the real pk=1 device."""
+    devices = [
+        _row(910, "float-pk-row", {"existing_device": Device(pk=1.9, name="nb-float-pk")}),  # must NOT become pk=1
+        _row(911, "real-pk-row", {"existing_device": Device(pk=1, name="nb-pk-1")}),
+    ]
+    # The float-pk row is dropped → only one valid NB pk is touched → no collision.
+    assert detect_bulk_collisions(devices) == []
+
+
 def test_digit_string_libre_id_is_accepted():
     """A plain digit-string device_id ('200') is still coerced and counted (regression guard for the coerce switch)."""
     nb_device = Device(pk=31, name="nb-strid")
@@ -344,6 +354,27 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     # Tabler's muted badge text (grey-on-red), unreadable in both themes.
     assert "badge bg-danger text-white" in html
     assert 'badge bg-danger"' not in html
+
+
+def test_collision_template_title_is_generic_for_non_collision_failures():
+    """The modal title must drop the 'NetBox device collisions' wording when rendering a non-collision error_message (the same modal serves LibreNMS fetch/check failures)."""
+    from django.template.loader import render_to_string
+
+    # Collision render → collision-specific title.
+    collision_html = render_to_string(
+        "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+        {"collisions": [{"nb_device_pk": 1, "nb_device_name": "x", "nb_model_name": "device", "librenms_rows": []}]},
+    )
+    assert "Bulk import blocked: NetBox device collisions" in collision_html
+
+    # Non-collision failure render → generic title, NOT the collision wording.
+    error_html = render_to_string(
+        "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+        {"error_message": "Could not fetch LibreNMS info for the selected device."},
+    )
+    assert "Bulk import blocked" in error_html
+    assert "NetBox device collisions" not in error_html
+    assert "Could not fetch LibreNMS info for the selected device." in error_html
 
 
 def test_non_string_merge_model_name_is_normalized():

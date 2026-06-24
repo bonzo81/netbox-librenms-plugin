@@ -1315,11 +1315,14 @@ def coerce_positive_int(value):
     """
     Coerce a value to a strictly-positive ``int``, or ``None`` when invalid.
 
-    Rejects ``None`` and ``bool`` (``bool`` is an ``int`` subclass, so ``int(True)``
-    would silently become ``1``), then attempts ``int(value)`` and keeps the result
-    only when ``> 0``. Shared by the NetBox-pk coercion sites — bulk-import collision
-    detection and module-inventory port identity — so the positive-int rule lives in
-    one place.
+    Accepts only an ``int`` (excluding ``bool``, an ``int`` subclass, so ``int(True)``
+    can't silently become ``1``) or an integer-parseable ``str``, and keeps the result
+    only when ``> 0``. Non-integer types such as ``float`` are rejected outright rather
+    than coerced — ``int(1.9)`` would truncate to a valid-looking ``1`` and resolve a
+    malformed id to the wrong object — mirroring the stricter guard in
+    :func:`coerce_librenms_id`. Shared by the NetBox-pk coercion sites — bulk-import
+    collision detection and module-inventory port identity — so the positive-int rule
+    lives in one place.
 
     Args:
         value: The raw value to coerce (a NetBox pk or similar identifier).
@@ -1327,13 +1330,17 @@ def coerce_positive_int(value):
     Returns:
         int | None: The positive integer, or None if it can't be coerced.
     """
-    if value is None or isinstance(value, bool):
+    if isinstance(value, bool):
         return None
-    try:
-        int_value = int(value)
-    except (TypeError, ValueError):
-        return None
-    return int_value if int_value > 0 else None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        try:
+            coerced = int(value)
+        except ValueError:
+            return None
+        return coerced if coerced > 0 else None
+    return None
 
 
 def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):

@@ -1,7 +1,13 @@
 {# Bulk-import collision warning: shown when two or more selected LibreNMS rows resolve to the same NetBox device. #}
 <div class="modal-header">
   <h5 class="modal-title text-danger">
-    <i class="mdi mdi-alert-octagon"></i> Bulk import blocked: NetBox device collisions
+    <i class="mdi mdi-alert-octagon"></i>
+    {# The modal also renders non-collision failures (error_message branch below), so keep the title generic in that case. #}
+    {% if error_message %}
+      Bulk import blocked
+    {% else %}
+      Bulk import blocked: NetBox device collisions
+    {% endif %}
   </h5>
   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
 </div>
