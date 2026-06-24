@@ -112,3 +112,33 @@ class TestHasLagSignalsFieldSelection:
         # A propVirtual port-channel whose name matches a seeded pattern (^Po\\d+$) still
         # triggers it via the name-pattern branch — so real IOS LAGs are unaffected.
         assert view._has_lag_signals([{"ifName": "Po10", "ifType": "propVirtual"}]) is True
+
+
+@pytest.mark.django_db
+class TestHasLagSignalsOsScoped:
+    """The name-pattern signal must be scoped to the device OS (matching resolve_port_relationships), so a name matching another platform's LAG regex doesn't trigger a wasted port_stack fetch + empty Parent/LAG column."""
+
+    @staticmethod
+    def _view():
+        from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
+
+        return object.__new__(BaseInterfaceTableView)
+
+    def test_name_pattern_signal_scoped_to_device_os(self):
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        PortStackLagPattern.objects.create(librenms_os="znos", lag_name_pattern=r"^Zo\d+$")
+        view = self._view()
+        ports = [{"ifName": "Zo1", "ifType": "propVirtual"}]
+        # Scoped to the OS that defines the pattern -> signal fires.
+        assert view._has_lag_signals(ports, device_os="znos") is True
+        # Scoped to a different OS with no matching pattern -> no false-positive fetch trigger.
+        assert view._has_lag_signals(ports, device_os="some-other-os") is False
+        # Unscoped (legacy / OS unknown) still matches any stored pattern.
+        assert view._has_lag_signals(ports, device_os=None) is True
+
+    def test_structural_signal_is_os_independent(self):
+        view = self._view()
+        agg = [{"ifName": "agg0", "ifType": "ieee8023adLag"}]
+        # ieee8023adLag is structural -> fires regardless of OS scope.
+        assert view._has_lag_signals(agg, device_os="some-other-os") is True

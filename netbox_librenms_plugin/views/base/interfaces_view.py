@@ -1,4 +1,5 @@
 import logging
+import re
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -391,31 +392,34 @@ class BaseInterfaceTableView(
         # when the main device has no such relationships.
         host_ports_final = [p for p in librenms_data.get("ports", []) if p.get("_source") != "oob"]
         if self._has_lag_signals(host_ports_final, interface_name_field):
-            ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
-            if ps_success:
-                # Scope LAG name-pattern matching to this device's OS so a vendor-specific
-                # regex can't misclassify an interface on another platform. Best-effort:
-                # on a failed/odd device-info fetch we fall back to all patterns.
-                device_os = None
-                info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
-                if info_success and isinstance(device_info, dict):
-                    device_os = device_info.get("os")
-                relationships = self.librenms_api.resolve_port_relationships(
-                    host_ports_final, ps_data, device_os=device_os
-                )
-                librenms_data["port_stack_relationships"] = relationships
-            else:
-                # _has_lag_signals() already decided this device has LAG/sub-interface
-                # relationships, so a failed fetch means the LAG/Parent column is silently
-                # incomplete. Warn the user (mirrors the OOB-incomplete handling) instead of
-                # dropping the enrichment without a trace.
-                logger.warning("port_stack fetch failed for device %s: %s", self.librenms_id, ps_data)
-                messages.warning(
-                    request,
-                    "Interfaces refreshed, but LAG/sub-interface relationship data could not be "
-                    "fetched from LibreNMS; the Parent / LAG column may be incomplete. "
-                    "See server logs for details.",
-                )
+            # Cheap unscoped pre-check passed; resolve the device OS and re-check the signal
+            # OS-scoped before paying for the port_stack fetch. A port name matching only
+            # another platform's LAG regex is a false positive (resolve_port_relationships is
+            # OS-scoped too, so it would resolve nothing), so skip the fetch entirely rather than
+            # fetch it and render an empty Parent/LAG column. Best-effort: on a failed/odd
+            # device-info fetch device_os stays None and the re-check falls back to all patterns.
+            device_os = None
+            info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+            if info_success and isinstance(device_info, dict):
+                device_os = device_info.get("os")
+            if self._has_lag_signals(host_ports_final, interface_name_field, device_os=device_os):
+                ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
+                if ps_success:
+                    relationships = self.librenms_api.resolve_port_relationships(
+                        host_ports_final, ps_data, device_os=device_os
+                    )
+                    librenms_data["port_stack_relationships"] = relationships
+                else:
+                    # The (OS-scoped) signal says this device has LAG/sub-interface relationships,
+                    # so a failed fetch means the LAG/Parent column is silently incomplete. Warn
+                    # (mirrors the OOB-incomplete handling) instead of dropping it without a trace.
+                    logger.warning("port_stack fetch failed for device %s: %s", self.librenms_id, ps_data)
+                    messages.warning(
+                        request,
+                        "Interfaces refreshed, but LAG/sub-interface relationship data could not be "
+                        "fetched from LibreNMS; the Parent / LAG column may be incomplete. "
+                        "See server logs for details.",
+                    )
 
         # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it
         # (which would leave downstream views — SingleInterfaceVerifyView,
@@ -848,16 +852,23 @@ class BaseInterfaceTableView(
 
         port["missing_vlans"] = missing_vlans
 
-    def _has_lag_signals(self, ports: list, interface_name_field: str = "ifName") -> bool:
+    def _has_lag_signals(self, ports: list, interface_name_field: str = "ifName", device_os=None) -> bool:
         """
         Return True if any port appears to be a LAG interface or sub-interface.
 
         Used to trigger the lazy port_stack API fetch only when needed. Detects:
 
           - ifType == 'ieee8023adLag' (definitive)
-          - Name matches any PortStackLagPattern regex
+          - Name matches a PortStackLagPattern regex (scoped to *device_os* — see below)
           - Any port name ends with '.<digits>' AND the base name also exists
             (sub-interface detection, e.g. ge-0/0/0.100 with ge-0/0/0 present)
+
+        ``device_os`` scopes the name-pattern match to this device's OS, matching the resolver
+        (resolve_port_relationships): a port name matching *another* platform's LAG regex is a
+        false positive that would otherwise trigger the (wasted) port_stack fetch and leave an
+        empty Parent/LAG column. The caller does a cheap unscoped pre-check (device_os None ->
+        all patterns) and, only when that passes, fetches the OS and re-checks scoped before the
+        port_stack fetch. The structural ieee8023adLag / sub-interface signals are OS-independent.
 
         'propVirtual' is deliberately NOT a signal: loopbacks, SVIs and tunnels are all
         propVirtual, so gating on it fired the extra get_port_stack()/get_device_info()
@@ -881,16 +892,10 @@ class BaseInterfaceTableView(
         Returns:
             bool: True if any port looks like a LAG aggregate or a sub-interface.
         """
-        import re as _re
-
         from netbox_librenms_plugin.models import PortStackLagPattern
 
-        lag_patterns = []
-        for pat_obj in PortStackLagPattern.objects.all():
-            try:
-                lag_patterns.append(_re.compile(pat_obj.lag_name_pattern))
-            except _re.error:
-                pass
+        # OS-scoped compiled patterns (shared with the resolver via the model helper).
+        lag_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
 
         name_fields = {"ifName", "ifDescr", interface_name_field}
 
@@ -898,7 +903,7 @@ class BaseInterfaceTableView(
             return [name for field in name_fields if (name := port.get(field))]
 
         port_names = {name for p in ports for name in _names(p)}
-        sub_iface_re = _re.compile(r"^(.+)\.\d+$")
+        sub_iface_re = re.compile(r"^(.+)\.\d+$")
 
         for port in ports:
             if_type = port.get("ifType", "")

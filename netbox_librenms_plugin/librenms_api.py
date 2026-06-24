@@ -652,27 +652,6 @@ class LibreNMSAPI:
                 'lag_members':    {member_port_id: aggregate_port_id}
                 'sub_interfaces': {child_port_id: parent_port_id}
         """
-        import re as _re
-
-        if lag_patterns is None:
-            from netbox_librenms_plugin.models import PortStackLagPattern
-
-            queryset = PortStackLagPattern.objects.all()
-            # Only the legacy OMITTED-OS path (device_os is None) loads the full, unscoped pattern
-            # set. A PRESENT but unusable device_os (non-string, e.g. a number from LibreNMS, or a
-            # blank string) must DISABLE name-pattern matching — falling back to every stored
-            # vendor regex would re-globalize them and could sync an incorrect LAG. Structural
-            # ieee8023adLag detection is unaffected (it doesn't use lag_patterns).
-            if device_os is None:
-                lag_patterns = {p.librenms_os: p.lag_name_pattern for p in queryset}
-            else:
-                os_filter = device_os.strip() if isinstance(device_os, str) else ""
-                if not os_filter:
-                    lag_patterns = {}
-                else:
-                    queryset = queryset.filter(librenms_os__iexact=os_filter)
-                    lag_patterns = {p.librenms_os: p.lag_name_pattern for p in queryset}
-
         # Guard against malformed payload items (non-dict) so a single bad entry from
         # LibreNMS doesn't crash the whole relationship resolution with AttributeError.
         safe_ports = [p for p in ports if isinstance(p, dict)]
@@ -693,15 +672,26 @@ class LibreNMSAPI:
         by_id = {str(p["port_id"]): p for p in safe_named_ports}
         by_name = {p["ifName"]: p for p in safe_named_ports}
 
-        compiled_patterns = []
-        for pattern_str in lag_patterns.values():
-            try:
-                compiled_patterns.append(_re.compile(pattern_str))
-            except _re.error as exc:
-                # A configured PortStackLagPattern with a typo'd regex is skipped rather than
-                # crashing relationship resolution — but log it so the user can tell why LAG
-                # detection silently isn't working for that OS.
-                logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
+        if lag_patterns is None:
+            # OS-scoped pattern loading + compile-with-skip lives on the model so the resolver
+            # and the _has_lag_signals fetch-trigger can't diverge on which patterns apply. A
+            # PRESENT but unusable device_os disables name-pattern matching (returns []), so a
+            # stale vendor regex can't be re-globalized; structural ieee8023adLag detection is
+            # unaffected. device_os None preserves the legacy unscoped behaviour.
+            from netbox_librenms_plugin.models import PortStackLagPattern
+
+            compiled_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
+        else:
+            import re as _re
+
+            compiled_patterns = []
+            for pattern_str in lag_patterns.values():
+                try:
+                    compiled_patterns.append(_re.compile(pattern_str))
+                except _re.error as exc:
+                    # A configured pattern with a typo'd regex is skipped rather than crashing
+                    # resolution — logged so the user can tell why LAG detection isn't working.
+                    logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
         from netbox_librenms_plugin.utils import normalize_librenms_port_id
 

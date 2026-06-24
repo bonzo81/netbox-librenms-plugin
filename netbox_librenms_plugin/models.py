@@ -949,9 +949,51 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
     )
     description = models.TextField(blank=True)
 
+    @functools.cached_property
+    def _compiled_pattern(self):
+        """Compiled lag_name_pattern regex, or None when it doesn't compile (skipped, not fatal)."""
+        try:
+            return re.compile(self.lag_name_pattern)
+        except re.error:
+            return None
+
+    @classmethod
+    def compiled_patterns_for_os(cls, device_os):
+        """
+        Return the compiled lag_name_pattern regexes scoped to *device_os*.
+
+        Single home for the OS-scoping + compile-with-skip used by both the relationship
+        resolver and the lazy port_stack-fetch trigger (``_has_lag_signals``), so the two can't
+        disagree on which patterns apply. ``device_os=None`` loads every stored pattern (legacy
+        unscoped behaviour); a present-but-blank/non-string OS returns none (an unknown OS must
+        not re-globalize every vendor's regex); otherwise the patterns whose ``librenms_os``
+        matches case-insensitively. Patterns that fail to compile are skipped and logged.
+        """
+        if device_os is None:
+            queryset = cls.objects.all()
+        else:
+            os_filter = device_os.strip() if isinstance(device_os, str) else ""
+            if not os_filter:
+                return []
+            queryset = cls.objects.filter(librenms_os__iexact=os_filter)
+        compiled = []
+        for pattern in queryset:
+            regex = pattern._compiled_pattern
+            if regex is None:
+                logger.warning(
+                    "Skipping invalid LAG name pattern for OS %r: %r",
+                    pattern.librenms_os,
+                    pattern.lag_name_pattern,
+                )
+                continue
+            compiled.append(regex)
+        return compiled
+
     def clean(self):
         """Validate OS name is non-blank and lag_name_pattern is a valid regex."""
         super().clean()
+        # Invalidate the cached compiled pattern so it recompiles from the edited value.
+        self.__dict__.pop("_compiled_pattern", None)
         os_name = (self.librenms_os or "").strip().lower()
         if not os_name:
             raise ValidationError({"librenms_os": "OS name must not be blank."})

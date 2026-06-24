@@ -3605,3 +3605,93 @@ class TestOobBadgeWiring:
         table = object.__new__(LibreNMSCableTable)
         html = str(table.render_local_port("Gi0/1", {"_source": "main"}))
         assert "From OOB controller" not in html
+
+
+# ---------------------------------------------------------------------------
+# Relationship owner resolution (findings S2/S3) + VM LAG button (finding #1)
+# Real-DB: real Device/VC/Interface objects so button + dropdown resolution is
+# exercised end-to-end rather than re-asserting mock call wiring.
+# ---------------------------------------------------------------------------
+class TestRelationshipOwnerResolutionConsistency:
+    """The relationship sync button (data-object-id) and the VC member dropdown must resolve the same owner; otherwise the JS posts the dropdown value and the sync 404s."""
+
+    @staticmethod
+    def _vc():
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+
+        m1 = make_device("vc-owner-a")
+        m2 = make_device("vc-owner-b")
+        make_virtual_chassis("VC-OWNER", m1, m2)
+        return m1, m2
+
+    @staticmethod
+    def _vc_table(device):
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+
+        return VCInterfaceTable(data=[], device=device, interface_name_field="ifName")
+
+    def test_non_ethernet_subiface_button_and_dropdown_agree_on_owner(self, db):
+        """A non-ethernet sub-interface owned by another VC member: both the sync button and the member dropdown point at that member, not the viewed one."""
+        from netbox_librenms_plugin.tests.conftest import make_interface
+
+        m1, m2 = self._vc()
+        sub = make_interface(m2, "Vlan100", iface_type="virtual")
+        table = self._vc_table(m1)  # viewing member1
+        record = {
+            "ifName": "Vlan100",
+            "ifType": "l3ipvlan",
+            "port_id": 5,
+            "netbox_interface": sub,
+            "lag_sync_status": None,
+            "parent_sync_status": "mismatch",
+            "librenms_parent_name": "Bdi1",
+            "librenms_parent_port_id": 6,
+        }
+        dropdown = str(table.render_device_selection(None, record))
+        button = str(table.render_parent(None, record))
+        assert f'value="{m2.id}" selected' in dropdown  # dropdown defaults to the true owner
+        assert f'data-object-id="{m2.id}"' in button  # button agrees
+        assert f'data-object-id="{m1.id}"' not in button  # not the viewed member
+
+
+class TestVMTableHidesLagSyncButton:
+    """LAG sync is device-only (VMInterface has no lag field); a VM table must not render a LAG sync button that would 404. Parent sync stays available for VMs."""
+
+    @staticmethod
+    def _vm_table():
+        from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
+        from netbox_librenms_plugin.tests.conftest import make_vm
+
+        vm = make_vm("vm-lag")
+        return LibreNMSVMInterfaceTable(data=[], device=vm, interface_name_field="ifName"), vm
+
+    def test_vm_table_omits_lag_button(self, db):
+        table, _vm = self._vm_table()
+        record = {
+            "ifName": "eth0",
+            "ifType": "ethernetCsmacd",
+            "port_id": 3,
+            "netbox_interface": None,
+            "lag_sync_status": "missing_nb",
+            "librenms_lag_name": "Po1",
+            "librenms_lag_port_id": 9,
+            "parent_sync_status": None,
+        }
+        html = str(table.render_parent(None, record))
+        assert "lag-sync-btn" not in html  # no LAG control on a VM (it could only 404)
+
+    def test_vm_table_keeps_parent_button(self, db):
+        table, vm = self._vm_table()
+        record = {
+            "ifName": "eth0.100",
+            "ifType": "l3ipvlan",
+            "port_id": 4,
+            "netbox_interface": None,
+            "lag_sync_status": None,
+            "parent_sync_status": "missing_nb",
+            "librenms_parent_name": "eth0",
+            "librenms_parent_port_id": 10,
+        }
+        html = str(table.render_parent(None, record))
+        assert "parent-sync-btn" in html  # parent sync IS supported for VMs
+        assert f'data-object-id="{vm.id}"' in html

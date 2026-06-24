@@ -446,7 +446,10 @@ class LibreNMSInterfaceTable(tables.Table):
         parts = []
 
         lag_status = record.get("lag_sync_status")
-        if lag_status is not None:
+        # LAG membership is device-only — VMInterface has no `lag` field and SyncInterfaceLagView
+        # 404s virtualmachine, so never render a LAG line/button on a VM table (it could only
+        # error). Parent/sub-interface sync is still supported for VMs and rendered below.
+        if lag_status is not None and self.sync_object_type != "virtualmachine":
             parts.append(
                 self._render_relationship_column(
                     type_label="LAG",
@@ -478,6 +481,33 @@ class LibreNMSInterfaceTable(tables.Table):
 
         return mark_safe("".join(str(p) for p in parts))
 
+    def _resolve_row_member_id(self, record):
+        """
+        Resolve the id of the device/VM that owns this row's interface.
+
+        The relationship sync button (``data-object-id``) and the VC member dropdown
+        (:meth:`VCInterfaceTable.render_device_selection`) must agree on the owner: the JS posts
+        the dropdown's value as the object id, so if the button resolved a different device the
+        sync POSTs to the wrong member and 404s (a non-ethernet sub-interface owned by another
+        member is the classic case). Both call this. Preference, most to least authoritative:
+        (1) the matched NetBox interface's device, (2) the row-selected object stamped by
+        ``format_interface_data`` (the cross-page member switch on the verify path), (3) the
+        name-based VC heuristic (best effort for a row not yet in NetBox), (4) the viewed device.
+        """
+        nb_iface = record.get("netbox_interface")
+        if nb_iface is not None and getattr(nb_iface, "device_id", None):
+            return nb_iface.device_id
+        row_object_id = record.get("selected_object_id")
+        if row_object_id:
+            return row_object_id
+        if self.device is not None and getattr(self.device, "virtual_chassis", None):
+            # record name can be None; get_virtual_chassis_member -> re.match() would raise on a
+            # None value while rendering a missing relationship button. Coerce to "".
+            interface_name = record.get(self.interface_name_field) or ""
+            member = get_virtual_chassis_member(self.device, interface_name)
+            return (member or self.device).pk
+        return self.device.pk if self.device else ""
+
     def _render_relationship_column(
         self, lnms_name, lnms_port_id, sync_status, record, btn_class, data_related_key, type_label=""
     ):
@@ -504,12 +534,8 @@ class LibreNMSInterfaceTable(tables.Table):
             type_label (str): The short relationship label ("LAG" / "Parent").
 
         Returns:
-            SafeString: The pill markup (plus a sync button when applicable), or empty
-                when *sync_status* is None.
+            SafeString: The pill markup (plus a sync button when applicable).
         """
-        if sync_status is None:
-            return mark_safe("")
-
         # (colour, mdi icon, full status text). Colour + icon read at a glance; the text is the
         # tooltip. mdi-check-circle / mdi-help-circle are already used elsewhere in this table.
         status_map = {
@@ -550,25 +576,10 @@ class LibreNMSInterfaceTable(tables.Table):
         # parent/LAG state despite the bulk form being hidden.
         if sync_status in ("missing_nb", "mismatch") and lnms_port_id and not self.migrated_to_marker:
             port_id = record.get("port_id", "")
-            nb_iface = record.get("netbox_interface")
-            row_object_id = record.get("selected_object_id")
-            # Resolve the row's member device first. On a VC page self.device is the viewed
-            # member, which may not own this row's interface — without this, a missing_nb
-            # sync would target the wrong device. Prefer (1) the matched NetBox interface's
-            # device, (2) the row-selected object stamped by format_interface_data (authoritative
-            # for the cross-page member switch), then (3) the name-based VC heuristic.
-            if nb_iface and hasattr(nb_iface, "device_id"):
-                object_id = nb_iface.device_id
-            elif row_object_id:
-                object_id = row_object_id
-            elif self.device is not None and getattr(self.device, "virtual_chassis", None):
-                # record name can be None; get_virtual_chassis_member -> re.match() would raise on
-                # a None value while rendering a missing relationship button. Coerce to "".
-                interface_name = record.get(self.interface_name_field) or ""
-                member = get_virtual_chassis_member(self.device, interface_name)
-                object_id = (member or self.device).pk
-            else:
-                object_id = self.device.pk if self.device else ""
+            # Resolve the owning member the same way the VC member dropdown does, so the button's
+            # data-object-id and the dropdown agree (the JS posts the dropdown value, so a
+            # disagreement would 404). See _resolve_row_member_id.
+            object_id = self._resolve_row_member_id(record)
             object_type = record.get("selected_object_type") or self.sync_object_type
             # A mismatch click OVERWRITES the differing NetBox lag/parent with the LibreNMS
             # value, so spell that out in the tooltip rather than the generic "Sync".
@@ -795,14 +806,14 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         Returns an HTML select element with appropriate member options.
         """
         members = self.device.virtual_chassis.members.all()
-        if_type = record.get("ifType", "").lower()
         interface_name = record.get(self.interface_name_field)
 
-        if "ethernet" in if_type:
-            chassis_member = get_virtual_chassis_member(self.device, interface_name)
-            selected_member_id = chassis_member.id if chassis_member else self.device.id
-        else:
-            selected_member_id = self.device.id
+        # Default the dropdown to the same owner the relationship sync button resolves (matched
+        # NetBox interface's device → cross-page selection → name heuristic), so the JS — which
+        # posts this dropdown's value as the sync object id — can't disagree with the button and
+        # 404. Previously non-ethernet rows always defaulted to the viewed member, breaking sync
+        # for a sub-interface owned by a different VC member.
+        selected_member_id = self._resolve_row_member_id(record) or self.device.id
 
         # Create unique base ID for TomSelect components
         base_id = f"device_selection_{interface_name}_{hash(interface_name)}"
