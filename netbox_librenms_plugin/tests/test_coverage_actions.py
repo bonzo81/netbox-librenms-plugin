@@ -5765,6 +5765,11 @@ class TestCreatePlatformFromImportManufacturer:
 
         view = object.__new__(CreatePlatformFromImportView)
         view.required_object_permissions = {}
+        # Pre-bind a client so the (now unconditional) server rebind is a no-op cache hit — this
+        # class exercises manufacturer validation, not server resolution, and a blank POST key
+        # would otherwise build the default LibreNMSAPI(None) (a LibreNMSSettings DB read).
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
         return view
 
     def test_invalid_manufacturer_id_is_rejected(self):

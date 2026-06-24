@@ -199,7 +199,14 @@ def get_virtual_chassis_members(device: Device) -> list:
         return list(members.all())
     except Exception:
         # Non-enumerable / broken membership: fall back to the documented [device] rather than
-        # letting the enumeration error bubble out of this centralizing helper.
+        # letting the enumeration error bubble out of this centralizing helper. Log it (don't
+        # swallow silently) so a real DB/relation error isn't masked as "device has no VC
+        # siblings", which would silently skip sibling-member interface/IP matching.
+        logger.warning(
+            "Failed to enumerate virtual chassis members for %s; treating as standalone.",
+            getattr(device, "name", device),
+            exc_info=True,
+        )
         return [device]
 
 

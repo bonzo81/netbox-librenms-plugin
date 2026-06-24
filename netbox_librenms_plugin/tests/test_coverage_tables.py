@@ -1501,6 +1501,43 @@ class TestDeviceImportTableRenderActions:
         assert "btn-outline-success" in result
         assert 'title="View details"' in result
 
+    def test_oob_id_without_host_id_does_not_render_host_state(self):
+        """A librenms_id link carrying an oob_id but NO readable host_id (corrupt/partial CF) must not render the 'Linked as host' badge — there's no host id, so oob_id != None must not satisfy the host-pair branch; it falls through to the generic details button."""
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 57
+
+        record = {
+            "device_id": 4,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "existing_librenms_link": {"oob_id": 99, "oob_type": "idrac"},  # no host_id
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=4, record=record))
+
+        assert "Linked as host" not in result
+        assert "btn-outline-success" in result
+        assert 'title="View details"' in result
+
 
 # ===========================================================================
 # DeviceImportTable._build_validation_details_url tests

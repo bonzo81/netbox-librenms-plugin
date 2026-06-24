@@ -524,6 +524,7 @@ class DeviceImportTable(tables.Table):
                 btn_title = "View conflict details"
             elif (
                 match_type == "librenms_id"
+                and paired_host_id_int is not None
                 and paired_oob_id_int is not None
                 and paired_oob_id_int != paired_host_id_int
             ):

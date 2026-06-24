@@ -2765,6 +2765,23 @@ class TestDeviceConflictActionView:
         assert resp.status_code == 200
         assert b"no longer configured" in resp.content
 
+    def test_blank_server_key_with_broken_default_returns_error_without_500(self):
+        """A POST that omits server_key must fail closed via rebind_api_for_server (which routes the blank case through build_librenms_api(None)) rather than the lazy self.librenms_api property raising a 500 when the default server is missing/misconfigured."""
+        view = self._create_view()
+        view._librenms_api = None  # fresh request: no client built yet, as in production at the rebind point
+        request = self._create_request("link", 42)
+        request.POST["server_key"] = ""  # blank — the bug path that previously fell through to the raising property
+
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None) as mock_build:
+            view.request = request
+            resp = view.post(request, device_id=10)
+
+        # The fix routes the blank key through build_librenms_api(None); the unfixed code skipped
+        # the rebind entirely (build never called) and hit the raising property.
+        mock_build.assert_called_once_with(None)
+        assert resp.status_code == 200
+        assert b"no longer configured" in resp.content
+
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
     def test_link_action_sets_librenms_id_and_name(self, mock_cache_key, mock_cache):

@@ -442,16 +442,20 @@ class TestVirtualChassisHelpers:
         assert {d.pk for d in get_virtual_chassis_members(m1)} == {m1.pk, m2.pk}
         assert {d.pk for d in get_virtual_chassis_members(m2)} == {m1.pk, m2.pk}
 
-    def test_get_virtual_chassis_members_returns_device_on_enumeration_error(self):
-        """Non-enumerable / broken VC membership must fall back to the documented [device], not let the enumeration error bubble out of this centralizing helper."""
+    def test_get_virtual_chassis_members_returns_device_on_enumeration_error(self, caplog):
+        """Non-enumerable / broken VC membership must fall back to [device] AND log a warning (not silently mask the error as 'device has no VC siblings', which would skip sibling-member matching)."""
+        import logging
         from unittest.mock import MagicMock
 
         from netbox_librenms_plugin.utils import get_virtual_chassis_members
 
         device = MagicMock()
+        device.name = "sw1"
         device.virtual_chassis.members.all.side_effect = RuntimeError("boom")
 
-        assert get_virtual_chassis_members(device) == [device]
+        with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.utils"):
+            assert get_virtual_chassis_members(device) == [device]
+        assert any("virtual chassis members" in r.message for r in caplog.records)
 
     def test_get_virtual_chassis_member_with_vc(self):
         """Device with VC returns correct member."""

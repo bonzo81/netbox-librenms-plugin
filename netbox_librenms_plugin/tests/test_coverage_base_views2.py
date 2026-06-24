@@ -131,6 +131,15 @@ class TestLibreNMSIdQ:
         expected = Q(pk__isnull=True) & Q(pk__isnull=False)
         assert str(result) == str(expected)
 
+    def test_float_returns_match_nothing_q(self):
+        """A float (e.g. 42.7) must match nothing, not be truncated by int() to bind device 42 — mirrors coerce_librenms_id's int/str-only contract."""
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+        from django.db.models import Q
+
+        result = _librenms_id_q("default", 42.7)
+        expected = Q(pk__isnull=True) & Q(pk__isnull=False)
+        assert str(result) == str(expected)
+
     def test_string_int_value_adds_integer_variant(self):
         """String '10': int_val=10 != '10' (value is str) → adds integer variants (lines 37-38)."""
         from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
