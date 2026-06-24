@@ -2716,6 +2716,21 @@ class AddAsOOBView(
         if existing is not None:
             assigned = existing.assigned_object
             owned = assigned is None or getattr(assigned, "device_id", None) == interface.device_id
+            # A row that isn't on any interface (assigned_object is None) can still be ANOTHER
+            # device's primary_ip4/primary_ip6/oob_ip — a direct Device FK, separate from
+            # assigned_object and UNIQUE per address. Claiming it as this device's oob_ip would
+            # trip that constraint and roll the whole attach back with an opaque IntegrityError,
+            # so treat it as a conflict the user can resolve rather than a re-homeable row.
+            if owned:
+                from dcim.models import Device
+                from django.db.models import Q
+
+                if (
+                    Device.objects.filter(Q(primary_ip4=existing) | Q(primary_ip6=existing) | Q(oob_ip=existing))
+                    .exclude(pk=interface.device_id)
+                    .exists()
+                ):
+                    owned = False
             if not owned:
                 return None, "conflict"
             if assigned != interface:
