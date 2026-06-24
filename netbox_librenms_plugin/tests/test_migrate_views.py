@@ -1076,6 +1076,24 @@ class TestVlanStaleServerMigratedContext:
         assert result == "rendered"
 
 
+class TestServerKeyFromRequest:
+    """_server_key_from_request must normalize the POSTed server_key."""
+
+    def test_strips_whitespace_padded_key(self):
+        from netbox_librenms_plugin.views.sync.migrate import _server_key_from_request
+
+        request = MagicMock()
+        request.POST = {"server_key": "  prod  "}
+        assert _server_key_from_request(request) == "prod"
+
+    def test_whitespace_only_key_falls_back_to_factory(self):
+        from netbox_librenms_plugin.views.sync.migrate import _server_key_from_request
+
+        request = MagicMock()
+        request.POST = {"server_key": "   "}  # whitespace-only → treated as blank
+        assert _server_key_from_request(request, default_factory=lambda: "sessionkey") == "sessionkey"
+
+
 @pytest.mark.django_db
 class TestMigratedContextServerKeyFallback:
     """When the POSTed server_key fails to rebind (malformed/stale), the cable/IP/interface sync error

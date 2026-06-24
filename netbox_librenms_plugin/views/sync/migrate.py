@@ -144,8 +144,12 @@ def _server_key_from_request(request, default_factory=None):
             the factory supplies one.
     """
     sk = request.POST.get("server_key")
-    if isinstance(sk, str) and sk:
-        return sk
+    if isinstance(sk, str):
+        # Strip whitespace so a padded-but-valid key (" prod ") resolves instead of breaking
+        # migrated-marker lookup / server-scoped redirects; a blank/whitespace key falls through.
+        sk = sk.strip()
+        if sk:
+            return sk
     if default_factory is not None:
         resolved = default_factory()
         if isinstance(resolved, str) and resolved:
