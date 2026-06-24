@@ -1290,15 +1290,23 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             servers_config = {}
         result = []
         for sk, did in cf_value.items():
-            # New dict form {server_key: {"id": N, "oob": {...}}} — display the host id.
-            # OOB-only entries ({"oob": {...}} with no "id") have no host mapping to show
-            # in this import-action modal and are skipped.
-            if isinstance(did, dict):
-                did = did.get("id")
+            # New dict form {server_key: {"id": N, "oob": {...}}} — display the host id, falling
+            # back to the OOB controller's id for an OOB-only entry ({"oob": {...}} with no usable
+            # host "id"). An OOB-only link is still a real link to this server, so surface it like
+            # the device-sync modal (_build_all_server_mappings) does instead of dropping it and
+            # showing "no link" (which can prompt a duplicate re-import).
             # coerce_librenms_id centralizes the bool/int/str/positive rules: it rejects booleans,
             # non-numeric strings, and non-positive ids (LibreNMS ids start at 1), so a 0 /
-            # negative / malformed host id can't slip through as a bogus server-mapping row.
-            did = coerce_librenms_id(did)
+            # negative / malformed id can't slip through as a bogus server-mapping row.
+            if isinstance(did, dict):
+                host_id = coerce_librenms_id(did.get("id"))
+                if host_id is None:
+                    oob = did.get("oob")
+                    if isinstance(oob, dict):
+                        host_id = coerce_librenms_id(oob.get("id"))
+                did = host_id
+            else:
+                did = coerce_librenms_id(did)
             if did is None:
                 continue
             srv_cfg = servers_config.get(sk)

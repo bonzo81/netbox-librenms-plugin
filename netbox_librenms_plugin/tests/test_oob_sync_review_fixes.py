@@ -199,6 +199,23 @@ class TestBuildIdServerInfoRejectsNonPositiveIds:
         server_keys = {r["server_key"]: r["device_id"] for r in (result or [])}
         assert server_keys == {"s_good": 42, "s_good_dict": 7}
 
+    def test_oob_only_entry_is_surfaced_with_controller_id(self):
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = make_device("idsrv-oob")
+        device.custom_field_data["librenms_id"] = {
+            "host_srv": {"id": 10},
+            "oob_srv": {"oob": {"id": 99}},  # OOB-only link: no host "id"
+        }
+        device.save()
+
+        result = DeviceValidationDetailsView._build_id_server_info(device)
+
+        # The OOB-only link is still a real link — surface it (controller id), mirroring the
+        # device-sync modal, rather than dropping it and risking a duplicate re-import.
+        mapping = {r["server_key"]: r["device_id"] for r in (result or [])}
+        assert mapping == {"host_srv": 10, "oob_srv": 99}
+
 
 @pytest.mark.django_db
 class TestSuggestOobInterfaceReusesMaterializedList:
