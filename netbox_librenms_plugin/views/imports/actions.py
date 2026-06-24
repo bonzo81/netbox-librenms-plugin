@@ -1123,7 +1123,7 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         )
 
 
-def _suggest_oob_interface(device, oob_candidate):
+def _suggest_oob_interface(device, oob_candidate, interfaces=None):
     """
     Suggest an interface (and default new-interface name) for an OOB IP.
 
@@ -1138,6 +1138,9 @@ def _suggest_oob_interface(device, oob_candidate):
     Args:
         device: The NetBox device the OOB IP will be attached to.
         oob_candidate (dict): The OOB-controller candidate, read for its ``type``.
+        interfaces: Optional pre-materialized iterable of the device's interfaces. When the
+            caller has already evaluated ``device.interfaces.all()`` (e.g. for the
+            ``oob_interfaces`` form field), pass it here to avoid a duplicate query.
 
     Returns:
         tuple: ``(suggested_interface_id, default_new_name)``; the id is None when no
@@ -1145,7 +1148,9 @@ def _suggest_oob_interface(device, oob_candidate):
     """
     oob_type = (oob_candidate.get("type") or "oob").strip().lower() or "oob"
     default_new_name = f"{oob_type}0"
-    for iface in device.interfaces.all():
+    if interfaces is None:
+        interfaces = device.interfaces.all()
+    for iface in interfaces:
         if _OOB_INTERFACE_NAME_PATTERN.search(iface.name or ""):
             return iface.pk, default_new_name
     return None, default_new_name
@@ -1186,11 +1191,12 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             # oob_ip be interface-assigned). Offer the device's interfaces with a
             # sensible default pre-selected.
             if validation.get("oob_candidate") and existing._meta.model_name == "device":
-                context["oob_interfaces"] = list(existing.interfaces.all())
+                oob_interfaces = list(existing.interfaces.all())
+                context["oob_interfaces"] = oob_interfaces
                 (
                     context["oob_suggested_interface_id"],
                     context["oob_default_new_name"],
-                ) = _suggest_oob_interface(existing, validation["oob_candidate"])
+                ) = _suggest_oob_interface(existing, validation["oob_candidate"], interfaces=oob_interfaces)
 
         return render(
             request,

@@ -198,3 +198,64 @@ class TestBuildIdServerInfoRejectsNonPositiveIds:
         # Only the genuinely-positive host ids survive — no bogus device_id 0 / -5 rows.
         server_keys = {r["server_key"]: r["device_id"] for r in (result or [])}
         assert server_keys == {"s_good": 42, "s_good_dict": 7}
+
+
+@pytest.mark.django_db
+class TestSuggestOobInterfaceReusesMaterializedList:
+    """_suggest_oob_interface must reuse a caller-materialized interface list, not re-query."""
+
+    def test_no_query_when_interfaces_supplied(self):
+        from dcim.models import Interface
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
+
+        device = make_device("oob-reuse")
+        Interface.objects.create(device=device, name="idrac0", type="1000base-t")
+        interfaces = list(device.interfaces.all())  # caller already materialized them
+
+        with CaptureQueriesContext(connection) as ctx:
+            iface_id, default_name = _suggest_oob_interface(device, {"type": "idrac"}, interfaces=interfaces)
+
+        assert iface_id is not None  # matched idrac0
+        assert default_name == "idrac0"
+        # The supplied list is reused — no second device.interfaces.all() query.
+        assert len(ctx.captured_queries) == 0
+
+
+@pytest.mark.django_db
+class TestValidateDedupsSerialDuplicateQuery:
+    """The Stage-1 duplicate guard and Stage-2 merge detection share one serial[:2] lookup."""
+
+    def test_serial_match_runs_serial_dup_query_once(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        # One NetBox device matched by serial; its name differs from the LibreNMS hostname so
+        # validation takes the serial-match path (which runs both dup-detection stages).
+        make_device("nb-name", serial="UNIQSER1")
+        api = MagicMock(server_key="default", cache_timeout=300)
+        api.get_device_info.return_value = (True, {"device_id": 1})
+        libre_device = {
+            "device_id": 5,
+            "hostname": "libre-name",
+            "sysName": "libre-name",
+            "serial": "UNIQSER1",
+            "hardware": "Model-X",
+            "os": "ios",
+        }
+
+        with CaptureQueriesContext(connection) as ctx:
+            validate_device_for_import(libre_device, api=api, include_vc_detection=False)
+
+        # The duplicate-detection serial lookup (serial[:2], no .exclude) must run exactly once,
+        # not once per stage. The .first() match query is LIMIT 1; the cross-side query has NOT.
+        serial_dup_queries = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if 'serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
+        ]
+        assert len(serial_dup_queries) == 1

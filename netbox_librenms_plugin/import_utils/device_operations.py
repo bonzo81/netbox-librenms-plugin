@@ -869,21 +869,30 @@ def validate_device_for_import(
             # row and acting on it (link/promote/import) would target the wrong device. This must
             # run even for a hostname match with no serial — the merge-candidate block below is
             # gated on a serial (it pairs host+OOB) and would otherwise skip the check entirely.
-            if (
-                not import_as_vm
-                and result.get("existing_device") is not None
-                and result.get("existing_match_type") in ("hostname", "serial")
-            ):
+            # Compute the duplicate-detection peer lists ONCE: the Stage-1 duplicate guard here and
+            # the Stage-2 merge-candidate detection below both run the identical UNIQUE [:2] query
+            # for the matched type, so share the result instead of issuing it twice per device.
+            _match_type = result.get("existing_match_type")
+            _serial_now = (libre_device.get("serial") or "").strip()
+            _dup_eligible = (
+                not import_as_vm and result.get("existing_device") is not None and _match_type in ("hostname", "serial")
+            )
+            _hostname_peers = (
+                list(Device.objects.filter(name__iexact=hostname)[:2])
+                if _dup_eligible and _match_type == "hostname" and hostname
+                else []
+            )
+            _serial_peers = (
+                list(Device.objects.filter(serial=_serial_now)[:2])
+                if _dup_eligible and _match_type == "serial" and _serial_now and _serial_now != "-"
+                else []
+            )
+            if _dup_eligible:
                 _dup_current = False
-                if result["existing_match_type"] == "hostname" and hostname:
-                    _dup_current = len(list(Device.objects.filter(name__iexact=hostname)[:2])) > 1
-                elif result["existing_match_type"] == "serial":
-                    _serial_now = (libre_device.get("serial") or "").strip()
-                    _dup_current = (
-                        bool(_serial_now)
-                        and _serial_now != "-"
-                        and len(list(Device.objects.filter(serial=_serial_now)[:2])) > 1
-                    )
+                if _match_type == "hostname" and hostname:
+                    _dup_current = len(_hostname_peers) > 1
+                elif _match_type == "serial":
+                    _dup_current = bool(_serial_now) and _serial_now != "-" and len(_serial_peers) > 1
                 if _dup_current:
                     # Arbitrary .first() match among duplicates: block link/promote/import and
                     # surface a blocking issue. The match is left for display only.
@@ -931,7 +940,7 @@ def validate_device_for_import(
                     # above; here it just means we can't pick a single peer to pair, so skip the
                     # merge suggestion and warn.
                     if result.get("existing_match_type") == "hostname" and hostname:
-                        _hostname_peers = list(Device.objects.filter(name__iexact=hostname)[:2])
+                        # Reuse the Stage-1 peer list (identical name__iexact[:2] query).
                         if len(_hostname_peers) == 1:
                             _hostname_match = _hostname_peers[0]
                         elif len(_hostname_peers) > 1:
@@ -939,7 +948,7 @@ def validate_device_for_import(
                                 f"Multiple NetBox devices share hostname '{hostname}'; merge suggestion skipped."
                             )
                     elif result.get("existing_match_type") == "serial":
-                        _serial_peers = list(Device.objects.filter(serial=_serial_for_pair)[:2])
+                        # Reuse the Stage-1 peer list (identical serial[:2] query).
                         if len(_serial_peers) == 1:
                             _serial_match = _serial_peers[0]
                         elif len(_serial_peers) > 1:
