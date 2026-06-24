@@ -86,7 +86,9 @@ def _is_job_cancelled(job) -> bool:
         return False
 
 
-def detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=None, sync_options=None) -> list[dict]:
+def detect_collisions_for_device_ids(
+    device_ids, api, libre_devices_cache=None, sync_options=None
+) -> tuple[list[dict], list]:
     """
     Detect same-NetBox-device collisions for a batch of LibreNMS device ids.
 
@@ -141,6 +143,14 @@ def detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=None, 
             server_key=api.server_key,
             include_vc_detection=False,
         )
+        if any(str(issue).startswith("Validation error:") for issue in validation.get("issues", [])):
+            # validate_device_for_import() caught an exception and returned only a partial result
+            # (its except branch appends a "Validation error: ..." issue). The collision-relevant
+            # match fields may be missing, so this id was NOT reliably collision-checked. Fail
+            # closed: record it as unresolved rather than collision-check it on incomplete data
+            # (mirrors the get_device_info miss above).
+            unresolved_ids.append(device_id)
+            continue
         devices.append(
             {
                 "device_id": device_id,

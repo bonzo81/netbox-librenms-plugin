@@ -3003,3 +3003,30 @@ class TestDetectCollisionsForDeviceIds:
         )
         assert unresolved == [9002]
         assert collisions == []  # only one resolvable row → no collision
+
+    def test_validation_error_id_is_reported_unresolved(self):
+        """A row whose validation raises is returned unresolved, not collision-checked on a partial result.
+
+        validate_device_for_import() catches any exception and appends a "Validation error: ..."
+        issue to an otherwise-incomplete result. The collision-relevant match fields may be
+        missing, so detect_collisions_for_device_ids must fail closed on it (mirroring the
+        unfetchable-id case) rather than group it on unreliable data.
+        """
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        make_device("validatable-host")
+        cache = {
+            9101: {"device_id": 9101, "sysName": "validatable-host", "hostname": "validatable-host"},
+            # A non-string sysName + strip_domain makes the REAL validator raise on `"." in name`
+            # inside _determine_device_name, so validate_device_for_import returns a partial result
+            # tagged "Validation error: ..." — exactly the except branch this fix must fail closed on.
+            9102: {"device_id": 9102, "sysName": 12345},
+        }
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [9101, 9102],
+            self._api(),
+            libre_devices_cache=cache,
+            sync_options={"use_sysname": True, "strip_domain": True},
+        )
+        assert unresolved == [9102]
+        assert collisions == []  # only one validatable row → no collision

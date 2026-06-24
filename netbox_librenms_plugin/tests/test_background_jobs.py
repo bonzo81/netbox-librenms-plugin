@@ -10,6 +10,8 @@ All tests use mocking and direct attribute manipulation instead of HTTP requests
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestShouldUseBackgroundJob:
     """Test background job decision logic."""
@@ -370,6 +372,10 @@ class TestFilterDevicesJob:
 class TestImportDevicesJob:
     """Test ImportDevicesJob background job."""
 
+    # Two LibreNMS ids (>=2) trigger the job's collision pre-check, which runs the real
+    # validate_device_for_import against the DB (as the production rqworker does). The
+    # fabricated hostnames match no existing NetBox object, so the batch resolves cleanly.
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -560,6 +566,8 @@ class TestImportDevicesJob:
         call_kwargs = mock_bulk_devices.call_args.kwargs
         assert call_kwargs["sync_options"] == sync_options
 
+    # >=2 ids → the collision pre-check runs real validation against the DB (see note above).
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
