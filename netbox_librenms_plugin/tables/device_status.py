@@ -468,9 +468,16 @@ class DeviceImportTable(tables.Table):
             serial_action = validation.get("serial_action")
             has_mismatch = validation.get("device_type_mismatch", False)
             is_oob_candidate = serial_action == "oob_candidate"
+            # 'oob_already_linked' is informational (re-import just updates the existing OOB
+            # entry), not an actionable conflict — exclude it like 'oob_candidate' so a correctly
+            # OOB-linked row doesn't render the warning "Conflict" button.
+            is_oob_already_linked = serial_action == "oob_already_linked"
             is_oob_linked = match_type == "librenms_oob"
             has_actions = match_type == "hostname" or (
-                match_type == "serial" and serial_action is not None and not is_oob_candidate
+                match_type == "serial"
+                and serial_action is not None
+                and not is_oob_candidate
+                and not is_oob_already_linked
             )
             has_name_sync = validation.get("name_sync_available", False)
             has_sync_needed = match_type == "librenms_id" and serial_action in ("update_serial", "conflict")

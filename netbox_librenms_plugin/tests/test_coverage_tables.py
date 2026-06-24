@@ -1071,6 +1071,41 @@ class TestDeviceImportTableRenderActions:
         assert "btn-outline-warning" in result
         assert "Conflict" in result
 
+    def test_existing_serial_match_oob_already_linked_is_informational_not_conflict(self):
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "serial",
+                "serial_action": "oob_already_linked",
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        # Informational state (re-import updates the existing OOB entry) — not a warning "Conflict".
+        assert "btn-outline-warning" not in result
+        assert "btn-outline-success" in result
+
     def test_existing_name_sync_shows_details_warning(self):
         from dcim.models import Device
         from virtualization.models import VirtualMachine
