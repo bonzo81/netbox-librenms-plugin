@@ -2963,9 +2963,10 @@ class TestDetectCollisionsForDeviceIds:
             8001: {"device_id": 8001, "sysName": "collide-batch-host", "hostname": "collide-batch-host"},
             8002: {"device_id": 8002, "sysName": "collide-batch-host", "hostname": "collide-batch-host"},
         }
-        collisions = detect_collisions_for_device_ids(
+        collisions, unresolved = detect_collisions_for_device_ids(
             [8001, 8002], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
         )
+        assert unresolved == []
         assert len(collisions) == 1
         assert collisions[0]["nb_device_pk"] == nb.pk
         assert collisions[0]["nb_model_name"] == "device"
@@ -2981,7 +2982,24 @@ class TestDetectCollisionsForDeviceIds:
             8003: {"device_id": 8003, "sysName": "clean-a-host", "hostname": "clean-a-host"},
             8004: {"device_id": 8004, "sysName": "clean-b-host", "hostname": "clean-b-host"},
         }
-        result = detect_collisions_for_device_ids(
+        collisions, unresolved = detect_collisions_for_device_ids(
             [8003, 8004], self._api(), libre_devices_cache=cache, sync_options={"use_sysname": True}
         )
-        assert result == []
+        assert collisions == []
+        assert unresolved == []
+
+    def test_unfetchable_id_is_reported_unresolved(self):
+        """An id not in the cache whose get_device_info fails is returned as unresolved (not silently skipped), so the caller can fail closed instead of importing it unchecked."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        make_device("resolvable-host")
+        cache = {9001: {"device_id": 9001, "sysName": "resolvable-host", "hostname": "resolvable-host"}}
+        # 9002 isn't cached and its info fetch fails → it can't be collision-checked.
+        api = SimpleNamespace(server_key="default", get_device_info=lambda _did: (False, None))
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [9001, 9002], api, libre_devices_cache=cache, sync_options={"use_sysname": True}
+        )
+        assert unresolved == [9002]
+        assert collisions == []  # only one resolvable row → no collision

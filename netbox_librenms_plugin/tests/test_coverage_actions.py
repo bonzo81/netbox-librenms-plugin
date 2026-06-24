@@ -5704,6 +5704,34 @@ class TestBulkImportDevicesViewCollisionGate:
         # Gate cleared (distinct devices) → the importer ran.
         mock_import.assert_called_once()
 
+    def test_unfetchable_id_blocks_import(self):
+        """A selected id whose LibreNMS info can't be fetched (not cached + get_device_info fails) blocks the import (fail closed) — the importer is never reached."""
+        view = self._make_view()
+        # id 2 isn't cached and its info fetch fails → it can't be collision-checked.
+        view._librenms_api.get_device_info = MagicMock(return_value=(False, None))
+        request = _make_request(post={"select": ["1", "2"]}, headers={"HX-Request": "true"})
+        request.POST.getlist = MagicMock(return_value=["1", "2"])
+        request.user = AnonymousUser()
+
+        make_device("gate-unresolved-host")
+        libre = {1: {"device_id": 1, "sysName": "gate-unresolved-host", "hostname": "gate-unresolved-host"}}
+        with (
+            patch.object(view, "require_write_permission", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.resolve_naming_preferences", return_value=(True, False)
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                side_effect=lambda did, _api: libre.get(did),
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.bulk_import_devices") as mock_import,
+        ):
+            response = view.post(request)
+
+        assert response.status_code == 200
+        assert "could not fetch LibreNMS device info" in response.content.decode()
+        mock_import.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # AddAsOOBView / PromoteToHostView — generic "oob" sentinel regression tests

@@ -82,7 +82,11 @@ def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str | None, str,
         pk_int = coerce_positive_int(pk)
         if pk_int is None:
             return
-        candidates.append((pk_int, name, role, model_name))
+        # model_name keys the collision bucket downstream; a non-string (e.g. a corrupt/foreign
+        # merge_candidates entry) would mis-group or raise on the dict key. Normalize to a
+        # lowercase string, defaulting to "device".
+        normalized_model = model_name.strip().lower() or "device" if isinstance(model_name, str) else "device"
+        candidates.append((pk_int, name, role, normalized_model))
 
     existing = validation.get("existing_device")
     if (

@@ -378,9 +378,13 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock()
-        # The collision pre-check fetches each device; return "not found" so it skips cleanly
-        # (collision detection is covered by its own real-DB tests).
-        mock_api_class.return_value.get_device_info.return_value = (False, None)
+        # The collision pre-check fetches each device; return distinct devices so the batch
+        # resolves cleanly with no collision (collision/unresolved handling has its own tests).
+        # A "not found" here would now fail the batch closed (unresolved id), not skip silently.
+        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+            True,
+            {"device_id": did, "hostname": f"job-import-dev-{did}", "sysName": f"job-import-dev-{did}"},
+        )
 
         # Mock successful device imports
         mock_device_1 = MagicMock()
@@ -564,8 +568,12 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock()
-        # Collision pre-check fetches each device; "not found" → skip cleanly.
-        mock_api_class.return_value.get_device_info.return_value = (False, None)
+        # Collision pre-check fetches each device; return distinct devices so the batch resolves
+        # cleanly (a "not found" would now fail the batch closed as an unresolved id).
+        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+            True,
+            {"device_id": did, "hostname": f"job-mm-dev-{did}", "sysName": f"job-mm-dev-{did}"},
+        )
 
         mock_bulk_devices.return_value = {
             "success": [],

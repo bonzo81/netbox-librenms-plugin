@@ -210,14 +210,25 @@ class ImportDevicesJob(JobRunner):
             # Defense-in-depth: block a batch where two LibreNMS rows resolve to the same NetBox
             # device, mirroring the confirm-preview/sync-view gate so the async path can't import a
             # colliding batch either. A single device can never collide, so skip the extra pass.
-            collisions = (
+            collisions, unresolved = (
                 detect_collisions_for_device_ids(
                     device_ids, api, libre_devices_cache=libre_devices_cache, sync_options=sync_options
                 )
                 if len(device_ids) >= 2
-                else []
+                else ([], [])
             )
-            if collisions:
+            if unresolved:
+                # Fail closed: these ids couldn't be fetched to collision-check, so don't import
+                # the batch unchecked (a transient get_device_info miss could otherwise let a
+                # colliding row through on retry). Block the whole batch like the collision path.
+                ids = ", ".join(str(d) for d in unresolved)
+                msg = (
+                    f"Import blocked: could not fetch LibreNMS device info for {len(unresolved)} "
+                    f"device(s) (id(s): {ids}) to verify collisions; retry the import."
+                )
+                self.logger.error(msg)
+                device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
+            elif collisions:
                 pks = ", ".join(str(group["nb_device_pk"]) for group in collisions)
                 msg = (
                     f"Import blocked: {len(collisions)} NetBox device collision(s) in this batch "

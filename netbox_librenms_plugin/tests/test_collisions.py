@@ -344,3 +344,14 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     # Tabler's muted badge text (grey-on-red), unreadable in both themes.
     assert "badge bg-danger text-white" in html
     assert 'badge bg-danger"' not in html
+
+
+def test_non_string_merge_model_name_is_normalized():
+    """A corrupt/foreign merge_candidates model_name (non-string) must not crash the dict-key bucketing — it's normalized to the 'device' default and still collides correctly."""
+    bad = {"merge_candidates": {"host_named": {"pk": 88, "name": "shared", "model_name": ["not-a-str"]}}}
+    devices = [_row(400, "row-a", dict(bad)), _row(401, "row-b", dict(bad))]
+    groups = detect_bulk_collisions(devices)  # must not raise TypeError on an unhashable model_name key
+    assert len(groups) == 1
+    assert groups[0]["nb_device_pk"] == 88
+    assert groups[0]["nb_model_name"] == "device"
+    assert {r["device_id"] for r in groups[0]["librenms_rows"]} == {400, 401}

@@ -1168,6 +1168,10 @@ def validate_device_for_import(
                         )
                         result["can_import"] = False
                         result["is_ready"] = False
+                        # Terminal, like the ambiguous_librenms_id guard: return now so the
+                        # new-import validation below doesn't append unrelated site/role/device-type
+                        # blockers to a row that's already blocked on the duplicate-IP ambiguity.
+                        return result
                     elif device:
                         # Surface any existing host/OOB linkage so the import UI renders the
                         # correct row state (the librenms_id / serial branches do the same;

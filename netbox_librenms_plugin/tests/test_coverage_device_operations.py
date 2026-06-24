@@ -322,6 +322,31 @@ class TestValidateDeviceStateMachine:
         assert "role" not in joined
         assert "cluster" not in joined
 
+    def test_ambiguous_primary_ip_is_terminal_no_new_import_blockers(self):
+        """A duplicate primary-IP match (resolve_device_by_host_ip ambiguous) is terminal too — validation must NOT fall through into the new-import site/role/device-type checks and pile unrelated blockers onto the row (mirrors the ambiguous_librenms_id handling)."""
+        from unittest.mock import patch
+
+        device = self._base_device()
+        device["ip"] = "10.1.2.3"  # drives the primary-IP resolution path
+        result = self._run_validate(
+            device,
+            patches_overrides=[
+                patch(
+                    "netbox_librenms_plugin.import_utils.device_operations.resolve_device_by_host_ip",
+                    return_value=(None, True, set()),  # ip_ambiguous
+                ),
+            ],
+        )
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert result["can_import"] is False
+        assert result["is_ready"] is False
+        # The duplicate-IP ambiguity is the only blocker — no new-import blockers appended.
+        joined = " ".join(result["issues"]).lower()
+        assert "site" not in joined
+        assert "role" not in joined
+        assert "cluster" not in joined
+        assert any("serial or management IP" in i for i in result["issues"])
+
     def test_flag_ambiguous_is_a_durable_blocker(self):
         """The ambiguity must land in issues (not only warnings) so the readiness step's `can_import = len(issues) == 0` recompute cannot silently re-enable the import."""
         from netbox_librenms_plugin.import_utils.device_operations import _flag_ambiguous_librenms_id

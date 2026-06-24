@@ -1063,13 +1063,31 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # (and again in ImportDevicesJob) so it can't be imported by bypassing the preview.
         # A single selected device can never collide (collisions need two distinct LibreNMS ids
         # on one NetBox device), so skip the extra validation pass for the common single-row case.
-        collisions = (
+        collisions, unresolved = (
             detect_collisions_for_device_ids(
                 parsed_ids, self.librenms_api, libre_devices_cache=libre_devices_cache, sync_options=sync_options
             )
             if len(parsed_ids) >= 2
-            else []
+            else ([], [])
         )
+        if unresolved:
+            # Fail closed: these ids couldn't be fetched to collision-check, so block rather than
+            # import them unchecked (mirrors ImportDevicesJob). A transient get_device_info miss
+            # could otherwise let a colliding row through on retry.
+            ids = ", ".join(str(d) for d in unresolved)
+            msg = (
+                f"Bulk import blocked: could not fetch LibreNMS device info for {len(unresolved)} "
+                f"selected device(s) (id(s): {ids}) to verify collisions. Retry the import."
+            )
+            if is_htmx:
+                # 200, like the collision step: HTMX skips the swap on non-2xx.
+                return render(
+                    request,
+                    "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+                    {"error_message": msg},
+                )
+            messages.error(request, msg)
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
         if collisions:
             if is_htmx:
                 # 200, like the confirm step: HTMX skips the swap on non-2xx.

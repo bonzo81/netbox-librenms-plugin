@@ -108,22 +108,34 @@ def detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=None, 
         sync_options: Optional sync options (``use_sysname`` / ``strip_domain``).
 
     Returns:
-        list[dict]: Collision groups as produced by :func:`detect_bulk_collisions`
-            (empty when the batch is clean).
+        tuple[list[dict], list]: ``(collisions, unresolved_ids)`` — the collision groups from
+            :func:`detect_bulk_collisions` (empty when the batch is clean), and the device ids
+            that could NOT be validated (``get_device_info`` failed and they weren't in the
+            cache). Those ids were not collision-checked, so the caller must fail closed on them
+            rather than import them unchecked — a transient miss could otherwise slip a colliding
+            row through on a retry.
     """
     use_sysname = (sync_options or {}).get("use_sysname", True)
     strip_domain = (sync_options or {}).get("strip_domain", False)
     cache = libre_devices_cache or {}
     devices = []
+    unresolved_ids = []
     for device_id in device_ids:
         libre_device = cache.get(device_id)
         if libre_device is None:
             success, libre_device = api.get_device_info(device_id)
             if not success or not libre_device:
+                # Couldn't fetch device info → can't collision-check this id. Record it so the
+                # caller blocks it instead of importing it unchecked (fail closed).
+                unresolved_ids.append(device_id)
                 continue
         validation = validate_device_for_import(
+            # DB-only collision pre-check: don't hand the validator an API client (it would let
+            # API-backed validation paths run even with the cache supplied + include_vc_detection
+            # False). The collision-relevant match fields are resolved from the DB; api is only
+            # used for VC/chassis enrichment, all of which is guarded on `api` being truthy.
             libre_device,
-            api=api,
+            api=None,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             server_key=api.server_key,
@@ -136,7 +148,7 @@ def detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=None, 
                 "validation": validation,
             }
         )
-    return detect_bulk_collisions(devices)
+    return detect_bulk_collisions(devices), unresolved_ids
 
 
 def bulk_import_devices_shared(
