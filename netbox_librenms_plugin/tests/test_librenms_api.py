@@ -3307,3 +3307,39 @@ class TestGetSerialPortSensors:
         assert mock_get.call_count == 1  # the malformed cache value forced a single re-fetch
         # The bad value was dropped and replaced with the validated fresh payload.
         assert cache.get(cache_key) == good
+
+    def test_refresh_bypasses_cache_with_use_cache_false(self, mock_librenms_api, mock_response_factory):
+        """A user Refresh (use_cache=False) re-fetches the sensor table even when a stale value is cached — otherwise a relabeled Avocent port stays stale until the TTL elapses (host LLDP/OOB are re-fetched on Refresh too)."""
+        import unittest.mock as mock
+
+        from django.core.cache import cache
+
+        cache_key = f"librenms_serial_sensors_{mock_librenms_api.server_key}"
+        stale = [self._make_sensor(12, port_num=7)]
+        stale[0]["sensor_descr"] = "STALE"
+        cache.set(cache_key, stale)
+
+        fresh = [self._make_sensor(12, port_num=7)]
+        fresh[0]["sensor_descr"] = "FRESH"
+        ok_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": fresh})
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=ok_resp) as mock_get:
+            success, data = mock_librenms_api.get_serial_port_sensors(device_id=12, use_cache=False)
+
+        assert success is True
+        assert mock_get.call_count == 1  # bypassed the cache and re-fetched
+        assert data[0]["sensor_descr"] == "FRESH"
+        assert cache.get(cache_key) == fresh  # cache refreshed with the fresh payload
+
+    def test_json_decode_error_reported_as_invalid_json(self, mock_librenms_api, mock_response_factory):
+        """A non-JSON 200 body must surface 'Invalid JSON', not be mislabeled 'Error connecting' — requests JSONDecodeError subclasses both ValueError and RequestException, so the ValueError handler must precede the RequestException one (mirrors get_port_stack)."""
+        import unittest.mock as mock
+
+        import requests as _requests
+
+        resp = mock_response_factory(status_code=200, json_data={})
+        resp.json.side_effect = _requests.exceptions.JSONDecodeError("Expecting value", "", 0)
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=resp):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "Invalid JSON" in msg

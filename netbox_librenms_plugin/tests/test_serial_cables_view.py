@@ -389,7 +389,8 @@ class TestEnrichLinksDataSerial:
         ):
             view.enrich_links_data([serial_link], obj)
 
-        mock_check_serial.assert_called_once_with(serial_link)
+        mock_check_serial.assert_called_once()
+        assert mock_check_serial.call_args.args[0] is serial_link  # csp= reuse arg may also be passed
         mock_process_remote.assert_not_called()
 
     def test_non_serial_row_goes_through_normal_path(self):
@@ -536,41 +537,28 @@ class TestCableTableSerialRendering:
 class TestEnrichSerialRemote:
     """enrich_serial_remote resolves remote device + ConsolePort."""
 
+    @pytest.mark.django_db
     def test_label_matches_device_with_uncabled_cp(self):
-        """When label matches device and device has an uncabled ConsolePort, sets can_create_cable."""
+        """When the label matches a device with an uncabled ConsolePort, sets can_create_cable + the remote port (real Device/ConsolePort)."""
         view = _make_view()
-
-        cp = MagicMock()
-        cp.pk = 77
-        cp.name = "con0"
-
-        device = MagicMock()
-        device.pk = 42
-        device.consoleports = MagicMock()
-        device.consoleports.filter.return_value.order_by.return_value.first.return_value = cp
+        device, _, (cp,) = make_serial_device("prod-router-uncabled", cp_names=["con0"])
 
         link = {
             "local_port": "ttyS7",
             "local_port_id": "serial:1007",
             "_source": "serial",
-            "remote_device": "prod-router-01",
+            "remote_device": device.name,
             "netbox_local_interface_id": 99,
             "cable_status": "No Cable",
         }
 
-        with (
-            patch.object(view, "get_device_by_id_or_name", return_value=(device, True, None)),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                side_effect=lambda name, args=None: f"/{args[0]}/",
-            ),
-        ):
+        with patch.object(view, "get_device_by_id_or_name", return_value=(device, True, None)):
             view.enrich_serial_remote(link)
 
-        assert link["netbox_remote_interface_id"] == 77
+        assert link["netbox_remote_interface_id"] == cp.pk
         assert link["remote_port_name"] == "con0"
         assert link["can_create_cable"] is True
-        assert link["netbox_remote_device_id"] == 42
+        assert link["netbox_remote_device_id"] == device.pk
 
     def test_device_not_found_leaves_link_unchanged(self):
         """When device lookup fails, link is not modified."""
@@ -597,24 +585,20 @@ class TestEnrichSerialRemote:
 
         mock_lookup.assert_not_called()
 
+    @pytest.mark.django_db
     def test_all_cps_cabled_sets_not_found_status(self):
-        """When all ConsolePorts are already cabled, sets 'Console Port Not Found'."""
+        """When every ConsolePort is already cabled, sets 'Console Port Not Found' (real Device + Cable)."""
         view = _make_view()
-
-        device = MagicMock()
-        device.pk = 42
-        device.consoleports = MagicMock()
-        device.consoleports.filter.return_value.order_by.return_value.first.return_value = None  # no uncabled CP
+        device, _, (cp,) = make_serial_device("prod-router-allcabled", cp_names=["con0"])
+        _, (peer_csp,), _ = make_serial_device("peer-allcabled", csp_names=["s0"])
+        cable_together(cp, peer_csp)  # the device's only ConsolePort is now cabled
 
         link = {
-            "remote_device": "prod-router-01",
+            "remote_device": device.name,
             "cable_status": "No Cable",
         }
 
-        with (
-            patch.object(view, "get_device_by_id_or_name", return_value=(device, True, None)),
-            patch("netbox_librenms_plugin.views.base.cables_view.reverse", return_value="/x/"),
-        ):
+        with patch.object(view, "get_device_by_id_or_name", return_value=(device, True, None)):
             view.enrich_serial_remote(link)
 
         assert link["cable_status"] == "Console Port Not Found in NetBox"
@@ -641,67 +625,35 @@ class TestEnrichSerialRemote:
         assert link["remote_port_name"] == "con-a"  # lowest name, deterministic
         assert link["can_create_cable"] is True
 
-    def test_enrich_links_data_calls_enrich_serial_remote_when_no_cable(self):
-        """enrich_links_data calls enrich_serial_remote for CSP-found rows with No Cable."""
+    @pytest.mark.django_db
+    def test_enrich_links_data_resolves_remote_when_no_cable(self):
+        """A serial row whose CSP exists and has no cable gets its remote ConsolePort resolved (real DB)."""
         view = _make_view()
+        local, (csp,), _ = make_serial_device("acs-nocable", csp_names=["ttyS7"])
+        remote, _, (cp,) = make_serial_device("router-nocable", cp_names=["con0"])
+        link = {"local_port": "ttyS7", "_source": "serial", "remote_device": remote.name, "device_id": local.id}
 
-        link = {
-            "local_port": "ttyS7",
-            "local_port_id": "serial:1007",
-            "_source": "serial",
-            "remote_device": "prod-router-01",
-            "device_id": None,
-        }
-        obj = _mock_obj()
+        with patch.object(view, "get_device_by_id_or_name", return_value=(remote, True, None)):
+            view.enrich_links_data([link], local)
 
-        with (
-            patch.object(view, "enrich_local_port"),
-            patch.object(
-                view,
-                "check_serial_cable_status",
-                side_effect=lambda lnk: lnk.update(
-                    {
-                        "cable_status": "No Cable",
-                        "netbox_local_interface_id": 99,
-                    }
-                ),
-            ),
-            patch.object(view, "enrich_serial_remote") as mock_enrich_remote,
-        ):
-            view.enrich_links_data([link], obj)
+        assert link["netbox_remote_interface_id"] == cp.pk  # enrich_serial_remote ran
+        assert link["can_create_cable"] is True
 
-        mock_enrich_remote.assert_called_once_with(link)
-
-    def test_enrich_links_data_skips_enrich_serial_remote_when_cable_found(self):
-        """enrich_serial_remote is NOT called when the CSP already has a cable."""
+    @pytest.mark.django_db
+    def test_enrich_links_data_skips_remote_when_cable_found(self):
+        """A serial row whose CSP already has a cable does NOT get a remote resolution / Sync action (real DB)."""
         view = _make_view()
+        local, (csp,), _ = make_serial_device("acs-cabled", csp_names=["ttyS3"])
+        _, _, (peer_cp,) = make_serial_device("peer-cabled", cp_names=["con0"])
+        cable_together(csp, peer_cp)  # the CSP now has a cable
+        link = {"local_port": "ttyS3", "_source": "serial", "remote_device": "irrelevant", "device_id": local.id}
 
-        link = {
-            "local_port": "ttyS3",
-            "local_port_id": "serial:1003",
-            "_source": "serial",
-            "remote_device": "some-device",
-            "device_id": None,
-        }
-        obj = _mock_obj()
+        with patch.object(view, "get_device_by_id_or_name") as mock_lookup:
+            view.enrich_links_data([link], local)
 
-        with (
-            patch.object(view, "enrich_local_port"),
-            patch.object(
-                view,
-                "check_serial_cable_status",
-                side_effect=lambda lnk: lnk.update(
-                    {
-                        "cable_status": "Cable Found",
-                        "netbox_local_interface_id": 88,
-                    }
-                ),
-            ),
-            patch.object(view, "enrich_serial_remote") as mock_enrich_remote,
-        ):
-            view.enrich_links_data([link], obj)
-
-        mock_enrich_remote.assert_not_called()
+        assert link["cable_status"] == "Cable Found"
+        assert "netbox_remote_interface_id" not in link
+        mock_lookup.assert_not_called()  # enrich_serial_remote (which performs the lookup) was skipped
 
 
 # ---------------------------------------------------------------------------
@@ -955,3 +907,109 @@ class TestSingleCableVerifySerial:
         row = _json.loads(view.post(request).content)["formatted_row"]
         assert "Cable Found" in row["cable_status"]
         assert "Sync Cable" not in row["actions"]
+
+
+# ---------------------------------------------------------------------------
+# Code-review fixes: device_id preservation (#2) + OOB-only serial guard (#4/#6)
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestSerialDeviceIdPreserved:
+    """A serial row must keep the CSP-owning device_id set by map_sensors_to_serial_links — not get overwritten with the viewed obj.id (which would mis-default the VC member dropdown)."""
+
+    def test_enrich_links_data_keeps_serial_device_id(self):
+        viewed, _, _ = make_serial_device("ser-viewed-deviceid")
+        view = _make_view()
+        # device_id was stamped by map_sensors_to_serial_links to the CSP-owning sync device.
+        link = {"_source": "serial", "device_id": 999999, "local_port": "ttyNope"}
+        view.enrich_links_data([link], viewed)
+        assert link["device_id"] == 999999  # preserved, not overwritten with viewed.id
+
+    def test_non_serial_row_still_scoped_to_viewed_device(self):
+        viewed, _, _ = make_serial_device("ser-viewed-nonserial")
+        view = _make_view()
+        link = {"local_port": "Gi0/0"}  # non-serial
+        with patch.object(view, "enrich_local_port"):
+            view.enrich_links_data([link], viewed)
+        assert link["device_id"] == viewed.id  # non-serial rows are scoped to the viewed device
+
+
+@pytest.mark.django_db
+class TestSerialFetchSkippedWithoutHostId:
+    """An OOB-only / unmapped device (no host librenms_id) must not call get_serial_port_sensors(None) — it can only return empty and, on a transient error, would wrongly mark the snapshot partial and suppress the valid OOB rows (#4/#6)."""
+
+    def test_serial_fetch_skipped_when_no_host_librenms_id(self):
+        obj, _csps, _ = make_serial_device("oob-only-serial", csp_names=["ttyS1"])
+        view = _make_view()
+        view._librenms_api.get_librenms_id.return_value = None  # OOB-only / unmapped host
+        view._librenms_api.get_device_links.return_value = (False, "no host mapping")
+        # Must not be reached: a None device id can only filter to nothing and waste a fetch.
+        view._librenms_api.get_serial_port_sensors.side_effect = AssertionError("must not fetch with no host id")
+        view.get_links_data(obj)
+        view._librenms_api.get_serial_port_sensors.assert_not_called()
+        assert view._serial_links_fetch_failed is False
+
+
+# ---------------------------------------------------------------------------
+# #5: cross-row ConsolePort dedup  ·  G-B2: verify-row dimming parity
+# ---------------------------------------------------------------------------
+@pytest.mark.django_db
+class TestSerialRemoteCollisionDedup:
+    """Two serial rows resolving to the same remote device must target distinct uncabled ConsolePorts — otherwise the 2nd sync hits the duplicate guard and a free port stays uncabled (#5)."""
+
+    def test_enrich_serial_remote_excludes_claimed_ports(self):
+        view = _make_view()
+        remote, _, (cp_a, cp_b) = make_serial_device("router-collide", cp_names=["con-a", "con-b"])
+        link1 = {
+            "_source": "serial",
+            "remote_device": remote.name,
+            "netbox_local_interface_id": 1,
+            "cable_status": "No Cable",
+        }
+        link2 = {
+            "_source": "serial",
+            "remote_device": remote.name,
+            "netbox_local_interface_id": 2,
+            "cable_status": "No Cable",
+        }
+        claimed = set()
+        with patch.object(view, "get_device_by_id_or_name", return_value=(remote, True, None)):
+            view.enrich_serial_remote(link1, claimed_cp_ids=claimed)
+            view.enrich_serial_remote(link2, claimed_cp_ids=claimed)
+        assert link1["netbox_remote_interface_id"] != link2["netbox_remote_interface_id"]
+        assert {link1["netbox_remote_interface_id"], link2["netbox_remote_interface_id"]} == {cp_a.pk, cp_b.pk}
+
+    def test_enrich_links_data_dedups_remote_cp_across_serial_rows(self):
+        view = _make_view()
+        local, (csp1, csp2), _ = make_serial_device("acs-collide", csp_names=["ttyS1", "ttyS2"])
+        remote, _, (cp_a, cp_b) = make_serial_device("router-collide2", cp_names=["con-a", "con-b"])
+        links = [
+            {"local_port": "ttyS1", "_source": "serial", "remote_device": remote.name, "device_id": local.id},
+            {"local_port": "ttyS2", "_source": "serial", "remote_device": remote.name, "device_id": local.id},
+        ]
+        with patch.object(view, "get_device_by_id_or_name", return_value=(remote, True, None)):
+            view.enrich_links_data(links, local)
+        ids = {link.get("netbox_remote_interface_id") for link in links}
+        assert ids == {cp_a.pk, cp_b.pk}  # distinct CPs, no collision
+
+
+@pytest.mark.django_db
+class TestSerialVerifyRowDimming:
+    """The inline verify-row render dims an unconfigured serial remote label, matching the table render (G-B2)."""
+
+    def test_unconfigured_serial_remote_is_dimmed(self):
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        view = object.__new__(SingleCableVerifyView)
+        view.request = _mock_request()
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        dev, (csp,), _ = make_serial_device("acs-verify-dim", csp_names=["ttyS1"])
+        link = {
+            "_source": "serial",
+            "local_port": "ttyS1",
+            "remote_device": "raw-avocent-label",
+            "is_configured": False,
+        }
+        # Remote label doesn't resolve to a NetBox device (real lookup) -> unconfigured, no URL.
+        row = view._format_serial_verify_row(view.request, dev, link, local_port_id="serial:1001", server_key="default")
+        assert "text-muted fst-italic" in row["remote_device"]  # dimmed, matching LibreNMSCableTable

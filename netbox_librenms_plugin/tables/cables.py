@@ -12,6 +12,11 @@ from netbox_librenms_plugin.utils import (
     render_vc_member_options,
 )
 
+# Static trusted markup for the "Serial" console-port badge, shared by the table render
+# (render_local_port) and the inline verify-row render (cables_view._format_serial_verify_row)
+# so the two can't drift. Leading space is intentional (it follows the port name).
+SERIAL_BADGE_HTML = ' <span class="badge bg-teal text-white ms-1" title="Serial console port">Serial</span>'
+
 
 class LibreNMSCableTable(tables.Table):
     """
@@ -69,13 +74,7 @@ class LibreNMSCableTable(tables.Table):
         """Render local port name as a link if URL is available."""
         # Leading space: the badge follows the port name.
         oob_badge = oob_badge_html(record, leading_space=True)
-        # Static trusted markup — use mark_safe, not format_html (which requires
-        # interpolation args and raises TypeError when given a bare string in Django 6+).
-        serial_badge = (
-            mark_safe(' <span class="badge bg-teal text-white ms-1" title="Serial console port">Serial</span>')
-            if record.get("_source") == "serial"
-            else ""
-        )
+        serial_badge = mark_safe(SERIAL_BADGE_HTML) if record.get("_source") == "serial" else ""  # noqa: S308
         # Normalize None to "" in both branches; otherwise the linked branch
         # renders the literal "None" as the link text when value is missing.
         display_value = value or ""

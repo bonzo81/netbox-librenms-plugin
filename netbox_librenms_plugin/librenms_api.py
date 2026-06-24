@@ -1784,7 +1784,7 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
-    def get_serial_port_sensors(self, device_id: int) -> tuple[bool, list | str]:
+    def get_serial_port_sensors(self, device_id: int, use_cache: bool = True) -> tuple[bool, list | str]:
         """
         Return serial-port sensor records for a single device from LibreNMS.
 
@@ -1815,27 +1815,36 @@ class LibreNMSAPI:
             tuple: (success: bool, data: list of sensor dicts or error string)
         """
         cache_key = f"librenms_serial_sensors_{self.server_key}"
-        cached = cache.get(cache_key)
-        # Validate the cached shape before trusting it: the device filter below calls .get() on
-        # every item, so a malformed cache value (not a list of dicts — e.g. a corrupt backend or
-        # foreign writer) would raise AttributeError and break every serial refresh until the TTL
-        # expires. _fetch_serial_port_sensors() already guarantees a list-of-dicts, so only the
-        # cache path needs this guard; a bad value is dropped and re-fetched as a cache miss.
-        if isinstance(cached, list) and all(isinstance(s, dict) for s in cached):
-            all_serial_sensors = cached
-        else:
-            if cached is not None:
+        all_serial_sensors = None
+        # use_cache=False forces a fresh pull (a user-initiated Cables "Refresh" wants current
+        # data — host LLDP/OOB are re-fetched too). The per-server cache only exists to stop a
+        # multi-device pass re-pulling the whole instance-wide table; it must not make Refresh
+        # serve a stale serial label until the TTL elapses.
+        if use_cache:
+            cached = cache.get(cache_key)
+            # Validate the cached shape before trusting it: the device filter below calls .get()
+            # on every item, so a malformed cache value (not a list of dicts — e.g. a corrupt
+            # backend or foreign writer) would raise AttributeError and break every serial
+            # refresh until the TTL expires. _fetch_serial_port_sensors() already guarantees a
+            # list-of-dicts, so only the cache path needs this guard; a bad value is dropped and
+            # re-fetched as a cache miss.
+            if isinstance(cached, list) and all(isinstance(s, dict) for s in cached):
+                all_serial_sensors = cached
+            elif cached is not None:
                 logger.warning(
                     "Ignoring malformed cached serial sensor payload for server %s: %r",
                     self.server_key,
                     cached,
                 )
                 cache.delete(cache_key)
+
+        if all_serial_sensors is None:
             success, all_serial_sensors = self._fetch_serial_port_sensors()
             if not success:
                 # all_serial_sensors is the error string here; never cache a failure so a
                 # transient error doesn't poison serial sync until the TTL elapses.
                 return False, all_serial_sensors
+            # Refresh the cache even on a forced fetch so a later cached reader sees current data.
             cache.set(cache_key, all_serial_sensors, timeout=self.cache_timeout)
 
         device_sensors = [s for s in all_serial_sensors if str(s.get("device_id")) == str(device_id)]
@@ -1892,7 +1901,13 @@ class LibreNMSAPI:
             if e.response.status_code == 404:
                 return False, "Sensors resource endpoint not found"
             return False, f"HTTP error: {str(e)}"
-        except (requests.exceptions.RequestException, ValueError) as e:
+        except ValueError as e:
+            # response.json() raises ValueError / requests JSONDecodeError on a non-JSON body.
+            # JSONDecodeError subclasses BOTH ValueError and RequestException, so this must precede
+            # the RequestException handler — otherwise a parse failure is mislabeled "connecting"
+            # (mirrors get_port_stack).
+            return False, f"Invalid JSON from LibreNMS: {str(e)}"
+        except requests.exceptions.RequestException as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
     def get_port_vlan_details(self, port_id: int) -> tuple[bool, dict | str]:

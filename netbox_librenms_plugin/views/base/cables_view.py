@@ -14,6 +14,7 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
+from netbox_librenms_plugin.tables.cables import SERIAL_BADGE_HTML
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     build_librenms_id_qs,
@@ -500,10 +501,19 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         # Append serial console-server port rows if the device has any CSPs. Gate on lookup_device
         # (the resolved sync device), not obj: on a VC-member page the viewed obj may lack CSPs
         # while the sync device owns them — the sensor fetch above is already scoped to that device.
-        if hasattr(lookup_device, "consoleserverports") and lookup_device.consoleserverports.exists():
+        if (
+            self.librenms_id is not None
+            and hasattr(lookup_device, "consoleserverports")
+            and lookup_device.consoleserverports.exists()
+        ):
             from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
-            serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(self.librenms_id)
+            # Refresh always re-fetches the serial sensor table (use_cache=False): host LLDP/OOB
+            # are fetched fresh here too, so a relabeled Avocent port shouldn't stay stale behind
+            # the per-server sensor cache until its TTL elapses.
+            serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(
+                self.librenms_id, use_cache=False
+            )
             if not serial_success:
                 # Don't silently drop serial rows on a fetch failure — flag it so post() can warn
                 # the user (this method has no request to message on). Mirrors the OOB branch.
@@ -598,30 +608,37 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 f"Multiple devices found with the same name: {hostname}.",
             )
 
-    def enrich_local_port(self, link, obj, server_key=None):
-        """Add local port URL if interface exists in NetBox."""
+    def enrich_local_port(self, link, obj, server_key=None, sync_device=None):
+        """
+        Add the local-port URL if the interface/CSP exists in NetBox.
+
+        Returns the resolved ConsoleServerPort for a serial row (so the caller can reuse it for
+        the cable-status check without a second fetch by pk), else None.
+        """
         # Merged OOB-controller rows are context-only: their local port lives on the
         # CONTROLLER, not the host, so a shared name (or colliding stored librenms_id)
         # must not bind a host interface — that would render a wrong local_port_url and
         # cable state. Sync and the actions column already refuse OOB rows; leave the
         # local end unresolved here too.
         if link.get("_source") == "oob":
-            return
+            return None
         if local_port := link.get("local_port"):
             # Serial rows map to ConsoleServerPort, not Interface. Resolve the CSP on the
             # LibreNMS sync device, not the viewed obj/selected_device: get_links_data builds
             # serial rows from get_librenms_sync_device(obj), so on a VC-member page the CSP
             # lives on the priority member — querying obj would drop the row to "Console Server
-            # Port Not Found" and lose its Sync Cable action.
+            # Port Not Found" and lose its Sync Cable action. sync_device may be passed in by the
+            # caller (resolved once for the whole links loop) to avoid re-resolving it per row.
             if link.get("_source") == "serial":
                 if server_key is None:
                     server_key = self.librenms_api.server_key
-                sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+                if sync_device is None:
+                    sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
                 csp = sync_device.consoleserverports.filter(name=local_port).first()
                 if csp:
                     link["local_port_url"] = reverse("dcim:consoleserverport", args=[csp.pk])
                     link["netbox_local_interface_id"] = csp.pk
-                return
+                return csp
 
             interface = None
             local_port_id = link.get("local_port_id")
@@ -727,18 +744,23 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
         return link
 
-    def check_serial_cable_status(self, link):
-        """Check cable status for a serial ConsoleServerPort row."""
+    def check_serial_cable_status(self, link, csp=None):
+        """Check cable status for a serial ConsoleServerPort row.
+
+        ``csp`` may be the ConsoleServerPort already loaded by ``enrich_local_port`` for this
+        row; when it matches the resolved id it's reused instead of re-fetching by pk.
+        """
         csp_id = link.get("netbox_local_interface_id")
         link["can_create_cable"] = False
         if not csp_id:
             link["cable_status"] = "Console Server Port Not Found in NetBox"
             return link
-        try:
-            csp = ConsoleServerPort.objects.get(pk=csp_id)
-        except ConsoleServerPort.DoesNotExist:
-            link["cable_status"] = "Console Server Port Not Found in NetBox"
-            return link
+        if csp is None or csp.pk != csp_id:
+            try:
+                csp = ConsoleServerPort.objects.get(pk=csp_id)
+            except ConsoleServerPort.DoesNotExist:
+                link["cable_status"] = "Console Server Port Not Found in NetBox"
+                return link
         if csp.cable:
             link.update(
                 {
@@ -750,7 +772,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             link["cable_status"] = "No Cable"
         return link
 
-    def enrich_serial_remote(self, link):
+    def enrich_serial_remote(self, link, claimed_cp_ids=None):
         """
         Resolve the remote ConsolePort for a serial row using the Avocent label.
 
@@ -763,6 +785,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         Args:
             link (dict): The serial cable-sync row, mutated in place with the resolved
                 remote device/port (or a ``cable_status`` note on failure).
+            claimed_cp_ids (set | None): ConsolePort pks already picked by an earlier serial
+                row in this response. The pick excludes them (and adds its own), so two serial
+                rows resolving to the same remote device don't both target the same uncabled
+                ConsolePort — which would create one cable and then misreport the second as a
+                "duplicate" while a genuinely free port stays uncabled.
 
         Returns:
             None
@@ -779,10 +806,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         link["remote_device_url"] = reverse("dcim:device", args=[device.pk])
         link["netbox_remote_device_id"] = device.pk
 
+        if claimed_cp_ids is None:
+            claimed_cp_ids = set()
         # Order explicitly so the picked port is deterministic (the label is only a hint and
-        # the user confirms before sync) and stable regardless of the model's default ordering.
-        uncabled_cp = device.consoleports.filter(cable__isnull=True).order_by("name").first()
+        # the user confirms before sync) and stable regardless of the model's default ordering;
+        # exclude ports already claimed by a sibling serial row this response.
+        uncabled_cp = (
+            device.consoleports.filter(cable__isnull=True).exclude(pk__in=claimed_cp_ids).order_by("name").first()
+        )
         if uncabled_cp:
+            claimed_cp_ids.add(uncabled_cp.pk)
             link["netbox_remote_interface_id"] = uncabled_cp.pk
             link["remote_port_name"] = uncabled_cp.name
             link["remote_port_url"] = reverse("dcim:consoleport", args=[uncabled_cp.pk])
@@ -815,17 +848,30 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
     def enrich_links_data(self, links_data, obj, server_key=None):
         """Enrich links data with local and remote port URLs and cable status."""
+        if server_key is None:
+            server_key = self.librenms_api.server_key
+        # Resolve the serial sync device once for the whole loop (loop-invariant) instead of
+        # per serial row.
+        serial_sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        # ConsolePorts already auto-picked by an earlier serial row this response, so two rows
+        # resolving to the same remote device don't collide on one port (see enrich_serial_remote).
+        claimed_remote_cp_ids = set()
         for link in links_data:
-            self.enrich_local_port(link, obj, server_key=server_key)
-            link["device_id"] = obj.id
+            csp = self.enrich_local_port(link, obj, server_key=server_key, sync_device=serial_sync_device)
 
             # Serial rows: check CSP cable status, then try to resolve remote ConsolePort.
             if link.get("_source") == "serial":
-                self.check_serial_cable_status(link)
+                # Serial rows already carry the CSP-owning sync device_id from
+                # map_sensors_to_serial_links; don't overwrite it with the viewed obj.id —
+                # on a VC-member page that would default the per-row member dropdown (and the
+                # sync target) to the wrong member. Reuse the CSP enrich_local_port just loaded.
+                self.check_serial_cable_status(link, csp=csp)
                 # If CSP is found and has no cable, try to match remote device + ConsolePort.
                 if link.get("netbox_local_interface_id") and link.get("cable_status") == "No Cable":
-                    self.enrich_serial_remote(link)
+                    self.enrich_serial_remote(link, claimed_cp_ids=claimed_remote_cp_ids)
                 continue
+
+            link["device_id"] = obj.id
 
             if remote_hostname := link.get("remote_device"):
                 link = self.process_remote_device(
@@ -887,7 +933,15 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         partial_fetch_failed = fetch_fresh and (
             bool(getattr(self, "_oob_links_fetch_failed", False))
             or bool(getattr(self, "_librenms_id_unresolved", False))
-            or bool(getattr(self, "_serial_links_fetch_failed", False))
+            # Like the host-links branch below, only an OOB-mapped device (host id present) can have
+            # a serial-fetch failure that makes the snapshot partial. An OOB-only device skips the
+            # serial fetch entirely (see get_links_data), so a transient serial error there must not
+            # drop its valid OOB rows from the cache.
+            or bool(getattr(self, "_librenms_id_unresolved", False))
+            or (
+                bool(getattr(self, "_serial_links_fetch_failed", False))
+                and getattr(self, "librenms_id", None) is not None
+            )
             or (bool(getattr(self, "_links_fetch_error", None)) and getattr(self, "librenms_id", None) is not None)
         )
         if partial_fetch_failed:
@@ -1095,13 +1149,13 @@ class SingleCableVerifyView(BaseCableTableView):
             dict: The formatted row (local_port, remote_port, remote_device,
                 cable_status, actions) as escaped HTML fragments.
         """
-        self.enrich_local_port(link_data, selected_device, server_key=server_key)
-        self.check_serial_cable_status(link_data)
+        csp = self.enrich_local_port(link_data, selected_device, server_key=server_key)
+        self.check_serial_cable_status(link_data, csp=csp)
         if link_data.get("netbox_local_interface_id") and link_data.get("cable_status") == "No Cable":
             self.enrich_serial_remote(link_data)
 
-        # Serial badge mirrors tables/cables.py render_local_port.
-        serial_badge = ' <span class="badge bg-teal text-white ms-1" title="Serial console port">Serial</span>'
+        # Shared constant so the verify-row badge can't drift from the table render.
+        serial_badge = SERIAL_BADGE_HTML
         safe_local = escape(link_data.get("local_port", ""))
         if link_data.get("local_port_url"):
             local_html = f'<a href="{link_data["local_port_url"]}">{safe_local}</a>{serial_badge}'
@@ -1111,6 +1165,11 @@ class SingleCableVerifyView(BaseCableTableView):
         safe_remote_device = escape(link_data.get("remote_device", ""))
         if link_data.get("remote_device_url"):
             remote_device_html = f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
+        elif link_data.get("_source") == "serial" and not link_data.get("is_configured"):
+            # Match the table render (LibreNMSCableTable.render_remote_device): dim an
+            # unconfigured serial label (the Avocent port was never customised) instead of
+            # showing it the same as a configured one.
+            remote_device_html = f'<span class="text-muted fst-italic">{safe_remote_device}</span>'
         else:
             remote_device_html = safe_remote_device
 
