@@ -383,7 +383,16 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             cached_ip_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
             if isinstance(cached_ip_data, dict):
                 ip_data = cached_ip_data.get("ip_addresses", [])
-                mgmt_ip = cached_ip_data.get("mgmt_ip", "")
+                # Pre-upgrade entries cached before mgmt_ip was stored lack the key entirely
+                # (distinct from a present-but-empty "" meaning "no mgmt IP"). Resolve it now —
+                # a one-time live call, mirroring the ports_by_id backfill below — so the
+                # "Set Primary IP" auto-select works without forcing a manual refresh first.
+                cached_mgmt_ip_missing = "mgmt_ip" not in cached_ip_data
+                if cached_mgmt_ip_missing:
+                    self.librenms_id = self.librenms_api.get_stored_librenms_id(obj)
+                    mgmt_ip = self._resolve_management_ip()
+                else:
+                    mgmt_ip = cached_ip_data["mgmt_ip"]
                 # Pre-populate the port map from cache so the cached render reads only
                 # cache + NetBox and never re-hits LibreNMS (resilient when it's down).
                 port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
@@ -410,9 +419,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                 {"ip_addresses": ip_data, "mgmt_ip": mgmt_ip, "ports_by_id": port_data_cache},
                 timeout=self.librenms_api.cache_timeout,
             )
-        elif not cached_had_ports_by_id and port_data_cache:
-            # Backfill: a pre-upgrade cache entry had no ports_by_id, so enrich_ip_data
-            # rebuilt the map via live get_port_by_id() calls. Persist it under the
+        elif (not cached_had_ports_by_id and port_data_cache) or cached_mgmt_ip_missing:
+            # Backfill: a pre-upgrade cache entry had no ports_by_id and/or no mgmt_ip, so they
+            # were rebuilt above via live calls. Persist them under the
             # *remaining* TTL (don't extend the entry's lifetime) so subsequent cached
             # renders stop re-hitting LibreNMS until the entry would have expired anyway.
             # cache.ttl() isn't part of Django's core cache API (only django-redis-style backends

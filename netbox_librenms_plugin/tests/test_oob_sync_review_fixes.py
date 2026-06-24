@@ -4,8 +4,11 @@ Real-DB (django_db) coverage that exercises the actual ORM/model behaviour rathe
 so a broken fix can't stay green by fabricating attributes.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.cache import cache as real_cache
 from django.db import transaction
 from django.test import RequestFactory
 
@@ -126,3 +129,46 @@ class TestSerialMatchRoleIgnoresMissingDeviceId:
         # — NOT a host/OOB chassis-pair situation. The role-choice toggle must not be offered.
         assert result["serial_role_choice_available"] is False
         assert result["serial_action"] == "link"
+
+
+@pytest.mark.django_db
+class TestIpCachedSnapshotMgmtIpBackfill:
+    """A pre-upgrade IP snapshot lacking the mgmt_ip key must resolve it on read, not silently skip auto-select."""
+
+    def _view(self, mgmt_ip_resolves_to="10.0.0.9"):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = DeviceIPAddressTableView()
+        api = MagicMock(server_key="default", cache_timeout=300)
+        api.get_stored_librenms_id.return_value = 7
+        api.get_device_info.return_value = (True, {"ip": mgmt_ip_resolves_to})
+        view._librenms_api = api
+        request = RequestFactory().get("/")
+        request.user = _superuser()
+        view.request = request
+        return view, api, request
+
+    def test_missing_mgmt_ip_key_resolves_on_cached_render(self):
+        device = make_device("ip-preupgrade")
+        view, api, request = self._view()
+        key = view.get_cache_key(device, "ip_addresses", "default")
+        # Pre-upgrade snapshot: NO "mgmt_ip" key.
+        real_cache.set(key, {"ip_addresses": [], "ports_by_id": {"7": {}}}, timeout=300)
+        try:
+            view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+            # The missing key triggered a one-time live resolve of the management IP.
+            api.get_device_info.assert_called_once_with(7)
+        finally:
+            real_cache.delete(key)
+
+    def test_present_mgmt_ip_key_does_not_resolve(self):
+        device = make_device("ip-postupgrade")
+        view, api, request = self._view()
+        key = view.get_cache_key(device, "ip_addresses", "default")
+        # Complete snapshot: mgmt_ip already stored (even empty "" must be honoured, not re-resolved).
+        real_cache.set(key, {"ip_addresses": [], "mgmt_ip": "", "ports_by_id": {"7": {}}}, timeout=300)
+        try:
+            view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+            api.get_device_info.assert_not_called()
+        finally:
+            real_cache.delete(key)
