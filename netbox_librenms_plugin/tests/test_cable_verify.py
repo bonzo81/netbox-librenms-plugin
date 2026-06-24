@@ -440,3 +440,80 @@ class TestRemoteDeviceResolutionExcludesOOB:
         assert found is True
         assert error is None
         assert device.pk == host.pk
+
+
+@pytest.mark.django_db
+class TestOOBRowsNeverActionable:
+    """check_cable_status must keep context-only OOB rows non-actionable (no Sync Cable)."""
+
+    # OOB-controller rows are merged into the host's cable list for context only (shared-LOM
+    # detection) and are skipped by SyncCablesView.process_single_interface, so they must never
+    # offer a Sync Cable action. check_cable_status is the single source of truth for
+    # can_create_cable (read by both the table render and the verify response), so it stays
+    # non-actionable even when an OOB row's shared-name local port resolves to a host interface.
+
+    def _make_resolved_no_cable_link(self, source):
+        """A link whose both endpoints resolve to real, cable-free NetBox interfaces."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        local_if = make_interface(make_device(f"local-{source}"), "eth0")
+        remote_if = make_interface(make_device(f"remote-{source}"), "eth1")
+        return {
+            "netbox_local_interface_id": local_if.pk,
+            "netbox_remote_interface_id": remote_if.pk,
+            "_source": source,
+        }
+
+    def test_host_row_with_no_cable_is_actionable(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        link = view.check_cable_status(self._make_resolved_no_cable_link("main"))
+
+        assert link["cable_status"] == "No Cable"
+        assert link["can_create_cable"] is True
+
+    def test_oob_row_with_no_cable_is_not_actionable(self):
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+        view = object.__new__(BaseCableTableView)
+        link = view.check_cable_status(self._make_resolved_no_cable_link("oob"))
+
+        # Status is still reported, but no Sync Cable action is offered.
+        assert link["cable_status"] == "No Cable"
+        assert link["can_create_cable"] is False
+
+    @pytest.mark.parametrize(
+        "source,expect_sync",
+        [("main", True), ("oob", False)],
+    )
+    def test_verify_response_offers_sync_only_for_non_oob_rows(self, source, expect_sync):
+        """Verify POST offers Sync Cable for a host row but not for an OOB row."""
+        # Both rows resolve to cable-free interfaces on both ends; only _source differs.
+        from django.core.cache import cache
+
+        from dcim.models import Interface
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        local_dev = make_device(f"verify-local-{source}")
+        Interface.objects.create(device=local_dev, name="eth0", type="1000base-t")
+        remote_dev = make_device(f"verify-remote-{source}")
+        Interface.objects.create(device=remote_dev, name="eth9", type="1000base-t")
+
+        view = _make_view()
+        link = {
+            "local_port": "eth0",
+            "local_port_id": 700,
+            "remote_port": "eth9",
+            "remote_device": remote_dev.name,
+            "remote_port_id": None,
+            "remote_device_id": None,
+            "_source": source,
+        }
+        cache.set(view.get_cache_key(local_dev, "links", "default"), {"links": [link]}, 300)
+
+        request = _make_request({"device_id": local_dev.pk, "local_port_id": 700, "server_key": "default"})
+        payload = json.loads(view.post(request).content)
+        actions = payload["formatted_row"]["actions"]
+
+        assert ("Sync Cable" in actions) is expect_sync

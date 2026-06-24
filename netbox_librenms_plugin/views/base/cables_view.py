@@ -552,7 +552,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                     }
                 )
             else:
-                link.update({"cable_status": "No Cable", "can_create_cable": True})
+                link["cable_status"] = "No Cable"
+                # OOB-controller rows are context-only (shared-LOM detection) and are skipped by
+                # SyncCablesView.process_single_interface, so they must never offer a Sync Cable
+                # action: an OOB row whose shared-name local port resolves to a host interface
+                # would otherwise present a dead button (in both the table render and the verify
+                # response, which both gate the action on can_create_cable).
+                link["can_create_cable"] = link.get("_source") != "oob"
         else:
             link["cable_status"] = (
                 "Both Interfaces Not Found in Netbox"
