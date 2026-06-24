@@ -894,10 +894,9 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                             link_data, remote_hostname, link_data.get("remote_device_id"), server_key=server_key
                         )
 
-                    # Normalize None → "" (link_data.get(..., "") still returns None when the key
-                    # is present-but-None, e.g. an OOB row whose port name couldn't be resolved).
-                    # Otherwise the unmatched-interface branch renders escape(None) == "None" as the
-                    # port label — the same defect tables/cables.py render_local_port was fixed for.
+                    # `or ""` (not a .get default): the OOB-merge path stores local_port=None when
+                    # the port name can't be resolved, and a present-but-None value would otherwise
+                    # render the literal string "None" via escape() below.
                     local_port = link_data.get("local_port") or ""
                     formatted_row["local_port"] = local_port
 
@@ -930,7 +929,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
 
                         # Escape LibreNMS-sourced labels to prevent XSS
                         safe_local_port = escape(local_port)
-                        remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
+                        remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
                         safe_remote_port = escape(remote_port_name)
                         remote_device_name = link_data.get("remote_device", "")
                         safe_remote_device = escape(remote_device_name)
@@ -973,7 +972,7 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                     else:
                         formatted_row["local_port"] = f"{escape(local_port)}{oob_badge}"
                         # Keep remote port name visible, add URL if available
-                        remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
+                        remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
                         safe_remote_port = escape(remote_port_name)
                         formatted_row["remote_port"] = (
                             f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'

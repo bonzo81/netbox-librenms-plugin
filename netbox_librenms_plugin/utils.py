@@ -1910,7 +1910,7 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
         ``oob_from_donor`` (None or dict), ``donor_id_demoted_to_oob``
         (None or dict).  Useful for audit logging and tests.
     """
-    from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN
+    from netbox_librenms_plugin.constants import normalize_oob_type
 
     summary = {
         "host_id_from_donor": None,
@@ -2082,8 +2082,11 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
         demoted = dict(donor_oob) if donor_oob else {}
         demoted.pop("id", None)
         if not demoted.get("type"):
-            match = OOB_TYPE_PATTERN.search(donor.name or "")
-            demoted["type"] = match.group(1).lower() if match else "oob"
+            # Resolve the type via normalize_oob_type (vendor token wins over the generic 'oob')
+            # for parity with the import-path OOB detection (device_operations._detect_oob_type_from_name),
+            # instead of a raw first-match search that would pick 'oob' from a name like
+            # 'leaf01-oob-idrac9'. Fall back to the generic 'oob' when no vendor token matches.
+            demoted["type"] = normalize_oob_type(donor.name or "", "") or "oob"
         demoted["id"] = donor_id
         winner_entry["oob"] = demoted
         summary["donor_id_demoted_to_oob"] = demoted

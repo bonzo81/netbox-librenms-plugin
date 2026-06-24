@@ -811,6 +811,19 @@ class TestMergeLibreNMSLinks:
         assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 99, "type": "oob"}
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "oob"}
 
+    def test_demoted_oob_type_prefers_vendor_token_over_generic(self):
+        # A donor name carrying a generic 'oob' token BEFORE the vendor token (e.g.
+        # 'leaf01-oob-idrac9') must demote with the vendor type ('idrac'), matching the import-path
+        # normalize_oob_type — not the raw first-match search that would pick the generic 'oob'.
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        donor = self._make_dev("leaf01-oob-idrac9", {"default": {"id": 99}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 99, "type": "idrac"}
+        assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
+
     def test_winner_inherits_donor_oob_when_winner_has_none(self):
         from netbox_librenms_plugin.utils import merge_librenms_links
 
