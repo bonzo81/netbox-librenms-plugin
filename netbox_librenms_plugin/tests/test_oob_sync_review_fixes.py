@@ -54,3 +54,51 @@ class TestAttachOobIpForeignKeyConflict:
         ip.refresh_from_db()
         assert donor.oob_ip_id == ip.pk
         assert ip.assigned_object is None
+
+
+@pytest.mark.django_db
+class TestSaveDeviceValidatesPlatformDeviceTypeConsistency:
+    """update_fields saves skip full_clean(), but a device_type/platform write must still honour the platform/manufacturer cross-field rule."""
+
+    def test_update_fields_save_rejects_manufacturer_mismatch(self):
+        from dcim.models import DeviceType, Manufacturer, Platform
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        device = make_device("dt-consistency")  # device_type=TestDT, manufacturer=TestMfr
+        mfr_a = Manufacturer.objects.get(slug="test-mfr")
+        mfr_b, _ = Manufacturer.objects.get_or_create(name="OtherMfr", slug="other-mfr")
+        # Platform limited to TestMfr — consistent with the device's current device_type.
+        platform = Platform.objects.create(name="P-testmfr", slug="p-testmfr", manufacturer=mfr_a)
+        device.platform = platform
+        device.save(update_fields=["platform"])
+        # A device_type from a DIFFERENT manufacturer than the platform allows.
+        dt_other = DeviceType.objects.create(model="DT-other", slug="dt-other", manufacturer=mfr_b)
+
+        device.device_type = dt_other
+        resp = _save_device(device, update_fields=["device_type"])
+
+        # Rejected with an error response, NOT silently persisted with a success toast.
+        assert resp is not None
+        device.refresh_from_db()
+        assert device.device_type_id != dt_other.pk
+
+    def test_update_fields_save_allows_consistent_device_type(self):
+        from dcim.models import DeviceType, Manufacturer, Platform
+
+        from netbox_librenms_plugin.views.imports.actions import _save_device
+
+        device = make_device("dt-consistent-ok")
+        mfr_a = Manufacturer.objects.get(slug="test-mfr")
+        platform = Platform.objects.create(name="P-ok", slug="p-ok", manufacturer=mfr_a)
+        device.platform = platform
+        device.save(update_fields=["platform"])
+        # Same-manufacturer device_type — the consistent case must still save cleanly.
+        dt_same = DeviceType.objects.create(model="DT-same", slug="dt-same", manufacturer=mfr_a)
+
+        device.device_type = dt_same
+        resp = _save_device(device, update_fields=["device_type"])
+
+        assert resp is None
+        device.refresh_from_db()
+        assert device.device_type_id == dt_same.pk

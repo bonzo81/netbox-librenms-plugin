@@ -187,6 +187,32 @@ def _htmx_error_response(message: str) -> HttpResponse:
     return resp
 
 
+def _platform_device_type_mismatch(device) -> HttpResponse | None:
+    """
+    Mirror NetBox Device.clean()'s platform/device-type manufacturer rule for save paths.
+
+    The save(update_fields=...) mode deliberately skips full_clean() (which would abort on
+    unrelated legacy field values), but a device_type/platform write still carries the
+    cross-field manufacturer constraint Device.clean() enforces, with no DB backstop. Validate
+    only that one rule so an inconsistent platform/device_type pairing can't be persisted
+    silently. Returns an HTMX error response on mismatch, else None.
+    """
+    platform = getattr(device, "platform", None)
+    device_type = getattr(device, "device_type", None)
+    if (
+        platform is not None
+        and getattr(platform, "manufacturer_id", None)
+        and device_type is not None
+        and platform.manufacturer_id != device_type.manufacturer_id
+    ):
+        return _htmx_error_response(
+            f"Can't save: the device's platform '{platform}' is limited to {platform.manufacturer} "
+            f"device types, but '{device_type}' is a {device_type.manufacturer} device type — "
+            "update the platform first."
+        )
+    return None
+
+
 def _save_device(device, update_fields: list[str] | None = None, request=None) -> HttpResponse | None:
     """
     Persist a Device row, returning an HttpResponse on failure or None on success.
@@ -234,6 +260,14 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
             logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
             return _err("Could not save: a database integrity constraint was violated.", 409)
         return None
+
+    # full_clean() is intentionally skipped here (it would abort on unrelated legacy field
+    # values), but a device_type/platform write still carries the platform/manufacturer
+    # cross-field constraint with no DB backstop — validate just that one rule so an
+    # inconsistent pairing can't be persisted silently with a success toast.
+    if update_fields and ({"device_type", "platform"} & set(update_fields)):
+        if mismatch := _platform_device_type_mismatch(device):
+            return mismatch
 
     try:
         device.save(update_fields=update_fields)
