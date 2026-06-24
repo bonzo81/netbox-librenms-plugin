@@ -172,3 +172,29 @@ class TestIpCachedSnapshotMgmtIpBackfill:
             api.get_device_info.assert_not_called()
         finally:
             real_cache.delete(key)
+
+
+@pytest.mark.django_db
+class TestBuildIdServerInfoRejectsNonPositiveIds:
+    """Per-server mapping rows must reject 0/negative/malformed host ids (LibreNMS ids start at 1)."""
+
+    def test_zero_negative_and_malformed_host_ids_skipped(self):
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = make_device("idsrv")
+        device.custom_field_data["librenms_id"] = {
+            "s_zero_int": 0,
+            "s_zero_str": "0",
+            "s_dict_zero": {"id": 0},
+            "s_neg": -5,
+            "s_bool": True,
+            "s_good": 42,
+            "s_good_dict": {"id": 7},
+        }
+        device.save()
+
+        result = DeviceValidationDetailsView._build_id_server_info(device)
+
+        # Only the genuinely-positive host ids survive — no bogus device_id 0 / -5 rows.
+        server_keys = {r["server_key"]: r["device_id"] for r in (result or [])}
+        assert server_keys == {"s_good": 42, "s_good_dict": 7}

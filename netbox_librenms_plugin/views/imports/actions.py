@@ -1289,21 +1289,11 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             # in this import-action modal and are skipped.
             if isinstance(did, dict):
                 did = did.get("id")
-            # Coerce with int() (not str.isdigit()) so this per-server panel accepts exactly what
-            # librenms_sync_view._build_all_server_mappings accepts over the SAME CF dict: a value
-            # written as " 42 " is a valid link everywhere else, so isdigit() here silently dropped
-            # it and the sync page and import-conflict panel reported contradictory server links
-            # for one device (issue #99). Reject bool/None/non-numeric and non-positive ids to match.
-            if isinstance(did, bool) or did is None:
-                continue
-            if isinstance(did, str):
-                try:
-                    did = int(did)
-                except (TypeError, ValueError):
-                    continue
-            elif not isinstance(did, int):
-                continue
-            if did <= 0:
+            # coerce_librenms_id centralizes the bool/int/str/positive rules: it rejects booleans,
+            # non-numeric strings, and non-positive ids (LibreNMS ids start at 1), so a 0 /
+            # negative / malformed host id can't slip through as a bogus server-mapping row.
+            did = coerce_librenms_id(did)
+            if did is None:
                 continue
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —
