@@ -2388,6 +2388,24 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {101: 102}
         assert 200 not in result["lag_members"].values()
 
+    def test_nokia_sap_excluded_when_colon_only_in_ifname_ifdescr_mode(self, mock_librenms_api):
+        """On an ifDescr-mode device a SAP port can carry a clean ifDescr (the primary name) but the real lag1:0 marker in ifName; the colon check must scan ALL names, not just the primary, or the SAP row is misclassified as a LAG member."""
+        ports = [
+            {"port_id": 101, "ifName": "1/1/c1/1", "ifDescr": "phys-1", "ifType": "ethernetCsmacd"},
+            {"port_id": 102, "ifName": "lag-1", "ifDescr": "agg-1", "ifType": "ieee8023adLag"},
+            # SAP entry: clean ifDescr (the primary in this mode), colon only in ifName.
+            {"port_id": 200, "ifName": "lag1:0", "ifDescr": "sap-clean", "ifType": "ipForward"},
+        ]
+        port_stack = [
+            {"high_port_id": 101, "low_port_id": 102},  # genuine LAG membership
+            {"high_port_id": 200, "low_port_id": 102},  # SAP row — must be skipped
+        ]
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
+        )
+        assert result["lag_members"] == {101: 102}
+        assert 200 not in result["lag_members"]
+
     def test_junos_sub_unit_stripping(self, mock_librenms_api):
         """Junos: xe-0/0/0.0 -> ae1.0 pair strips to xe-0/0/0 member of ae1."""
         result = mock_librenms_api.resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[:1], lag_patterns={})

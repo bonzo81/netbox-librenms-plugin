@@ -292,3 +292,31 @@ class TestInterfaceSyncContentTemplateMigratedMode:
 
         move_button_tag = extract_enclosing_tag(html, "mdi-transfer-right")
         assert 'hx-vals=\'{"server_key": "default"}\'' in move_button_tag
+
+
+@pytest.mark.django_db
+class TestInterfaceSyncRefreshButtonServerKey:
+    """The outer _interface_sync.html Refresh button must not POST a blank server_key on initial load."""
+
+    def test_refresh_button_falls_back_to_context_server_key_not_blank(self):
+        # On initial page load window.location.search has no server_key, so the Refresh button's
+        # hx-vals must fall back to the active server from context (librenms_server_info.server_key)
+        # rather than '' — a blank key would POST to the default/wrong LibreNMS server.
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("iface-refresh-dev")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()  # NetBox context processors read request.user
+        html = render_to_string(
+            "netbox_librenms_plugin/_interface_sync.html",
+            {"object": device, "has_librenms_id": True, "librenms_server_info": {"server_key": "prod"}},
+            request=request,
+        )
+
+        # The URL-empty fallback now resolves to the active server, not a blank string.
+        assert "get('server_key') || 'prod'" in html
+        assert "get('server_key') || ''" not in html

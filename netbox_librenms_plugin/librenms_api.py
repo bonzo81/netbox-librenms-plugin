@@ -769,8 +769,13 @@ class LibreNMSAPI:
             h_name = _primary_name(high_port)
             l_name = _primary_name(low_port)
 
-            # Universal rule: skip Nokia SAP entries (colon notation: lag1:0, lag-1:10)
-            if ":" in h_name or ":" in l_name:
+            # Universal rule: skip Nokia SAP entries (colon notation: lag1:0, lag-1:10). Check
+            # ALL known names, not just the primary: when interface_name_field="ifDescr" a SAP port
+            # can carry a clean ifDescr but the real lag1:0 marker in ifName, so a primary-only
+            # check would miss it and misclassify the row as a LAG/sub-interface relationship.
+            if any(":" in name for name in _port_names(high_port)) or any(
+                ":" in name for name in _port_names(low_port)
+            ):
                 continue
 
             # Sub-interface detection: the child name is parent + '.<digits>'. port_stack
