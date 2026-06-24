@@ -707,6 +707,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def get_context_data(self, request, obj):
         """Get the context data for the cable sync view."""
+        # GET render: scope the cache read to the server from the request query, matching the
+        # server post() rebinds to and caches under — else a non-default-server tab reads the
+        # default-server cache and renders empty after a successful refresh. Mirrors
+        # modules_view.get_context_data; a blank/absent query falls back to the session server.
+        self.rebind_api_for_server(request.GET.get("server_key"))
         context = self._prepare_context(request, obj, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table

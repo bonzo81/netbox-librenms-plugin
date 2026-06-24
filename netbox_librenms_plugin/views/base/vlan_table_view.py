@@ -125,11 +125,15 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         """
         vlan_table = None
 
-        # Get cached data. Honour the POST-resolved server when provided; otherwise use the
-        # shared degrading resolver (not a bare getattr on the lazy librenms_api property): on a
-        # missing/misconfigured default the property raises KeyError/ValueError, which would 500
-        # the VLAN tab on GET — the exact failure mode _render_server_key() fixes for the sibling
-        # interface/module/cable/ip tabs.
+        # Get cached data (scoped to the POST-resolved server when provided, else the GET-query
+        # server on a page render — without the rebind a non-default-server tab reads the default
+        # cache and renders empty after a successful refresh). Mirrors modules_view.get_context_data.
+        if server_key is None:
+            self.rebind_api_for_server(request.GET.get("server_key"))
+        # Honour the POST-resolved server when provided; otherwise use the shared degrading resolver
+        # (not a bare getattr on the lazy librenms_api property): on a missing/misconfigured default
+        # the property raises KeyError/ValueError, which would 500 the VLAN tab on GET — the exact
+        # failure mode _render_server_key() fixes for the sibling interface/module/cable/ip tabs.
         server_key = server_key or self._render_server_key()
         cached_vlans = cache.get(self.get_cache_key(obj, "vlans", server_key))
         last_fetched = cache.get(self.get_last_fetched_key(obj, "vlans", server_key))

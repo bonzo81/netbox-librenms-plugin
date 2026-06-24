@@ -400,6 +400,12 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             interface_name_field = get_interface_name_field(request)
 
         if server_key is None:
+            # GET render (no POST-resolved key threaded in): rebind the client to the server
+            # from the request query so the ports-cache read scopes to the same server post()
+            # cached under. Without this a non-default-server tab reads the default-server cache
+            # and renders empty after a successful refresh. Mirrors modules_view.get_context_data;
+            # a blank/absent query falls back to the session/default server.
+            self.rebind_api_for_server(request.GET.get("server_key"))
             # getattr does NOT protect this: the lazy librenms_api property RAISES
             # KeyError/ValueError (not AttributeError) on a misconfigured server config,
             # 500ing the cached tab render. Use the degrading resolve like cables/IP.
