@@ -635,11 +635,11 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             try:
                 interface.full_clean()
             except ValidationError as exc:
-                detail = (
-                    "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
-                    if hasattr(exc, "message_dict")
-                    else str(exc)
-                )
+                # Reuse the shared flatten helper (same message_dict join, plus a .messages
+                # fallback) so the two sync flows format validation errors identically.
+                from netbox_librenms_plugin.views.sync.interfaces import _validation_error_detail
+
+                detail = _validation_error_detail(exc)
                 return self._fail(
                     request,
                     f"Cannot move interface '{interface.name}' to '{winner.name}': {detail}",

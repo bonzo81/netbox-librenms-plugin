@@ -22,7 +22,6 @@ from netbox_librenms_plugin.utils import (
     build_migrated_context,
     cache_remaining_ttl,
     get_interface_name_field,
-    get_librenms_device_id,
     get_librenms_sync_device,
     get_missing_vlan_warning,
     get_tagged_vlan_css_class,
@@ -228,22 +227,23 @@ class SingleInterfaceVerifyView(
                 # a name lookup breaks whenever the current naming mode differs from the one the
                 # interface was synced under. Fall back to the name only for interfaces created
                 # without a librenms_id.
-                # Normalize both sides through the canonical normalizer (like
-                # _enrich_port_with_lag_parent's stored-id match): get_librenms_device_id can
-                # return a string-backed custom-field value, so a bare int compare could miss a
-                # stable id that actually agrees and drop to the fragile name fallback.
-                target_int = normalize_librenms_port_id(port_data.get("port_id"))
-                nb_iface = None
-                if target_int is not None:
-                    for iface in selected_device.interfaces.all():
-                        if (
-                            normalize_librenms_port_id(get_librenms_device_id(iface, server_key, auto_save=False))
-                            == target_int
-                        ):
-                            nb_iface = iface
-                            break
-                if nb_iface is None:
-                    nb_iface = selected_device.interfaces.filter(name=interface_name).first()
+                # Reuse the canonical resolver (stable librenms_id, then exact-name fallback,
+                # owner-pinned to the selected member) instead of a hand-rolled per-interface
+                # scan: one indexed pass, and the id/name precedence stays identical to the bulk
+                # sync path. On any miss nb_iface stays None and format_interface_data still
+                # name-resolves it on selected_device.
+                from netbox_librenms_plugin.views.sync.interfaces import (
+                    _interface_owner_for_object,
+                    _resolve_interface_by_port_id,
+                )
+
+                nb_iface, _resolve_err = _resolve_interface_by_port_id(
+                    selected_device,
+                    str(port_data.get("port_id") or ""),
+                    server_key,
+                    name_hint=interface_name or "",
+                    expected_owner=_interface_owner_for_object(selected_device),
+                )
                 port_data["netbox_interface"] = nb_iface
                 # Reuse the exact prep the table path uses (normalize keys + corruption guard +
                 # host-scoping all live in _build_relationship_maps): the inline verify response
