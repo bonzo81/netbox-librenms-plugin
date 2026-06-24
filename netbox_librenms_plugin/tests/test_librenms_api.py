@@ -113,8 +113,9 @@ class TestLibreNMSAPIInit:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         # Use the default key so this exercises the missing URL/token ValueError path in legacy
-        # mode (no configured 'servers' dict, no librenms_url/api_token).
-        with pytest.raises(ValueError):
+        # mode (no configured 'servers' dict, no librenms_url/api_token). Pin the message so an
+        # unrelated ValueError (e.g. the misconfigured-mapping guard) can't keep this test green.
+        with pytest.raises(ValueError, match=r"URL or API token is not configured for server 'default'"):
             LibreNMSAPI(server_key="default")
 
     def test_init_nonexistent_server_key_raises_keyerror(self, mock_librenms_config):
