@@ -1618,44 +1618,115 @@ class TestResolveInterfaceByPortIdExpectedOwner:
         assert err is None
         assert found == iface1
 
+    def test_owner_mismatch_falls_back_to_name_hint(self, db):
+        """A stale port_id on a foreign VC member must not block the name_hint fallback to the manually-created interface on the expected owner."""
+        from netbox_librenms_plugin.tests.conftest import make_interface
+        from netbox_librenms_plugin.views.sync.interfaces import _resolve_interface_by_port_id
 
+        member1, member2 = self._make_vc_members()
+        # Stale/reused librenms_id 42 lives on member2 (a foreign member).
+        self._iface_with_librenms_id(member2, "Gi0/1", 42)
+        # The real target: a manually-created aggregate on member1 with no stored librenms_id.
+        agg = make_interface(member1, "Po1", iface_type="lag")
+
+        # port_id 42 uniquely id-matches member2, but pinned to member1 with name_hint 'Po1'
+        # the foreign id-match must be skipped and the name fallback must find member1's Po1.
+        found, err = _resolve_interface_by_port_id(
+            member1, "42", "default", name_hint="Po1", expected_owner=(member1.pk, None)
+        )
+        assert err is None, err
+        assert found == agg
+
+
+class TestBulkRelationshipRobustness:
+    """Real-DB coverage for the bulk LAG/parent relationship pass robustness fixes."""
+
+    def test_non_dict_relationship_maps_do_not_crash(self, db):
+        """A corrupt list-shaped lag_members/sub_interfaces in the cached relationships must be coerced to {} (fail-soft), not crash the bulk sync POST."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("rel-shape")
+        view = object.__new__(SyncInterfacesView)
+        # Mirrors the hardened reader _build_relationship_maps; without the guard this raises
+        # AttributeError ('list' object has no attribute 'items').
+        view._sync_lag_and_parent_relationships(
+            device, [], [], {"lag_members": [1, 2], "sub_interfaces": ["x"]}, "default"
+        )
+
+    def test_bulk_lag_persist_does_not_clobber_concurrent_edits(self, db):
+        """The bulk LAG persist writes only the changed FK/type columns, so a concurrent edit to other fields of the stale in-memory objects isn't lost (no full-row overwrite)."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        device = make_device("toctou")
+        member = make_interface(device, "Et1", iface_type="1000base-t")
+        agg = make_interface(device, "Po1", iface_type="1000base-t")
+        # In-memory objects now hold stale descriptions; a concurrent writer commits fresh
+        # descriptions straight to the DB after these objects were loaded.
+        member.description = "member-stale"
+        agg.description = "agg-stale"
+        Interface.objects.filter(pk=member.pk).update(description="member-fresh")
+        Interface.objects.filter(pk=agg.pk).update(description="agg-fresh")
+
+        view = object.__new__(SyncInterfacesView)
+        view._apply_relationship_edge(member, "lag", agg, SyncInterfacesView._prepare_bulk_lag_aggregate, "LAG")
+
+        agg.refresh_from_db()
+        member.refresh_from_db()
+        assert agg.type == "lag"  # the intended mutation persisted
+        assert member.lag_id == agg.pk  # the link persisted
+        assert agg.description == "agg-fresh"  # concurrent edit NOT clobbered
+        assert member.description == "member-fresh"  # concurrent edit NOT clobbered
+
+
+@pytest.mark.django_db
 class TestInterfaceLinkValidationErrorNoStackTrace:
-    """LAG/parent full_clean() failures return a fixed message and log the detail — the exception text must not be echoed to the client (CodeQL py/stack-trace-exposure)."""
+    """LAG/parent full_clean() failures return a fixed message and log the detail — the raw exception text must not be echoed to the client (CodeQL py/stack-trace-exposure). Real device/interfaces + view; only Interface.full_clean is patched to inject a known sentinel error."""
 
     _SENTINEL = "SENSITIVE_VALIDATION_INTERNALS"
+
+    @staticmethod
+    def _make_view(view_cls):
+        view = object.__new__(view_cls)
+        view._librenms_api = MagicMock(server_key="default")
+        view.require_all_permissions_json = MagicMock(return_value=None)
+        return view
+
+    @staticmethod
+    def _iface(device, name, port_id):
+        from netbox_librenms_plugin.tests.conftest import make_interface
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        iface = make_interface(device, name, iface_type="1000base-t")
+        set_librenms_device_id(iface, port_id, "default")
+        iface.save()
+        return iface
 
     def test_lag_link_validation_error_does_not_leak_exception(self):
         import json
 
+        from dcim.models import Interface
         from django.core.exceptions import ValidationError
 
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView, _PortIdResolveMixin
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
-        view = object.__new__(SyncInterfaceLagView)
-        view.require_all_permissions_json = MagicMock(return_value=None)
-        view._librenms_api = MagicMock(server_key="default")
-
-        member = MagicMock()
-        member.name = "Et1"
-        member.full_clean.side_effect = ValidationError(self._SENTINEL)
-        agg = MagicMock()
-        agg.name = "Po1"
-        agg.type = "lag"
-
+        device = make_device("lag-noleak")
+        self._iface(device, "Et1", 1)
+        self._iface(device, "Po1", 2)
+        view = self._make_view(SyncInterfaceLagView)
         req = _make_request({"port_id": "1", "lag_port_id": "2", "server_key": "default"})
 
+        # Real resolution + real view; inject a known error at the validation boundary so we can
+        # prove its text is not echoed back (a genuine self-link error gives no controllable string).
         with (
-            patch.object(SyncInterfaceLagView, "_get_object", return_value=MagicMock()),
-            patch.object(
-                _PortIdResolveMixin,
-                "_resolve_interface_by_port_id",
-                side_effect=[(member, None), (agg, None)],
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces._interfaces_same_owner", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
+            patch.object(Interface, "full_clean", side_effect=ValidationError(self._SENTINEL)),
             patch("netbox_librenms_plugin.views.sync.interfaces.logger") as mock_logger,
         ):
-            resp = view.post(req, object_type="device", object_id=1)
+            resp = view.post(req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         assert self._SENTINEL not in resp.content.decode()
@@ -1667,34 +1738,23 @@ class TestInterfaceLinkValidationErrorNoStackTrace:
     def test_parent_link_validation_error_does_not_leak_exception(self):
         import json
 
+        from dcim.models import Interface
         from django.core.exceptions import ValidationError
 
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView, _PortIdResolveMixin
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        view = object.__new__(SyncInterfaceParentView)
-        view.require_all_permissions_json = MagicMock(return_value=None)
-        view._librenms_api = MagicMock(server_key="default")
-
-        child = MagicMock()
-        child.name = "Et1.100"
-        child.full_clean.side_effect = ValidationError(self._SENTINEL)
-        parent = MagicMock()
-        parent.name = "Et1"
-
+        device = make_device("parent-noleak")
+        self._iface(device, "Et1.100", 1)
+        self._iface(device, "Et1", 2)
+        view = self._make_view(SyncInterfaceParentView)
         req = _make_request({"port_id": "1", "parent_port_id": "2", "server_key": "default"})
 
         with (
-            patch.object(SyncInterfaceParentView, "_get_object", return_value=MagicMock()),
-            patch.object(
-                _PortIdResolveMixin,
-                "_resolve_interface_by_port_id",
-                side_effect=[(child, None), (parent, None)],
-            ),
-            patch("netbox_librenms_plugin.views.sync.interfaces._interfaces_same_owner", return_value=True),
-            patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
+            patch.object(Interface, "full_clean", side_effect=ValidationError(self._SENTINEL)),
             patch("netbox_librenms_plugin.views.sync.interfaces.logger") as mock_logger,
         ):
-            resp = view.post(req, object_type="device", object_id=1)
+            resp = view.post(req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         assert self._SENTINEL not in resp.content.decode()

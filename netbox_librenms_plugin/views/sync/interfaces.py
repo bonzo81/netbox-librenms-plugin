@@ -169,6 +169,7 @@ class SyncInterfacesView(
         cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
         # No cached entry at all (or a non-dict one) → ask the user to refresh before syncing.
         if not isinstance(cached_data, dict):
+            self._cached_ports_payload = None
             messages.warning(
                 request,
                 "No cached data found. Please refresh the data before syncing.",
@@ -185,13 +186,19 @@ class SyncInterfacesView(
                 "No cached data found. Please refresh the data before syncing.",
             )
             return None
+        # Stash the whole payload so _get_cached_relationships can read port_stack_relationships
+        # from it without a second cache round-trip for the same key.
+        self._cached_ports_payload = cached_data
         return ports_data
 
     def _get_cached_relationships(self, obj, server_key):
         """Return port_stack_relationships from the cached port data, or empty dict."""
-        # Same VC-scoped key the writer uses (see get_cached_ports_data).
-        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
-        cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
+        # Reuse the payload get_cached_ports_data already fetched in post(); only hit the cache
+        # again when called independently (e.g. in isolation/tests) — same VC-scoped key.
+        cached_data = getattr(self, "_cached_ports_payload", None)
+        if cached_data is None:
+            cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
+            cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
         if cached_data:
             return cached_data.get("port_stack_relationships", {})
         return {}
@@ -224,10 +231,18 @@ class SyncInterfacesView(
         # int-keyed. Re-normalizing here lets every lookup below use a single
         # normalize_librenms_port_id(port_id) call instead of a hand-rolled get(str)/get(int)
         # fallback that silently skips a write whenever one form is missing.
-        lag_members = {normalize_librenms_port_id(k): v for k, v in (relationships.get("lag_members") or {}).items()}
-        sub_interfaces = {
-            normalize_librenms_port_id(k): v for k, v in (relationships.get("sub_interfaces") or {}).items()
-        }
+        # Coerce a present-but-non-dict value (e.g. a list from a corrupt / partial-write /
+        # format-migrated cache) to {} — mirror the hardened reader _build_relationship_maps so
+        # the bulk sync POST fails soft (skips relationship enrichment) instead of raising
+        # AttributeError on .items().
+        lag_members_raw = relationships.get("lag_members")
+        if not isinstance(lag_members_raw, dict):
+            lag_members_raw = {}
+        sub_interfaces_raw = relationships.get("sub_interfaces")
+        if not isinstance(sub_interfaces_raw, dict):
+            sub_interfaces_raw = {}
+        lag_members = {normalize_librenms_port_id(k): v for k, v in lag_members_raw.items()}
+        sub_interfaces = {normalize_librenms_port_id(k): v for k, v in sub_interfaces_raw.items()}
         if not lag_members and not sub_interfaces:
             return
 
@@ -344,7 +359,13 @@ class SyncInterfacesView(
             return None
         original_type = agg_iface.type
         agg_iface.type = "lag"
-        return (lambda: agg_iface.save(), lambda: setattr(agg_iface, "type", original_type))
+        # update_fields=["type"] so a concurrent edit to the aggregate's other columns isn't
+        # lost — it was loaded into the shared index outside the row lock (see
+        # _apply_interface_relationship).
+        return (
+            lambda: agg_iface.save(update_fields=["type"]),
+            lambda: setattr(agg_iface, "type", original_type),
+        )
 
     def _resolve_relationship_ends(
         self,
@@ -396,20 +417,15 @@ class SyncInterfacesView(
         """
         Set ``source_iface.<relation_field> = related_iface`` and persist, validating first.
 
-        Shared by the LAG and parent bulk passes. Validation guards against a self-link or
-        other relationship Interface.clean() rejects (``_interfaces_same_owner`` only checks the
-        device). ``prepare_related(related_iface)`` may set required related-side state in
-        memory and return ``(persist_fn, restore_fn)`` — the LAG pass uses it to bump the
-        aggregate to type=lag and undo that on failure. A validation failure is logged and
-        skipped so the batch continues, never raised.
+        Thin bulk-pass wrapper over :func:`_apply_interface_relationship` (the shared
+        set -> validate -> persist core, also used by the inline single-row endpoints). A
+        validation failure is logged and skipped so the batch continues, never raised.
+        ``prepare_related`` is the LAG pass's aggregate type=lag hook (returns
+        ``(persist, restore)``); the parent pass passes None.
         """
-        setattr(source_iface, relation_field, related_iface)
-        prepared = prepare_related(related_iface) if prepare_related else None
         try:
-            source_iface.full_clean()
+            _apply_interface_relationship(source_iface, relation_field, related_iface, prepare_related)
         except ValidationError as exc:
-            if prepared:
-                prepared[1]()  # restore the in-memory related-side mutation
             logger.warning(
                 "Bulk sync: skipping invalid %s link %s -> %s: %s",
                 log_kind,
@@ -418,9 +434,6 @@ class SyncInterfacesView(
                 _validation_error_detail(exc),
             )
             return
-        if prepared:
-            prepared[0]()  # persist the related-side mutation (e.g. aggregate type=lag)
-        source_iface.save()
         logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
 
     def sync_selected_interfaces(
@@ -533,6 +546,20 @@ class SyncInterfacesView(
         ):
             return None
         return target_device
+
+    def _vc_member_ids(self, obj):
+        """
+        VC member-id set for *obj*, computed once per request.
+
+        ``_resolve_row_target_device`` runs once per selected row across two passes
+        (interface sync + the relationship pass); the member set is loop-invariant, so cache it
+        on the (per-request) view instance instead of re-querying ``members.values_list`` per row.
+        """
+        cached = getattr(self, "_vc_member_ids_cache", None)
+        if cached is None:
+            cached = set(obj.virtual_chassis.members.values_list("id", flat=True))
+            self._vc_member_ids_cache = cached
+        return cached
 
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
         """Create or update a single NetBox interface from LibreNMS data."""
@@ -974,19 +1001,31 @@ def _resolve_interface_by_port_id(
         if index is None:
             return None, f"Unsupported object type: {type(obj).__name__}"
 
-    target_id = int(port_id) if str(port_id).isdigit() else None
+    # Use the shared normalizer (rejects bools / non-positive ids) so id resolution stays
+    # consistent with every other port_id coercion in this module, rather than a hand-rolled
+    # int(port_id) if isdigit() that would accept e.g. "0".
+    target_id = normalize_librenms_port_id(port_id)
     # Collect every interface in scope whose stored LibreNMS id matches, then fail on
     # ambiguity rather than binding lag/parent to an arbitrary first match. Mirrors the
     # ambiguity-safe behaviour of _resolve_device_interface()/_resolve_vm_interface():
     # two interfaces carrying the same stale librenms_id must surface, not silently pick one.
     matches = list(index["by_lnms_id"].get(target_id, [])) if target_id is not None else []
-    if len(matches) == 1:
-        iface = matches[0]
-        if expected_owner is not None and _interface_owner(iface) != expected_owner:
-            return None, f"LibreNMS port_id {port_id} resolves to a different owner than the selected row"
-        return iface, None
-    if len(matches) > 1:
-        return None, f"LibreNMS port_id {port_id} is ambiguous on {obj} (matches multiple interfaces)"
+    ambiguous_msg = f"LibreNMS port_id {port_id} is ambiguous on {obj} (matches multiple interfaces)"
+    if expected_owner is not None:
+        # Prefer an id-match on the owner this row was synced onto. A stale/reused librenms_id
+        # can resolve uniquely onto a *different* VC member; don't let that foreign match block
+        # the name_hint fallback to the (often manually-created, id-less) interface on the
+        # expected owner — fall through to the name lookup below before giving up.
+        owned = [m for m in matches if _interface_owner(m) == expected_owner]
+        if len(owned) == 1:
+            return owned[0], None
+        if len(owned) > 1:
+            return None, ambiguous_msg
+    else:
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, ambiguous_msg
 
     if name_hint:
         iface, err = _resolve_interface_by_name_hint(obj, name_hint, index=index)
@@ -997,6 +1036,10 @@ def _resolve_interface_by_port_id(
                 return None, f"Interface name '{name_hint}' resolves to a different owner than the selected row"
             return iface, None
 
+    # Nothing resolved. If an id-match existed but only on a different owner, report that
+    # (the row points at a port owned elsewhere); otherwise it's a plain not-found.
+    if expected_owner is not None and matches:
+        return None, f"LibreNMS port_id {port_id} resolves to a different owner than the selected row"
     return None, f"Interface with LibreNMS port_id {port_id} not found on {obj}"
 
 
@@ -1059,13 +1102,43 @@ def _interfaces_same_owner(a, b) -> bool:
     )
 
 
-class _PortIdResolveMixin:
-    """Mixin to resolve a LibreNMS port_id to a NetBox interface by librenms_id custom field, then name fallback."""
+def _apply_interface_relationship(source_iface, relation_field, related_iface, prepare_related=None):
+    """
+    Set ``source_iface.<relation_field> = related_iface``, validate, and persist both sides.
 
-    def _resolve_interface_by_port_id(
-        self, obj, port_id: str, server_key: str, name_hint: str = "", expected_owner=None
-    ):
-        return _resolve_interface_by_port_id(obj, port_id, server_key, name_hint, expected_owner)
+    The single place the relationship set -> validate -> persist sequence lives, shared by the
+    bulk pass (:meth:`SyncInterfacesView._apply_relationship_edge`) and the inline single-row
+    endpoints (:class:`_BaseRelationshipSyncView`) so a fix applies once, not twice.
+
+    ``prepare_related`` may mutate the related interface in memory before validation (e.g. bump
+    an aggregate to ``type=lag``) and return either a ``persist`` callable or a
+    ``(persist, restore)`` pair: ``persist`` runs only after the source validates, and
+    ``restore`` undoes the in-memory mutation when validation fails — needed when the related
+    object is reused across calls (a shared aggregate in the bulk pass).
+
+    Both rows are persisted with ``update_fields`` so a concurrent edit to their other columns
+    isn't clobbered: the objects may have been loaded into a shared index outside any row lock,
+    so a full ``save()`` of the stale instance would lose-update the concurrent write.
+
+    Raises:
+        ValidationError: when the source fails ``full_clean()`` (after restoring the related
+            mutation); the caller decides how to surface it (bulk logs+skips, single-row 409).
+    """
+    setattr(source_iface, relation_field, related_iface)
+    prepared = prepare_related(related_iface) if prepare_related else None
+    if isinstance(prepared, tuple):
+        persist_related, restore_related = prepared
+    else:
+        persist_related, restore_related = prepared, None
+    try:
+        source_iface.full_clean()
+    except ValidationError:
+        if restore_related:
+            restore_related()
+        raise
+    if persist_related:
+        persist_related()
+    source_iface.save(update_fields=[relation_field])
 
 
 class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -1150,14 +1223,12 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         # obj is the VC member the JS posted (vcMemberSelect), so both ends must belong to it —
         # pin the owner so a stale librenms_id can't resolve onto another member.
         expected_owner = _interface_owner_for_object(obj)
-        source_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
-            self, obj, port_id, server_key, expected_owner=expected_owner
-        )
+        source_iface, err = _resolve_interface_by_port_id(obj, port_id, server_key, expected_owner=expected_owner)
         if err:
             return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
 
-        related_iface, err = _PortIdResolveMixin._resolve_interface_by_port_id(
-            self, obj, related_port_id, server_key, name_hint=related_name, expected_owner=expected_owner
+        related_iface, err = _resolve_interface_by_port_id(
+            obj, related_port_id, server_key, name_hint=related_name, expected_owner=expected_owner
         )
         if err:
             return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
@@ -1171,13 +1242,11 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         with transaction.atomic():
             # Validate before persisting: a crafted POST with port_id == related_port_id
             # resolves source == related and passes the same-owner check, so full_clean() is
-            # what rejects the resulting self-relationship. _prepare_related sets any required
-            # related-side state (e.g. the aggregate's type=lag) in memory first so the
-            # relation validates, and is persisted only on success.
-            setattr(source_iface, self.relation_field, related_iface)
-            persist_related = self._prepare_related(related_iface)
+            # what rejects the resulting self-relationship. The shared helper sets the FK, runs
+            # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
+            # saves with update_fields.
             try:
-                source_iface.full_clean()
+                _apply_interface_relationship(source_iface, self.relation_field, related_iface, self._prepare_related)
             except ValidationError as exc:
                 # Log the validation detail server-side and return a fixed message — don't echo
                 # exception text to the client (CodeQL py/stack-trace-exposure). The
@@ -1200,9 +1269,6 @@ class _BaseRelationshipSyncView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
                     },
                     status=409,
                 )
-            if persist_related is not None:
-                persist_related()
-            source_iface.save()
             logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
 
         return JsonResponse(
@@ -1231,7 +1297,9 @@ class SyncInterfaceLagView(_BaseRelationshipSyncView):
             related_iface.type = "lag"
 
             def _persist():
-                related_iface.save()
+                # update_fields=["type"]: only the type column changed, so don't risk
+                # clobbering a concurrent edit to the aggregate's other fields.
+                related_iface.save(update_fields=["type"])
                 logger.info("Set interface %s type=lag", related_iface.name)
 
             return _persist
