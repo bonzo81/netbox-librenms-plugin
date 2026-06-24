@@ -54,26 +54,6 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
 
 
-def _try_int(v: object) -> int | None:
-    """
-    Return int(v), or None if v is not coercible to int.
-
-    LibreNMS API responses may return numeric SNMP indices as strings. This helper
-    lets callers safely coerce without crashing on unexpected non-numeric values such
-    as empty strings or "N/A".
-
-    Args:
-        v (object): The value to coerce.
-
-    Returns:
-        int | None: The coerced integer, or None if *v* is not coercible.
-    """
-    try:
-        return int(v)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
 def _check_ignore_rules(
     item: dict,
     parent_item: dict | None,
@@ -411,15 +391,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
         for item in inventory_data:
             item.setdefault("_source", "main")
-            # Normalize main-inventory indices to int, matching the OOB normalization below.
-            # LibreNMS returns SNMP indices as strings; the install/branch action handlers cast
-            # parent_index to int (modules.py) and match it against entPhysicalIndex, so a
-            # string-keyed main item would never match an integer lookup — silently breaking
-            # branch install for main device inventory.
-            if (idx := _try_int(item.get("entPhysicalIndex"))) is not None:
-                item["entPhysicalIndex"] = idx
-            if (parent := _try_int(item.get("entPhysicalContainedIn"))) is not None:
-                item["entPhysicalContainedIn"] = parent
         # Enrich port rows with stable LibreNMS port_id using ports data so
         # interface matching works even when transceiver metadata is absent.
         self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
@@ -444,16 +415,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 and all(isinstance(item, dict) for item in oob_inventory)
             ):
                 main_max_idx = max(
-                    (cast for item in inventory_data if (cast := _try_int(item.get("entPhysicalIndex"))) is not None),
+                    (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
                     default=0,
                 )
                 # Round up to the next 1000-boundary for a clean namespace.
                 _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
                 for item in oob_inventory:
                     item["_source"] = "oob"
-                    if (idx := _try_int(item.get("entPhysicalIndex"))) is not None:
+                    if (idx := item.get("entPhysicalIndex")) is not None:
                         item["entPhysicalIndex"] = idx + _OOB_OFFSET
-                    if (parent := _try_int(item.get("entPhysicalContainedIn"))) is not None and parent != 0:
+                    if (parent := item.get("entPhysicalContainedIn")) not in (None, 0):
                         item["entPhysicalContainedIn"] = parent + _OOB_OFFSET
                 inventory_data = inventory_data + oob_inventory
             else:
