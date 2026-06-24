@@ -129,7 +129,11 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
         # server on a page render — without the rebind a non-default-server tab reads the default
         # cache and renders empty after a successful refresh). Mirrors modules_view.get_context_data.
         if server_key is None:
-            self.rebind_api_for_server(request.GET.get("server_key"))
+            requested = (request.GET.get("server_key") or "").strip()
+            resolved = self.rebind_api_for_server(requested)
+            # An unresolved non-blank key (deleted/misconfigured server) scopes to that key so the
+            # cache read misses and we render empty for it, not the default server's cached VLANs.
+            server_key = resolved if resolved is not None else requested
         # Honour the POST-resolved server when provided; otherwise use the shared degrading resolver
         # (not a bare getattr on the lazy librenms_api property): on a missing/misconfigured default
         # the property raises KeyError/ValueError, which would 500 the VLAN tab on GET — the exact

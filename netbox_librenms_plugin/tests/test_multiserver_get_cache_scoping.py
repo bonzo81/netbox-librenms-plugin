@@ -95,3 +95,83 @@ class TestMultiServerGetRenderCacheScoping:
             assert ctx["vlan_table"] is not None
         finally:
             real_cache.delete(vlans_key)
+
+
+@pytest.mark.django_db
+class TestUnresolvedServerKeyRendersEmpty:
+    """A GET ?server_key that no longer resolves must render empty, not the default server's data."""
+
+    def _ghost_request(self):
+        return _get_request("ghost")
+
+    def test_modules_tab_unresolved_key_renders_empty(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device("ghost-mod")
+        view = DeviceModuleTableView()
+        view._librenms_api = MagicMock(server_key="default")
+        view.request = self._ghost_request()
+        # Default-server inventory cache IS populated; it must NOT surface under ?server_key=ghost.
+        default_key = view.get_cache_key(device, "inventory", "default")
+        real_cache.set(default_key, {"inventory": [{"entPhysicalIndex": 1}], "librenms_id": 1, "oob_librenms_id": None})
+        try:
+            with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+                ctx = view.get_context_data(view.request, device)
+            assert ctx["server_key"] == "ghost"
+            assert ctx["table"] is None
+        finally:
+            real_cache.delete(default_key)
+
+    def test_interfaces_tab_unresolved_key_renders_empty(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("ghost-iface")
+        Interface.objects.create(device=device, name="Gi0/1", type="1000base-t")
+        view = DeviceInterfaceTableView()
+        view._librenms_api = MagicMock(server_key="default")
+        view.request = self._ghost_request()
+        default_key = view.get_cache_key(device, "ports", "default")
+        real_cache.set(default_key, {"ports": [{"port_id": 5, "ifName": "Gi0/1", "ifAdminStatus": "up"}]})
+        try:
+            with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+                ctx = view.get_context_data(view.request, device, "ifName")
+            assert ctx["server_key"] == "ghost"
+            assert ctx["table"] is None
+        finally:
+            real_cache.delete(default_key)
+
+    def test_cables_tab_unresolved_key_renders_empty(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        device = make_device("ghost-cable")
+        view = DeviceCableTableView()
+        view._librenms_api = MagicMock(server_key="default")
+        view.request = self._ghost_request()
+        default_key = view.get_cache_key(device, "links", "default")
+        real_cache.set(default_key, {"links": [{"local_port": "Gi0/1", "local_port_id": 11}]})
+        try:
+            with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+                ctx = view.get_context_data(view.request, device)
+            assert ctx["server_key"] == "ghost"
+            assert ctx["table"] is None
+        finally:
+            real_cache.delete(default_key)
+
+    def test_vlan_tab_unresolved_key_renders_empty(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
+
+        device = make_device("ghost-vlan")
+        view = DeviceVLANTableView()
+        view._librenms_api = MagicMock(server_key="default")
+        view.request = self._ghost_request()
+        default_key = view.get_cache_key(device, "vlans", "default")
+        real_cache.set(default_key, [{"vlan_vlan": 10, "vlan_name": "DATA"}])
+        try:
+            with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+                ctx = view.get_vlan_context(view.request, device)
+            assert ctx["server_key"] == "ghost"
+            assert ctx["vlan_table"] is None
+        finally:
+            real_cache.delete(default_key)

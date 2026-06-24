@@ -405,11 +405,14 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             # cached under. Without this a non-default-server tab reads the default-server cache
             # and renders empty after a successful refresh. Mirrors modules_view.get_context_data;
             # a blank/absent query falls back to the session/default server.
-            self.rebind_api_for_server(request.GET.get("server_key"))
-            # getattr does NOT protect this: the lazy librenms_api property RAISES
-            # KeyError/ValueError (not AttributeError) on a misconfigured server config,
-            # 500ing the cached tab render. Use the degrading resolve like cables/IP.
-            server_key = self._render_server_key()
+            requested = (request.GET.get("server_key") or "").strip()
+            resolved = self.rebind_api_for_server(requested)
+            # An unresolved non-blank key (deleted/misconfigured server) scopes to that key so the
+            # cache read misses and we render empty for it, not the default server's cached rows.
+            # getattr does NOT protect the fallback: the lazy librenms_api property RAISES
+            # KeyError/ValueError (not AttributeError) on a misconfigured server config, 500ing the
+            # cached tab render — use the degrading resolve like cables/IP.
+            server_key = resolved if resolved is not None else (requested or self._render_server_key())
 
         # Scope the ports cache to the VC sync device (not the viewed member) so all VC
         # members share one entry instead of fragmenting / re-fetching per member. Mirrors

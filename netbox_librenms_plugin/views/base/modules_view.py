@@ -491,7 +491,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # (empty module table despite a successful refresh) and the OOB-invalidation guard no-ops.
         # rebind_api_for_server falls back to the session/default server when the query is blank,
         # so single-server and default-server renders are unchanged.
-        self.rebind_api_for_server(request.GET.get("server_key"))
+        requested_server = (request.GET.get("server_key") or "").strip()
+        resolved_server = self.rebind_api_for_server(requested_server)
+        if requested_server and resolved_server is None:
+            # The query named a server that no longer resolves (deleted/misconfigured). Render an
+            # empty table scoped to that key instead of silently falling back to the default
+            # server's cached inventory and attributing it to the requested server.
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": requested_server}
         # Resolve the server key through the DEGRADING helper (mirrors the cables/IP tabs):
         # the lazy librenms_api property raises KeyError/ValueError on a missing or
         # misconfigured server config, which would 500 the whole sync-page render for this
