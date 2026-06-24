@@ -10,6 +10,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
+    coerce_librenms_id,
     get_interface_name_field,
     get_librenms_oob,
     get_librenms_sync_device,
@@ -182,9 +183,11 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
 
         # Resolve librenms_id (scoped to the POSTed server + resolved member) after the cache
         # is already invalidated, so the missing-id path can't leave stale interface data behind.
-        self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
+        # coerce_librenms_id fails closed on a bool/zero/negative/garbage custom-field value (a
+        # stored ``True`` would otherwise become id ``1`` and fetch a stranger's ports).
+        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(lookup_device))
 
-        if not self.librenms_id:
+        if self.librenms_id is None:
             messages.error(request, "Device not found in LibreNMS.")
             return self._failure_redirect(request, obj, _server_key)
 

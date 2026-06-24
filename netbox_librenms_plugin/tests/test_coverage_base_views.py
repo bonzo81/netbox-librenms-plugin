@@ -1816,6 +1816,76 @@ class TestBaseInterfaceTableViewPost:
         mock_get_last_fetched_key.assert_called_with(obj, "ports", "default")
 
 
+@pytest.mark.django_db
+class TestBaseInterfaceTablePostCoercesLibreNMSId:
+    """post() must coerce whatever get_librenms_id() hands back before trusting it.
+
+    get_librenms_id() resolves through three paths — the librenms_id custom field, the
+    device-id cache, and live API discovery. The custom-field and discovery paths already
+    coerce (reject bool/zero/non-numeric), but the *cache* path returns its value verbatim.
+    A poisoned cache holding ``True`` therefore reaches the view as a truthy non-int that
+    ``int(True)`` would silently turn into device id ``1`` — fetching a stranger's ports.
+    The view must fail closed on it BEFORE get_ports().
+    """
+
+    def _real_api(self):
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.get_plugin_config",
+            return_value={
+                "default": {
+                    "librenms_url": "https://lnms.example.com",
+                    "api_token": "tok",
+                    "cache_timeout": 300,
+                    "verify_ssl": True,
+                }
+            },
+        ):
+            return LibreNMSAPI(server_key="default")
+
+    def test_corrupt_cached_id_fails_closed_before_get_ports(self):
+        """A boolean cached under the device-id key must fail closed at the view, never get_ports()."""
+        from django.core.cache import cache as real_cache
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("coerce-id-host")  # no librenms_id custom field → forces the cache path
+        api = self._real_api()
+
+        # Poison the device-id cache. This is the ONE get_librenms_id path that does not coerce,
+        # so it is the realistic vector for a non-int id reaching the view.
+        real_cache.set(api._get_cache_key(device), True)
+        try:
+            # The real lookup really does hand back the uncoerced bool — proving this isn't a
+            # straw-man mock return; if get_librenms_id ever starts coercing this path the
+            # premise (and this test) should be revisited.
+            assert api.get_librenms_id(device) is True
+
+            view = object.__new__(DeviceInterfaceTableView)
+            view._librenms_api = api
+            # get_ports is the external HTTP boundary; spy on it to prove it is never reached.
+            # The return value is irrelevant on the (correct) fail-closed path — it only matters
+            # for the unfixed regression, where get_ports IS called and this failure tuple keeps
+            # the red failure on a clean assertion rather than a downstream render error.
+            api.get_ports = MagicMock(name="get_ports", return_value=(False, "should-not-be-called"))
+
+            request = RequestFactory().post(f"/plugins/librenms/devices/{device.pk}/interface-sync/", data={})
+            view.request = request
+
+            with patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages:
+                response = view.post(request, pk=device.pk)
+        finally:
+            real_cache.delete(api._get_cache_key(device))
+
+        # Coerced to None → fail closed: error surfaced, redirect issued, get_ports never called.
+        assert view.librenms_id is None
+        api.get_ports.assert_not_called()
+        mock_messages.error.assert_called_once_with(request, "Device not found in LibreNMS.")
+        assert response.status_code == 302
+
+
 class TestBaseInterfaceTableViewGetContextData:
     """Tests for BaseInterfaceTableView.get_context_data."""
 
