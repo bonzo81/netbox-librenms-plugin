@@ -843,8 +843,8 @@ class TestBuildIdServerInfo:
         assert result is not None
         assert result[0]["device_id"] == 42
 
-    def test_oob_only_dict_entry_skipped(self):
-        """An OOB-only entry has no host id to show in the import-action modal → skipped."""
+    def test_oob_only_dict_entry_surfaced_with_controller_id(self):
+        """An OOB-only entry is still a real link → surfaced with the OOB controller's id."""
         method = self._get_method()
         existing = MagicMock()
         existing.custom_field_data = {"librenms_id": {"default": {"oob": {"id": 17, "type": "idrac"}}}}
@@ -855,7 +855,9 @@ class TestBuildIdServerInfo:
             }
             result = method(existing)
 
-        assert result is None
+        # Mirrors the device-sync modal (_build_all_server_mappings): the OOB-only link is shown
+        # using the OOB controller's id rather than dropped (which would risk a duplicate re-import).
+        assert result == [{"server_key": "default", "display_name": "Default Server", "device_id": 17}]
 
     def test_default_key_fallback_display_name(self):
         """'default' with no servers config uses root display_name."""
@@ -2820,6 +2822,7 @@ class TestDeviceConflictMoreActions:
         mock_existing = MagicMock()
         mock_existing.pk = 1
         mock_existing.name = "router01"
+        mock_existing.platform = None  # no platform → no platform/device_type manufacturer constraint
         libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN001", "hardware": "Cisco", "os": "ios"}
         validation = {
             "existing_device": mock_existing,
@@ -3025,6 +3028,7 @@ class TestMoreSaveErrorPaths:
         mock_existing = MagicMock()
         mock_existing.pk = 1
         mock_existing.name = "router01"
+        mock_existing.platform = None  # no platform → no platform/device_type manufacturer constraint
         libre_device = {"device_id": 42, "hostname": "router01", "serial": "SN001", "hardware": "Cisco", "os": "ios"}
         validation = {
             "existing_device": mock_existing,
@@ -5615,8 +5619,14 @@ class TestAttachOOBIp:
         iface = MagicMock(device_id=1)
         existing = MagicMock()
         existing.assigned_object = None
-        with patch("ipam.models.IPAddress") as mock_ip_cls:
+        with (
+            patch("ipam.models.IPAddress") as mock_ip_cls,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
             mock_ip_cls.objects.select_for_update.return_value.filter.return_value.__getitem__.return_value = [existing]
+            # The cross-device FK guard must see no OTHER device referencing this IP, so the row
+            # is treated as re-homeable and the lock path under test runs.
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             view._attach_oob_ip(_make_request(post={}), "10.0.0.9", iface)
         mock_ip_cls.objects.select_for_update.assert_called_once()
 

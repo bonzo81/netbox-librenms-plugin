@@ -360,6 +360,7 @@ class TestMergeTransceiverDataPortIdentity:
         view._librenms_api.get_librenms_id.return_value = 1
         view._build_context = MagicMock()  # must NOT be reached for a malformed payload
         request = MagicMock()
+        request.GET = {}  # real query dict (no server_key) so the GET-rebind guard doesn't early-return
 
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,

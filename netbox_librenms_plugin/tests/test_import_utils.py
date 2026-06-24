@@ -3223,6 +3223,7 @@ class TestDeviceConflictActionView:
         existing_device.pk = 42
         existing_device.custom_field_data = {}
         existing_device.name = "old-name"
+        existing_device.platform = None  # no platform → no platform/device_type manufacturer constraint
 
         librenms_device_type = MagicMock()
         librenms_device_type.pk = 99
@@ -3277,6 +3278,7 @@ class TestDeviceConflictActionView:
         existing_device.pk = 42
         existing_device.custom_field_data = {"librenms_id": 10}
         existing_device.name = "switch-01"
+        existing_device.platform = None  # no platform → no platform/device_type manufacturer constraint
         old_device_type = MagicMock()
         existing_device.device_type = old_device_type
 
@@ -3367,6 +3369,7 @@ class TestDeviceConflictActionView:
         selections = {}
 
         mock_platform = MagicMock()
+        mock_platform.manufacturer_id = None  # unconstrained platform → no manufacturer mismatch check
         request = self._create_request("sync_platform", 42)
 
         with (
@@ -3398,6 +3401,7 @@ class TestDeviceConflictActionView:
 
         view = self._create_view()
         existing_device = MagicMock()
+        existing_device.platform = None  # no platform → no platform/device_type manufacturer constraint
         new_device_type = MagicMock()
         libre_device = {"device_id": 10, "hardware": "Catalyst C4900M", "sysName": "test"}
         validation = {"existing_device": existing_device, "device_type_mismatch": False}
