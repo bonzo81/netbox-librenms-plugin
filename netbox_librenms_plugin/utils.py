@@ -2040,6 +2040,27 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
                 f"{_raw_winner_oob_id!r} — expected a positive integer or numeric string."
             )
 
+    # Validate the donor's oob id up-front (mirroring the winner_oob check above) so a corrupt
+    # non-blank id fails closed regardless of which branch fires below, and so a metadata-only
+    # donor oob (a type but no usable id) is NOT mistaken for a real controller link. Treating
+    # any truthy donor_oob as "occupied" would skip demoting the donor's host id into the empty
+    # oob slot, silently losing that host link once the donor is marked migrated. Only meaningful
+    # when the winner has no oob of its own (otherwise donor_oob is ignored); a blank/whitespace
+    # id is treated leniently as "no id".
+    donor_oob_has_valid_id = False
+    _donor_oob_id = None
+    if winner_oob is None and donor_oob is not None:
+        _raw_donor_oob_id = donor_oob.get("id")
+        if isinstance(_raw_donor_oob_id, str) and not _raw_donor_oob_id.strip():
+            _raw_donor_oob_id = None
+        _donor_oob_id = coerce_librenms_id(_raw_donor_oob_id) if _raw_donor_oob_id is not None else None
+        if _raw_donor_oob_id is not None and _donor_oob_id is None:
+            raise ValueError(
+                f"donor '{donor.name}' has an unparseable librenms_id[{server_key!r}] oob id "
+                f"{_raw_donor_oob_id!r} — expected a positive integer or numeric string."
+            )
+        donor_oob_has_valid_id = _donor_oob_id is not None
+
     if winner_id is None and donor_id is not None:
         winner_entry["id"] = donor_id
         summary["host_id_from_donor"] = donor_id
@@ -2048,43 +2069,34 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
         and donor_id is not None
         and donor_id != winner_id
         and winner_oob is None
-        and not donor_oob
+        and not donor_oob_has_valid_id
     ):
-        # Demote donor's host id into winner's oob slot — but ONLY when the donor has no real
-        # OOB and the donor host id actually differs from the winner's. Equal ids are the same
-        # host linkage (a duplicate mapping), not an OOB controller, so demoting them would
-        # fabricate a fake OOB link on the merged device.
-        # If the donor is shaped like {"id": ..., "oob": {...}}, its actual OOB
-        # controller (inherited by the donor_oob path below) takes precedence over demoting the
-        # donor's host id, otherwise the real OOB link would be lost. Infer type from donor name.
-        match = OOB_TYPE_PATTERN.search(donor.name or "")
-        inferred_type = match.group(1).lower() if match else "oob"
-        demoted = {"id": donor_id, "type": inferred_type}
+        # Demote donor's host id into winner's oob slot — but ONLY when the donor has no real OOB
+        # controller (no usable oob id) and the donor host id actually differs from the winner's.
+        # Equal ids are the same host linkage (a duplicate mapping), not an OOB controller, so
+        # demoting them would fabricate a fake OOB link on the merged device.
+        # A donor shaped {"id": ..., "oob": {<valid id>}} has a REAL controller, which the
+        # donor_oob inheritance path below takes precedence over — so it is excluded here. But a
+        # metadata-only donor oob ({"type": ...} with no usable id) is NOT a real link: fold its
+        # metadata (type) into the demoted block so it survives, then preserve the donor host id.
+        demoted = dict(donor_oob) if donor_oob else {}
+        demoted.pop("id", None)
+        if not demoted.get("type"):
+            match = OOB_TYPE_PATTERN.search(donor.name or "")
+            demoted["type"] = match.group(1).lower() if match else "oob"
+        demoted["id"] = donor_id
         winner_entry["oob"] = demoted
         summary["donor_id_demoted_to_oob"] = demoted
         winner_oob = demoted
 
     if donor_oob and winner_oob is None:
-        # Coerce the donor's oob host id before inheriting it: the helper fails closed on
-        # malformed host ids elsewhere, so don't let a corrupt donor link (e.g. {"id": "abc"})
-        # propagate verbatim into the winner. A blank/whitespace id is treated as "no id"
-        # (lenient) — the same as a blank host id above and the same as an absent oob id —
-        # so only a *non-blank* unparseable value fails closed. A blank id is dropped so the
-        # winner inherits the oob (type, etc.) without carrying a bogus id string.
-        _raw_oob_id = donor_oob.get("id")
-        if isinstance(_raw_oob_id, str) and not _raw_oob_id.strip():
-            _raw_oob_id = None
-        _coerced_oob_id = coerce_librenms_id(_raw_oob_id) if _raw_oob_id is not None else None
-        if _raw_oob_id is not None and _coerced_oob_id is None:
-            raise ValueError(
-                f"donor '{donor.name}' has an unparseable librenms_id[{server_key!r}] oob id "
-                f"{_raw_oob_id!r} — expected a positive integer or numeric string."
-            )
+        # Inherit the donor's oob. Its id was already validated/coerced up-front (a non-blank
+        # unparseable id fails closed there); a blank/absent id is dropped so the winner inherits
+        # the oob metadata (type, etc.) without carrying a bogus id string.
         inherited_oob = dict(donor_oob)
-        if _coerced_oob_id is not None:
-            inherited_oob["id"] = _coerced_oob_id
+        if _donor_oob_id is not None:
+            inherited_oob["id"] = _donor_oob_id
         else:
-            # Blank/absent id → don't carry a bogus value into the winner.
             inherited_oob.pop("id", None)
         winner_entry["oob"] = dict(inherited_oob)
         summary["oob_from_donor"] = dict(inherited_oob)

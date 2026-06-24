@@ -899,6 +899,37 @@ class TestMergeLibreNMSLinks:
         assert "id" not in inherited
         assert summary["oob_from_donor"] == {"type": "drac"}
 
+    def test_metadata_only_donor_oob_does_not_drop_donor_host_id(self):
+        # A donor with a host id AND a metadata-only oob (a type but no usable id) must still
+        # demote its host id into the winner's empty oob slot — the metadata-only oob is not a
+        # real controller link. Treating the truthy-but-idless oob as "occupied" used to skip
+        # demotion and inherit the useless metadata, silently losing the donor host id once the
+        # donor was marked migrated.
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 50}})
+        donor = self._make_dev("idrac-host", {"default": {"id": 99, "oob": {"type": "idrac"}}})
+        summary = merge_librenms_links(winner, donor, "default")
+
+        oob = winner.custom_field_data["librenms_id"]["default"]["oob"]
+        assert oob == {"id": 99, "type": "idrac"}  # host id preserved + type metadata folded in
+        assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
+        assert summary["oob_from_donor"] is None  # not the useless metadata-only inherit path
+        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 50
+
+    def test_donor_host_id_with_corrupt_oob_id_still_fails_closed(self):
+        # A donor host id paired with a non-blank unparseable oob id must still fail closed: the
+        # up-front oob-id validation runs before demotion, so a corrupt link can't be silently
+        # demoted/dropped just because the donor also carries a host id.
+        import pytest
+
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 50}})
+        donor = self._make_dev("idrac-host", {"default": {"id": 99, "oob": {"id": "abc", "type": "idrac"}}})
+        with pytest.raises(ValueError, match="unparseable librenms_id.*oob id"):
+            merge_librenms_links(winner, donor, "default")
+
     def test_winner_oob_never_overwritten(self):
         from netbox_librenms_plugin.utils import merge_librenms_links
 
