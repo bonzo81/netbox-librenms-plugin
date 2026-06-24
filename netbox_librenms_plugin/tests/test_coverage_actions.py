@@ -6051,34 +6051,30 @@ class TestGetValidatedDeviceLibreDeviceReuse:
         mock_fetch.assert_called_once()
 
 
-class TestRebindApiForPostedServer:
-    """_rebind_api_for_posted_server: rebind on a posted server_key, or return the HTMX error for an unknown one."""
+@pytest.mark.django_db
+class TestPostActionRebindFailsClosed:
+    """PromoteToHost/Merge POST views are consolidated onto the fail-closed mixin rebind.
 
-    def test_blank_key_is_noop(self):
-        from netbox_librenms_plugin.views.imports.actions import _rebind_api_for_posted_server
+    A blank server_key with a misconfigured default must surface a fragment error here instead of
+    leaving the lazy default client in place and 500ing on the first self.librenms_api access.
+    """
 
-        view = MagicMock()
-        assert _rebind_api_for_posted_server(view, _make_request(post={})) is None
+    def test_blank_key_with_misconfigured_default_returns_error(self):
+        from netbox_librenms_plugin.views.imports.actions import PromoteToHostView
 
-    def test_unknown_key_returns_htmx_error(self):
-        from netbox_librenms_plugin.views.imports.actions import _rebind_api_for_posted_server
-
-        view = MagicMock()
+        view = object.__new__(PromoteToHostView)
+        view.kwargs = {}
+        view.require_write_permission = MagicMock(return_value=None)
+        view.require_object_permissions = MagicMock(return_value=None)
+        # No session client bound + a default that won't build → the mixin must fail closed on the
+        # blank key, where the old per-view helper left the default in place and validated nothing.
+        request = _make_request(post={"existing_device_id": "5"})
         with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
-            resp = _rebind_api_for_posted_server(view, _make_request(post={"server_key": "ghost"}))
-        assert resp is not None
-        assert resp.status_code == 200
-        assert b"no longer configured" in resp.content
-        assert resp["HX-Reswap"] == "none"
+            response = view.post(request, device_id=17)
 
-    def test_valid_key_rebinds_and_returns_none(self):
-        from netbox_librenms_plugin.views.imports.actions import _rebind_api_for_posted_server
-
-        view = MagicMock()
-        new_api = MagicMock()
-        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=new_api):
-            assert _rebind_api_for_posted_server(view, _make_request(post={"server_key": "prod"})) is None
-        assert view._librenms_api is new_api
+        assert response.status_code == 200
+        assert b"no longer configured" in response.content
+        assert response["HX-Reswap"] == "none"
 
 
 @pytest.mark.django_db

@@ -371,33 +371,6 @@ def _device_type_rack_fit_error(device) -> HttpResponse | None:
     return None
 
 
-def _rebind_api_for_posted_server(view, request) -> HttpResponse | None:
-    """
-    Rebind ``view._librenms_api`` to the POSTed ``server_key``, or return an HTMX error.
-
-    A blank/absent ``server_key`` leaves the session/default client in place. An
-    unknown/tampered key would otherwise raise the first time the API client is used
-    (turning the action into a 500), so build it eagerly here and surface the same
-    fragment error every POST action view uses.
-
-    Args:
-        view: The view whose ``_librenms_api`` is (re)bound on a posted key.
-        request: The current HTTP request (its POST body is read).
-
-    Returns:
-        HttpResponse: The error response to return verbatim when the posted key is
-            unknown, or ``None`` when the key is blank or successfully resolved.
-    """
-    from netbox_librenms_plugin.librenms_api import build_librenms_api
-
-    post_server_key = (request.POST.get("server_key") or "").strip()
-    if post_server_key:
-        view._librenms_api = build_librenms_api(post_server_key)
-        if view._librenms_api is None:
-            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
-    return None
-
-
 def _save_device(device, update_fields: list[str] | None = None, request=None) -> HttpResponse | None:
     """
     Persist a Device row, returning an HttpResponse on failure or None on success.
@@ -3086,8 +3059,10 @@ class PromoteToHostView(
         if not existing_device_id:
             return _htmx_error_response("Missing existing_device_id")
 
-        if err := _rebind_api_for_posted_server(self, request):
-            return err
+        # Fail closed on a blank/unknown/misconfigured key (the mixin validates the default too)
+        # so a broken default can't 500 via the lazy self.librenms_api property later.
+        if self.rebind_api_for_server(request.POST.get("server_key")) is None:
+            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
 
         try:
             existing_device = Device.objects.get(pk=int(existing_device_id))
@@ -3339,8 +3314,10 @@ class MergeNetBoxDevicesView(
             merge_librenms_links,
         )
 
-        if err := _rebind_api_for_posted_server(self, request):
-            return err
+        # Fail closed on a blank/unknown/misconfigured key (the mixin validates the default too)
+        # so a broken default can't 500 via the lazy self.librenms_api property later.
+        if self.rebind_api_for_server(request.POST.get("server_key")) is None:
+            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
 
         winner_pk_raw = request.POST.get("winner_pk")
         if not winner_pk_raw:
