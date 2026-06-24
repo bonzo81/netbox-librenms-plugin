@@ -201,11 +201,15 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             # A migrated-only entry ({"_migrated_to": ...}) has neither id nor oob and is
             # skipped.
             if isinstance(did, dict):
-                host_id = did.get("id")
+                # Coerce the host id (rejects blank/zero/invalid), so an entry whose "id" is a
+                # corrupt non-None value (e.g. 0 or "") but whose "oob.id" is valid still falls
+                # back to the real OOB-only mapping instead of being dropped — otherwise the user
+                # can't see/remove it from the server-mappings list.
+                host_id = coerce_librenms_id(did.get("id"))
                 if host_id is None:
                     oob = did.get("oob")
                     if isinstance(oob, dict):
-                        host_id = oob.get("id")
+                        host_id = coerce_librenms_id(oob.get("id"))
                         is_oob_only = host_id is not None
                 did = host_id
             # Validate device ID consistently with the int()-based coercion used everywhere

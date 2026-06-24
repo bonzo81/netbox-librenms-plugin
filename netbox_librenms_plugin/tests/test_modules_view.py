@@ -4739,7 +4739,9 @@ class TestGetContextDataOOBCacheFingerprint:
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 7}),
         ):
             mock_cache.get.return_value = cached
-            ctx = view.get_context_data(MagicMock(), obj)
+            # GET={} → no server_key in the query, so rebind_api_for_server reuses the cached
+            # (mocked) _librenms_api instead of building a new client.
+            ctx = view.get_context_data(MagicMock(GET={}), obj)
 
         mock_cache.delete.assert_called_once_with("test_cache_key")
         assert ctx["table"] is None
@@ -4759,7 +4761,9 @@ class TestGetContextDataOOBCacheFingerprint:
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
         ):
             mock_cache.get.return_value = cached
-            ctx = view.get_context_data(MagicMock(), obj)
+            # GET={} → no server_key in the query, so rebind_api_for_server reuses the cached
+            # (mocked) _librenms_api instead of building a new client.
+            ctx = view.get_context_data(MagicMock(GET={}), obj)
 
         mock_cache.delete.assert_called_once_with("test_cache_key")
         assert ctx["table"] is None
@@ -4773,7 +4777,7 @@ class TestGetContextDataOOBCacheFingerprint:
         view._librenms_api.get_librenms_id = MagicMock(return_value=10)
         view._build_context = MagicMock(return_value={"built": True})
         cached = {"inventory": [{"x": 1}], "librenms_id": 10, "oob_librenms_id": 5}
-        request = MagicMock()
+        request = MagicMock(GET={})  # no server_key → rebind reuses the cached (mocked) _librenms_api
         with (
             patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
             patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value={"id": 5}),
@@ -4782,9 +4786,27 @@ class TestGetContextDataOOBCacheFingerprint:
             ctx = view.get_context_data(request, obj)
 
         # The reuse contract: the unchanged-fingerprint path must rebuild from the cached
-        # inventory snapshot, not some other payload.
-        view._build_context.assert_called_once_with(request, obj, cached["inventory"])
+        # inventory snapshot, not some other payload. It also forwards the already-resolved
+        # sync_device so _build_context doesn't re-resolve it.
+        view._build_context.assert_called_once_with(request, obj, cached["inventory"], sync_device=obj)
         assert ctx == {"built": True}
         # Lock in the "cache preserved when OOB linkage is unchanged" contract: the
         # unchanged-fingerprint path must rebuild from cache without deleting it.
         mock_cache.delete.assert_not_called()
+
+    def test_get_context_data_rebinds_to_request_server_key(self):
+        """The GET render must rebind to the active server from the request query so the cache read keys on the same server post() wrote under (else a non-default-server tab cache-misses and the OOB guard no-ops)."""
+        from unittest.mock import MagicMock, patch
+
+        view = _make_view()
+        obj = MagicMock(pk=1)
+        view._get_sync_device = MagicMock(return_value=obj)
+        view.rebind_api_for_server = MagicMock(return_value="prod")
+        request = MagicMock()
+        request.GET = {"server_key": "prod"}
+
+        with patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache:
+            mock_cache.get.return_value = None  # cache miss → early return after the rebind
+            view.get_context_data(request, obj)
+
+        view.rebind_api_for_server.assert_called_once_with("prod")

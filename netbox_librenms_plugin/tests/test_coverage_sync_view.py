@@ -447,6 +447,26 @@ class TestBuildAllServerMappings:
         assert len(result) == 1
         assert result[0]["server_key"] == "other"
 
+    def test_oob_only_entry_with_invalid_host_id_is_surfaced(self):
+        """An entry whose host "id" is a corrupt non-None value (0) but whose "oob.id" is valid must still surface as an OOB-only mapping so the user can see/remove it, not be dropped by the <=0 guard."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"default": {"id": 0, "oob": {"id": 42}}}}
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = {
+                "netbox_librenms_plugin": {
+                    "servers": {"default": {"librenms_url": "https://x.example.com", "display_name": "Default"}}
+                }
+            }
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "default")
+
+        assert result is not None
+        entry = next((m for m in result if m["server_key"] == "default"), None)
+        assert entry is not None  # not dropped despite the invalid host id
+        assert entry["is_oob_only"] is True
+
     def test_string_device_id_converted_to_int(self):
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 

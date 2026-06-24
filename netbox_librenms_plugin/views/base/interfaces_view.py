@@ -333,6 +333,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             obj,
             interface_name_field,
             _server_key,
+            sync_device=lookup_device,
         )
         context = {"interface_sync": context}
         context["interface_name_field"] = interface_name_field
@@ -363,7 +364,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             enriched.append(port)
         return enriched
 
-    def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None):
+    def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None, sync_device=None):
         """
         Build the context data for the interface sync view.
 
@@ -407,7 +408,9 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # Scope the ports cache to the VC sync device (not the viewed member) so all VC
         # members share one entry instead of fragmenting / re-fetching per member. Mirrors
         # cables_view; resolves to obj itself for non-VC devices. Must match post()'s key.
-        cache_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        # Reuse the device post() already resolved (passed as sync_device) to avoid a second
+        # get_librenms_sync_device() VC-members query per refresh; the GET path passes None.
+        cache_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
 
         if fresh_data is not None:
             cached_data = fresh_data

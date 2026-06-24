@@ -14,7 +14,7 @@ import pytest
 
 @pytest.mark.django_db
 class TestInterfaceSyncContentTemplateMigratedMode:
-    def _render(self, *, migrated, netbox_only=(), winner=None):
+    def _render(self, *, migrated, netbox_only=(), winner=None, has_write=False):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -45,7 +45,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             "interface_name_field": "ifName",
             "migrated_to_marker": migrated,
             "migrated_to_winner": winner,
-            "has_write_permission": False,
+            "has_write_permission": has_write,
         }
         return render_to_string("netbox_librenms_plugin/_interface_sync_content.html", ctx, request=request)
 
@@ -126,3 +126,19 @@ class TestInterfaceSyncContentTemplateMigratedMode:
     def test_normal_mode_shows_exclude_from_sync_controls(self):
         html = self._render(migrated=None)
         assert "Exclude from Sync:" in html
+
+    def test_migrated_move_button_hidden_for_read_only_users(self):
+        """The migrated 'Move' action is a mutating HTMX POST; without write permission it must not render as a live button (it would only fail at the permission gate) — show muted 'read-only' text instead."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        winner = make_device("iface-winner-dev")
+        iface = {"id": 1, "name": "eth-only", "type": "1000base-t", "enabled": True, "url": "/dcim/x/"}
+        marker = {"server_key": "default", "device_id": 1, "at": "now"}
+
+        # Read-only must NOT render the Move button. (The button + its interface_move_to_winner
+        # URL belong to the migrate feature on feat/device-merge; the write-permission render is
+        # covered there, where that URL is registered — on this branch rendering it would
+        # NoReverseMatch, which is itself how this asserts the button stays hidden.)
+        ro = self._render(migrated=marker, netbox_only=[iface], winner=winner, has_write=False)
+        assert "interface_move_to_winner" not in ro  # no live mutating button for read-only users
+        assert "read-only" in ro

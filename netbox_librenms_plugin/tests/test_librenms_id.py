@@ -152,6 +152,17 @@ class TestFindByLibreNMSId:
         _dev({"production": 7})  # a row exists, but not for id 999
         assert find_by_librenms_id(Device, 999, "production") is None
 
+    def test_single_match_uses_one_query(self, django_assert_num_queries):
+        """The common case (0 or 1 match) must use a single combined query, not separate host + OOB queries — find_by_librenms_id runs per-port during sync."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        dev = _dev({"default": {"id": 42}})
+        with django_assert_num_queries(1):
+            result = find_by_librenms_id(Device, 42, "default")
+        assert result == dev
+
     def test_fail_closed_when_host_and_oob_match_different_rows(self):
         """Host query matches one row, OOB query a *different* one → ambiguous → raise."""
         from dcim.models import Device

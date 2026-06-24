@@ -1405,10 +1405,21 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, sele
         # The OOB controller's own device id — so a re-import recognises the merged device.
         oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
 
-    # Pull two rows per side so a duplicate within either result set is detectable.
     # Lock the matched rows when asked so a concurrent conflict check serializes against an
     # existing owner (best-effort: a not-yet-created row can't be locked). Caller must hold a txn.
     manager = model.objects.select_for_update() if select_for_update else model.objects
+
+    # Fast path: a single combined query covers the common case (0 or 1 match). One matching row is
+    # unambiguous by definition — it can't collide host-vs-OOB or duplicate within a set — so return
+    # it without a second query (this runs per-port during sync). Only when ≥2 rows match do we
+    # re-run the separate host/OOB predicates (two rows per side) to classify and fail closed on the
+    # precise ambiguity.
+    combined = list(manager.filter(host_q | oob_q)[:2])
+    if not combined:
+        return None
+    if len(combined) == 1:
+        return combined[0]
+
     host_matches = list(manager.filter(host_q)[:2])
     oob_matches = list(manager.filter(oob_q)[:2])
 

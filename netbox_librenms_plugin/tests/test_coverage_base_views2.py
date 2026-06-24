@@ -853,7 +853,7 @@ class TestCablePartialSnapshotNotCached:
     def _links_cache_sets(self, *, oob_failed, links_error, librenms_id):
         view = self._make_view()
 
-        def fake_get_links(obj, server_key=None):
+        def fake_get_links(obj, server_key=None, sync_device=None):
             view._oob_links_fetch_failed = oob_failed
             view._links_fetch_error = links_error
             view.librenms_id = librenms_id

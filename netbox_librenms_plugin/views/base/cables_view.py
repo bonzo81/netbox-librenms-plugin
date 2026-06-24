@@ -182,7 +182,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             return {"ports": []}
         return data
 
-    def get_links_data(self, obj, server_key=None):
+    def get_links_data(self, obj, server_key=None, sync_device=None):
         """Fetch links data from LibreNMS for the device and add local port names."""
         # Scope DB lookups (sync device / OOB) and the ports cache to the POST-resolved
         # server when provided (fallback: session server). The LibreNMS fetch itself
@@ -198,7 +198,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # not just the OOB branch below. On VC-member pages the active librenms_id/mapping can
         # live on the priority member, so reading it from the viewed `obj` would fetch one
         # member's cables and cache them under another member's key (mismatched verify/sync).
-        lookup_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        # Reuse the device the caller (_prepare_context) already resolved to avoid a second
+        # get_librenms_sync_device() VC-members query per request; falls back to resolving here.
+        lookup_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
         self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
         if self.librenms_id is None:
             # OOB-only / unmapped device: skip the host LLDP call. get_device_links(None) would
@@ -626,7 +628,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
         if fetch_fresh:
             # Always fetch new data when requested
-            links_data = self.get_links_data(obj, server_key=server_key)
+            links_data = self.get_links_data(obj, server_key=server_key, sync_device=cache_device)
             # Only a true fetch failure returns None. An empty list ([]) is a valid result
             # (device has no host links) and must flow through: get_links_data() may have
             # collected zero host links yet still set _oob_links_fetch_failed, and post()

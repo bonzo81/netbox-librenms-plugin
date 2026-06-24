@@ -482,7 +482,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 timeout=self.librenms_api.cache_timeout,
             )
 
-        context = self._build_context(request, obj, inventory_data, server_key=server_key)
+        context = self._build_context(request, obj, inventory_data, server_key=server_key, sync_device=sync_device)
         if ports_error:
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(
@@ -514,6 +514,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def get_context_data(self, request, obj):
         """Get context from cache (used by the main sync view on initial page load)."""
+        # Scope the cache read + OOB-fingerprint comparison to the active server from the request
+        # (GET query), matching the server post() rebinds to and caches under. Without this the
+        # GET render keys on the lazy default server_key, so a non-default-server tab cache-misses
+        # (empty module table despite a successful refresh) and the OOB-invalidation guard no-ops.
+        # rebind_api_for_server falls back to the session/default server when the query is blank,
+        # so single-server and default-server renders are unchanged.
+        self.rebind_api_for_server(request.GET.get("server_key"))
         # Resolve the server key through the DEGRADING helper (mirrors the cables/IP tabs):
         # the lazy librenms_api property raises KeyError/ValueError on a missing or
         # misconfigured server config, which would 500 the whole sync-page render for this
@@ -550,9 +557,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if cached_payload.get("oob_librenms_id") != current_oob_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
-        return self._build_context(request, obj, cached_payload["inventory"])
+        return self._build_context(request, obj, cached_payload["inventory"], sync_device=sync_device)
 
-    def _build_context(self, request, obj, inventory_data, server_key=None):
+    def _build_context(self, request, obj, inventory_data, server_key=None, sync_device=None):
         """Build context with matched inventory items and table."""
         # Scope cache reads + per-row interface binding to the POST-resolved server when
         # provided (fallback: session server). Stored on self so _build_member_contexts
@@ -637,7 +644,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         table = self.get_table(table_data, obj)
         table.configure(request)
 
-        sync_device = self._get_sync_device(obj, server_key=self._active_server_key)
+        # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
+        # _get_sync_device() VC-members query per request; falls back to resolving here.
+        sync_device = sync_device or self._get_sync_device(obj, server_key=self._active_server_key)
         cache_ttl = cache_remaining_ttl(
             cache, self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key)
         )

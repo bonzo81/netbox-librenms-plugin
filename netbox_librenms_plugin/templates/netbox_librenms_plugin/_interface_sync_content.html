@@ -376,7 +376,7 @@
                                     <td>{{ interface.description|default:"-" }}</td>
                                     {% if migrated_to_marker %}
                                     <td class="text-end">
-                                        {% if migrated_to_winner %}
+                                        {% if has_write_permission and migrated_to_winner %}
                                         <button type="button"
                                             class="btn btn-sm btn-outline-warning"
                                             hx-post="{% url 'plugins:netbox_librenms_plugin:interface_move_to_winner' pk=interface.id %}"
@@ -387,6 +387,8 @@
                                             title="Reassign this interface (and its cables/IPs/MACs) to {{ migrated_to_winner.name }}">
                                             <i class="mdi mdi-transfer-right"></i> Move
                                         </button>
+                                        {% elif migrated_to_winner %}
+                                        <span class="text-muted small">read-only</span>
                                         {% else %}
                                         <span class="text-muted small">winner missing</span>
                                         {% endif %}

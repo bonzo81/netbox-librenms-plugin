@@ -134,7 +134,7 @@ class TestBaseCableTableViewGetLinksData:
         view._librenms_api.cache_timeout = 300
         obj = _mock_obj()
 
-        def _fake_links(o, server_key=None):
+        def _fake_links(o, server_key=None, sync_device=None):
             view._oob_links_fetch_failed = True  # host has no links AND the OOB fetch failed
             return []
 
@@ -163,7 +163,7 @@ class TestBaseCableTableViewGetLinksData:
         # A prior FULL snapshot is already cached (what verify/sync would resolve rows from).
         real_cache.set(cache_key, {"links": [{"local_port": "Gi0/1", "local_port_id": 11}]})
 
-        def _fake_links(o, server_key=None):
+        def _fake_links(o, server_key=None, sync_device=None):
             view._oob_links_fetch_failed = True  # partial: the OOB-side fetch failed
             return [{"local_port": "Gi0/2", "local_port_id": 22}]  # fresh PARTIAL set
 
