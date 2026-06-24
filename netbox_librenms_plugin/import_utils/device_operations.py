@@ -319,18 +319,21 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     # (e.g. "17") doesn't cause a false "linked elsewhere" result
     # when compared to the int host_id from coerce_librenms_id.
     normalized_device_id = coerce_librenms_id(libre_device.get("device_id"))
-    already_linked_elsewhere = bool(
-        existing_link and existing_link["host_id"] and existing_link["host_id"] != normalized_device_id
+    # Only a real (non-None) incoming id can establish "linked to a DIFFERENT id". A missing or
+    # zero device_id normalizes to None, which is unknown — not a mismatch — so it must NOT trip
+    # the chassis-pair / host-promotion heuristic (host_id != None is always True and would offer
+    # a spurious OOB/Host toggle).
+    linked_to_other_id = bool(
+        existing_link
+        and existing_link["host_id"]
+        and normalized_device_id is not None
+        and existing_link["host_id"] != normalized_device_id
     )
+    already_linked_elsewhere = linked_to_other_id
     chassis_pair_likely = (not names_match) or already_linked_elsewhere
 
     oob_possible = chassis_pair_likely and existing_oob is None
-    host_possible = chassis_pair_likely and bool(
-        existing_link
-        and existing_link["host_id"]
-        and existing_link["host_id"] != normalized_device_id
-        and not existing_link.get("oob_id")
-    )
+    host_possible = chassis_pair_likely and bool(linked_to_other_id and not existing_link.get("oob_id"))
     existing_oob_from_name = _detect_oob_type_from_name(existing_by_serial.name)
 
     # --- Compute all values before mutating result ---

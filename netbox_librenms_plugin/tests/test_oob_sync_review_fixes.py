@@ -102,3 +102,27 @@ class TestSaveDeviceValidatesPlatformDeviceTypeConsistency:
         assert resp is None
         device.refresh_from_db()
         assert device.device_type_id == dt_same.pk
+
+
+@pytest.mark.django_db
+class TestSerialMatchRoleIgnoresMissingDeviceId:
+    """A missing/zero incoming device_id is unknown, not a 'linked elsewhere' mismatch."""
+
+    def test_missing_device_id_does_not_offer_chassis_pair_toggle(self):
+        from netbox_librenms_plugin.import_utils.device_operations import _detect_serial_match_role
+
+        device = make_device("host1", serial="SN1")
+        existing_link = {"host_id": 42, "oob_id": None}
+        result = _detect_serial_match_role(
+            existing_by_serial=device,
+            existing_link=existing_link,
+            hostname="host1",  # matches device.name
+            serial="SN1",
+            libre_device={"os": "ios", "hardware": "C9300"},  # no device_id key → normalizes to None
+            server_key="default",
+        )
+
+        # Names match and there's no real incoming id to mismatch against, so this is a plain link
+        # — NOT a host/OOB chassis-pair situation. The role-choice toggle must not be offered.
+        assert result["serial_role_choice_available"] is False
+        assert result["serial_action"] == "link"
