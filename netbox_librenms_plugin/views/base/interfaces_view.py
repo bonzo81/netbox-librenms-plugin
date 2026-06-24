@@ -406,7 +406,7 @@ class BaseInterfaceTableView(
                 ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
                 if ps_success:
                     relationships = self.librenms_api.resolve_port_relationships(
-                        host_ports_final, ps_data, device_os=device_os
+                        host_ports_final, ps_data, device_os=device_os, interface_name_field=interface_name_field
                     )
                     librenms_data["port_stack_relationships"] = relationships
                 else:

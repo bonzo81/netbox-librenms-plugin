@@ -614,6 +614,7 @@ class LibreNMSAPI:
         port_stack: list,
         lag_patterns: dict | None = None,
         device_os: str | None = None,
+        interface_name_field: str = "ifName",
     ) -> dict:
         """
         Resolve LAG membership and sub-interface parent relationships from LibreNMS data.
@@ -655,22 +656,36 @@ class LibreNMSAPI:
         # Guard against malformed payload items (non-dict) so a single bad entry from
         # LibreNMS doesn't crash the whole relationship resolution with AttributeError.
         safe_ports = [p for p in ports if isinstance(p, dict)]
-        # Only ports with both a usable port_id and a non-empty string ifName feed the
-        # lookup maps: downstream relationship resolution does string ops on ifName
-        # (regex .search(), `":" in name`, suffix splits), so a non-string ifName (e.g. a
-        # numeric value from a malformed payload) would raise at runtime. A port without a
-        # usable name can't be name-matched anyway, so dropping it loses nothing.
-        safe_named_ports = [
-            p
-            for p in safe_ports
-            if p.get("port_id") is not None and isinstance(p.get("ifName"), str) and p.get("ifName")
-        ]
+
+        # Scan names across the selected interface_name_field plus ifName/ifDescr, mirroring
+        # _has_lag_signals. On an ifDescr-mode device the LAG aggregate / sub-unit name lives in
+        # ifDescr (ifName may be empty), so keying only on ifName here would drop every such port
+        # from the lookup maps and silently resolve no relationships even though the port_stack
+        # fetch was triggered. dict.fromkeys de-dups while preserving precedence order.
+        name_fields = tuple(dict.fromkeys((interface_name_field or "ifName", "ifName", "ifDescr")))
+
+        def _port_names(port: dict) -> list[str]:
+            return [name for field in name_fields if isinstance(name := port.get(field), str) and name]
+
+        def _primary_name(port: dict) -> str:
+            names = _port_names(port)
+            return names[0] if names else ""
+
+        # Only ports with a usable port_id and at least one non-empty string name feed the lookup
+        # maps: downstream resolution does string ops (regex .search(), `":" in name`, suffix
+        # splits), so a nameless / non-string-name port can't be matched anyway.
+        safe_named_ports = [p for p in safe_ports if p.get("port_id") is not None and _port_names(p)]
         # Normalize port_id keys to str: ports (this map) and port_stack (high/low_port_id
         # below) are independent LibreNMS payloads, so a str-vs-int discrepancy between them
         # would silently miss every by_id.get() lookup and drop valid relationships. Coercing
         # both sides to str makes the match type-agnostic.
         by_id = {str(p["port_id"]): p for p in safe_named_ports}
-        by_name = {p["ifName"]: p for p in safe_named_ports}
+        # Index every name a port is known by (selected field + ifName/ifDescr) so the
+        # physical-name / sub-unit lookups below resolve regardless of which field carries it.
+        by_name: dict = {}
+        for p in safe_named_ports:
+            for name in _port_names(p):
+                by_name[name] = p
 
         if lag_patterns is None:
             # OS-scoped pattern loading + compile-with-skip lives on the model so the resolver
@@ -701,8 +716,7 @@ class LibreNMSAPI:
         def _is_lag_aggregate(port: dict) -> bool:
             if port.get("ifType") == "ieee8023adLag":
                 return True
-            name = port.get("ifName", "")
-            return any(pat.search(name) for pat in compiled_patterns)
+            return any(pat.search(name) for pat in compiled_patterns for name in _port_names(port))
 
         def _relate(mapping: dict, key_port: dict, value_port: dict) -> None:
             """
@@ -752,8 +766,8 @@ class LibreNMSAPI:
             if not high_port or not low_port:
                 continue
 
-            h_name = high_port.get("ifName", "")
-            l_name = low_port.get("ifName", "")
+            h_name = _primary_name(high_port)
+            l_name = _primary_name(low_port)
 
             # Universal rule: skip Nokia SAP entries (colon notation: lag1:0, lag-1:10)
             if ":" in h_name or ":" in l_name:

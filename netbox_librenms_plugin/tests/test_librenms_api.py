@@ -2326,6 +2326,31 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {101: 102}
         assert result["sub_interfaces"] == {}
 
+    def test_subinterface_resolved_from_ifdescr_mode(self, mock_librenms_api):
+        """On an ifDescr-mode device the sub-unit name lives in ifDescr (ifName empty); the resolver must still pair child -> parent instead of dropping both ports (which only matched ifName before)."""
+        ports = [
+            {"port_id": 1, "ifName": "", "ifDescr": "ge-0/0/0", "ifType": "ethernetCsmacd"},
+            {"port_id": 2, "ifName": "", "ifDescr": "ge-0/0/0.100", "ifType": "l3ipvlan"},
+        ]
+        port_stack = [{"high_port_id": 2, "low_port_id": 1}]
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
+        )
+        assert result["sub_interfaces"] == {2: 1}
+
+    def test_lag_aggregate_matched_from_ifdescr_name_pattern(self, mock_librenms_api):
+        """A name-pattern LAG aggregate whose name lives in ifDescr (ifName empty) is still detected via the ifDescr fallback."""
+        ports = [
+            {"port_id": 11, "ifName": "", "ifDescr": "Gi0/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 12, "ifName": "", "ifDescr": "Po1", "ifType": "propVirtual"},
+        ]
+        port_stack = [{"high_port_id": 11, "low_port_id": 12}]
+        # low (Po1) is the aggregate via the configured pattern; member -> aggregate.
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={"ios": r"^Po\d+$"}, interface_name_field="ifDescr"
+        )
+        assert result["lag_members"] == {11: 12}
+
     def test_string_port_stack_ids_match_int_port_ids(self, mock_librenms_api):
         """port_stack and ports are independent LibreNMS payloads: a str high/low_port_id must still match int port_id keys (and vice versa), or the by_id lookup silently misses and valid relationships are dropped."""
         # NOKIA_PORTS carries int port_ids 101/102; reference them as strings in the stack.
