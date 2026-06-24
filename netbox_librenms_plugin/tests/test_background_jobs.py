@@ -691,6 +691,7 @@ class TestImportDevicesJob:
         assert job.job.data["failed_count"] == 2
         assert job.job.data["success_count"] == 0
 
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -699,8 +700,14 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api_class.return_value = MagicMock()
-        # Collision pre-check fetches each device; "not found" → skip cleanly.
-        mock_api_class.return_value.get_device_info.return_value = (False, None)
+        # Collision pre-check fetches each device; return distinct devices so the batch resolves
+        # cleanly (no collision/unresolved) and the import actually reaches
+        # bulk_import_devices_shared. A "not found" here would fail the batch closed in the
+        # unresolved branch, so the mocked all-failure payload below would never be exercised.
+        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+            True,
+            {"device_id": did, "hostname": f"job-fail-dev-{did}", "sysName": f"job-fail-dev-{did}"},
+        )
 
         mock_bulk_devices.return_value = {
             "success": [],
@@ -716,7 +723,13 @@ class TestImportDevicesJob:
 
         job.run(device_ids=[1, 2], vm_imports={})
 
-        # Should complete without exception
+        # The import path is actually exercised, and the bulk-import failures (not an
+        # unresolved/collision block message) are the stored errors.
+        mock_bulk_devices.assert_called_once()
+        assert job.job.data["errors"] == [
+            {"device_id": 1, "error": "Error 1"},
+            {"device_id": 2, "error": "Error 2"},
+        ]
         assert job.job.data["success_count"] == 0
         assert job.job.data["failed_count"] == 2
         assert job.job.data["completed"] is True
