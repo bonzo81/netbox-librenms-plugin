@@ -200,7 +200,10 @@ _IP_EXEMPT_KEYS = frozenset(
         "sysDescr",
         "model",
         "entPhysicalModelName",
-        "entPhysicalDescr",
+        # entPhysicalDescr is NOT exempt: it's broad free-text preserved verbatim (logic-bearing),
+        # so the residual-PII scan is its only safety net — exempting it from the IP/FQDN checks
+        # would let a chassis/module description carrying a hostname or address pass unnoticed. The
+        # version/model-like fields below stay exempt to suppress dotted-version false positives.
         "entPhysicalFirmwareRev",
         "entPhysicalHardwareRev",
         "entPhysicalSoftwareRev",

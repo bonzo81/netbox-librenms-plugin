@@ -71,7 +71,11 @@ class Command(BaseCommand):
             raise CommandError(f"Recording still contains PII (anonymize before submitting):\n  - {lines}")
 
         signature = compute_shape_signature(recording)
-        verdict = classify_novelty(signature, build_manifest(recordings_store.load_bundled_recordings()))
+        # Use the shipped manifest.json (recordings_store.load_manifest), not a manifest rebuilt from
+        # load_bundled_recordings(): the recordings are dev/test fixtures NOT packaged in the wheel,
+        # so in a wheel install build_manifest(load_bundled_recordings()) would be empty and classify
+        # every submission as novel. This mirrors the runtime capture view's novelty contract.
+        verdict = classify_novelty(signature, recordings_store.load_manifest())
         self.stdout.write(self.style.SUCCESS(f"OK: '{recording['name']}' is schema-valid and PII-clean."))
         self.stdout.write(f"Novelty: {verdict['verdict']} ({verdict['why']}).")
 

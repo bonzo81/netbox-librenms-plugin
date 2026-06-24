@@ -30,6 +30,21 @@ def test_validate_clean_recording_reports_novelty(tmp_path):
     assert "Novelty: likely-covered" in output
 
 
+def test_validate_uses_shipped_manifest_not_bundled_recordings(tmp_path, monkeypatch):
+    """Wheel installs ship manifest.json but NOT the recordings, so novelty must classify against the shipped manifest (load_manifest), not a manifest rebuilt from load_bundled_recordings — which is empty in a wheel and would mark every submission new."""
+    rec = anonymize_recording(load_recording("cisco-stackwise-3member"))
+    path = tmp_path / "rec.json"
+    path.write_text(json.dumps(rec))
+
+    # Simulate the wheel: no packaged recordings, but the shipped manifest is still present.
+    monkeypatch.setattr(store, "load_bundled_recordings", lambda: [])
+
+    output = _run(validate=str(path))
+
+    # The recording's shape IS in the shipped manifest, so it must classify as covered, not new.
+    assert "Novelty: likely-covered" in output
+
+
 def test_validate_rejects_residual_pii(tmp_path):
     """A recording with residual PII (an IP in a preserved label) is rejected."""
     rec = load_recording("cisco-stackwise-3member")

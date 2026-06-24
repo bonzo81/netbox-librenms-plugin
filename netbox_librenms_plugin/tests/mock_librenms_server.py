@@ -341,14 +341,12 @@ def _recording_variant_handler(path: str, variants: list):
 
     def _handler(method, path, query, headers, body):
         incoming = {k: (v[0] if isinstance(v, list) else v) for k, v in (query or {}).items()}
-        best = None
-        best_score = -1
+        # Require EXACT query equality: a subset/contains match would let a request carrying extra
+        # unexpected params still replay a cached response, so a request-shape regression would
+        # false-pass instead of failing closed (404).
         for qdict, status, resp_body in variants:
-            if all(incoming.get(k) == v for k, v in qdict.items()) and len(qdict) > best_score:
-                best = (status, resp_body)
-                best_score = len(qdict)
-        if best is not None:
-            return best
+            if incoming == qdict:
+                return status, resp_body
         return 404, {"status": "error", "message": f"No recorded variant for {path}?{incoming}"}
 
     return _handler

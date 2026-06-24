@@ -287,6 +287,20 @@ def test_entphysical_name_and_descr_preserved_for_matching():
     assert item["entPhysicalDescr"] == "10GBASE-LR SFP+"
 
 
+def test_find_pii_flags_address_in_entphysical_descr():
+    """Preserved-verbatim entPhysicalDescr is not exempt from the IP/FQDN residual-PII scan: it's the only safety net for that logic-bearing free-text field, so an embedded address/hostname must be flagged."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"] = {
+        "status": "ok",
+        "inventory": [
+            {"entPhysicalIndex": 1, "entPhysicalName": "FPC 1", "entPhysicalDescr": "uplink to host 10.7.8.9"}
+        ],
+    }
+    anon = anonymize_recording(rec)
+    # The descr is preserved verbatim, so the embedded address survives — find_pii must flag it.
+    assert any(f["kind"] == "ipv4" and f["value"] == "10.7.8.9" for f in find_pii(anon))
+
+
 def test_snmp_credentials_scrubbed():
     """SNMP community / v3 auth+priv secrets in the device row are scrubbed to empty, not leaked."""
     rec = _ports()

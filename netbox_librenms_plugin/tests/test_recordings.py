@@ -47,6 +47,20 @@ def test_recording_schema_errors_rejects_bool_int_fields():
     assert any("device_id must be an integer" in e for e in errors)
 
 
+def test_recording_variant_handler_requires_exact_query():
+    """The replay matcher must require EXACT query equality: a request carrying an extra unexpected param must NOT subset-match a recorded variant (which would let a request-shape regression false-pass) — it must fail closed with 404."""
+    from netbox_librenms_plugin.tests.mock_librenms_server import _recording_variant_handler
+
+    variants = [({"columns": "ifName"}, 200, {"status": "ok"})]
+    handler = _recording_variant_handler("/ports", variants)
+
+    # Exact query → the recorded response.
+    assert handler("GET", "/ports", {"columns": ["ifName"]}, {}, None) == (200, {"status": "ok"})
+    # An extra unexpected param is a different request shape → 404, not a subset false-pass.
+    status, _body = handler("GET", "/ports", {"columns": ["ifName"], "extra": ["x"]}, {}, None)
+    assert status == 404
+
+
 def test_get_ports_real_fetch_and_parse_via_recording(recording_server):
     """Real-HTTP de-mock demo: get_ports() fetches and parses a real captured recording through the live LibreNMSAPI client (real `requests` → MockLibreNMSServer → real parse), so a regression in the request build or response parsing is caught — unlike test_librenms_api.py::test_get_ports_all, which mocks requests.get and feeds canned JSON straight back."""
     from netbox_librenms_plugin.tests.recordings import load_recording
