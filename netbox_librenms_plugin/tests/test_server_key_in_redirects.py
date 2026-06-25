@@ -1,19 +1,21 @@
-"""Guard against the recurring "redirect URL drops server_key" review finding.
+"""Real redirect-behavior guard: server-scoped redirects must carry ``server_key``.
 
-Module sync / interface / cable / VLAN / IP actions are server-scoped: after a POST (or an
-HTMX refresh) on a non-default LibreNMS server, the follow-up URL must carry ``server_key`` so
-the user returns to the same server's tab and cache namespace. This has been flagged across
-multiple reviews, one ``?tab=`` builder at a time. Rather than re-checking each by hand, this
-test asserts the whole class in one place: every ``?tab=`` URL built under the server-scoped
-view packages must reference ``server_key`` within the same statement.
-
-Scope is intentionally limited to ``views/sync``, ``views/base`` and ``views/object_sync`` —
-the packages where the per-server redirect/tab convention applies.
+Module sync / interface / cable / VLAN / IP actions are server-scoped: after a POST (or an HTMX
+refresh) on a non-default LibreNMS server, the follow-up URL must carry ``server_key`` so the user
+returns to the same server's tab and cache namespace. This has been flagged across multiple reviews,
+one ``?tab=`` builder at a time. Rather than grepping source text (which passes even when
+``server_key`` is wired to the wrong param or sits in a comment), these tests drive the actual
+redirect builders and assert the resolved ``server_key`` survives into the built URL. A lightweight
+structural canary keeps the suite honest if a builder is renamed or removed.
 """
 
 from pathlib import Path
 
+import pytest
+from django.test import RequestFactory
+
 import netbox_librenms_plugin.views as views_pkg
+from netbox_librenms_plugin.tests.conftest import make_device
 
 # Per the codebase convention, every redirect/tab URL built in these packages is server-scoped.
 SCOPED_SUBPACKAGES = ("sync", "base", "object_sync")
@@ -25,35 +27,64 @@ def _scoped_python_files():
         yield from sorted((root / sub).rglob("*.py"))
 
 
-def test_every_tab_url_propagates_server_key():
-    """Each ``?tab=`` URL builder must reference ``server_key`` in the same statement window."""
-    offenders = []
-    views_root = Path(views_pkg.__file__).parent
-    for path in _scoped_python_files():
-        lines = path.read_text().splitlines()
-        for idx, line in enumerate(lines):
-            if "?tab=" not in line:
-                continue
-            window = "\n".join(lines[idx : idx + 4])
-            if "server_key" not in window:
-                # Emit a path relative to the views package, not the bare basename, so the
-                # offender is unambiguous when two scoped files share a name (e.g. several
-                # subpackages each define interfaces.py).
-                try:
-                    where = path.relative_to(views_root)
-                except ValueError:
-                    where = path.name
-                offenders.append(f"{where}:{idx + 1}: {line.strip()}")
+@pytest.mark.django_db
+def test_ip_redirect_url_propagates_server_key():
+    """SyncIPAddressesView.get_ip_tab_url appends the resolved server_key to the IP tab URL."""
+    from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
-    assert not offenders, (
-        "These server-scoped '?tab=' URLs don't propagate server_key (the redirect would land "
-        "on the default server's tab after a POST on another server):\n  " + "\n  ".join(offenders)
-    )
+    device = make_device("redir-ip")
+    view = object.__new__(SyncIPAddressesView)
+    view._post_server_key = "prod"  # the POST-resolved server the user acted on
+
+    url = view.get_ip_tab_url(device)
+
+    assert "tab=ipaddresses" in url
+    assert "server_key=prod" in url
 
 
-def test_guard_actually_sees_tab_builders():
-    """Sanity: the scan reaches real source (guards against a wrong path silently passing)."""
-    total = 0
-    for path in _scoped_python_files():
-        total += path.read_text().count("?tab=")
+@pytest.mark.django_db
+def test_vlan_redirect_url_propagates_server_key():
+    """SyncVLANsView._redirect carries server_key on the VLAN tab redirect."""
+    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
+    device = make_device("redir-vlan")
+    view = object.__new__(SyncVLANsView)
+    view._post_server_key = "prod"
+
+    resp = view._redirect("device", device.pk)
+
+    assert "tab=vlans" in resp.url
+    assert "server_key=prod" in resp.url
+
+
+def test_modules_redirect_response_propagates_server_key():
+    """_modules_redirect_response carries server_key on a classic (non-HTMX) redirect."""
+    from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+
+    request = RequestFactory().post("/")
+    resp = _modules_redirect_response(request, "/plugins/librenms_plugin/x/", server_key="prod")
+
+    assert "tab=modules" in resp.url
+    assert "server_key=prod" in resp.url
+
+
+def test_modules_redirect_response_htmx_propagates_server_key():
+    """The HTMX variant carries server_key on the HX-Redirect header."""
+    from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
+
+    request = RequestFactory().post("/", HTTP_HX_REQUEST="true")
+    resp = _modules_redirect_response(request, "/plugins/librenms_plugin/x/", server_key="prod")
+
+    target = resp["HX-Redirect"]
+    assert "tab=modules" in target
+    assert "server_key=prod" in target
+
+
+def test_scoped_tab_builders_exist():
+    """Structural canary (not a behavioral assertion): the scoped view packages still contain
+    ``?tab=`` redirect builders, so the behavioral tests above are pointed at a tree that actually
+    builds tab URLs — a refactor that moves/removes them is noticed rather than silently leaving
+    this file asserting nothing.
+    """
+    total = sum(path.read_text().count("?tab=") for path in _scoped_python_files())
     assert total > 0, f"Expected at least one '?tab=' builder under the scoped views, found {total}"
