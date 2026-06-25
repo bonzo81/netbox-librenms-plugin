@@ -160,6 +160,17 @@ class TestMapSensorsToSerialLinks:
         assert links[0]["is_configured"] is False
         assert links[0]["remote_device"] == "ttyS49"
 
+    def test_non_list_sensors_fails_closed_to_empty(self):
+        """A None/non-iterable top-level payload (malformed LibreNMS response) must return [], not crash.
+
+        Without the guard, iterating ``sensors`` raises before any per-row hardening runs, so the
+        serial-sync path would 500 instead of degrading to "no serial links".
+        """
+        from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
+
+        for bad in (None, {"sensor_id": 1}, 42, "not-a-list"):
+            assert map_sensors_to_serial_links(bad) == []
+
     def test_unknown_sensor_type_skipped(self):
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 

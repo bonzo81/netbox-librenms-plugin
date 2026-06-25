@@ -100,6 +100,12 @@ def map_sensors_to_serial_links(
     Returns:
         List of link-row dicts sorted by port number (ascending).
     """
+    # Fail closed on a non-list top-level payload (None or another non-iterable from a malformed
+    # LibreNMS response) before iterating — otherwise the sync path crashes here instead of
+    # degrading to "no serial links". Per-row hardening below covers malformed entries.
+    if not isinstance(sensors, list):
+        return []
+
     links = []
 
     for sensor in sensors:
