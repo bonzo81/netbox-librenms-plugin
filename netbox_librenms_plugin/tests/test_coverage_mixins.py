@@ -88,6 +88,53 @@ class TestLibreNMSAPIMixinRebindApiForServer:
         assert m._librenms_api is None
 
 
+class TestLibreNMSAPIMixinResolveGetRenderServerKey:
+    """LibreNMSAPIMixin.resolve_get_render_server_key: GET-render cache-scope resolution."""
+
+    class _Req:
+        """Minimal request stand-in exposing only ``GET`` (a dict supports ``.get``)."""
+
+        def __init__(self, server_key=None):
+            self.GET = {} if server_key is None else {"server_key": server_key}
+
+    def _mixin(self):
+        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+
+        m = object.__new__(LibreNMSAPIMixin)
+        m._librenms_api = None
+        return m
+
+    def test_blank_key_misconfigured_default_does_not_rebuild_client(self):
+        """Blank key + no cached client + misconfigured default scopes to "default" without rebuilding."""
+        m = self._mixin()
+        with (
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls,
+        ):
+            scoped, unresolved = m.resolve_get_render_server_key(self._Req())
+        mock_api_cls.assert_not_called()  # the lazy property must never reconstruct the default
+        assert m._librenms_api is None  # left unbound, not a freshly-built client
+        assert unresolved is False
+        assert scoped == "default"
+
+    def test_blank_key_reads_cached_client_key_without_rebuild(self):
+        """Blank key with a cached client returns that client's key, read directly without rebuilding."""
+        m = self._mixin()
+        m._librenms_api = MagicMock(server_key="prod")
+        with patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api_cls:
+            scoped, unresolved = m.resolve_get_render_server_key(self._Req())
+        mock_api_cls.assert_not_called()
+        assert unresolved is False
+        assert scoped == "prod"
+
+    def test_unknown_requested_key_flags_unresolved(self):
+        """A non-blank server_key that no longer resolves returns (requested, True)."""
+        m = self._mixin()
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            scoped, unresolved = m.resolve_get_render_server_key(self._Req("ghost"))
+        assert (scoped, unresolved) == ("ghost", True)
+
+
 class TestLibreNMSAPIMixinGetContextData:
     """Tests for LibreNMSAPIMixin.get_context_data (lines 275-282)."""
 
