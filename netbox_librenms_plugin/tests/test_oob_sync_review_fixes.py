@@ -331,3 +331,30 @@ class TestAddDeviceTypeMappingSingleUpfrontQuery:
         assert not count_qs, f"upfront ambiguity check must use [:2], not COUNT(): {count_qs}"
         # Sanity: the path ran to completion and created the mapping (normalized to lowercase).
         assert DeviceTypeMapping.objects.filter(librenms_hardware="widgetx").exists()
+
+
+@pytest.mark.django_db
+class TestSyncUrlUnboundApiDoesNotReconstructDefault:
+    """A post-action redirect after a fail-closed rebind must not rebuild the default client."""
+
+    def test_sync_url_unbound_api_does_not_construct_default(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+        dev = make_device("sync-url-dev")
+        view = object.__new__(ConvertLegacyLibreNMSIdView)
+        view._librenms_api = None  # unbound, as left by a fail-closed rebind that returned None
+        request = RequestFactory().post("/", {})  # no server_key in the POST
+        request.user = _superuser()
+        view.request = request
+
+        # The lazy librenms_api property constructs LibreNMSAPI() (looked up in views.mixins).
+        with patch("netbox_librenms_plugin.views.mixins.LibreNMSAPI") as mock_api:
+            resp = view._sync_url("device", dev.pk)
+
+        # The fail-closed rebind already declined to build a client; _sync_url must NOT re-run
+        # that construction just to guess a redirect server_key (it can mis-scope to a different
+        # configured server). It degrades to a bare redirect instead.
+        mock_api.assert_not_called()
+        assert "server_key=" not in resp.url

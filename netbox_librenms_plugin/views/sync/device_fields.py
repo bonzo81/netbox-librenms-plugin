@@ -833,10 +833,12 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             if bound is not None:
                 fallback = (getattr(bound, "server_key", "") or "").strip()
             else:
-                try:
-                    fallback = (getattr(self.librenms_api, "server_key", "") or "").strip()
-                except Exception:  # a redirect helper must degrade, never 500 (misconfigured default)
-                    fallback = ""
+                # Nothing bound — e.g. a fail-closed rebind already returned None on a
+                # missing/misconfigured default. Don't re-run the construction the rebind
+                # deliberately avoided via the lazy self.librenms_api property: it can raise, or
+                # silently resolve to a different first-configured server and redirect the user to
+                # the wrong tab. Leave server_key unset so the redirect lands on the bare sync tab.
+                fallback = ""
             server_key = (
                 next((key for key in LibreNMSAPI.get_available_servers() if key == fallback), None)
                 if fallback
