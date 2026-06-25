@@ -380,29 +380,33 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # map and cache it so warm-cache renders enrich without any live calls.
             port_data_cache = {}
         else:
-            cached_ip_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
-            if isinstance(cached_ip_data, dict):
-                ip_data = cached_ip_data.get("ip_addresses", [])
-                # Pre-upgrade entries cached before mgmt_ip was stored lack the key entirely
-                # (distinct from a present-but-empty "" meaning "no mgmt IP"). Resolve it now —
-                # a one-time live call, mirroring the ports_by_id backfill below — so the
-                # "Set Primary IP" auto-select works without forcing a manual refresh first.
-                cached_mgmt_ip_missing = "mgmt_ip" not in cached_ip_data
-                if cached_mgmt_ip_missing:
-                    self.librenms_id = self.librenms_api.get_stored_librenms_id(obj)
-                    mgmt_ip = self._resolve_management_ip()
-                else:
-                    mgmt_ip = cached_ip_data["mgmt_ip"]
-                # Pre-populate the port map from cache so the cached render reads only
-                # cache + NetBox and never re-hits LibreNMS (resilient when it's down).
-                port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
-                # Pre-upgrade entries lack ports_by_id; remember so we can backfill below.
-                cached_had_ports_by_id = bool(cached_ip_data.get("ports_by_id"))
-            else:
-                # Missing, or a stale/corrupt non-dict entry (legacy snapshot shape): drop it and
-                # render empty rather than 500 on a .get() against a list/str. Mirrors the
-                # isinstance fail-closed guard the interfaces/modules cached paths use.
+            cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
+            cached_ip_data = cache.get(cache_key)
+            if cached_ip_data is None:
                 return None
+            # Fail closed on a malformed/corrupt cache entry: a truthy non-dict (list/str), or a
+            # dict whose "ip_addresses" isn't a list, would crash the cached-render derefs below
+            # (cached_ip_data["mgmt_ip"], .get("ports_by_id")). Treat it as a cache miss — purge
+            # it and bail — mirroring the fresh path's fail-closed validation above.
+            if not isinstance(cached_ip_data, dict) or not isinstance(cached_ip_data.get("ip_addresses"), list):
+                cache.delete(cache_key)
+                return None
+            ip_data = cached_ip_data.get("ip_addresses", [])
+            # Pre-upgrade entries cached before mgmt_ip was stored lack the key entirely
+            # (distinct from a present-but-empty "" meaning "no mgmt IP"). Resolve it now —
+            # a one-time live call, mirroring the ports_by_id backfill below — so the
+            # "Set Primary IP" auto-select works without forcing a manual refresh first.
+            cached_mgmt_ip_missing = "mgmt_ip" not in cached_ip_data
+            if cached_mgmt_ip_missing:
+                self.librenms_id = self.librenms_api.get_stored_librenms_id(obj)
+                mgmt_ip = self._resolve_management_ip()
+            else:
+                mgmt_ip = cached_ip_data["mgmt_ip"]
+            # Pre-populate the port map from cache so the cached render reads only
+            # cache + NetBox and never re-hits LibreNMS (resilient when it's down).
+            port_data_cache = dict(cached_ip_data.get("ports_by_id") or {})
+            # Pre-upgrade entries lack ports_by_id; remember so we can backfill below.
+            cached_had_ports_by_id = bool(cached_ip_data.get("ports_by_id"))
 
         cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
 

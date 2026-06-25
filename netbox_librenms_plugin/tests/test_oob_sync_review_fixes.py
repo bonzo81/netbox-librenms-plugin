@@ -24,7 +24,18 @@ def _superuser():
     if user:
         return user
     # NetBox's User model has no is_staff field — only is_superuser/is_active gate access here.
-    return User.objects.create(username="review-su", is_superuser=True, is_active=True)
+    # get_or_create so a pre-existing but inactive/non-superuser "review-su" row (left by an
+    # earlier test that reused the username) is reused and corrected rather than tripping the
+    # unique-username constraint that a bare create() would hit.
+    user, _ = User.objects.get_or_create(
+        username="review-su",
+        defaults={"is_superuser": True, "is_active": True},
+    )
+    if not user.is_superuser or not user.is_active:
+        user.is_superuser = True
+        user.is_active = True
+        user.save(update_fields=["is_superuser", "is_active"])
+    return user
 
 
 @pytest.mark.django_db
@@ -179,6 +190,64 @@ class TestIpCachedSnapshotMgmtIpBackfill:
             api.get_device_info.assert_not_called()
         finally:
             real_cache.delete(key)
+
+
+@pytest.mark.django_db
+class TestIpCachedSnapshotFailsClosedOnMalformedCache:
+    """A stale/corrupt truthy cache value (list/str/wrong-shaped dict) must fail closed, not 500 the render."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        view = DeviceIPAddressTableView()
+        # cache_timeout/server_key only; the cached path must NOT reach LibreNMS for a corrupt entry.
+        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
+        request = RequestFactory().get("/")
+        request.user = _superuser()
+        view.request = request
+        return view, request
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            ["junk"],  # a list — .get(...) would AttributeError on the old code
+            "corrupt-string",  # a str — same crash class
+            {"ports_by_id": {"7": {}}},  # dict missing the "ip_addresses" list
+            {"ip_addresses": "not-a-list"},  # dict whose ip_addresses isn't a list
+        ],
+    )
+    def test_malformed_cache_returns_none_and_purges_key(self, bad_value):
+        device = make_device("ip-corruptcache")
+        view, request = self._view()
+        key = view.get_cache_key(device, "ip_addresses", "default")
+        real_cache.set(key, bad_value, timeout=300)
+        try:
+            result = view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+            # Fail closed: treated as a cache miss (None), never crashing the tab render.
+            assert result is None
+            # The corrupt entry is purged so the next GET doesn't keep serving garbage.
+            assert real_cache.get(key) is None
+        finally:
+            real_cache.delete(key)
+
+
+@pytest.mark.django_db
+class TestSuperuserHelperIsIdempotent:
+    """_superuser() must reuse/correct a pre-existing inactive 'review-su' row, not trip the unique constraint."""
+
+    def test_reactivates_existing_inactive_review_user(self):
+        User = get_user_model()
+        # An earlier test left an inactive review-su; and there is no other active superuser, so the
+        # filter short-circuit misses and the helper reaches the get-or-create path.
+        User.objects.filter(is_superuser=True, is_active=True).delete()
+        User.objects.create(username="review-su", is_superuser=False, is_active=False)
+
+        user = _superuser()  # bare create() would raise IntegrityError on the duplicate username
+
+        assert user.username == "review-su"
+        assert user.is_superuser and user.is_active
+        # No duplicate row was created.
+        assert User.objects.filter(username="review-su").count() == 1
 
 
 @pytest.mark.django_db
