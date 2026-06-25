@@ -6398,7 +6398,16 @@ class TestDeviceValidationDetailsTemplate:
         import re
 
         src = self._source()
-        assert "Full Sync Page" in src
-        # The href must conditionally append the active, url-encoded server_key. Match
-        # whitespace-tolerantly so harmless template formatting changes don't fail this.
-        assert re.search(r"server_key=\{\{\s*server_key\s*\|\s*urlencode\s*\}\}", src)
+        # Bind the conditional, url-encoded server_key to the SAME <a> that carries the "Full
+        # Sync Page" text. Asserting the token appears *somewhere* in the source (the old check)
+        # passes even when server_key is wired into a different href entirely. re.S so the match
+        # spans the href attributes and the icon markup between the tag and the link text.
+        # The tempered "(?:(?!</a>).)*?" forbids crossing a closing </a>, so server_key and the
+        # link text must sit in ONE anchor — a plain ".*?" with re.S would happily bridge a
+        # server_key in an earlier href to a "Full Sync Page" text in a later, unrelated <a>.
+        assert re.search(
+            r'<a\b[^>]*\bhref="[^"]*\?server_key=\{\{\s*server_key\s*\|\s*urlencode\s*\}\}[^"]*"[^>]*>'
+            r"(?:(?!</a>).)*?Full Sync Page(?:(?!</a>).)*?</a>",
+            src,
+            re.S,
+        )
