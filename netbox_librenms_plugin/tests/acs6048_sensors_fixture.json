@@ -247,7 +247,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.28",
-    "sensor_descr": "Q12025-Juniper-1 Status",
+    "sensor_descr": "rdev-5b80e6-1 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -256,7 +256,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.29",
-    "sensor_descr": "Q12025-Juniper-2 Status",
+    "sensor_descr": "rdev-628e12-2 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -292,7 +292,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.33",
-    "sensor_descr": "2a-6a-be-p-33 Status",
+    "sensor_descr": "rdev-48e813-p33 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -301,7 +301,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.34",
-    "sensor_descr": "ncm-A0 Status",
+    "sensor_descr": "rdev-7b944e-a0 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -310,7 +310,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.35",
-    "sensor_descr": "ncm-B0 Status",
+    "sensor_descr": "rdev-35400a-b0 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -319,7 +319,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.36",
-    "sensor_descr": "ncf-6 Status",
+    "sensor_descr": "rdev-9b420a-6 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -328,7 +328,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.37",
-    "sensor_descr": "ncf-0 Status",
+    "sensor_descr": "rdev-ad1c0a-0 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -337,7 +337,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.38",
-    "sensor_descr": "cl2-ncp-0 Status",
+    "sensor_descr": "rdev-7d3975-0 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -346,7 +346,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.39",
-    "sensor_descr": "80JP79 Status",
+    "sensor_descr": "rdev-7b9b2d Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -373,7 +373,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.42",
-    "sensor_descr": "Nokia7750SR-2s-con1 Status",
+    "sensor_descr": "rdev-1f154b-con1 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -382,7 +382,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.43",
-    "sensor_descr": "Nokia7750SR-2s-con2 Status",
+    "sensor_descr": "rdev-044143-con2 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -391,7 +391,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.44",
-    "sensor_descr": "7750SR-7s-con1 Status",
+    "sensor_descr": "rdev-9401f4-con1 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -400,7 +400,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.45",
-    "sensor_descr": "7750SR-7s-con2 Status",
+    "sensor_descr": "rdev-0d7c92-con2 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -409,7 +409,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.46",
-    "sensor_descr": "2a-6a-be-p-46 Status",
+    "sensor_descr": "rdev-abd2f9-p46 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -418,7 +418,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.47",
-    "sensor_descr": "2a-6a-be-p-47 Status",
+    "sensor_descr": "rdev-cf3f70-p47 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },
@@ -427,7 +427,7 @@
     "device_id": 12,
     "sensor_type": "acsSerialPortTable",
     "sensor_index": "acsSerialPortTableStatus.48",
-    "sensor_descr": "2a-6a-be-p-48 Status",
+    "sensor_descr": "rdev-3b21a3-p48 Status",
     "sensor_current": 2,
     "group": "Serial Ports"
   },

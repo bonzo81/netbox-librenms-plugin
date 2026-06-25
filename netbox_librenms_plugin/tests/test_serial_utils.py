@@ -353,14 +353,31 @@ class TestMapSensorsWithFixture:
         assert row["is_configured"] is False
 
     def test_port_44_vendor_alias_is_configured(self, fixture_sensors):
-        """Index 44 = '7750SR-7s-con1' — vendor alias, configured but won't resolve."""
+        """Index 44 = a console-alias label (pseudonymized), configured but won't resolve."""
         from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
         links = map_sensors_to_serial_links(fixture_sensors)
         row = links[43]
         assert row["sensor_index_int"] == 44
-        assert row["remote_device"] == "7750SR-7s-con1"
+        assert row["remote_device"] == "rdev-9401f4-con1"
         assert row["is_configured"] is True
+
+    def test_fixture_carries_no_raw_operator_labels(self, fixture_sensors):
+        """Privacy: every bundled serial-port label must be a safe pseudonym (rdev-<hash>) or a default ttySNN.
+
+        The fixture is committed to the repo, so operator-assigned hostnames (vendor/site/date
+        identifiers) must be pseudonymized following the rdev-<hash> convention. This guards against
+        the recurring leak of real infra labels into the corpus.
+        """
+        import re
+
+        from netbox_librenms_plugin.serial_utils import strip_status_suffix
+
+        safe = re.compile(r"^(rdev-[0-9a-f]{6}(-.*)?|ttyS\d+)$")
+        leaked = sorted(
+            label for s in fixture_sensors if not safe.match(label := strip_status_suffix(s.get("sensor_descr") or ""))
+        )
+        assert not leaked, f"raw operator-style labels leaked into the fixture: {leaked}"
 
     def test_configured_count(self, fixture_sensors):
         """48 out of 49 ports have custom labels (all except ttyS49)."""
