@@ -103,6 +103,32 @@ def test_signature_reads_host_ports_not_oob_controller_ports():
     assert compute_shape_signature(rec)["lag"]["present"] is False
 
 
+def test_signature_oob_axis_reflects_meta_oob_id():
+    """OOB presence is an axis: meta.oob_id set → oob True, absent → oob False."""
+    base = {"schema_version": 1, "name": "x", "device_id": 1, "responses": {}}
+    assert compute_shape_signature({**base, "meta": {"os": "linux", "oob_id": 25}})["oob"] is True
+    assert compute_shape_signature({**base, "meta": {"os": "linux"}})["oob"] is False
+    assert compute_shape_signature({**base, "meta": None})["oob"] is False
+
+
+def test_oob_and_non_oob_host_are_distinct_novelty_buckets():
+    """An OOB-controller capture must not be reported as covered by the plain-host shape.
+
+    linux-host and linux-host-oob share os/VC/LAG/sub-interface shape, so before OOB became a
+    structural axis the OOB capture classified as 'likely-covered' by the plain host (and vice
+    versa) — collapsing two genuinely different topologies into one novelty bucket.
+    """
+    oob_sig = compute_shape_signature(load_recording("linux-host-oob"))
+    plain_sig = compute_shape_signature(load_recording("linux-host"))
+    assert oob_sig["oob"] is True
+    assert plain_sig["oob"] is False
+
+    # With only the plain host known, the OOB capture is genuinely new (different shape axes).
+    assert classify_novelty(oob_sig, build_manifest([load_recording("linux-host")]))["verdict"] == "new"
+    # ...and symmetrically the plain host is new against an OOB-only manifest.
+    assert classify_novelty(plain_sig, build_manifest([load_recording("linux-host-oob")]))["verdict"] == "new"
+
+
 def test_signature_transceivers_requires_non_empty_list():
     """The transceivers axis must reflect an actual non-empty transceivers list, not a captured error/404 body — a present-but-empty body must not inflate the novelty signature."""
 

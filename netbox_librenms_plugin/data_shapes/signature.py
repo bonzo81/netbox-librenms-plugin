@@ -112,7 +112,7 @@ def compute_shape_signature(recording):
     Returns:
         dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base},
             lag:{present,ieee8023ad,name_prefix}, sub_interfaces:{present,styles}, port_stack,
-            vlans, transceivers}``.
+            vlans, transceivers, oob}``.
     """
     device_id = recording.get("device_id")
     dev_body = _body(recording, lambda k: k == f"GET /api/v0/devices/{device_id}")
@@ -162,6 +162,13 @@ def compute_shape_signature(recording):
         and bool(transceiver_body["transceivers"])
     )
 
+    # OOB controller presence. Capture stamps meta["oob_id"] only when a separate OOB-controller
+    # device's ports were merged into the host capture (and anonymization preserves meta), so it's
+    # the authoritative signal. Without it an OOB and a non-OOB capture of the same host OS share an
+    # identical signature and collapse into one novelty bucket — the capture modal would report an
+    # OOB topology as already known when only the plain-host shape exists.
+    oob_present = (recording.get("meta") or {}).get("oob_id") is not None
+
     return {
         "os": os_name,
         "virtual_chassis": vc,
@@ -170,17 +177,19 @@ def compute_shape_signature(recording):
         "port_stack": port_stack,
         "vlans": any(port_has_vlan(p) for p in ports),
         "transceivers": has_transceivers,
+        "oob": oob_present,
     }
 
 
 def _structural_axes(signature):
-    """Reduce a signature to its OS-independent shape axes (VC + LAG + sub-interface presence)."""
+    """Reduce a signature to its OS-independent shape axes (VC + LAG + sub-interface + OOB presence)."""
     vc = signature.get("virtual_chassis", {})
     return (
         vc.get("present", False),
         vc.get("root_class"),
         signature.get("lag", {}).get("present", False),
         signature.get("sub_interfaces", {}).get("present", False),
+        signature.get("oob", False),
     )
 
 
