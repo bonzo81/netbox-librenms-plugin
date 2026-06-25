@@ -86,6 +86,27 @@ def test_merge_candidates_overlap_with_direct_existing():
     assert rows == {300, 301}
 
 
+def test_unknown_merge_slot_falls_back_instead_of_crashing(monkeypatch):
+    """A merge slot absent from _MERGE_SLOT_ROLES degrades to a generated role, not a KeyError."""
+    import netbox_librenms_plugin.import_utils.collisions as collisions_mod
+
+    # Simulate a future MERGE_CANDIDATE_SLOTS extended with a slot nobody added to
+    # _MERGE_SLOT_ROLES yet — the role map and the slot tuple are tightly coupled today.
+    monkeypatch.setattr(collisions_mod, "MERGE_CANDIDATE_SLOTS", ("host_named", "extra_named"))
+
+    devices = [
+        _row(300, "row-merge", {"merge_candidates": {"extra_named": {"pk": 99, "name": "x-side"}}}),
+        _row(301, "row-direct", {"existing_device": Device(pk=99, name="x-side")}),
+    ]
+
+    groups = detect_bulk_collisions(devices)  # must not raise KeyError on the unmapped slot
+
+    assert len(groups) == 1
+    rows = {r["device_id"]: r for r in groups[0]["librenms_rows"]}
+    # The unmapped slot got a generated fallback role rather than crashing the import gate.
+    assert rows[300]["role"] == "merge_extra_named"
+
+
 def test_promote_via_existing_device_field_collides_with_direct_match():
     """promote_to_host carries existing_device; collision fires against a direct existing_device row."""
     nb_device = Device(pk=55, name="shared")
@@ -351,9 +372,15 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     assert "<script>alpha</script>" not in html
     assert "&lt;script&gt;alpha&lt;/script&gt;" in html
     # The "Collision" badge must pair its red fill with a text colour: a bare bg-danger leaves
-    # Tabler's muted badge text (grey-on-red), unreadable in both themes.
-    assert "badge bg-danger text-white" in html
-    assert 'badge bg-danger"' not in html
+    # Tabler's muted badge text (grey-on-red), unreadable in both themes. Match order-agnostically
+    # so harmless class reordering doesn't break the test and a bare bg-danger elsewhere in the
+    # modal can't satisfy it.
+    import re
+
+    assert re.search(
+        r'class="(?=[^"]*\bbadge\b)(?=[^"]*\bbg-danger\b)(?=[^"]*\btext-white\b)[^"]*"',
+        html,
+    ), "collision badge must pair bg-danger with text-white on one element"
 
 
 def test_collision_template_title_is_generic_for_non_collision_failures():

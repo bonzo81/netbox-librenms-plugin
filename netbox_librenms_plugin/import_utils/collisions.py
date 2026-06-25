@@ -107,8 +107,12 @@ def _candidate_pks_for_row(validation: dict) -> list[tuple[int, str | None, str,
             entry = merge.get(slot) or {}
             if not isinstance(entry, dict):
                 continue
+            # Derive a fallback role rather than indexing: if MERGE_CANDIDATE_SLOTS is ever
+            # extended without updating _MERGE_SLOT_ROLES, a new slot degrades to a generated
+            # label instead of crashing the import gate with a KeyError.
+            role = _MERGE_SLOT_ROLES.get(slot, f"merge_{slot}")
             if entry.get("pk") is not None:
-                _add(entry.get("pk"), entry.get("name"), _MERGE_SLOT_ROLES[slot], entry.get("model_name") or "device")
+                _add(entry.get("pk"), entry.get("name"), role, entry.get("model_name") or "device")
 
     promote = validation.get("promote_to_host") or {}
     if isinstance(promote, dict):
