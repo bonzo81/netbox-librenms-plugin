@@ -135,7 +135,11 @@ class SyncInterfacesView(
                 request,
                 f"{len(self._skipped_conflicts)} interface(s) skipped: {skipped}.",
             )
-        messages.success(request, "Selected interfaces synced successfully.")
+        # Only claim success when at least one selected interface was actually synced. When the
+        # conflict-skip logic skipped ALL selected interfaces, nothing was written, so pairing the
+        # skip warning with a green "synced successfully" banner is contradictory and misleading.
+        if len(self._skipped_conflicts) < len(selected_interfaces):
+            messages.success(request, "Selected interfaces synced successfully.")
         return redirect(redirect_url)
 
     def get_object(self, object_type, object_id):

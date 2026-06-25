@@ -671,21 +671,20 @@ class TestSyncInterfacesViewPost:
         mock_msgs.success.assert_called_once()
         mock_redirect.assert_called_once()
 
-    def test_post_surfaces_skipped_conflicts_warning(self):
-        """When an interface is skipped (port_id owned by another device), post() surfaces a warning naming it — not just a log line."""
+    def _run_post_with_skips(self, mock_msgs, selected, skip_names):
+        """Drive SyncInterfacesView.post selecting *selected*, skipping *skip_names* during sync."""
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         view = object.__new__(SyncInterfacesView)
         view.require_all_permissions = MagicMock(return_value=None)
         view.get_required_permissions_for_object_type = MagicMock(return_value=[])
         mock_api = MagicMock(server_key="default")
-
         mock_device = MagicMock(pk=1)
-        ports = [{"ifName": "Gi0/1", "port_id": 10}]
-        req = _make_request(post_data={"select": ["Gi0/1"], "server_key": "default"})
+        ports = [{"ifName": name, "port_id": 10 + i} for i, name in enumerate(selected)]
+        req = _make_request(post_data={"select": list(selected), "server_key": "default"})
 
-        def _record_skip(*args, **kwargs):
-            view._skipped_conflicts.append("Gi0/1 (selected target unavailable)")
+        def _record_skips(*args, **kwargs):
+            view._skipped_conflicts.extend(skip_names)
 
         with (
             patch(
@@ -694,11 +693,12 @@ class TestSyncInterfacesViewPost:
             ),
             patch("netbox_librenms_plugin.views.sync.interfaces.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.sync.interfaces.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.interfaces.redirect"),
             patch("netbox_librenms_plugin.views.sync.interfaces.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.interfaces.transaction"),
-            patch.object(view, "sync_interface", side_effect=_record_skip),
+            patch.object(view, "sync_selected_interfaces", side_effect=_record_skips),
+            patch.object(view, "_sync_lag_and_parent_relationships"),
+            patch.object(view, "_get_cached_relationships", return_value={}),
             patch.object(type(view), "get_vlan_groups_for_device", return_value=[]),
             patch.object(view.__class__, "get_cache_key", return_value="k"),
             patch.object(view.__class__, "_build_vlan_lookup_maps", return_value={}),
@@ -708,11 +708,35 @@ class TestSyncInterfacesViewPost:
             view.request = req
             view.post(req, "device", 1)
 
+    def test_post_all_skipped_warns_without_success_banner(self):
+        """Every selected interface conflict-skipped → only a warning, NO 'synced successfully'.
+
+        Nothing was written, so a green success banner alongside the skip warning is misleading.
+        """
+        with patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs:
+            self._run_post_with_skips(
+                mock_msgs,
+                selected=["Gi0/1"],
+                skip_names=["Gi0/1 (selected target unavailable)"],
+            )
+
         mock_msgs.warning.assert_called_once()
         warning_msg = mock_msgs.warning.call_args[0][1]
         assert "Gi0/1" in warning_msg
         assert "selected target unavailable" in warning_msg
         assert "could not be safely matched" not in warning_msg
+        mock_msgs.success.assert_not_called()
+
+    def test_post_partial_skip_still_reports_success(self):
+        """Some synced, some skipped → both the skip warning AND the success banner fire."""
+        with patch("netbox_librenms_plugin.views.sync.interfaces.messages") as mock_msgs:
+            self._run_post_with_skips(
+                mock_msgs,
+                selected=["Gi0/1", "Gi0/2"],
+                skip_names=["Gi0/1 (selected target unavailable)"],
+            )
+
+        mock_msgs.warning.assert_called_once()
         mock_msgs.success.assert_called_once()
 
 
