@@ -16,8 +16,15 @@ from netbox_librenms_plugin.tests.conftest import make_device
 
 
 def _superuser():
+    # Must return an ACTUAL active superuser: User.objects.first() can hand back a pre-seeded
+    # non-superuser (DB-ordering dependent), which would run permission-sensitive tests under the
+    # wrong principal and cover the wrong branch. Filter explicitly, creating one if none exists.
     User = get_user_model()
-    return User.objects.first() or User.objects.create(username="review-su", is_superuser=True, is_active=True)
+    user = User.objects.filter(is_superuser=True, is_active=True).first()
+    if user:
+        return user
+    # NetBox's User model has no is_staff field — only is_superuser/is_active gate access here.
+    return User.objects.create(username="review-su", is_superuser=True, is_active=True)
 
 
 @pytest.mark.django_db
@@ -276,3 +283,51 @@ class TestValidateDedupsSerialDuplicateQuery:
             if 'serial" =' in q["sql"].lower() and "limit 2" in q["sql"].lower() and "not" not in q["sql"].lower()
         ]
         assert len(serial_dup_queries) == 1
+
+
+@pytest.mark.django_db
+class TestAddDeviceTypeMappingSingleUpfrontQuery:
+    """The upfront ambiguity check must use one [:2] fetch, not a separate count() + first()."""
+
+    def test_no_count_query_on_mapping_upfront_check(self):
+        from unittest.mock import patch
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView
+
+        dev = make_device("dtm-host")  # supplies a real DeviceType
+        device_type = dev.device_type
+
+        view = object.__new__(AddDeviceTypeMappingView)
+        view._librenms_api = MagicMock(server_key="default")  # blank-key rebind returns "default"
+        request = RequestFactory().post("/", {"device_type_id": str(device_type.pk), "server_key": ""})
+        request.user = _superuser()
+        view.request = request
+
+        with (
+            patch(
+                "netbox_librenms_plugin.views.imports.actions.fetch_device_with_cache",
+                return_value={"hardware": "WidgetX"},
+            ),
+            patch("netbox_librenms_plugin.views.imports.actions.DeviceValidationDetailsView") as mock_detail,
+            # Skip the post-save modal/row re-render (template URL reversal) — irrelevant to the
+            # upfront query count, which has already run by then.
+            patch.object(view, "get_validated_device_with_selections", return_value=(None, None, None)),
+        ):
+            mock_detail.return_value.get.return_value = MagicMock(content=b"<div></div>")
+            with CaptureQueriesContext(connection) as ctx:
+                view.post(request, device_id=1)
+
+        # The fix collapses the upfront .count() + .first() into a single [:2] fetch (the locked
+        # read already uses [:2]), so NO COUNT() query should touch the mapping table.
+        count_qs = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "count(" in q["sql"].lower() and "devicetypemapping" in q["sql"].lower()
+        ]
+        assert not count_qs, f"upfront ambiguity check must use [:2], not COUNT(): {count_qs}"
+        # Sanity: the path ran to completion and created the mapping (normalized to lowercase).
+        assert DeviceTypeMapping.objects.filter(librenms_hardware="widgetx").exists()

@@ -1803,16 +1803,20 @@ class AddDeviceTypeMappingView(
         except DeviceType.DoesNotExist:
             return _htmx_error_response("Selected device type not found.")
 
-        # Reject ambiguous state up front: multiple case-variant rows for the same
-        # hardware string mean .first() would silently mutate an arbitrary one and leave
-        # the duplicate unresolved. Mirrors AddPlatformMappingView.
-        if DeviceTypeMapping.objects.filter(librenms_hardware__iexact=mapping_hardware).count() > 1:
+        # Reject ambiguous state up front: multiple case-variant rows for the same hardware
+        # string mean .first() would silently mutate an arbitrary one and leave the duplicate
+        # unresolved. Fetch [:2] once and reuse it for both the ambiguity check and the
+        # existing-mapping resolution rather than a separate count() + first() (two queries for
+        # the same filter). Key on the NORMALISED hardware string (what's actually stored), not
+        # the raw value. Mirrors AddPlatformMappingView and the locked read below.
+        upfront_rows = list(DeviceTypeMapping.objects.filter(librenms_hardware__iexact=mapping_hardware)[:2])
+        if len(upfront_rows) > 1:
             return _htmx_error_response(
                 "Multiple mappings exist for this hardware string. Remove duplicates before updating."
             )
         # Resolve the existing mapping first so we only require the permission
         # actually needed: "add" for a new mapping, "change" for an update.
-        existing_mapping = DeviceTypeMapping.objects.filter(librenms_hardware__iexact=mapping_hardware).first()
+        existing_mapping = upfront_rows[0] if upfront_rows else None
         if existing_mapping:
             self.required_object_permissions = {"POST": [("change", DeviceTypeMapping)]}
         else:
@@ -2876,11 +2880,15 @@ class AddPlatformMappingView(
         except Platform.DoesNotExist:
             return _htmx_error_response("Selected platform not found.")
 
-        if PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).count() > 1:
+        # Fetch [:2] once and reuse it for both the ambiguity check and the existing-mapping
+        # resolution rather than a separate count() + first() (two queries for the same filter).
+        # Mirrors AddDeviceTypeMappingView and the locked read below.
+        upfront_rows = list(PlatformMapping.objects.filter(librenms_os__iexact=librenms_os)[:2])
+        if len(upfront_rows) > 1:
             return _htmx_error_response(
                 "Multiple mappings exist for this OS string. Remove duplicates before updating."
             )
-        existing_mapping = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
+        existing_mapping = upfront_rows[0] if upfront_rows else None
         self.required_object_permissions = {
             "POST": [("change", PlatformMapping) if existing_mapping else ("add", PlatformMapping)]
         }
