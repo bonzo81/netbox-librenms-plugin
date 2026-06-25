@@ -846,13 +846,15 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         )
         return link
 
-    def enrich_links_data(self, links_data, obj, server_key=None):
+    def enrich_links_data(self, links_data, obj, server_key=None, sync_device=None):
         """Enrich links data with local and remote port URLs and cable status."""
         if server_key is None:
             server_key = self.librenms_api.server_key
         # Resolve the serial sync device once for the whole loop (loop-invariant) instead of
-        # per serial row.
-        serial_sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        # per serial row. Reuse the device the caller (_prepare_context) already resolved to
+        # avoid a second get_librenms_sync_device() VC-members query per request; falls back to
+        # resolving here when called without one.
+        serial_sync_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
         # ConsolePorts already auto-picked by an earlier serial row this response, so two rows
         # resolving to the same remote device don't collide on one port (see enrich_serial_remote).
         claimed_remote_cp_ids = set()
@@ -956,8 +958,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 "refresh_incomplete": True,
             }
 
-        # Enrich data in both cases to ensure current NetBox state
-        links_data = self.enrich_links_data(links_data, obj, server_key=server_key)
+        # Enrich data in both cases to ensure current NetBox state. Pass the already-resolved
+        # cache_device so enrich_links_data reuses it instead of re-running get_librenms_sync_device
+        # (a second VC-members query + per-member cf scan) on every cable refresh.
+        links_data = self.enrich_links_data(links_data, obj, server_key=server_key, sync_device=cache_device)
 
         # Cache after enrichment so verify/sync views read current NetBox state
         if fetch_fresh:

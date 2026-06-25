@@ -1013,3 +1013,20 @@ class TestSerialVerifyRowDimming:
         # Remote label doesn't resolve to a NetBox device (real lookup) -> unconfigured, no URL.
         row = view._format_serial_verify_row(view.request, dev, link, local_port_id="serial:1001", server_key="default")
         assert "text-muted fst-italic" in row["remote_device"]  # dimmed, matching LibreNMSCableTable
+
+
+class TestEnrichLinksDataReusesSyncDevice:
+    """enrich_links_data must reuse the sync_device _prepare_context already resolved."""
+
+    def test_passed_sync_device_avoids_resolve_query(self):
+        from unittest.mock import patch
+
+        view = _make_view()
+        sentinel_device = MagicMock()
+        with patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device") as mock_resolve:
+            result = view.enrich_links_data([], MagicMock(), server_key="default", sync_device=sentinel_device)
+
+        # The caller threaded in the already-resolved device, so enrich_links_data must NOT
+        # re-run get_librenms_sync_device (a second VC-members query + per-member cf scan).
+        mock_resolve.assert_not_called()
+        assert result == []

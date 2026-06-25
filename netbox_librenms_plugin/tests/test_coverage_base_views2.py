@@ -944,7 +944,7 @@ class TestCablePartialSnapshotNotCached:
         view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
         view.get_cache_key = MagicMock(return_value="links-key")
         view.get_table = MagicMock(return_value=MagicMock())
-        view.enrich_links_data = MagicMock(side_effect=lambda d, o, server_key=None: d)
+        view.enrich_links_data = MagicMock(side_effect=lambda d, o, server_key=None, sync_device=None: d)
         return view
 
     def _links_cache_sets(self, *, oob_failed, links_error, librenms_id, serial_failed=False):
