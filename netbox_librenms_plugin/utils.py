@@ -2209,9 +2209,19 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     if isinstance(winner_pk, bool) or not isinstance(winner_pk, int) or winner_pk <= 0:
         raise ValueError(f"winner_pk must be a positive integer, got {winner_pk!r}")
 
-    cf_value = donor.custom_field_data.get("librenms_id") or {}
-    if not isinstance(cf_value, dict):
+    cf_value = donor.custom_field_data.get("librenms_id")
+    if cf_value is None:
         cf_value = {}
+    elif not isinstance(cf_value, dict):
+        # Fail closed on a legacy bare-int/bare-string or corrupt top-level librenms_id rather
+        # than silently collapsing it to {} and stamping the marker: that drops the donor's
+        # still-resolvable mapping (find_by_librenms_id can no longer locate the old owner),
+        # converting recoverable state into data loss. The caller must migrate the legacy form
+        # first — mirrors merge_librenms_links(), which rejects the same shapes.
+        raise ValueError(
+            f"Cannot mark '{getattr(donor, 'name', donor)}' migrated: librenms_id is a legacy "
+            f"bare-integer or corrupt value ({cf_value!r}); migrate it to the dict form first."
+        )
     entry = cf_value.get(server_key)
     if isinstance(entry, int) and not isinstance(entry, bool):
         entry = {"id": entry}

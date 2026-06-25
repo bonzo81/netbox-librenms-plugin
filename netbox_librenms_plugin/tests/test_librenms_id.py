@@ -1147,6 +1147,25 @@ class TestMarkLibreNMSMigrated:
             with pytest.raises(ValueError):
                 mark_librenms_migrated(donor, winner_pk=bad, server_key="default")
 
+    def test_fails_closed_on_legacy_or_corrupt_top_level_librenms_id(self):
+        """A legacy bare-int/bare-string or corrupt top-level librenms_id must raise, not collapse.
+
+        Collapsing it to {} and stamping the marker would drop the donor's still-resolvable
+        mapping (data loss). The donor's value must be left intact so it stays recoverable.
+        """
+        import pytest
+
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        for legacy in (42, "42", True, [1, 2]):
+            donor = MagicMock()
+            donor.name = "legacy-donor"
+            donor.custom_field_data = {"librenms_id": legacy}
+            with pytest.raises(ValueError):
+                mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+            # Untouched: no marker stamped, original value preserved for the caller to migrate.
+            assert donor.custom_field_data["librenms_id"] == legacy
+
     @pytest.mark.django_db
     def test_after_marker_find_by_librenms_id_no_longer_matches(self):
         """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned by find_by_librenms_id, queried against the REAL Device model."""
