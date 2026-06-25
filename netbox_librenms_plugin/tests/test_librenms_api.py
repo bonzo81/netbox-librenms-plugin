@@ -2416,6 +2416,22 @@ class TestResolvePortRelationships:
         result = mock_librenms_api.resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[1:], lag_patterns={})
         assert result["sub_interfaces"] == {206: 205}
 
+    def test_sub_interface_detected_via_ifname_when_namefield_is_ifdescr(self, mock_librenms_api):
+        """With interface_name_field='ifDescr', a clean ifDescr must not hide the .N sub-unit that ifName carries."""
+        ports = [
+            # Parent: ifName xe-0/0/0, but ifDescr (the primary in this mode) is a clean unrelated label.
+            {"port_id": 401, "ifName": "xe-0/0/0", "ifDescr": "uplink-core", "ifType": "ethernetCsmacd"},
+            # Child: the .N marker lives in ifName; its ifDescr is NOT a sub-unit of the parent's ifDescr.
+            {"port_id": 402, "ifName": "xe-0/0/0.100", "ifDescr": "vlan-100-svc", "ifType": "l2vlan"},
+        ]
+        port_stack = [{"high_port_id": 401, "low_port_id": 402}]
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={}, interface_name_field="ifDescr"
+        )
+        # The ifDescr primaries have no .N relationship; only ifName does. A primary-only check (the
+        # old behaviour) scanned ifDescr alone and left sub_interfaces empty — child 402 -> parent 401.
+        assert result["sub_interfaces"] == {402: 401}
+
     def test_cisco_ios_lag_via_name_pattern(self, mock_librenms_api, ios_lag_patterns):
         """Cisco IOS: Po10 has propVirtual type but is a LAG via name pattern."""
         result = mock_librenms_api.resolve_port_relationships(

@@ -751,6 +751,20 @@ class LibreNMSAPI:
                 return False
             return child_name[len(parent_name) + 1 :].isdigit()
 
+        def _has_sub_unit_relationship(child_port: dict, parent_port: dict) -> bool:
+            """
+            Return True when child_port has a numeric sub-unit name relationship to parent_port.
+
+            Scans ALL known names of each port (not just the primary), mirroring the SAP guard
+            below: with interface_name_field="ifDescr" the ``.N`` sub-unit marker can live in ifName
+            while the primary (ifDescr) carries a clean name, so a primary-only check would miss it.
+            """
+            return any(
+                _is_sub_unit_of(child_name, parent_name)
+                for child_name in _port_names(child_port)
+                for parent_name in _port_names(parent_port)
+            )
+
         for entry in port_stack:
             if not isinstance(entry, dict):
                 continue
@@ -784,10 +798,10 @@ class LibreNMSAPI:
             # check BOTH directions. Without the reverse check a parent=low/child=high pair
             # falls through to the LAG branch, where _resolve_physical collapses both names to
             # the same base and the self-reference guard silently drops the relationship.
-            if _is_sub_unit_of(l_name, h_name):
+            if _has_sub_unit_relationship(low_port, high_port):
                 _relate(sub_interfaces, low_port, high_port)  # low is the child, high the parent
                 continue
-            if _is_sub_unit_of(h_name, l_name):
+            if _has_sub_unit_relationship(high_port, low_port):
                 _relate(sub_interfaces, high_port, low_port)  # high is the child, low the parent
                 continue
 

@@ -545,31 +545,36 @@ class TestSingleInterfaceVerifyView:
         }
 
         view = self._make_view()
-        cache.set(view.get_cache_key(device, "ports", "default"), {"ports": [port_data]})
+        # cache.set() writes the real cache backend (NOT rolled back with the test DB); clean
+        # the key up even on assertion failure so a reused device PK cannot read stale ports.
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, {"ports": [port_data]})
+        try:
+            request = RequestFactory().post(
+                "/plugins/librenms_plugin/verify-interface/",
+                data=json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "interface_name": "GigabitEthernet0/1",
+                        "interface_name_field": "ifDescr",
+                        "port_id": 42,
+                        "server_key": "default",
+                    }
+                ),
+                content_type="application/json",
+            )
+            response = view.post(request)
 
-        request = RequestFactory().post(
-            "/plugins/librenms_plugin/verify-interface/",
-            data=json.dumps(
-                {
-                    "device_id": device.pk,
-                    "interface_name": "GigabitEthernet0/1",
-                    "interface_name_field": "ifDescr",
-                    "port_id": 42,
-                    "server_key": "default",
-                }
-            ),
-            content_type="application/json",
-        )
-        response = view.post(request)
-
-        assert response.status_code == 200
-        formatted = json.loads(response.content)["formatted_row"]
-        # The 'enabled' badge compares the RESOLVED interface's enabled flag against the port's
-        # up state. Resolving by stable port_id picks the enabled id-42 interface → green match;
-        # a display-name fallback would pick the disabled decoy → an orange mismatch. So a green
-        # badge proves port_id precedence over the name lookup — asserted on real rendered output.
-        assert "text-success" in formatted["enabled"]
-        assert "text-warning" not in formatted["enabled"]
+            assert response.status_code == 200
+            formatted = json.loads(response.content)["formatted_row"]
+            # The 'enabled' badge compares the RESOLVED interface's enabled flag against the port's
+            # up state. Resolving by stable port_id picks the enabled id-42 interface → green match;
+            # a display-name fallback would pick the disabled decoy → an orange mismatch. So a green
+            # badge proves port_id precedence over the name lookup — asserted on real rendered output.
+            assert "text-success" in formatted["enabled"]
+            assert "text-warning" not in formatted["enabled"]
+        finally:
+            cache.delete(cache_key)
 
     @pytest.mark.django_db
     def test_verify_repaint_payload_includes_member_specific_librenms_id_cell(self):
@@ -601,30 +606,35 @@ class TestSingleInterfaceVerifyView:
         }
 
         view = self._make_view()
-        cache.set(view.get_cache_key(device, "ports", "default"), {"ports": [port_data]})
+        # cache.set() writes the real cache backend (NOT rolled back with the test DB); clean
+        # the key up even on assertion failure so a reused device PK cannot read stale ports.
+        cache_key = view.get_cache_key(device, "ports", "default")
+        cache.set(cache_key, {"ports": [port_data]})
+        try:
+            request = RequestFactory().post(
+                "/plugins/librenms_plugin/verify-interface/",
+                data=json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "interface_name": "Gi0/1",
+                        "interface_name_field": "ifName",
+                        "port_id": 42,
+                        "server_key": "default",
+                    }
+                ),
+                content_type="application/json",
+            )
+            response = view.post(request)
 
-        request = RequestFactory().post(
-            "/plugins/librenms_plugin/verify-interface/",
-            data=json.dumps(
-                {
-                    "device_id": device.pk,
-                    "interface_name": "Gi0/1",
-                    "interface_name_field": "ifName",
-                    "port_id": 42,
-                    "server_key": "default",
-                }
-            ),
-            content_type="application/json",
-        )
-        response = view.post(request)
-
-        assert response.status_code == 200
-        formatted = json.loads(response.content)["formatted_row"]
-        # The cell must be present (it was previously dropped from the repaint payload) and
-        # reflect THIS member: port_id 42 matches the resolved interface's stored librenms_id 42,
-        # so the badge is the green "match".
-        assert "librenms_id" in formatted, "verify repaint payload dropped the librenms_id cell"
-        assert "text-success" in formatted["librenms_id"]
+            assert response.status_code == 200
+            formatted = json.loads(response.content)["formatted_row"]
+            # The cell must be present (it was previously dropped from the repaint payload) and
+            # reflect THIS member: port_id 42 matches the resolved interface's stored librenms_id 42,
+            # so the badge is the green "match".
+            assert "librenms_id" in formatted, "verify repaint payload dropped the librenms_id cell"
+            assert "text-success" in formatted["librenms_id"]
+        finally:
+            cache.delete(cache_key)
 
 
 class TestSingleModuleVerifyView:
