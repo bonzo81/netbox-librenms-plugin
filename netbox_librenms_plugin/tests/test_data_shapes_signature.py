@@ -208,6 +208,24 @@ def test_classify_novelty_new_for_different_vendor_same_shape():
     assert classify_novelty(sig, manifest)["verdict"] == "new"
 
 
+def test_classify_novelty_distinguishes_vc_member_count():
+    """A capture identical except for VC member_count must not be reported 'likely-covered' — member_count is a structural axis, so the narrower set of axes would wrongly collapse them."""
+    manifest = build_manifest([load_recording("cisco-stackwise-3member")])
+    sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
+    vc = sig["virtual_chassis"]
+    assert vc["member_count"] >= 2  # the recording really is a multi-member VC
+    sig["virtual_chassis"] = {**vc, "member_count": vc["member_count"] - 1}  # same OS/shape, fewer members
+    assert classify_novelty(sig, manifest)["verdict"] != "likely-covered"
+
+
+def test_classify_novelty_distinguishes_transceiver_presence():
+    """A capture identical except for transceiver presence must not be reported 'likely-covered' — transceivers is a structural axis the narrower set dropped."""
+    manifest = build_manifest([load_recording("cisco-stackwise-3member")])
+    sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
+    sig["transceivers"] = not sig["transceivers"]  # flip optics presence, keep OS + everything else
+    assert classify_novelty(sig, manifest)["verdict"] != "likely-covered"
+
+
 def test_classify_novelty_skips_malformed_manifest_entries():
     """A malformed manifest item (a non-dict entry, or a null/non-dict signature) must be skipped, not crash novelty eval — the valid sibling entry is still matched."""
     good = build_manifest([load_recording("cisco-stackwise-3member")])

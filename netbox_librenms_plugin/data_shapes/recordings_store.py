@@ -29,6 +29,10 @@ def iter_recording_paths():
 def load_recording(name: str) -> dict:
     """Load a single recording by name, with or without the ``.json`` suffix."""
     filename = name if name.endswith(".json") else f"{name}.json"
+    # The manifest is a list of signatures, not a recording — iter_recording_paths() excludes it,
+    # so reject it here too rather than return a list from a helper that advertises a single dict.
+    if filename == MANIFEST_NAME:
+        raise ValueError("manifest.json is not a recording")
     # Constrain the resolved path to RECORDINGS_DIR so a name like "../../secrets" can't escape
     # the recordings directory (defensive: callers pass fixed fixture names today, but keep the
     # loader safe if a name ever becomes caller-derived).
@@ -38,7 +42,10 @@ def load_recording(name: str) -> dict:
         candidate.relative_to(base_dir)
     except ValueError as exc:
         raise ValueError(f"Invalid recording name: {name!r}") from exc
-    return json.loads(candidate.read_text())
+    loaded = json.loads(candidate.read_text())
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{filename!r} is not a recording object")
+    return loaded
 
 
 def iter_recordings() -> list[dict]:

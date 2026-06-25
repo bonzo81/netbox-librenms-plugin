@@ -57,7 +57,7 @@
           "purpose": null,
           "type": "network",
           "serial": "SN-ad382c",
-          "icon": "images/os/cisco.svg",
+          "icon": "images/os/generic.svg",
           "poller_group": 0,
           "override_sysLocation": false,
           "notes": null,
@@ -94,7 +94,7 @@
           "entPhysicalSerialNum": "SN-ad382c",
           "entPhysicalContainedIn": 0,
           "entPhysicalParentRelPos": -1,
-          "entPhysicalMfgName": "Cisco Systems Inc",
+          "entPhysicalMfgName": "MFG-f19536",
           "entPhysicalMfgDate": null,
           "ifIndex": null
         }

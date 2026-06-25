@@ -37,6 +37,22 @@ def test_load_recording_rejects_path_traversal():
         load_recording("../../../../../../etc/passwd")
 
 
+def test_load_recording_rejects_manifest_and_non_dict(monkeypatch, tmp_path):
+    """load_recording advertises a single recording dict: the manifest (a list) and any non-dict JSON must raise, not silently return a list."""
+    from netbox_librenms_plugin.data_shapes import recordings_store
+    from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+
+    # The manifest is a list of signatures, not a recording — rejected by name.
+    with pytest.raises(ValueError, match="not a recording"):
+        load_recording("manifest")
+
+    # A non-dict recording JSON is rejected by shape.
+    monkeypatch.setattr(recordings_store, "RECORDINGS_DIR", tmp_path)
+    (tmp_path / "listy.json").write_text("[1, 2, 3]")
+    with pytest.raises(ValueError, match="not a recording object"):
+        load_recording("listy")
+
+
 def test_recording_schema_errors_rejects_bool_int_fields():
     """Bool is an int subclass; True/False for schema_version or device_id must be rejected — a bare `!= 1` / `isinstance(int)` check would otherwise let a malformed recording validate."""
     from netbox_librenms_plugin.data_shapes.recordings_store import recording_schema_errors
@@ -51,7 +67,8 @@ def test_recording_variant_handler_requires_exact_query():
     """The replay matcher must require EXACT query equality: a request carrying an extra unexpected param must NOT subset-match a recorded variant (which would let a request-shape regression false-pass) — it must fail closed with 404."""
     from netbox_librenms_plugin.tests.mock_librenms_server import _recording_variant_handler
 
-    variants = [({"columns": "ifName"}, 200, {"status": "ok"})]
+    # Recorded qdicts carry the full sorted value tuple per key (as the registration path builds them).
+    variants = [({"columns": ("ifName",)}, 200, {"status": "ok"})]
     handler = _recording_variant_handler("/ports", variants)
 
     # Exact query → the recorded response.
@@ -59,6 +76,35 @@ def test_recording_variant_handler_requires_exact_query():
     # An extra unexpected param is a different request shape → 404, not a subset false-pass.
     status, _body = handler("GET", "/ports", {"columns": ["ifName"], "extra": ["x"]}, {}, None)
     assert status == 404
+
+
+def test_load_recording_distinguishes_repeated_query_params():
+    """Two variants differing only by a repeated param (?columns=A vs ?columns=A&columns=B) must register as distinct shapes and replay to their own bodies — collapsing to the first value would false-match."""
+    from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+
+    server = MockLibreNMSServer()
+    try:
+        server.load_recording(
+            {
+                "responses": {
+                    "GET /api/v0/devices/1/ports?columns=ifName": {"status": "single"},
+                    "GET /api/v0/devices/1/ports?columns=ifName&columns=ifDescr": {"status": "double"},
+                }
+            }
+        )
+        handler = server.routes["GET /api/v0/devices/1/ports"]
+        assert callable(handler)  # two distinct variants → a selecting handler, not a static tuple
+        # Each request shape routes to its OWN body (the old v[0] collapse served "single" for both).
+        assert handler("GET", "/api/v0/devices/1/ports", {"columns": ["ifName"]}, {}, None) == (
+            200,
+            {"status": "single"},
+        )
+        assert handler("GET", "/api/v0/devices/1/ports", {"columns": ["ifName", "ifDescr"]}, {}, None) == (
+            200,
+            {"status": "double"},
+        )
+    finally:
+        server._server.server_close()
 
 
 def test_get_ports_real_fetch_and_parse_via_recording(recording_server):
@@ -103,6 +149,57 @@ def test_bundled_recording_has_no_public_asn(recording):
                 _walk(item)
 
     _walk(recording.get("responses", {}))
+
+
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_recording_has_anonymized_vendor_metadata(recording):
+    """A committed recording must carry the anonymizer's normalized icon (generic.svg) and a pseudonymized entPhysicalMfgName (MFG-<hash>) — a raw value means the fixture predates an anonymizer rule and re-leaks vendor metadata."""
+    import re
+
+    mfg_re = re.compile(r"^MFG-[0-9a-f]{6}$")
+    leaked = []
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k == "icon" and isinstance(v, str) and v and v != "images/os/generic.svg":
+                    leaked.append((k, v))
+                if k == "entPhysicalMfgName" and isinstance(v, str) and v and not mfg_re.match(v):
+                    leaked.append((k, v))
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(recording)
+    assert not leaked, f"{recording.get('name')}: un-anonymized vendor metadata: {leaked}"
+
+
+def test_make_recording_api_delegates_non_servers_config_to_real():
+    """make_recording_api patches ONLY the 'servers' lookup: other keys (including a 3-arg defaulted call) must delegate to the real config — never returning None or raising a TypeError on the extra arg."""
+    import netbox_librenms_plugin.librenms_api as api_mod
+    from netbox_librenms_plugin.tests.conftest import make_recording_api
+
+    # What the real config returns for a non-'servers' key (computed outside the patch).
+    expected_other = api_mod.get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
+
+    captured = {}
+    real_init = api_mod.LibreNMSAPI.__init__
+
+    def spy_init(self, *args, **kwargs):
+        # While make_recording_api's patch is active, exercise the patched get_plugin_config the
+        # way a construction-time read would: the 'servers' key (mocked) and another key with a
+        # default 3rd arg (must delegate to the real config, not return None or raise).
+        captured["servers"] = api_mod.get_plugin_config("netbox_librenms_plugin", "servers")
+        captured["other"] = api_mod.get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
+        return real_init(self, *args, **kwargs)
+
+    with patch.object(api_mod.LibreNMSAPI, "__init__", spy_init):
+        make_recording_api("http://127.0.0.1:9", server_key="test")
+
+    # 'servers' is the injected mock; every other key faithfully delegates to the real config.
+    assert "test" in captured["servers"]
+    assert captured["other"] == expected_other
 
 
 def test_manifest_is_in_sync_with_bundled_recordings():

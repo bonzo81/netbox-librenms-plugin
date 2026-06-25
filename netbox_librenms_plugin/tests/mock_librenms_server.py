@@ -277,7 +277,9 @@ class MockLibreNMSServer:
             if not sep:  # No verb prefix → default to GET on the whole key.
                 method, rest = "GET", key
             path, _, query = rest.partition("?")
-            qdict = {k: v[0] for k, v in parse_qs(query).items()} if query else {}
+            # Keep the FULL value set per key (sorted) so a repeated param like ?a=1&a=2 is a
+            # distinct shape from ?a=1 — collapsing to v[0] would let them false-match.
+            qdict = {k: tuple(sorted(v)) for k, v in parse_qs(query, keep_blank_values=True).items()} if query else {}
             if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
                 status, body = value
             else:
@@ -342,7 +344,7 @@ def _recording_variant_handler(path: str, variants: list):
     """
 
     def _handler(method, path, query, headers, body):
-        incoming = {k: (v[0] if isinstance(v, list) else v) for k, v in (query or {}).items()}
+        incoming = {k: tuple(sorted(v if isinstance(v, list) else [v])) for k, v in (query or {}).items()}
         # Require EXACT query equality: a subset/contains match would let a request carrying extra
         # unexpected params still replay a cached response, so a request-shape regression would
         # false-pass instead of failing closed (404).

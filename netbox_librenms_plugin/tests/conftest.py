@@ -608,6 +608,7 @@ def make_recording_api(url, *, server_key="test", token="test-token"):
         LibreNMSAPI: A client configured to talk to the mock server.
     """
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.librenms_api import get_plugin_config as real_get_plugin_config
 
     servers_config = {
         server_key: {
@@ -618,7 +619,13 @@ def make_recording_api(url, *, server_key="test", token="test-token"):
         }
     }
     with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-        mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
+        # Patch ONLY the "servers" lookup; delegate every other plugin-setting key to the real
+        # config so an API path that reads another setting under test still sees production values.
+        # Accept *args/**kwargs so a defaulted 3-arg call (get_plugin_config(plugin, key, default))
+        # doesn't trip an arity error.
+        mock_cfg.side_effect = lambda plugin, key, *args, **kwargs: (
+            servers_config if key == "servers" else real_get_plugin_config(plugin, key, *args, **kwargs)
+        )
         return LibreNMSAPI(server_key=server_key)
 
 

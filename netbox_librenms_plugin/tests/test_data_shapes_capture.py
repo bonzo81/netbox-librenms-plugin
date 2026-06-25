@@ -7,6 +7,8 @@ capture and replay are faithful.
 
 from unittest.mock import patch
 
+import pytest
+
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
 from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
@@ -322,3 +324,36 @@ def test_capture_skips_oob_ports_when_oob_id_equals_host():
     # The host id is not recorded as its own OOB controller, so no self-collision on the ports key.
     assert "oob_id" not in captured["meta"]
     assert captured["responses"]["GET /api/v0/devices/1000/ports"]["ports"] == [{"port_id": 1, "ifName": "Gi0/1"}]
+
+
+def _all_ok_routes():
+    """Routes where every structural endpoint answers 200 — a happy-path capture base."""
+    return {
+        "devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
+        "inventory/1000": {"status": "ok", "inventory": []},
+        "inventory/1000/all": {"status": "ok", "inventory": []},
+        "devices/1000/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "Gi0/1"}]},
+        "devices/1000/port_stack": {"status": "ok", "mappings": []},
+        "devices/1000/transceivers": {"status": "ok", "transceivers": []},
+    }
+
+
+def test_capture_raises_when_required_route_has_transport_error():
+    """A required structural route (here port_stack) with no HTTP response must fail the capture, not persist a partial recording."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes["devices/1000/port_stack"] = (0, None)  # transport error on a REQUIRED route
+
+    with pytest.raises(RuntimeError, match="port_stack"):
+        capture_device_recording(api, 1000)
+
+
+def test_capture_ignores_caller_supplied_oob_id_without_controller():
+    """A caller-supplied meta['oob_id'] must not mark a plain recording as OOB — oob_id is authoritative and set only when controller ports are actually captured."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+
+    captured = capture_device_recording(api, 1000, meta={"oob_id": 999, "note": "kept"})
+
+    # The spoofed oob_id is dropped (no controller was captured); unrelated caller meta is preserved.
+    assert "oob_id" not in captured["meta"]
+    assert captured["meta"].get("note") == "kept"
+    assert compute_shape_signature(captured)["oob"] is False

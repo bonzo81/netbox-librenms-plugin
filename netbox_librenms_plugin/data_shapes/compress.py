@@ -68,6 +68,29 @@ def _port_stack_referenced(recording):
     return referenced
 
 
+def _transceiver_referenced(recording):
+    """
+    Return the set of str port ids referenced by any captured transceiver (0/"0" excluded).
+
+    Transceivers point at ports by ``port_id``; if compression drops those ports the replay is no
+    longer a self-consistent LibreNMS dataset (the transceiver-merge can't map them to a port name),
+    so they must be kept alongside the port_stack-referenced ones.
+    """
+    tx_key = _route_key(recording, "/transceivers")
+    referenced = set()
+    if tx_key is None:
+        return referenced
+    tx_body = _unwrap(recording["responses"][tx_key])
+    entries = tx_body.get("transceivers") if isinstance(tx_body, dict) else None
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        port_id = entry.get("port_id")
+        if port_id not in (None, 0, "0"):
+            referenced.add(str(port_id))
+    return referenced
+
+
 def _add_base_name_ports(dict_ports, by_name, keep_ids):
     """
     Grow *keep_ids* to include base-level ports that kept ``parent.N`` names resolve to (fixpoint).
@@ -136,7 +159,7 @@ def compress_recording(recording):
 
     # Always keep the ports whose relationships we must preserve: those named by port_stack, plus the
     # base-level ports their ``.N`` names resolve to.
-    referenced = _port_stack_referenced(recording)
+    referenced = _port_stack_referenced(recording) | _transceiver_referenced(recording)
     keep_ids = {str(p.get("port_id")) for p in dict_ports if str(p.get("port_id")) in referenced}
     _add_base_name_ports(dict_ports, by_name, keep_ids)
 

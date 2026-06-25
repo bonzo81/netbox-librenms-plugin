@@ -182,13 +182,22 @@ def compute_shape_signature(recording):
 
 
 def _structural_axes(signature):
-    """Reduce a signature to its OS-independent shape axes (VC + LAG + sub-interface + OOB presence)."""
+    """Reduce a signature to the OS-independent shape axes used for novelty matching."""
     vc = signature.get("virtual_chassis", {})
+    lag = signature.get("lag", {})
+    sub = signature.get("sub_interfaces", {})
     return (
         vc.get("present", False),
         vc.get("root_class"),
-        signature.get("lag", {}).get("present", False),
-        signature.get("sub_interfaces", {}).get("present", False),
+        vc.get("member_count"),
+        vc.get("position_base"),
+        lag.get("present", False),
+        lag.get("name_prefix"),
+        sub.get("present", False),
+        tuple(sub.get("styles", ())),
+        signature.get("port_stack", False),
+        signature.get("vlans", False),
+        signature.get("transceivers", False),
         signature.get("oob", False),
     )
 

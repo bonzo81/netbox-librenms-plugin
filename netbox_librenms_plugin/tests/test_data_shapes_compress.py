@@ -107,6 +107,28 @@ def test_compression_drops_redundant_cardinality():
     assert comp["meta"]["compressed_ports"] == {"from": 208, "to": 9}
 
 
+def test_compression_keeps_transceiver_linked_ports():
+    """A port referenced by a transceiver survives compression even when fingerprint-dedup would drop it — otherwise the transceiver dangles and the replay is no longer self-consistent."""
+    rec = _large_recording()
+    # Point a transceiver at access-50 (port_id 1050), one of the redundant same-fingerprint access
+    # ports that dedup would otherwise collapse into the access-0 representative.
+    rec["responses"]["GET /api/v0/devices/4242/transceivers"] = {
+        "status": "ok",
+        "transceivers": [{"port_id": 1050, "type": "QSFP28", "serial": "SN-x", "model": "M1"}],
+    }
+
+    comp = compress_recording(rec)
+    comp_ports = comp["responses"]["GET /api/v0/devices/4242/ports"]["ports"]
+    comp_ids = {p["port_id"] for p in comp_ports}
+
+    # The transceiver's port is kept (referential integrity)...
+    assert 1050 in comp_ids
+    # ...while the OTHER 198 redundant access ports still collapse: only access-0 (fingerprint
+    # representative) and access-50 (transceiver-linked) remain.
+    access_kept = sorted(p["ifName"] for p in comp_ports if p["ifName"].startswith("access-"))
+    assert access_kept == ["access-0", "access-50"]
+
+
 def test_compression_is_noop_without_redundancy():
     """A recording with no droppable ports is returned unchanged (no meta annotation added)."""
     rec = _large_recording()

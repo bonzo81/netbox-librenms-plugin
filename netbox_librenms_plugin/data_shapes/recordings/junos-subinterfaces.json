@@ -57,7 +57,7 @@
           "purpose": null,
           "type": "network",
           "serial": "SN-8c6448",
-          "icon": "images/os/junos.png",
+          "icon": "images/os/generic.svg",
           "poller_group": 0,
           "override_sysLocation": false,
           "notes": null,

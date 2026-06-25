@@ -175,6 +175,25 @@ def test_find_pii_flags_residual_pii_in_unexpected_field():
     assert not any(f["kind"] == "email" for f in find_pii(anon))
 
 
+def test_find_pii_does_not_echo_secret_value_after_redaction():
+    """A secret-keyed value that also looks like PII must be redacted once, never re-reported with the raw secret echoed."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        # 'authkey' is a secret-key hint; the value also matches the email regex.
+        "devices": [{"device_id": 1, "snmp_authkey": "admin@corp.example.com"}],
+    }
+
+    findings = find_pii(rec)
+
+    secret_findings = [f for f in findings if f["path"].endswith("snmp_authkey")]
+    # The secret key is reported exactly once, redacted — never recursed into and re-flagged.
+    assert secret_findings == [{"path": secret_findings[0]["path"], "kind": "credential", "value": "<redacted>"}]
+    # The raw secret value is never echoed (neither verbatim nor as an "email" finding).
+    assert not any(f["value"] == "admin@corp.example.com" for f in findings)
+    assert not any(f["kind"] == "email" for f in findings)
+
+
 def test_find_pii_scans_top_level_fields_not_just_responses():
     """find_pii must scan the whole recording — residual PII in a top-level field (name/description/meta) is missed if only `responses` is scanned."""
     rec = _ports()

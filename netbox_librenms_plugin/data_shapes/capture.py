@@ -70,7 +70,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             key += "?" + "&".join(f"{k}={v}" for k, v in key_params.items())
         return key
 
-    def record(path, request_params=None, *, key_params="__same__"):
+    def record(path, request_params=None, *, key_params="__same__", required=False):
         """Issue one raw GET and store it under its route key (key_params=None → path-only)."""
         status, body = api._raw_get(path, request_params)
         if key_params == "__same__":
@@ -80,6 +80,12 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         # calls send_response(0), an out-of-range HTTP status — so skip any route that never produced
         # a real HTTP status. A genuine non-2xx (e.g. 404) IS a real status and is still recorded.
         if not (100 <= status < 600):
+            # A required structural route that never answered means the capture is incomplete:
+            # persisting it would ship a partial fixture (missing device/ports/port_stack) as if
+            # capture succeeded. Fail loudly instead. (Optional routes like transceivers may be
+            # legitimately absent/timed out, so they are not required.)
+            if required:
+                raise RuntimeError(f"Capture failed for {path!r}: no HTTP response (status {status})")
             return status, body
         responses[_route_key(path, key_params)] = body if 200 <= status < 300 else [status, body]
         return status, body
@@ -117,7 +123,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         return filtered
 
     # 1. Device info (also the source of the os metadata).
-    _, dev_body = record(f"devices/{device_id}")
+    _, dev_body = record(f"devices/{device_id}", required=True)
     device_os = None
     if isinstance(dev_body, dict):
         devices = dev_body.get("devices")
@@ -139,8 +145,8 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     # 3. Ports (request VLAN data so the body matches what get_ports reads) and 4. port_stack
     #    (LAG / sub-interface relationships). Both are keyed path-only — there's a single variant
     #    per path, so the loader serves it for any query the production readers send.
-    record(f"devices/{device_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
-    record(f"devices/{device_id}/port_stack")
+    record(f"devices/{device_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None, required=True)
+    record(f"devices/{device_id}/port_stack", required=True)
 
     # 5. Transceivers (optics shape). Per-device route — safe to record verbatim; anonymization
     #    pseudonymizes the transceiver serial and preserves the optics shape plus the `model` SKU
@@ -163,8 +169,11 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     #    Record them under the controller's own /ports route so replay's get_ports(oob_id) serves them.
     # Spread caller meta first, then stamp the captured device_os last so it always wins — a
     # caller-supplied meta["os"] must not override the OS we actually captured (it scopes
-    # signature/novelty behavior).
-    meta_out = {**(meta or {}), "os": device_os}
+    # signature/novelty behavior). Drop any caller-supplied oob_id: it's the authoritative OOB
+    # signal (signature reads meta["oob_id"]), so it must be set ONLY below when controller ports
+    # are actually recorded — never spoofed in by a caller without an OOB capture.
+    meta_out = {k: v for k, v in (meta or {}).items() if k != "oob_id"}
+    meta_out["os"] = device_os
     # Skip a (misconfigured) OOB controller whose LibreNMS id equals the host's own id: its ports
     # route devices/<oob_id>/ports is the SAME key as the host's, so recording it would overwrite the
     # host's ports — and a device is not its own out-of-band controller.

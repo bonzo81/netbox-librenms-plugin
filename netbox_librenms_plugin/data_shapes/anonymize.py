@@ -484,8 +484,12 @@ def find_pii(recording):
     def scan(obj, path, key=None):
         if isinstance(obj, dict):
             for k, v in obj.items():
-                if isinstance(v, str) and v and any(hint in k.lower() for hint in _SECRET_KEY_HINTS):
+                is_secret_key = any(hint in k.lower() for hint in _SECRET_KEY_HINTS)
+                if isinstance(v, str) and v and is_secret_key:
                     findings.append({"path": f"{path}.{k}", "kind": "credential", "value": "<redacted>"})
+                    # Don't recurse into a flagged secret's value: re-scanning it would re-report the
+                    # raw string as ipv4/mac/email/fqdn, echoing the very secret we just redacted.
+                    continue
                 scan(v, f"{path}.{k}", k)
         elif isinstance(obj, list):
             for i, v in enumerate(obj):
