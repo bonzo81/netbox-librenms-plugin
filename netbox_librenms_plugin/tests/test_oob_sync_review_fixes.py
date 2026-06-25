@@ -358,3 +358,43 @@ class TestSyncUrlUnboundApiDoesNotReconstructDefault:
         # configured server). It degrades to a bare redirect instead.
         mock_api.assert_not_called()
         assert "server_key=" not in resp.url
+
+
+class TestRebindOrHtmxErrorHelper:
+    """The extracted fail-closed rebind helper used across the import HTMX endpoints."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.imports.actions import AddDeviceTypeMappingView
+
+        view = object.__new__(AddDeviceTypeMappingView)  # any LibreNMSAPIMixin view
+        view._librenms_api = None
+        return view
+
+    def test_unresolved_server_key_returns_htmx_error_toast(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _rebind_or_htmx_error
+
+        view = self._view()
+        request = RequestFactory().post("/", {"server_key": "ghost"})
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            resp = _rebind_or_htmx_error(view, request)
+
+        assert resp is not None
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"no longer configured" in resp.content
+
+    def test_resolved_server_key_returns_none_and_binds(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _rebind_or_htmx_error
+
+        view = self._view()
+        request = RequestFactory().post("/", {"server_key": "prod"})
+        with patch(
+            "netbox_librenms_plugin.librenms_api.build_librenms_api",
+            return_value=MagicMock(server_key="prod"),
+        ):
+            assert _rebind_or_htmx_error(view, request) is None
+        assert view._librenms_api.server_key == "prod"

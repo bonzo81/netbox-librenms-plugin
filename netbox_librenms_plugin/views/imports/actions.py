@@ -187,6 +187,28 @@ def _htmx_error_response(message: str) -> HttpResponse:
     return resp
 
 
+def _rebind_or_htmx_error(view, request) -> HttpResponse | None:
+    """
+    Rebind ``view.librenms_api`` to the POSTed ``server_key``, failing closed.
+
+    Base/import HTMX endpoints must re-scope the client to the tab the user acted on before any
+    live lookup. Returns an :func:`_htmx_error_response` toast when the posted key is
+    blank/unknown/misconfigured (so a missing or broken default can't 500 via the lazy
+    ``librenms_api`` property), else ``None`` so the caller proceeds.
+
+    Args:
+        view: The view instance providing ``rebind_api_for_server``.
+        request: The current request (source of the ``server_key`` POST param).
+
+    Returns:
+        HttpResponse | None: An HTMX error toast when the rebind fails closed, else ``None``.
+    """
+    post_server_key = (request.POST.get("server_key") or "").strip()
+    if view.rebind_api_for_server(post_server_key) is None:
+        return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+    return None
+
+
 def _platform_device_type_mismatch(device) -> HttpResponse | None:
     """
     Mirror NetBox Device.clean()'s platform/device-type manufacturer rule for save paths.
@@ -535,11 +557,10 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if error := self.require_write_permission():
             return error
 
-        post_server_key = (request.POST.get("server_key") or "").strip()
-        # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
-        # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
-        if self.rebind_api_for_server(post_server_key) is None:
-            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+        # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
+        # or broken default can't 500 via the lazy librenms_api property.
+        if err := _rebind_or_htmx_error(self, request):
+            return err
 
         device_ids = request.POST.getlist("select")
         if not device_ids:
@@ -1379,11 +1400,10 @@ class DeviceConflictActionView(
 
         # If the form submitted a specific server_key, honour it so the handler uses
         # the same server context as the import page when the user clicked the button.
-        post_server_key = (request.POST.get("server_key") or "").strip()
-        # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
-        # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
-        if self.rebind_api_for_server(post_server_key) is None:
-            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+        # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
+        # or broken default can't 500 via the lazy librenms_api property.
+        if err := _rebind_or_htmx_error(self, request):
+            return err
 
         if not action or not existing_device_id:
             return _htmx_error_response("Missing action or existing_device_id")
@@ -1761,11 +1781,10 @@ class AddDeviceTypeMappingView(
         if error := self.require_write_permission():
             return error
 
-        post_server_key = (request.POST.get("server_key") or "").strip()
-        # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
-        # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
-        if self.rebind_api_for_server(post_server_key) is None:
-            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+        # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
+        # or broken default can't 500 via the lazy librenms_api property.
+        if err := _rebind_or_htmx_error(self, request):
+            return err
 
         from dcim.models import DeviceType
 
@@ -2008,11 +2027,10 @@ class CreatePlatformFromImportView(
         if error := self.require_write_permission():
             return error
 
-        post_server_key = (request.POST.get("server_key") or "").strip()
-        # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
-        # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
-        if self.rebind_api_for_server(post_server_key) is None:
-            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+        # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
+        # or broken default can't 500 via the lazy librenms_api property.
+        if err := _rebind_or_htmx_error(self, request):
+            return err
 
         create_mapping = _parse_boolish(request.POST.get("create_mapping")) is True
         device_pk_str = (request.POST.get("device_pk") or "").strip()
@@ -2300,11 +2318,10 @@ class AddAsOOBView(
         if not existing_device_id:
             return _htmx_error_response("Missing existing_device_id")
 
-        post_server_key = (request.POST.get("server_key") or "").strip()
-        # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
-        # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
-        if self.rebind_api_for_server(post_server_key) is None:
-            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+        # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
+        # or broken default can't 500 via the lazy librenms_api property.
+        if err := _rebind_or_htmx_error(self, request):
+            return err
 
         try:
             existing_device = Device.objects.get(pk=int(existing_device_id))
@@ -2852,11 +2869,10 @@ class AddPlatformMappingView(
         from dcim.models import Platform
         from netbox_librenms_plugin.models import PlatformMapping
 
-        post_server_key = (request.POST.get("server_key") or "").strip()
-        # Rebind to the POSTed server, failing closed on a blank/unknown/misconfigured key so a
-        # missing or broken default can't raise a 500 via the lazy self.librenms_api property.
-        if self.rebind_api_for_server(post_server_key) is None:
-            return _htmx_error_response("Selected LibreNMS server is no longer configured.")
+        # Rebind to the POSTed server, failing closed (blank/unknown/misconfigured) so a missing
+        # or broken default can't 500 via the lazy librenms_api property.
+        if err := _rebind_or_htmx_error(self, request):
+            return err
 
         libre_device = fetch_device_with_cache(device_id, self.librenms_api)
         if not libre_device:
