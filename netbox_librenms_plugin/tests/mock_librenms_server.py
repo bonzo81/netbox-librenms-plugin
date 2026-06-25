@@ -259,10 +259,12 @@ class MockLibreNMSServer:
         A recording's ``responses`` map is keyed by request strings using the same
         ``"METHOD /path?query"`` convention the handler matches against. Multiple
         query variants of the same path (e.g. the two ``entPhysicalContainedIn``
-        inventory calls) are collapsed into a single callable route that selects
-        the variant whose recorded query parameters are all present on the incoming
-        request, preferring the most specific match. Matching is order-independent,
-        so it does not depend on how ``requests`` happens to serialize the params.
+        inventory calls) are collapsed into a single callable route that selects the
+        variant whose recorded query parameters EXACTLY match the incoming request's
+        (full set equality, order-independent — not a subset/contains match). A
+        request whose params don't exactly match any recorded variant 404s rather
+        than falling back to a near match, so a replay drift surfaces instead of
+        silently serving the wrong variant.
 
         Args:
             recording (dict): Parsed recording with a ``responses`` mapping. Each
