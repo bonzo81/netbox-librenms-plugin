@@ -2101,8 +2101,14 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
             inherited_oob["id"] = _donor_oob_id
         else:
             inherited_oob.pop("id", None)
-        winner_entry["oob"] = dict(inherited_oob)
-        summary["oob_from_donor"] = dict(inherited_oob)
+        # Don't persist an empty {} oob: a donor oob carrying only a blank/absent id (no type or
+        # other metadata) collapses to {} once the bogus id is dropped. A later merge reads that
+        # empty dict as an OCCUPIED oob slot (winner_oob is not None) and refuses to demote a
+        # subsequent donor host id into it — silently losing that mapping. Only inherit when
+        # something meaningful (a valid id or other oob metadata) actually remains.
+        if inherited_oob:
+            winner_entry["oob"] = dict(inherited_oob)
+            summary["oob_from_donor"] = dict(inherited_oob)
 
     winner_cf[server_key] = winner_entry
     winner.custom_field_data["librenms_id"] = winner_cf

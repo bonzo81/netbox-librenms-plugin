@@ -811,6 +811,40 @@ class TestMergeLibreNMSLinks:
         assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 99, "type": "oob"}
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "oob"}
 
+    def test_blank_only_donor_oob_does_not_persist_empty_oob_slot(self):
+        """A donor oob carrying only a blank id (no other metadata) must NOT leave an empty {} oob.
+
+        The blank id is dropped (validated up-front); with no other metadata the inherited oob
+        collapses to {} and must not be written — a persisted empty dict reads as an occupied slot.
+        """
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("host-win", {"default": {}})
+        donor = self._make_dev("host-don", {"default": {"oob": {"id": "  "}}})  # blank id, nothing else
+        summary = merge_librenms_links(winner, donor, "default")
+
+        entry = winner.custom_field_data["librenms_id"]["default"]
+        assert "oob" not in entry, f"empty oob slot persisted: {entry}"
+        assert summary["oob_from_donor"] is None
+
+    def test_empty_oob_inheritance_does_not_block_a_later_demote(self):
+        """The real harm: a persisted empty {} oob would block a subsequent donor-id demotion.
+
+        Merge a blank-only donor oob into a winner that holds a host id, then merge a second donor
+        whose host id should demote into the (still-free) oob slot. Before the fix the first merge
+        wrote oob={}, which the second merge read as occupied → the second donor id was lost.
+        """
+        from netbox_librenms_plugin.utils import merge_librenms_links
+
+        winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
+        merge_librenms_links(winner, self._make_dev("blank-oob", {"default": {"oob": {"id": " "}}}), "default")
+        # The blank-only oob left the slot free, not occupied by {}.
+        assert "oob" not in winner.custom_field_data["librenms_id"]["default"]
+
+        summary = merge_librenms_links(winner, self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}}), "default")
+        assert winner.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 99
+        assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
+
     def test_demoted_oob_type_prefers_vendor_token_over_generic(self):
         # A donor name carrying a generic 'oob' token BEFORE the vendor token (e.g.
         # 'leaf01-oob-idrac9') must demote with the vendor type ('idrac'), matching the import-path
