@@ -19,6 +19,11 @@ from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device
 
+# A real cache backend that does NOT expose .ttl() (Django's default LocMemCache, like
+# Memcached/DB backends — only django-redis exposes ttl()). Used to prove the cable tab's
+# get_context_data degrades instead of raising AttributeError on a non-Redis backend.
+_NO_TTL_CACHE = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "no-ttl"}}
+
 
 def _get_request(server_key):
     request = RequestFactory().get("/", {"server_key": server_key})
@@ -217,3 +222,41 @@ class TestUnresolvedServerKeyRendersEmpty:
             assert ctx["table"] is None
         finally:
             real_cache.delete(default_key)
+
+
+@pytest.mark.django_db
+def test_cables_get_render_survives_backend_without_ttl(settings):
+    """The cable tab's GET render must not 500 on a non-Redis cache backend (no .ttl()).
+
+    The other four base views already guard ``cache.ttl()`` with ``getattr(cache, "ttl", ...)``;
+    cables was the lone holdout. This swaps in the real Django LocMemCache (which genuinely lacks
+    ``ttl``) via the pytest-django ``settings`` fixture, seeds the links cache so the render
+    reaches the TTL computation, and only patches the HTTP-client boundary — so the unguarded
+    ``cache.ttl()`` would raise AttributeError mid-render here.
+    """
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+    settings.CACHES = _NO_TTL_CACHE  # rebuilds the default-cache proxy to a backend without .ttl()
+    assert not hasattr(real_cache, "ttl"), "test precondition: backend must lack .ttl()"
+
+    device = make_device("nottl-cable")
+    view = DeviceCableTableView()
+    view._librenms_api = MagicMock(server_key="prod")
+    prod_api = MagicMock(server_key="prod")
+    request = _get_request("prod")
+    view.request = request
+
+    # Seed the (LocMemCache) links cache so the render takes the cache-hit path that reaches the
+    # cache.ttl() backfill + expiry computation rather than returning early on a miss.
+    links_key = view.get_cache_key(device, "links", "prod")
+    real_cache.set(links_key, {"links": [{"local_port": "Gi0/1", "local_port_id": 11}]})
+    try:
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=prod_api):
+            # Must not raise AttributeError: 'LocMemCache' object has no attribute 'ttl'.
+            ctx = view.get_context_data(request, device)
+        assert ctx["server_key"] == "prod"
+        assert ctx["table"] is not None
+        # No .ttl() on this backend → expiry degrades to None rather than crashing.
+        assert ctx["cache_expiry"] is None
+    finally:
+        real_cache.delete(links_key)
