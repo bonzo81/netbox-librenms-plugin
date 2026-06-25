@@ -1066,6 +1066,30 @@ class TestRefreshExistingDevice:
         assert validation["existing_match_type"] == "serial"
         assert validation["can_import"] is False
 
+    def test_fresh_lookup_no_match_does_not_requery_librenms_id(self):
+        """The no-match refresh path must not re-run find_by_librenms_id in the name fallback.
+
+        The cross-model collision check already resolves the id against both models (2 queries);
+        _lookup_in_model then does name-only fallbacks. Before the fix it re-queried
+        find_by_librenms_id inside each _lookup_in_model call (4 total) for no result.
+        """
+        from unittest.mock import MagicMock, patch
+
+        import netbox_librenms_plugin.import_utils.bulk_import as bi
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        validation = self._device_validation()
+        # device_id matches no CF; hostname/sysName match no device name; no serial/ip → no match.
+        libre_device = {"device_id": 999142, "hostname": "no-such-host-xyzzy", "sysName": "no-such-host-xyzzy"}
+
+        spy = MagicMock(side_effect=bi.find_by_librenms_id)  # real call, just counted
+        with patch.object(bi, "find_by_librenms_id", spy):
+            _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"] is None
+        # Exactly the two cross-model collision-check queries (Device + VM); no redundant re-query.
+        assert spy.call_count == 2, f"expected 2 find_by_librenms_id calls, got {spy.call_count}"
+
     def test_fresh_lookup_no_role_clears_stale_role_blocker(self):
         """When a fresh lookup resolves a previously-unmatched row to an existing device, the stale "Device role must be manually selected" blocker must be cleared so it doesn't linger in the UI (the row is force-blocked as an existing match regardless)."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device

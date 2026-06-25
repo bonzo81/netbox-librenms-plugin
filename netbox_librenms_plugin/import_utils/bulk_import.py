@@ -655,11 +655,14 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         found_as_cross_model = False
 
         def _lookup_in_model(m):
-            """Return (device, match_type) for model m, or (None, None)."""
-            if librenms_id is not None:
-                dev = find_by_librenms_id(m, librenms_id, server_key)
-                if dev:
-                    return dev, "librenms_id"
+            """
+            Return (device, match_type) by NAME for model m, or (None, None).
+
+            The librenms_id match is resolved up-front by the cross-model collision check below
+            and short-circuits (sets ``new_device``) before this is ever reached, so re-running
+            ``find_by_librenms_id(m, ...)`` here would just repeat that query for no result. This
+            does only the name/hostname/sysName fallbacks.
+            """
             resolved_name = validation.get("resolved_name")
             if resolved_name:
                 dev = m.objects.filter(name__iexact=resolved_name).first()
