@@ -490,6 +490,34 @@ class LibreNMSAPIMixin:
         # so live fetches and cache writes target the same server.
         return api.server_key
 
+    def resolve_get_render_server_key(self, request):
+        """
+        Resolve and rebind ``self.librenms_api`` for a GET-render cache read.
+
+        On a full page render the orchestrator delegates to each tab's ``get_context_data``
+        without a ``server_key`` and never rebinds the client, so every sync tab must rebind
+        itself to the request's ``?server_key`` — otherwise it reads the *default* server's
+        cache and renders an empty table right after a successful refresh on another server. A
+        blank/absent query falls back to the session/default server, so single-server and
+        default-server renders are unchanged.
+
+        Args:
+            request: The current request; ``?server_key`` is read from its GET params.
+
+        Returns:
+            tuple[str | None, bool]: ``(scoped_key, unresolved)``. ``scoped_key`` is the key
+                to scope the cache read to. ``unresolved`` is True when ``?server_key`` named a
+                non-blank server that no longer resolves (deleted/misconfigured); a caller that
+                wants to short-circuit can render an empty table scoped to ``scoped_key`` rather
+                than fall back to the default server's cached data.
+        """
+        requested = (request.GET.get("server_key") or "").strip()
+        resolved = self.rebind_api_for_server(requested)
+        if requested and resolved is None:
+            return requested, True
+        scoped = resolved if resolved is not None else (requested or getattr(self.librenms_api, "server_key", None))
+        return scoped, False
+
     def get_server_info(self):
         """
         Get information about the currently active LibreNMS server.

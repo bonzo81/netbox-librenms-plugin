@@ -489,24 +489,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # (GET query), matching the server post() rebinds to and caches under. Without this the
         # GET render keys on the lazy default server_key, so a non-default-server tab cache-misses
         # (empty module table despite a successful refresh) and the OOB-invalidation guard no-ops.
-        # rebind_api_for_server falls back to the session/default server when the query is blank,
-        # so single-server and default-server renders are unchanged.
-        requested_server = (request.GET.get("server_key") or "").strip()
-        resolved_server = self.rebind_api_for_server(requested_server)
-        if requested_server and resolved_server is None:
+        # The shared helper falls back to the session/default server when the query is blank, so
+        # single-server and default-server renders are unchanged.
+        scoped_server, unresolved = self.resolve_get_render_server_key(request)
+        if unresolved:
             # The query named a server that no longer resolves (deleted/misconfigured). Render an
             # empty table scoped to that key instead of silently falling back to the default
             # server's cached inventory and attributing it to the requested server.
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": requested_server}
-        # Resolve the server key through the DEGRADING helper (mirrors the cables/IP tabs):
-        # the lazy librenms_api property raises KeyError/ValueError on a missing or
-        # misconfigured server config, which would 500 the whole sync-page render for this
-        # tab. With no buildable client there is no valid server scope (and the librenms_id
-        # validation below needs the client too), so degrade to the empty panel — its
-        # refresh POST surfaces the configuration error properly.
-        server_key = self._render_server_key()
-        if server_key is None:
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": None}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+        # The helper already rebound self.librenms_api to the scoped server; bind the resolved key
+        # to a local so the cache read + OOB fingerprint below don't repeatedly hit the lazy
+        # librenms_api property (which can re-raise a misconfigured-server error mid-render).
+        server_key = scoped_server
         sync_device = self._get_sync_device(obj)
         cache_key = self.get_cache_key(sync_device, "inventory", server_key=server_key)
         cached_payload = cache.get(cache_key)

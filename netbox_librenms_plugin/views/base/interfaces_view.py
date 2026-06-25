@@ -400,19 +400,10 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             interface_name_field = get_interface_name_field(request)
 
         if server_key is None:
-            # GET render (no POST-resolved key threaded in): rebind the client to the server
-            # from the request query so the ports-cache read scopes to the same server post()
-            # cached under. Without this a non-default-server tab reads the default-server cache
-            # and renders empty after a successful refresh. Mirrors modules_view.get_context_data;
-            # a blank/absent query falls back to the session/default server.
-            requested = (request.GET.get("server_key") or "").strip()
-            resolved = self.rebind_api_for_server(requested)
-            # An unresolved non-blank key (deleted/misconfigured server) scopes to that key so the
-            # cache read misses and we render empty for it, not the default server's cached rows.
-            # getattr does NOT protect the fallback: the lazy librenms_api property RAISES
-            # KeyError/ValueError (not AttributeError) on a misconfigured server config, 500ing the
-            # cached tab render — use the degrading resolve like cables/IP.
-            server_key = resolved if resolved is not None else (requested or self._render_server_key())
+            # GET render (no POST-resolved key threaded in): rebind + scope the ports-cache read
+            # to ?server_key (shared helper) so a non-default-server tab reads that server's
+            # cache, not the default's. An unresolved non-blank key scopes to that key (miss).
+            server_key, _unresolved = self.resolve_get_render_server_key(request)
 
         # Scope the ports cache to the VC sync device (not the viewed member) so all VC
         # members share one entry instead of fragmenting / re-fetching per member. Mirrors

@@ -457,10 +457,16 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
         interface_name_field = get_interface_name_field(request)
-        context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False)
+        # GET render: scope the cache read to ?server_key (mirrors the interfaces/cables/VLAN/
+        # module tabs) so a non-default-server tab reads that server's IP cache, not the
+        # default's — without this the IP tab renders empty after a successful refresh on a
+        # non-default server. An unresolved non-blank key scopes to that key (cache miss →
+        # empty) rather than falling back to the default server's cached IPs.
+        scoped, _unresolved = self.resolve_get_render_server_key(request)
+        context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False, server_key=scoped)
         if context is None:
             # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self._render_server_key()}
+            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
         return context
 
     def post(self, request, pk):

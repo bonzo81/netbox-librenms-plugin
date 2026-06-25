@@ -707,18 +707,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def get_context_data(self, request, obj):
         """Get the context data for the cable sync view."""
-        # GET render: scope the cache read to the server from the request query, matching the
-        # server post() rebinds to and caches under — else a non-default-server tab reads the
-        # default-server cache and renders empty after a successful refresh. Mirrors
-        # modules_view.get_context_data; a blank/absent query falls back to the session server.
-        requested = (request.GET.get("server_key") or "").strip()
-        resolved = self.rebind_api_for_server(requested)
-        # An unresolved non-blank key (deleted/misconfigured server) scopes to that key so the
-        # cache read misses and we render empty for it, not the default server's cached links.
-        # The blank-query fallback uses the DEGRADING resolver (not bare self.librenms_api.server_key):
-        # the lazy property raises KeyError/ValueError on a misconfigured default, which would 500 the
-        # cable tab on GET.
-        scoped = resolved if resolved is not None else (requested or self._render_server_key())
+        # GET render: rebind + scope the cache read to ?server_key (shared helper) so a
+        # non-default-server tab reads that server's cache, not the default's. An unresolved
+        # non-blank key scopes to that key (cache miss → empty) rather than the default's links.
+        scoped, _unresolved = self.resolve_get_render_server_key(request)
         context = self._prepare_context(request, obj, fetch_fresh=False, server_key=scoped)
         if context is None:
             # No data found; return context with empty table
