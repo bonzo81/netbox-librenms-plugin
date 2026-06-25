@@ -206,6 +206,10 @@ class ImportDevicesJob(JobRunner):
             "skipped": [],
             "virtual_chassis_created": 0,
         }
+        # Set to the block reason when the device collision/unresolved gate fires, so the VM
+        # section below skips too — the synchronous view returns before importing ANY of the
+        # submitted batch, and the async path must not partially import the same batch's VMs.
+        batch_blocked_msg = None
         if device_ids:
             # Defense-in-depth: block a batch where two LibreNMS rows resolve to the same NetBox
             # device, mirroring the confirm-preview/sync-view gate so the async path can't import a
@@ -228,6 +232,7 @@ class ImportDevicesJob(JobRunner):
                 )
                 self.logger.error(msg)
                 device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
+                batch_blocked_msg = msg
             elif collisions:
                 pks = ", ".join(str(group["nb_device_pk"]) for group in collisions)
                 msg = (
@@ -237,6 +242,7 @@ class ImportDevicesJob(JobRunner):
                 )
                 self.logger.error(msg)
                 device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
+                batch_blocked_msg = msg
             else:
                 self.logger.info(f"Importing {len(device_ids)} devices...")
                 device_result = bulk_import_devices_shared(
@@ -252,12 +258,19 @@ class ImportDevicesJob(JobRunner):
         # Import VMs
         vm_result = {"success": [], "failed": [], "skipped": []}
         if vm_imports:
-            self.logger.info(f"Importing {len(vm_imports)} VMs...")
-            from netbox_librenms_plugin.import_utils import bulk_import_vms
+            if batch_blocked_msg:
+                # The device collision/unresolved gate blocked this submission; the synchronous
+                # view returns before importing anything, so fail the same batch's VMs closed with
+                # the block reason rather than partially importing them here.
+                self.logger.error(f"Skipping {len(vm_imports)} VM import(s); batch blocked: {batch_blocked_msg}")
+                vm_result["failed"] = [{"device_id": device_id, "error": batch_blocked_msg} for device_id in vm_imports]
+            else:
+                self.logger.info(f"Importing {len(vm_imports)} VMs...")
+                from netbox_librenms_plugin.import_utils import bulk_import_vms
 
-            vm_result = bulk_import_vms(
-                vm_imports, api, sync_options, libre_devices_cache, job=self, user=self.job.user
-            )
+                vm_result = bulk_import_vms(
+                    vm_imports, api, sync_options, libre_devices_cache, job=self, user=self.job.user
+                )
 
         # Combine results — partition device_result successes by model type since
         # bulk_import_devices_shared() may return VirtualMachine objects when import_as_vm=True.

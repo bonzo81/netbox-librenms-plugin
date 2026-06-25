@@ -735,6 +735,75 @@ class TestImportDevicesJob:
         assert job.job.data["completed"] is True
         job.job.save.assert_called()
 
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_unresolved_block_skips_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """An unresolved id blocks the batch and the same submission's VMs are NOT imported."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+
+        # Real collision gate against the DB: id 1 resolves and validates cleanly (matches no
+        # existing NetBox device), id 2 is a get_device_info miss → unresolved → batch blocked.
+        def _get_device_info(did):
+            if did == 2:
+                return (False, None)
+            return (True, {"device_id": did, "hostname": f"job-block-dev-{did}", "sysName": f"job-block-dev-{did}"})
+
+        mock_api.get_device_info.side_effect = _get_device_info
+        mock_api_class.return_value = mock_api
+        # Valid payloads so the UNFIXED code (which falls through to the VM import) completes and
+        # the assert_not_called below is the clean red signal, not an incidental crash.
+        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=810)
+        job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+
+        # Blocked batch → neither devices nor VMs are imported.
+        mock_bulk_devices.assert_not_called()
+        mock_bulk_vms.assert_not_called()
+        errors = job.job.data["errors"]
+        # Both device ids AND the VM id are failed closed with the same block reason.
+        assert {e["device_id"] for e in errors} == {1, 2, 10}
+        assert all("Import blocked" in e["error"] for e in errors)
+        assert job.job.data["failed_count"] == 3
+        assert job.job.data["success_count"] == 0
+        assert job.job.data["completed"] is True
+
+    @patch("netbox_librenms_plugin.import_utils.detect_collisions_for_device_ids")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_collision_block_skips_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms, mock_detect):
+        """A same-NetBox-device collision blocks the batch and skips the VM section too.
+
+        Collision DETECTION has its own real-DB tests; here the detector is stubbed to isolate
+        the job's collisions-branch block flow (the symmetric counterpart of the unresolved one).
+        """
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        mock_api_class.return_value = mock_api
+        mock_detect.return_value = ([{"nb_device_pk": 5}], [])  # one collision group, no unresolved
+        mock_bulk_devices.return_value = {"success": [], "failed": [], "skipped": [], "virtual_chassis_created": 0}
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=811)
+        job.run(device_ids=[1, 2], vm_imports={10: {"cluster_id": 1}}, server_key="default")
+
+        mock_bulk_devices.assert_not_called()
+        mock_bulk_vms.assert_not_called()
+        errors = job.job.data["errors"]
+        assert {e["device_id"] for e in errors} == {1, 2, 10}
+        assert all("Import blocked" in e["error"] for e in errors)
+        assert job.job.data["failed_count"] == 3
+        assert job.job.data["success_count"] == 0
+
     def test_job_meta_name(self):
         """Job has correct Meta.name."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
