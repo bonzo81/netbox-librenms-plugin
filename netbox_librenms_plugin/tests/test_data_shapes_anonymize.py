@@ -77,6 +77,29 @@ def test_hostname_and_model_pseudonymized():
     assert "WS-C3750X" not in dev["hardware"]
 
 
+def test_features_field_pseudonymized_like_version():
+    """The `features` field (Linux/IOS-XE OS-version string) must be pseudonymized to fw-<hash>.
+
+    Leaving it raw re-exposes the exact platform/version the os/sysObjectID/icon anonymization
+    deliberately hides, undercutting the capture's privacy contract.
+    """
+    rec = {
+        "schema_version": 1,
+        "name": "synthetic",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1": {
+                "status": "ok",
+                "devices": [{"device_id": 1, "hostname": "h", "os": "linux", "features": "Ubuntu 22.04"}],
+            }
+        },
+    }
+    anon = anonymize_recording(rec)
+    feat = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["features"]
+    assert feat.startswith("fw-")
+    assert "Ubuntu" not in feat
+
+
 def test_inventory_model_name_preserved_as_module_match_key():
     """The entPhysicalModelName ModuleType match key is preserved verbatim, even though device hardware is pseudonymized."""
     rec = load_recording("cisco-stackwise-3member")
@@ -401,6 +424,12 @@ _PORT_PATTERNS = [
     "bond1",
     "eth0",
     "lo0",
+    # systemd "predictable" Linux names: the n<phys_port>/f<function> suffix is logic-bearing and
+    # must survive in full so sibling NIC ports don't collapse to one truncated token.
+    "eno17395np0",
+    "ens3f1",
+    "enp2s0f1np0",
+    "eno1np0.100",
     # Junos digit-less pseudo-interfaces and their sub-units: the base/sub-unit names must both
     # survive so the resolver's name-based pairing (jsrv.1 -> jsrv) is preserved after anonymization.
     "jsrv",
@@ -416,6 +445,18 @@ def test_port_pattern_ifname_preserved_verbatim(name):
     rec = _ports({"port_id": 1, "ifName": name, "ifType": "ethernetCsmacd"})
     port = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
     assert port["ifName"] == name
+
+
+def test_linux_predictable_sibling_ports_stay_distinct():
+    """eno…np0 and eno…np1 must not both collapse to the truncated eno… token after anonymization."""
+    rec = _ports(
+        {"port_id": 1, "ifName": "eno17395np0", "ifType": "ethernetCsmacd"},
+        {"port_id": 2, "ifName": "eno17395np1", "ifType": "ethernetCsmacd"},
+    )
+    ports = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"]
+    assert ports[0]["ifName"] == "eno17395np0"
+    assert ports[1]["ifName"] == "eno17395np1"
+    assert ports[0]["ifName"] != ports[1]["ifName"]
 
 
 @pytest.mark.parametrize(

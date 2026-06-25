@@ -38,7 +38,7 @@
           "sysContact": null,
           "version": "fw-a7995b",
           "hardware": "MODEL-2d2274",
-          "features": "IOSXE",
+          "features": "fw-464126",
           "location_id": 1,
           "os": "os-48b51d",
           "status": true,

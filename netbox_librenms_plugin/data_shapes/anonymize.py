@@ -111,7 +111,7 @@ MFG_KEYS = frozenset({"entPhysicalMfgName"})
 # Firmware / software version strings. Identifying (pin an exact build → deployment fingerprint /
 # CVE surface) and read by no sync logic, so pseudonymized to a deterministic fw-<hash>. (Device
 # chassis HARDWARE revision is left alone — it's not a firmware version.)
-VERSION_KEYS = frozenset({"version", "entPhysicalFirmwareRev", "entPhysicalSoftwareRev"})
+VERSION_KEYS = frozenset({"version", "features", "entPhysicalFirmwareRev", "entPhysicalSoftwareRev"})
 IP_KEYS = frozenset({"ip", "ipv4", "ipv6", "inet", "ip_address", "overwrite_ip"})
 MAC_KEYS = frozenset({"ifPhysAddress", "mac", "mac_address"})
 GEO_KEYS = frozenset({"lat", "lng", "latitude", "longitude"})
@@ -236,6 +236,13 @@ _IF_PREFIXES = (
 # it — unlike CR's "make the trailing digit optional", which would also preserve any value starting
 # with a short prefix such as "ip"/"lo").
 _DIGITLESS_IF_NAMES = "jsrv|irb|dsc|lsi|mtun|pimd|pime|tap"
+# systemd "predictable" Linux names (eno1np0, ens3f1, enp2s0f1np0): the n<phys_port> / f<function>
+# segments are letters+digits that the general "stop at the first letter" run below would truncate,
+# collapsing siblings like …np0 / …np1 onto one preserved token and breaking name-based correlation
+# in captured recordings. Match the full systemd grammar as a leading token so the distinguishing
+# suffix survives. enx<MAC> is intentionally NOT matched here — it's MAC-derived, so it falls through
+# to the iface-<hash> pseudonym rather than leaking a MAC.
+_LINUX_PREDICTABLE_IF_RE = r"(?:eno\d+|ens\d+(?:f\d+)?|enp\d+s\d+(?:f\d+)?)(?:np\d+)?(?:d\d+)?"
 # A logic-bearing port-name token at the START of the string. Three shapes: a digit-less Junos
 # special (above), slot notation (optional leading letter, then digit groups separated by '/'), or a
 # known prefix + '-?' + digit. The trailing run is restricted to slot-path characters — digits and
@@ -245,6 +252,7 @@ _DIGITLESS_IF_NAMES = "jsrv|irb|dsc|lsi|mtun|pimd|pime|tap"
 # component (matched above), never in the bare trailing run.
 _PORT_TOKEN_RE = re.compile(
     rf"^(?:(?:{_DIGITLESS_IF_NAMES})(?:\.\d+)?(?![\w/.:-])"
+    rf"|(?:{_LINUX_PREDICTABLE_IF_RE})[\d/.:-]*"
     rf"|(?:[A-Za-z]?\d+(?:/[A-Za-z]*\d+)+|[A-Za-z]/\d+|(?:{_IF_PREFIXES})-?\d)[\d/.:-]*)"
 )
 
