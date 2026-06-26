@@ -214,6 +214,14 @@ class TestIpCachedSnapshotFailsClosedOnMalformedCache:
             "corrupt-string",  # a str — same crash class
             {"ports_by_id": {"7": {}}},  # dict missing the "ip_addresses" list
             {"ip_addresses": "not-a-list"},  # dict whose ip_addresses isn't a list
+            # Container is valid but a nested field is corrupt — these reach enrichment on the
+            # old (container-only) check and 500 the tab; the per-row/ports_by_id/mgmt_ip
+            # validation must now fail them closed too.
+            {"ip_addresses": [{"port_id": 7}]},  # row has port_id but no addr pair → KeyError in _create_base_ip_entry
+            # unhashable port_id → TypeError in `port_id not in port_data_cache`
+            {"ip_addresses": [{"port_id": [], "ip_address": "1.1.1.1", "prefix_length": 24}]},
+            {"ip_addresses": [], "ports_by_id": ["bad"]},  # non-mapping ports_by_id → dict(["bad"]) ValueError
+            {"ip_addresses": [], "mgmt_ip": 123},  # non-str mgmt_ip → bad deref/auto-select
         ],
     )
     def test_malformed_cache_returns_none_and_purges_key(self, bad_value):
@@ -467,3 +475,63 @@ class TestRebindOrHtmxErrorHelper:
         ):
             assert _rebind_or_htmx_error(view, request) is None
         assert view._librenms_api.server_key == "prod"
+
+
+@pytest.mark.django_db
+class TestCableLinksDataCoercesLibreNMSId:
+    """get_links_data() must coerce whatever get_librenms_id() hands back before fetching links.
+
+    The id-cache path returns its value verbatim (the custom-field/discovery paths already
+    coerce), so a poisoned cache holding ``True`` reaches the cables view as a truthy non-int
+    that ``int(True)`` would silently turn into device id ``1`` — fetching a stranger's links
+    and ports. The view must fail closed on it BEFORE get_device_links()/get_ports(), mirroring
+    the interfaces-POST contract (TestBaseInterfaceTablePostCoercesLibreNMSId).
+    """
+
+    def _real_api(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with patch(
+            "netbox_librenms_plugin.librenms_api.get_plugin_config",
+            return_value={
+                "default": {
+                    "librenms_url": "https://lnms.example.com",
+                    "api_token": "tok",
+                    "cache_timeout": 300,
+                    "verify_ssl": True,
+                }
+            },
+        ):
+            return LibreNMSAPI(server_key="default")
+
+    def test_corrupt_cached_id_fails_closed_before_link_and_port_fetch(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        device = make_device("coerce-cables-host")  # no librenms_id custom field → forces the cache path
+        api = self._real_api()
+        # Poison the device-id cache — the ONE get_librenms_id path that does not coerce.
+        real_cache.set(api._get_cache_key(device), True)
+        try:
+            # The real lookup hands back the uncoerced bool, so this isn't a straw-man mock return.
+            assert api.get_librenms_id(device) is True
+
+            view = object.__new__(DeviceCableTableView)
+            view._librenms_api = api
+            # get_device_links / get_ports are the external HTTP boundary; spy to prove neither is
+            # reached with the poisoned id. int(True) == 1 would otherwise GET /devices/1/links.
+            api.get_device_links = MagicMock(name="get_device_links", return_value=(False, "should-not-be-called"))
+            api.get_ports = MagicMock(name="get_ports", return_value=(False, "should-not-be-called"))
+
+            result = view.get_links_data(device, server_key="default")
+        finally:
+            real_cache.delete(api._get_cache_key(device))
+
+        # Coerced to None → fail closed: the host link/port fetches are skipped entirely (no OOB
+        # mapping on this device, so neither spy fires at all), and the unmapped device resolves
+        # to a fetch failure (None) rather than fetching device 1's data.
+        assert view.librenms_id is None
+        api.get_device_links.assert_not_called()
+        api.get_ports.assert_not_called()
+        assert result is None

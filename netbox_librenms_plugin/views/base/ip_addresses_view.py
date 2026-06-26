@@ -340,6 +340,26 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request)
 
+        # Validate the per-row schema, not just the container shape: a dict row missing
+        # port_id or any supported address/prefix pair would KeyError inside
+        # _create_base_ip_entry() mid-enrichment and 500 the render. Shared by the
+        # fresh-fetch and the cached-snapshot fail-closed paths so a malformed LibreNMS
+        # payload or a corrupt cache entry both fail closed identically.
+        def _valid_ip_row(item):
+            if not isinstance(item, dict) or "port_id" not in item:
+                return False
+            # port_id is used as a cache-dict key in _get_port_info(); an unhashable
+            # (e.g. {}/[]) or bool value would raise inside `port_id not in port_data_cache`
+            # and 500 the render. Reject anything that is not a plain int/str.
+            port_id = item.get("port_id")
+            if isinstance(port_id, bool) or not isinstance(port_id, (int, str)):
+                return False
+            return (
+                {"ip_address", "prefix_length"} <= item.keys()
+                or {"ipv6_compressed", "ipv6_prefixlen"} <= item.keys()
+                or {"ipv4_address", "ipv4_prefixlen"} <= item.keys()
+            )
+
         if fetch_fresh:
             success, ip_data = self.get_ip_addresses(obj)
 
@@ -348,25 +368,6 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # non-list payload (dict/string) or a list with non-dict entries makes
             # enrich_ip_data() silently drop every row and caches that empty snapshot as
             # complete, so treat it as a fetch failure.
-            def _valid_ip_row(item):
-                # Validate the per-row schema, not just the container shape: a dict row
-                # missing port_id or any supported address/prefix pair would KeyError inside
-                # _create_base_ip_entry() mid-enrichment and 500 the fresh-refresh path.
-                # Reject it here so a malformed LibreNMS payload fails closed.
-                if not isinstance(item, dict) or "port_id" not in item:
-                    return False
-                # port_id is used as a cache-dict key in _get_port_info(); an unhashable
-                # (e.g. {}/[]) or bool value would raise inside `port_id not in port_data_cache`
-                # and 500 the fresh-refresh path. Reject anything that is not a plain int/str.
-                port_id = item.get("port_id")
-                if isinstance(port_id, bool) or not isinstance(port_id, (int, str)):
-                    return False
-                return (
-                    {"ip_address", "prefix_length"} <= item.keys()
-                    or {"ipv6_compressed", "ipv6_prefixlen"} <= item.keys()
-                    or {"ipv4_address", "ipv4_prefixlen"} <= item.keys()
-                )
-
             if not success or not isinstance(ip_data, list) or any(not _valid_ip_row(item) for item in ip_data):
                 # Purge any prior valid snapshot so this fail-closed actually takes effect: without
                 # it, a bad-but-successful refresh leaves the previous rows in cache and the next GET
@@ -389,6 +390,19 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             # (cached_ip_data["mgmt_ip"], .get("ports_by_id")). Treat it as a cache miss — purge
             # it and bail — mirroring the fresh path's fail-closed validation above.
             if not isinstance(cached_ip_data, dict) or not isinstance(cached_ip_data.get("ip_addresses"), list):
+                cache.delete(cache_key)
+                return None
+            # Container shape is valid, but the nested fields still need the same fail-closed
+            # checks as the fresh path: a stale row missing port_id (or with a bool/unhashable
+            # one) would KeyError in _create_base_ip_entry(); a truthy non-mapping ports_by_id
+            # (e.g. a list) would raise in dict(...) below; a non-str mgmt_ip would break the
+            # cached["mgmt_ip"] deref. Purge and treat as a miss instead of 500-ing the tab.
+            cached_ports_by_id = cached_ip_data.get("ports_by_id")
+            if (
+                any(not _valid_ip_row(item) for item in cached_ip_data["ip_addresses"])
+                or ("mgmt_ip" in cached_ip_data and not isinstance(cached_ip_data["mgmt_ip"], str))
+                or (cached_ports_by_id is not None and not isinstance(cached_ports_by_id, dict))
+            ):
                 cache.delete(cache_key)
                 return None
             ip_data = cached_ip_data.get("ip_addresses", [])
