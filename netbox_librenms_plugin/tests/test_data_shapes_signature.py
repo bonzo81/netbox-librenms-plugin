@@ -230,9 +230,19 @@ def test_classify_novelty_skips_malformed_manifest_entries():
     """A malformed manifest item (a non-dict entry, or a null/non-dict signature) must be skipped, not crash novelty eval — the valid sibling entry is still matched."""
     good = build_manifest([load_recording("cisco-stackwise-3member")])
     sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
-    # Mix malformed items (a bare string, a null signature, a missing signature) before the
-    # valid entry so an unguarded .get()/_structural_axes() would raise on the first one.
-    malformed_manifest = ["not-a-dict", {"name": "x", "signature": None}, {"name": "y"}, *good]
+    # Mix malformed items before the valid entry so an unguarded .get()/_structural_axes() would
+    # raise on the first one. Crucially this includes a DICT signature with a null/non-dict nested
+    # section ({"virtual_chassis": null}, {"lag": "bad"}) — those pass the non-dict-signature guard
+    # but still reach _structural_axes(), where dict.get(key, {}) returns the stored None and
+    # vc.get(...) used to blow up.
+    malformed_manifest = [
+        "not-a-dict",
+        {"name": "x", "signature": None},
+        {"name": "y"},
+        {"name": "z", "signature": {"virtual_chassis": None}},
+        {"name": "w", "signature": {"lag": "bad", "sub_interfaces": 5}},
+        *good,
+    ]
     verdict = classify_novelty(sig, malformed_manifest)  # must not raise
     assert verdict["verdict"] == "likely-covered"
     assert verdict["closest"] == "cisco-stackwise-3member"

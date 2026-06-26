@@ -183,9 +183,19 @@ def compute_shape_signature(recording):
 
 def _structural_axes(signature):
     """Reduce a signature to the OS-independent shape axes used for novelty matching."""
-    vc = signature.get("virtual_chassis", {})
-    lag = signature.get("lag", {})
-    sub = signature.get("sub_interfaces", {})
+    # A partially malformed manifest entry can carry an explicit null (or non-dict) section —
+    # dict.get(key, {}) returns the stored None when the key is present, so `.get()` below would
+    # blow up. classify_novelty() feeds load_manifest() straight into here in the capture flow,
+    # so fall back to {} per-section to degrade gracefully instead of breaking the modal.
+    vc = signature.get("virtual_chassis")
+    if not isinstance(vc, dict):
+        vc = {}
+    lag = signature.get("lag")
+    if not isinstance(lag, dict):
+        lag = {}
+    sub = signature.get("sub_interfaces")
+    if not isinstance(sub, dict):
+        sub = {}
     return (
         vc.get("present", False),
         vc.get("root_class"),
