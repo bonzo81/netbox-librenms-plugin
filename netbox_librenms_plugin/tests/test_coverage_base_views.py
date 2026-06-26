@@ -58,6 +58,10 @@ class TestBaseCableTableViewGetLinksData:
         view.librenms_id = 42
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        # get_links_data resolves the id via get_librenms_id() and now coerces it (coerce_librenms_id
+        # fails closed on a non-int/bool/zero value); a bare MagicMock return would coerce to None and
+        # take the OOB-only "no host mapping" branch. Return a real id so the host-fetch path runs.
+        view._librenms_api.get_librenms_id.return_value = 42
         return view
 
     def test_get_links_data_returns_none_on_api_error(self):
@@ -2828,7 +2832,17 @@ class TestBaseIPAddressTableViewPrepareContext:
         obj = _mock_obj()
         request = _mock_request()
 
-        cached_ips = [{"ip_with_mask": "192.168.1.1/24", "status": "matched"}]
+        # A realistic cached row: the cached branch now validates each row (port_id + an
+        # address/prefix pair) before reuse, so an incomplete stub would be purged as malformed.
+        cached_ips = [
+            {
+                "port_id": 7,
+                "ip_address": "192.168.1.1",
+                "prefix_length": 24,
+                "ip_with_mask": "192.168.1.1/24",
+                "status": "matched",
+            }
+        ]
         mock_table = MagicMock()
         mock_table.configure = MagicMock()
 
