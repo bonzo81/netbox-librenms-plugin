@@ -175,6 +175,31 @@ def test_bundled_recording_has_anonymized_vendor_metadata(recording):
     assert not leaked, f"{recording.get('name')}: un-anonymized vendor metadata: {leaked}"
 
 
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_recording_transceivers_reference_present_ports(recording):
+    """Every transceiver must reference a port that survived compression — a dangling port_id means the replay isn't a self-consistent LibreNMS dataset (the transceiver-merge can't map it to a port name)."""
+
+    def _body(suffix):
+        for k, v in recording.get("responses", {}).items():
+            if k.split("?", 1)[0].endswith(suffix):
+                return v[1] if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int) else v
+        return None
+
+    device_id = recording.get("device_id")
+    tx_body = _body(f"/devices/{device_id}/transceivers")
+    ports_body = _body(f"/devices/{device_id}/ports")
+    if not isinstance(tx_body, dict) or not isinstance(ports_body, dict):
+        return  # no transceivers/ports route to cross-check
+
+    port_ids = {str(p.get("port_id")) for p in ports_body.get("ports", []) if isinstance(p, dict)}
+    dangling = sorted(
+        str(t.get("port_id"))
+        for t in tx_body.get("transceivers", [])
+        if isinstance(t, dict) and t.get("port_id") not in (None, 0, "0") and str(t.get("port_id")) not in port_ids
+    )
+    assert not dangling, f"{recording.get('name')}: transceivers reference ports missing from /ports: {dangling}"
+
+
 def test_make_recording_api_delegates_non_servers_config_to_real():
     """make_recording_api patches ONLY the 'servers' lookup: other keys (including a 3-arg defaulted call) must delegate to the real config — never returning None or raising a TypeError on the extra arg."""
     import netbox_librenms_plugin.librenms_api as api_mod
