@@ -107,6 +107,37 @@ def test_load_recording_distinguishes_repeated_query_params():
         server._server.server_close()
 
 
+def test_replay_matches_request_with_blank_valued_query_param(recording_server):
+    """A recorded route whose only variant carries a blank-valued query param (?probe=) must still match a byte-for-byte request that carries ?probe= — the request side must parse with keep_blank_values too (load_recording already does), or replay 404s on an exact-shape match."""
+    import http.client
+    from urllib.parse import urlparse
+
+    recording = {
+        "schema_version": 1,
+        "name": "blank-param-route",
+        "device_id": 1,
+        "meta": {"os": "ios"},
+        "responses": {
+            # The recording side normalizes ?probe= as a present empty value; the request side must too.
+            "GET /api/v0/devices/1/ports?probe=": {"status": "ok", "ports": [{"port_id": 7}]},
+        },
+    }
+    server, _api = recording_server(recording)
+    parsed = urlparse(server.url)
+    conn = http.client.HTTPConnection(parsed.hostname, parsed.port)
+    try:
+        conn.request("GET", "/api/v0/devices/1/ports?probe=")
+        resp = conn.getresponse()
+        status = resp.status
+        body = resp.read()
+    finally:
+        conn.close()
+
+    # Without keep_blank_values on the request side, ?probe= parses to {} and falls through to 404.
+    assert status == 200
+    assert b'"port_id"' in body
+
+
 def test_get_ports_real_fetch_and_parse_via_recording(recording_server):
     """Real-HTTP de-mock demo: get_ports() fetches and parses a real captured recording through the live LibreNMSAPI client (real `requests` → MockLibreNMSServer → real parse), so a regression in the request build or response parsing is caught — unlike test_librenms_api.py::test_get_ports_all, which mocks requests.get and feeds canned JSON straight back."""
     from netbox_librenms_plugin.tests.recordings import load_recording

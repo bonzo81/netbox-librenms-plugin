@@ -56,7 +56,8 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         request = {
             "method": method,
             "path": path,
-            "query": parse_qs(query),
+            # Preserve blank values so live requests normalize the same way as recordings.
+            "query": parse_qs(query, keep_blank_values=True),
             "headers": dict(self.headers),
             "body": body,
         }
