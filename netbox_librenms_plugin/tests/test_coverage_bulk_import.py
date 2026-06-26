@@ -2846,7 +2846,7 @@ class TestCrossModelConflictDetection:
 class TestRefreshLibreNMSLinkage:
     """_refresh_librenms_linkage: re-classify a librenms-id match on cache-hit refresh."""
 
-    def _call(self, *, match_type, scanned_id, host_id, oob_id):
+    def _call(self, *, match_type, scanned_id, host_id, oob_id, expect_describe=True):
         from netbox_librenms_plugin.import_utils import bulk_import
 
         validation = {"existing_match_type": match_type}
@@ -2861,7 +2861,11 @@ class TestRefreshLibreNMSLinkage:
         # The linkage read (which itself reads the OOB sub-object) must be scoped to the active
         # server_key — a regression that dropped server_key would re-classify against the wrong
         # server's mapping. The OOB id is taken from this describe result, not a second read.
-        mock_describe.assert_called_once_with(device, "default")
+        # Only pin this in the librenms-id/oob re-classification cases where the scoping matters;
+        # a non-librenms match type may validly short-circuit before reading linkage data, so its
+        # test asserts the contract (match_type untouched) rather than the internal describe call.
+        if expect_describe:
+            mock_describe.assert_called_once_with(device, "default")
         return validation
 
     def test_host_id_match_classifies_librenms_id(self):
@@ -2878,8 +2882,8 @@ class TestRefreshLibreNMSLinkage:
         assert v["existing_match_type"] is None
 
     def test_non_librenms_match_type_untouched(self):
-        """Serial/hostname/primary_ip matches are left alone."""
-        v = self._call(match_type="serial", scanned_id=42, host_id=None, oob_id=None)
+        """Serial/hostname/primary_ip matches are left alone (without forcing a linkage read)."""
+        v = self._call(match_type="serial", scanned_id=42, host_id=None, oob_id=None, expect_describe=False)
         assert v["existing_match_type"] == "serial"
 
 

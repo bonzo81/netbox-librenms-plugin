@@ -383,7 +383,10 @@ class TestImportDevicesJob:
         """Import devices without VMs."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        # Pin server_key to a real string: the collision pre-check uses api.server_key as a
+        # cache/Q discriminator, so a bare MagicMock() would let server-scoped logic pass on a
+        # non-string sentinel and miss the multi-server regression this path protects.
+        mock_api_class.return_value = MagicMock(server_key="default")
         # The collision pre-check fetches each device; return distinct devices so the batch
         # resolves cleanly with no collision (collision/unresolved handling has its own tests).
         # A "not found" here would now fail the batch closed (unresolved id), not skip silently.
@@ -575,7 +578,9 @@ class TestImportDevicesJob:
         """Manual mappings passed correctly."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        # Pin server_key to a real string so the collision pre-check's server-scoped cache/Q
+        # logic runs on a real discriminator, not a MagicMock sentinel.
+        mock_api_class.return_value = MagicMock(server_key="default")
         # Collision pre-check fetches each device; return distinct devices so the batch resolves
         # cleanly (a "not found" would now fail the batch closed as an unresolved id).
         mock_api_class.return_value.get_device_info.side_effect = lambda did: (
@@ -699,7 +704,9 @@ class TestImportDevicesJob:
         """All imports fail gracefully."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        # Pin server_key to a real string so the collision pre-check runs server-scoped cache/Q
+        # logic on a real discriminator rather than a MagicMock sentinel.
+        mock_api_class.return_value = MagicMock(server_key="default")
         # Collision pre-check fetches each device; return distinct devices so the batch resolves
         # cleanly (no collision/unresolved) and the import actually reaches
         # bulk_import_devices_shared. A "not found" here would fail the batch closed in the
