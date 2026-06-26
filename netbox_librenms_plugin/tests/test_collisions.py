@@ -368,6 +368,14 @@ def test_collision_template_renders_correct_link_targets_and_escapes():
     assert "srv-collide" in html
     assert "vm-collide" in html
     assert "beta" in html
+    # The copy must be VM-safe: this batch includes a VM collision, so the modal must not use
+    # device-only wording or point at device-only follow-up actions (Add as OOB / Promote to host)
+    # that don't exist for a VM collision. Object-neutral language is used instead.
+    assert "same NetBox object" in html
+    assert "selected LibreNMS rows" in html
+    assert "same NetBox device" not in html
+    assert "Add as OOB" not in html
+    assert "Promote to host" not in html
     # Device-supplied hostname is auto-escaped (no raw <script> injected into the modal).
     assert "<script>alpha</script>" not in html
     assert "&lt;script&gt;alpha&lt;/script&gt;" in html
@@ -392,7 +400,7 @@ def test_collision_template_title_is_generic_for_non_collision_failures():
         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
         {"collisions": [{"nb_device_pk": 1, "nb_device_name": "x", "nb_model_name": "device", "librenms_rows": []}]},
     )
-    assert "Bulk import blocked: NetBox device collisions" in collision_html
+    assert "Bulk import blocked: NetBox object collisions" in collision_html
 
     # Non-collision failure render → generic title, NOT the collision wording.
     error_html = render_to_string(
@@ -400,7 +408,7 @@ def test_collision_template_title_is_generic_for_non_collision_failures():
         {"error_message": "Could not fetch LibreNMS info for the selected device."},
     )
     assert "Bulk import blocked" in error_html
-    assert "NetBox device collisions" not in error_html
+    assert "NetBox object collisions" not in error_html
     assert "Could not fetch LibreNMS info for the selected device." in error_html
 
 

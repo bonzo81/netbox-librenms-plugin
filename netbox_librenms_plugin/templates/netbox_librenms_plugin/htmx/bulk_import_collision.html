@@ -6,7 +6,7 @@
     {% if error_message %}
       Bulk import blocked
     {% else %}
-      Bulk import blocked: NetBox device collisions
+      Bulk import blocked: NetBox object collisions
     {% endif %}
   </h5>
   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
@@ -21,10 +21,10 @@
   <div class="alert alert-danger mb-3">
     <div>
       <i class="mdi mdi-alert-octagon me-1"></i>
-      Two or more selected LibreNMS devices would update the
-      <strong>same NetBox device</strong>. Importing them as a batch could
+      Two or more selected LibreNMS rows would update the
+      <strong>same NetBox object</strong>. Importing them as a batch could
       leave NetBox in an inconsistent state, so the whole import has been
-      blocked. Resolve each colliding NetBox device individually first
+      blocked. Resolve each colliding NetBox object individually first
       (use the per-row import action on the table), or deselect the
       duplicates and try again.
     </div>
@@ -66,9 +66,8 @@
       <strong>How to fix:</strong> close this dialog, untick all but one
       of the LibreNMS rows in each colliding group, and click
       <em>Bulk Import</em> again. After the first row is imported, the
-      conflict for the second one usually resolves into an
-      <em>Add as OOB</em> or <em>Promote to host</em> action that you
-      can run from the per-row import button.
+      conflict for the second one usually resolves into a different
+      per-row action that you can run from the import button.
     </div>
   </div>
   {% endif %}
