@@ -1166,6 +1166,47 @@ class TestMarkLibreNMSMigrated:
             # Untouched: no marker stamped, original value preserved for the caller to migrate.
             assert donor.custom_field_data["librenms_id"] == legacy
 
+    def test_fails_closed_on_corrupt_per_server_entry(self):
+        """A corrupt per-server entry (bool/list/float/unparseable string) must raise, not collapse.
+
+        The top-level guard rejects a corrupt librenms_id, but a per-server value such as
+        ``{"default": True}`` / ``{"default": ["bad"]}`` was previously collapsed to ``{}`` and
+        stamped migrated — hiding the malformed donor state behind ``_migrated_to``. Mirror the
+        per-entry validation from merge_librenms_links() and fail closed instead.
+        """
+        import pytest
+
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        for corrupt in (True, ["bad"], 3.5, "notanid"):
+            donor = MagicMock()
+            donor.name = "corrupt-entry-donor"
+            donor.custom_field_data = {"librenms_id": {"default": corrupt}}
+            with pytest.raises(ValueError):
+                mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+            # The raise happens before any mutation: no marker stamped, entry untouched.
+            assert donor.custom_field_data["librenms_id"] == {"default": corrupt}
+
+    def test_blank_or_numeric_string_per_server_entry_does_not_raise(self):
+        """A blank string is "no link" (collapse to {}); a numeric string is a valid id — neither raises."""
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        # Blank string → no recoverable link → collapses to {} and stamps the marker (no raise).
+        donor = MagicMock()
+        donor.name = "blank-entry-donor"
+        donor.custom_field_data = {"librenms_id": {"default": ""}}
+        mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
+        assert donor.custom_field_data["librenms_id"]["default"]["_migrated_to"]["device_id"] == 99
+
+        # Numeric string → a real id → also valid, marker stamped, id cleared.
+        donor2 = MagicMock()
+        donor2.name = "numstr-entry-donor"
+        donor2.custom_field_data = {"librenms_id": {"default": "77"}}
+        mark_librenms_migrated(donor2, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
+        entry = donor2.custom_field_data["librenms_id"]["default"]
+        assert "id" not in entry
+        assert entry["_migrated_to"]["device_id"] == 99
+
     @pytest.mark.django_db
     def test_after_marker_find_by_librenms_id_no_longer_matches(self):
         """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned by find_by_librenms_id, queried against the REAL Device model."""

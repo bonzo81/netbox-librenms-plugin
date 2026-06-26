@@ -2225,8 +2225,29 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     entry = cf_value.get(server_key)
     if isinstance(entry, int) and not isinstance(entry, bool):
         entry = {"id": entry}
-    elif not isinstance(entry, dict):
+    elif isinstance(entry, str):
+        # Mirror merge_librenms_links()'s per-entry validation: a non-empty string that can't be
+        # parsed to a positive id is corrupt donor state, not "no link" — fail closed instead of
+        # collapsing it to {} and stamping the donor migrated (which would hide the malformed value
+        # behind _migrated_to and drop any recoverable mapping).
+        coerced = coerce_librenms_id(entry)
+        if coerced is None and entry.strip():
+            raise ValueError(
+                f"Cannot mark '{getattr(donor, 'name', donor)}' migrated: "
+                f"librenms_id[{server_key!r}] is unparseable ({entry!r}); migrate it first."
+            )
+        entry = {"id": coerced} if coerced else {}
+    elif isinstance(entry, dict):
+        entry = dict(entry)
+    elif entry is None:
         entry = {}
+    else:
+        # An unsupported shape (bool/float/list/…) is corrupt state, not "no mapping". Fail closed
+        # like the top-level guard rather than collapsing to {} and marking the donor migrated.
+        raise ValueError(
+            f"Cannot mark '{getattr(donor, 'name', donor)}' migrated: "
+            f"librenms_id[{server_key!r}] has unsupported type {type(entry).__name__}."
+        )
     entry.pop("id", None)
     entry.pop("oob", None)
     entry["_migrated_to"] = {
