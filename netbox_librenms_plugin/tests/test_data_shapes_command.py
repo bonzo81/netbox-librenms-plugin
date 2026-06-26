@@ -116,6 +116,45 @@ def test_rebuild_manifest_writes_signatures(tmp_path, monkeypatch):
     assert "Wrote 3 signature(s)" in output
 
 
+def test_rebuild_manifest_writes_atomically(tmp_path, monkeypatch):
+    """The manifest is written via a temp file + atomic replace, so a crash mid-write can never leave load_manifest() reading a truncated/empty manifest (every recording would then classify as 'new')."""
+    from pathlib import Path
+
+    rec_dir = tmp_path / "recordings"
+    rec_dir.mkdir()
+    (rec_dir / "cisco-stackwise-3member.json").write_text(json.dumps(load_recording("cisco-stackwise-3member")))
+    manifest_path = rec_dir / "manifest.json"
+    # A pre-existing good manifest that must remain intact in place right up to the atomic swap.
+    manifest_path.write_text(json.dumps([{"name": "old", "signature": {}}]) + "\n")
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", manifest_path)
+
+    seen = {}
+    real_replace = Path.replace
+
+    def spy_replace(self, target):
+        # At replace time the temp source must already hold the COMPLETE new manifest and the live
+        # manifest must still be its previous content — proving it was never truncated in place.
+        seen["src_content"] = self.read_text()
+        seen["target"] = str(target)
+        seen["target_before"] = Path(target).read_text()
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy_replace)
+
+    _run(**{"rebuild_manifest": True})
+
+    # The write went through an atomic temp + replace onto the manifest path (never a direct
+    # truncating write_text): on the old code Path.replace was never called and `seen` stays empty.
+    assert seen.get("target") == str(manifest_path)
+    assert [e["name"] for e in json.loads(seen["src_content"])] == ["cisco-stackwise-3member"]
+    # The previous manifest survived intact right up to the atomic swap.
+    assert [e["name"] for e in json.loads(seen["target_before"])] == ["old"]
+    # No leftover temp file, and the final manifest is the rebuilt one.
+    assert not (rec_dir / "manifest.json.tmp").exists()
+    assert [e["name"] for e in json.loads(manifest_path.read_text())] == ["cisco-stackwise-3member"]
+
+
 def test_rebuild_manifest_excludes_manifest_itself(tmp_path, monkeypatch):
     """A pre-existing manifest.json is not loaded back in as a recording on rebuild."""
     rec_dir = tmp_path / "recordings"
