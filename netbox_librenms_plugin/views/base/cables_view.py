@@ -15,6 +15,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
+    coerce_librenms_id,
     get_interface_name_field,
     get_librenms_oob,
     get_librenms_sync_device,
@@ -201,7 +202,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # Reuse the device the caller (_prepare_context) already resolved to avoid a second
         # get_librenms_sync_device() VC-members query per request; falls back to resolving here.
         lookup_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
-        self.librenms_id = self.librenms_api.get_librenms_id(lookup_device)
+        # coerce_librenms_id fails closed on a bool/zero/negative/garbage value (a poisoned
+        # id-cache can return True/0 verbatim — get_librenms_id only coerces the custom-field
+        # and discovery paths), so a falsy non-None id resolves to None here instead of being
+        # passed to get_device_links()/get_ports() as device id 1 (int(True)) — fetching a
+        # stranger's links. Mirrors the GET/interfaces-POST contract.
+        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(lookup_device))
         if self.librenms_id is None:
             # OOB-only / unmapped device: skip the host LLDP call. get_device_links(None) would
             # GET /devices/None/links and always 404 for no benefit. Synthesize the same not-ok
