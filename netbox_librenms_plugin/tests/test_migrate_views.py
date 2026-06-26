@@ -751,6 +751,9 @@ class TestMoveIPAddressToWinnerView:
         resp = view.post(req, pk=ip.pk)
 
         assert resp.status_code == 200
+        # The HTMX refresh contract must fire so the migrated row doesn't linger stale in the UI:
+        # a bare 200 without HX-Refresh would leave the old assignment on screen.
+        assert resp.headers.get("HX-Refresh") == "true"
         ip.refresh_from_db()
         # The IP moved onto the winner's same-named interface — proving both the donor re-lock
         # and the winner lookup resolved the correct rows.
