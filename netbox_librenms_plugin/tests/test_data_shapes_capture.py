@@ -357,3 +357,26 @@ def test_capture_ignores_caller_supplied_oob_id_without_controller():
     assert "oob_id" not in captured["meta"]
     assert captured["meta"].get("note") == "kept"
     assert compute_shape_signature(captured)["oob"] is False
+
+
+def test_capture_raises_when_inventory_all_fallback_fails():
+    """Once the filtered inventory comes back empty, /all is the ONLY inventory source — a transport failure there must fail the capture, not silently record an empty (wrong-topology) inventory."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    # Filtered inventory is empty (see _all_ok_routes), so capture falls back to /all — make it fail.
+    api.routes["inventory/1000/all"] = (0, None)  # transport error on the /all fallback
+
+    with pytest.raises(RuntimeError, match="inventory/1000/all"):
+        capture_device_recording(api, 1000)
+
+
+def test_capture_does_not_mark_oob_when_controller_ports_fail():
+    """record() skips an un-replayable controller-ports route (transport error); the recording must NOT then be marked OOB with no controller ports behind it."""
+    api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
+    api.routes["devices/2000/ports"] = (0, None)  # OOB controller ports fail at the transport layer
+
+    captured = capture_device_recording(api, 1000, oob_id=2000)
+
+    # The un-replayable controller route was skipped, so the recording isn't marked OOB.
+    assert "GET /api/v0/devices/2000/ports" not in captured["responses"]
+    assert "oob_id" not in captured["meta"]
+    assert compute_shape_signature(captured)["oob"] is False

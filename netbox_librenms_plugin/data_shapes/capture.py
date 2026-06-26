@@ -108,7 +108,17 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         if items:
             return items
         if not _all_inventory:
-            _, all_body = api._raw_get(f"inventory/{device_id}/all")
+            all_status, all_body = api._raw_get(f"inventory/{device_id}/all")
+            # This /all fetch bypasses record(), so a TRANSPORT failure (no HTTP response, status 0)
+            # would silently degrade to an empty inventory and still ship a "successful" capture —
+            # recording a VC device with the wrong topology/signature. Once the filtered query came
+            # back empty, /all is the only inventory source, so a no-response failure is fatal here,
+            # mirroring record(required=True). A real HTTP answer (incl. 404 / 2xx-empty) is a
+            # definitive "no inventory" for a plain device and stays an empty list.
+            if not (100 <= all_status < 600):
+                raise RuntimeError(
+                    f"Capture failed for inventory/{device_id}/all: no HTTP response (status {all_status})"
+                )
             all_items = all_body.get("inventory") if isinstance(all_body, dict) else None
             _all_inventory.append(all_items if isinstance(all_items, list) else [])
         filtered = [i for i in _all_inventory[0] if isinstance(i, dict)]
@@ -178,8 +188,13 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     # route devices/<oob_id>/ports is the SAME key as the host's, so recording it would overwrite the
     # host's ports — and a device is not its own out-of-band controller.
     if oob_id is not None and oob_id != device_id:
-        record(f"devices/{oob_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
-        meta_out["oob_id"] = oob_id
+        oob_status, _ = record(f"devices/{oob_id}/ports", {"columns": _PORTS_COLUMNS, "with": "vlans"}, key_params=None)
+        # Only mark the recording OOB once the controller ports were actually captured: record()
+        # silently skips a route that produced no HTTP response (transport failure), so stamping
+        # oob_id unconditionally would label the recording OOB with no controller ports behind it —
+        # and signature reads meta["oob_id"] as the authoritative OOB signal.
+        if 200 <= oob_status < 300:
+            meta_out["oob_id"] = oob_id
 
     return {
         "schema_version": SCHEMA_VERSION,
