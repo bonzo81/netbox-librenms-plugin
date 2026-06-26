@@ -896,6 +896,19 @@ def validate_device_for_import(
                 if _dup_current:
                     # Arbitrary .first() match among duplicates: block link/promote/import and
                     # surface a blocking issue. The match is left for display only.
+                    # Drop the arbitrary existing_device and all match-derived linkage/name state:
+                    # this is a terminal ambiguity, so retaining the .first() row would let
+                    # bulk_import treat it as a real existing match — `_refresh_existing_device`
+                    # short-circuits on a set existing_device (skipping the ambiguity re-check) and
+                    # the exclude_existing / collision paths key off it — pinning the row to the
+                    # wrong device. Only existing_match_type carries the ambiguity forward.
+                    result["existing_device"] = None
+                    result["existing_librenms_link"] = None
+                    result["name_matches"] = False
+                    result["name_sync_available"] = False
+                    result["suggested_name"] = None
+                    result["serial_confirmed"] = False
+                    result["serial_duplicate"] = False
                     # Demote the match_type off "hostname"/"serial" so neither the device_status
                     # table (has_actions) nor device_validation_details.html renders a "Link to
                     # LibreNMS" action — otherwise the arbitrary row could be linked to the wrong

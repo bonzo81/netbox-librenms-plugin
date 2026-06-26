@@ -884,6 +884,17 @@ class TestValidateDeviceForImportEdgeCases:
         # device_status table (has_actions) and device_validation_details.html branch on it to
         # render a "Link to LibreNMS" action, which would link the wrong NetBox device.
         assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        # ...and the arbitrary .first() device + its match-derived linkage/name state must be
+        # CLEARED, not just demoted. bulk_import's _refresh_existing_device short-circuits on a
+        # set existing_device (skipping the ambiguity re-check) and exclude_existing / collision
+        # handling keys off it, so a retained row pins the import to the wrong device.
+        assert result["existing_device"] is None
+        assert result["existing_librenms_link"] is None
+        assert result["name_matches"] is False
+        assert result["name_sync_available"] is False
+        assert result["suggested_name"] is None
+        assert result["serial_confirmed"] is False
+        assert result["serial_duplicate"] is False
 
     def test_oob_ip_match_without_os_token_still_oob_candidate(self):
         """An incoming IP equal to device.oob_ip is still an OOB candidate when no os token classifies a type."""
