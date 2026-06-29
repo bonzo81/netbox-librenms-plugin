@@ -1776,6 +1776,52 @@ class TestBaseInterfaceTableViewPost:
         assert oob_msg is not None  # the OOB-fetch failure is surfaced to the user
         assert "99" not in oob_msg  # but the internal OOB id stays out of the UI
 
+    def test_post_oob_invalid_id_marks_snapshot_incomplete(self):
+        """A corrupt stored OOB id fails closed: warn, skip the OOB fetch, tag the snapshot oob_incomplete."""
+        view = self._make_view()
+        obj = _mock_obj()
+        request = _mock_request()
+
+        view._librenms_api.get_librenms_id.return_value = 42
+        # Host ports OK. The OOB controller IS linked but its stored id is non-numeric, so the OOB
+        # fetch must be skipped entirely — get_ports is called exactly once (host), never for OOB.
+        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]})
+
+        with (
+            patch.object(view, "get_object", return_value=obj),
+            patch.object(view, "get_redirect_url", return_value="/device/1/"),
+            patch.object(view, "_enrich_ports_with_vlan_data", side_effect=lambda ports, field: ports),
+            patch.object(view, "_has_lag_signals", return_value=False, create=True),
+            patch.object(view, "get_context_data", return_value={}),
+            patch.object(view, "get_cache_key", return_value="cache-key"),
+            patch.object(view, "get_last_fetched_key", return_value="last-key"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
+            patch(
+                "netbox_librenms_plugin.views.base.interfaces_view.get_librenms_oob",
+                return_value={"id": "not-a-number"},
+            ),
+            patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.render") as mock_render,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.interfaces_view.timezone"),
+        ):
+            mock_render.return_value = MagicMock()
+            view.post(request, pk=1)
+
+        # The corrupt id never reaches a device-scoped LibreNMS call: only the host fetch runs.
+        view._librenms_api.get_ports.assert_called_once_with(42)
+
+        # The user is warned that OOB ports are missing (not silently dropped).
+        warning_msgs = [a for call in mock_messages.warning.call_args_list for a in call.args if isinstance(a, str)]
+        assert any("OOB controller ports fetch failed" in m for m in warning_msgs)
+
+        # The cached snapshot is tagged incomplete so get_context_data keeps the banner on later
+        # cached renders — without the fix oob_ports_failed stayed False and this flag was absent.
+        ports_set_calls = [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "cache-key"]
+        assert len(ports_set_calls) == 1
+        assert ports_set_calls[0].args[1].get("oob_incomplete") is True
+
     def test_post_success_caches_and_renders(self):
         """Successful fetch caches data and renders template."""
         view = self._make_view()

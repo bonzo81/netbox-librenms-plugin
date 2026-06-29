@@ -228,7 +228,24 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # never build a GET /devices/<garbage>/ports that 404s and silently drops OOB ports.
         oob_id = coerce_librenms_id(oob.get("id")) if oob else None
         oob_ports_failed = False
-        if oob_id:
+        if oob and oob_id is None:
+            # An OOB controller IS linked, but its stored id is corrupt (non-numeric / bool / zero /
+            # negative). Silently skipping here would cache a host-only snapshot that looks COMPLETE,
+            # so the OOB rows / shared-LOM markers would vanish with no banner. Fail closed onto the
+            # same partial-outcome path as a fetch failure: log the corrupt custom-field state, warn
+            # the user, and tag the snapshot oob_incomplete below.
+            logger.warning(
+                "Invalid OOB controller id for device %s: %r",
+                self.librenms_id,
+                oob.get("id"),
+            )
+            messages.warning(
+                request,
+                "Interfaces refreshed, but OOB controller ports fetch failed; "
+                "showing host interfaces only. See server logs for details.",
+            )
+            oob_ports_failed = True
+        elif oob_id:
             oob_success, oob_raw = self.librenms_api.get_ports(oob_id)
             # Treat a malformed-but-truthy OOB payload the same as oob_success=False so the
             # host-only warning path runs instead of 500-ing on .get()/_enrich below. get_ports
