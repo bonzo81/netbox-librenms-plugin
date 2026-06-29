@@ -150,6 +150,32 @@ class TestSerialMatchRoleIgnoresMissingDeviceId:
 
 
 @pytest.mark.django_db
+class TestSerialMatchRoleSameNameOobController:
+    """An incoming OOB-typed device staging as oob_candidate even when its hostname matches the host."""
+
+    def test_same_name_oob_typed_device_stages_oob_candidate_not_link(self):
+        from netbox_librenms_plugin.import_utils.device_operations import _detect_serial_match_role
+
+        device = make_device("host1", serial="SN1")  # real host, no OOB linked → existing_oob is None
+        result = _detect_serial_match_role(
+            existing_by_serial=device,
+            existing_link=None,  # not yet linked to any LibreNMS id
+            hostname="host1",  # iDRAC mirrors the host's hostname → names_match is True
+            serial="SN1",
+            libre_device={"device_id": 77, "os": "idrac", "hardware": "iDRAC9"},
+            server_key="default",
+        )
+
+        # LibreNMS reports the incoming device as an OOB controller, so a same-name match must NOT
+        # collapse to the legacy host link (which would attach the iDRAC's id #77 as the HOST id).
+        # It has to surface as an OOB candidate instead.
+        assert result["serial_action"] == "oob_candidate"
+        assert result["oob_candidate"] is not None
+        assert result["oob_candidate"]["device"] == device
+        assert result["oob_candidate"]["type"] == "idrac"
+
+
+@pytest.mark.django_db
 class TestIpCachedSnapshotMgmtIpBackfill:
     """A pre-upgrade IP snapshot lacking the mgmt_ip key must resolve it on read, not silently skip auto-select."""
 

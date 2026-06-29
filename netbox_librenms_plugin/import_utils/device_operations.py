@@ -344,7 +344,16 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         or _detect_oob_type_from_name(libre_device.get("hostname") or libre_device.get("sysName") or "")
     )
     has_oob_signal = incoming_oob_signal or bool(existing_oob_from_name)
-    chassis_pair_likely = already_linked_elsewhere or ((not names_match) and has_oob_signal)
+    # A name match normally means "just link" — but not when LibreNMS itself reports the incoming
+    # device as an OOB controller (os/hardware → oob_type_from_libre). An iDRAC/iLO/IPMI sharing the
+    # host's chassis serial often also shares (or mirrors) its hostname, so gating purely on
+    # ``not names_match`` would drop a same-name OOB row into the legacy link path and attach the
+    # controller's LibreNMS id as the HOST id. A definitive incoming OOB type is enough on its own to
+    # treat this as a chassis pair, regardless of name; the reinstall guard above stays intact
+    # because a reinstalled host has no incoming OOB type.
+    chassis_pair_likely = (
+        already_linked_elsewhere or bool(oob_type_from_libre) or ((not names_match) and has_oob_signal)
+    )
 
     oob_possible = chassis_pair_likely and existing_oob is None
     host_possible = chassis_pair_likely and bool(linked_to_other_id and not existing_link.get("oob_id"))
