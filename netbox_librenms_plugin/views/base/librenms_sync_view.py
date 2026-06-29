@@ -34,6 +34,13 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """Handle GET request for the LibreNMS sync view."""
         obj = get_object_or_404(self.model, pk=pk)
 
+        # Scope the page header (device info, VC inventory serials, active-server highlight) to the
+        # same ?server_key the embedded tabs rebind to. Without this the orchestrator reads the
+        # session/default server while a ?server_key load renders the tab tables for another server
+        # — an internally inconsistent page. A blank/absent key keeps the session/default client, so
+        # single-server and default renders are unchanged.
+        self.resolve_get_render_server_key(request)
+
         # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
         # self._librenms_lookup_device and self.librenms_id are consistent with the
         # helper-based VC status computed in get_context_data().  A legacy bare-int mapping

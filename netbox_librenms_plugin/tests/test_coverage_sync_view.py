@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import RequestFactory
 
 
 def _make_view():
@@ -50,6 +51,28 @@ class TestBaseLibreNMSSyncViewGet:
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    def test_get_rebinds_header_to_request_server_key(self, mock_get_obj, mock_render, mock_multi_server_config):
+        """The page header must rebind to ?server_key so it matches the server the tabs render for."""
+        view = _make_view()
+        view._librenms_api.server_key = "default"  # bound to the default server
+        obj = MagicMock()
+        obj.virtual_chassis = None
+        obj.custom_field_data = {}
+        mock_get_obj.return_value = obj
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = RequestFactory().get("/x/?server_key=secondary")
+        with patch(
+            "netbox_librenms_plugin.librenms_api.get_plugin_config",
+            side_effect=lambda _plugin, key: mock_multi_server_config if key == "servers" else None,
+        ):
+            view.get(request, pk=1)
+
+        assert view._librenms_api.server_key == "secondary"
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_get_vc_member_always_delegates_to_sync_device(self, mock_get_sync, mock_get_obj, mock_render):
         """VC member: no own librenms_id - get_librenms_sync_device returns VC primary."""
@@ -70,7 +93,7 @@ class TestBaseLibreNMSSyncViewGet:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         mock_get_sync.assert_called_once_with(obj, server_key="default")
@@ -98,7 +121,7 @@ class TestBaseLibreNMSSyncViewGet:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         mock_get_sync.assert_called_once_with(obj, server_key="default")
@@ -125,7 +148,7 @@ class TestBaseLibreNMSSyncViewGet:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         mock_get_sync.assert_called_once_with(obj, server_key="default")
@@ -1007,12 +1030,11 @@ class TestInterfaceSyncRefreshButtonServerKey:
     """The 'Refresh Interfaces' buttons must carry the active server_key (hidden input + hx-include) so a non-default server tab refreshes from the right LibreNMS server/cache, not the fallback."""
 
     def _render(self, *, server_key="prod"):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
-
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
