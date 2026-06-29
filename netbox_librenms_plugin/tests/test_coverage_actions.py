@@ -5419,6 +5419,18 @@ class TestSuggestOOBInterface:
         assert sid == idrac.pk
         assert new_name == "idrac0"
 
+    def test_picks_cimc_named_interface(self):
+        # cimc is in OOB_TYPES (detection) but was missing from the interface-suggester pattern,
+        # so a cimc0 interface was never pre-selected. The pattern is now derived from OOB_TYPES.
+        from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
+
+        dev = make_device("oob-suggest-cimc")
+        make_interface(dev, "eth0")
+        cimc = make_interface(dev, "cimc0")
+        sid, new_name = _suggest_oob_interface(dev, {"type": "cimc"})
+        assert sid == cimc.pk
+        assert new_name == "cimc0"
+
     def test_no_match_returns_none_and_typed_default(self):
         from netbox_librenms_plugin.views.imports.actions import _suggest_oob_interface
 

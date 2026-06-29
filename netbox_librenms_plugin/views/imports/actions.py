@@ -19,6 +19,7 @@ from django.utils.safestring import mark_safe
 from django.utils.text import slugify
 from django.views import View
 
+from netbox_librenms_plugin.constants import OOB_TYPES
 from netbox_librenms_plugin.import_utils import (
     _determine_device_name,
     bulk_import_devices,
@@ -96,7 +97,12 @@ _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_
 
 # Existing-interface names that look like an OOB/management port, used to pre-select the
 # OOB-attach interface suggestion. Compiled once at import; see _suggest_oob_interface().
-_OOB_INTERFACE_NAME_PATTERN = re.compile(r"(idrac|ilo|ipmi|bmc|drac|oob|mgmt|management)", re.IGNORECASE)
+# Derived from OOB_TYPES (the single source of truth for OOB controller types — so a new type can't
+# silently drift out of the UI suggestion, as "cimc" had) plus the interface-name-only mgmt tokens.
+_OOB_INTERFACE_NAME_TOKENS = (*OOB_TYPES, "mgmt", "management")
+_OOB_INTERFACE_NAME_PATTERN = re.compile(
+    "(" + "|".join(re.escape(token) for token in _OOB_INTERFACE_NAME_TOKENS) + ")", re.IGNORECASE
+)
 
 # Actions that operate on Device-only fields and cannot be applied to VMs.
 _DEVICE_ONLY_ACTIONS = frozenset({"link", "update", "update_serial", "update_type", "sync_serial", "sync_device_type"})
