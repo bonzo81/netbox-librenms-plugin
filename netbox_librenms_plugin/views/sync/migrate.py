@@ -477,6 +477,13 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             # _site/_location/_rack columns. A bare .update(device=...) would skip all of
             # that (stale denormalized location + no relationship validation).
             interface.device = winner
+            # Coupling to a private NetBox internal: ComponentModel seeds
+            # _original_device from device_id in __init__ and clean() raises
+            # "Components cannot be moved to a different device" when it differs
+            # (dcim/models/device_components.py — ComponentModel.__init__ /
+            # ComponentModel.clean). If a NetBox upgrade renames or drops this
+            # attribute, the move below will silently stop working or 500 — treat
+            # any change to that attribute as a breaking change in upgrade notes.
             interface._original_device = winner.pk
             try:
                 interface.full_clean()
