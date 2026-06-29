@@ -817,6 +817,40 @@ class TestImportSingleDevice:
         assert "ambiguous" in result["error"].lower()
         assert Device.objects.count() == before
 
+    @patch("netbox_librenms_plugin.import_utils.device_operations.LibreNMSAPI")
+    def test_ambiguous_hostname_or_serial_blocks_create_even_with_manual_mappings(self, MockAPI):
+        """Terminal hostname/serial ambiguity must block the create even when manual_mappings supply site/type/role."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
+
+        MockAPI.return_value.server_key = "default"
+        site, dtype, role = _shared_infra()
+        before = Device.objects.count()
+        validation = {
+            "existing_device": None,
+            "existing_match_type": "ambiguous_hostname_or_serial",
+            "can_import": False,
+            "resolved_name": "dup-ambiguous-host",
+            "site": {"found": True, "site": site},
+            "device_type": {"matched": True, "device_type": dtype},
+            "device_role": {"found": True, "role": role},
+            "platform": {"found": False, "platform": None},
+            "rack": {"rack": None},
+        }
+        result = import_single_device(
+            1,
+            server_key="default",
+            validation=validation,
+            manual_mappings={"site_id": site.pk, "device_type_id": dtype.pk, "device_role_id": role.pk},
+            libre_device=self._make_libre_device(),
+        )
+        assert result["success"] is False
+        assert result["device"] is None
+        assert any(t in result["error"].lower() for t in ("hostname", "serial", "duplicate", "ambiguous"))
+        assert Device.objects.count() == before
+
 
 @pytest.mark.django_db
 class TestValidateDeviceForImportEdgeCases:

@@ -1471,6 +1471,22 @@ def import_single_device(
                 "synced": {},
             }
 
+        # Parallel terminal-ambiguity guard: a duplicate hostname/serial match is also a terminal
+        # blocker — validate_device_for_import() sets existing_device=None AND
+        # existing_match_type="ambiguous_hostname_or_serial" for it, so neither the existing_device
+        # check above nor the ambiguous_librenms_id guard catches it. Without this, a manual_mappings
+        # import (which supplies site/type/role and so skips the `if not site` fail-closed below)
+        # would create a duplicate Device under the unresolved ambiguity — the same fail-open the
+        # ambiguous_librenms_id guard exists to prevent.
+        if validation.get("existing_match_type") == "ambiguous_hostname_or_serial":
+            return {
+                "success": False,
+                "device": None,
+                "message": "",
+                "error": "Import blocked: this device's hostname/serial matches multiple NetBox devices; resolve the duplicate first.",
+                "synced": {},
+            }
+
         # Use validation-derived matches, allow manual mappings to override specific fields
         site = validation["site"].get("site")
         device_type = validation["device_type"].get("device_type")
