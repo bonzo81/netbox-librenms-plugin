@@ -431,6 +431,9 @@ class TestImportDevicesJob:
         assert job.job.data["success_count"] == 2
         assert job.job.data["failed_count"] == 0
 
+    # Two VM ids (>=2) now trigger the job's collision pre-check too — it runs over the WHOLE
+    # batch (devices + VMs), so configure the api the same way the device-batch tests do.
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -438,7 +441,13 @@ class TestImportDevicesJob:
         """Import VMs without devices."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        mock_api_class.return_value = MagicMock(server_key="default")
+        # The batch-wide collision pre-check now fetches each VM id; return distinct devices so the
+        # VM-only batch resolves cleanly (no collision) and the VM import still proceeds.
+        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+            True,
+            {"device_id": did, "hostname": f"job-vm-{did}", "sysName": f"job-vm-{did}"},
+        )
 
         # Mock successful VM imports
         mock_vm_1 = MagicMock()
@@ -476,12 +485,46 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_run_vm_only_batch_is_collision_gated(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """A VM-only batch goes through the same fail-closed gate, so unverifiable ids block the VM import."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api_class.return_value = MagicMock(server_key="default")
+        # get_device_info fails for the VM ids → they can't be collision-checked → the batch-wide
+        # gate must fail closed and skip the VM import (before the fix the gate only saw device_ids,
+        # so a VM-only batch bypassed it entirely and bulk_import_vms ran unchecked).
+        mock_api_class.return_value.get_device_info.side_effect = lambda did: (False, None)
+
+        job = create_mock_job_runner(ImportDevicesJob, job_pk=801)
+
+        job.run(
+            device_ids=[],
+            vm_imports={10: {"cluster_id": 1}, 11: {"cluster_id": 1}},
+            server_key="default",
+        )
+
+        # The VM import must NOT run — the batch is blocked closed.
+        mock_bulk_vms.assert_not_called()
+        mock_bulk_devices.assert_not_called()
+        assert job.job.data["failed_count"] == 2
+        assert job.job.data["success_count"] == 0
+
+    # device + VM = 2 ids → the batch-wide collision pre-check runs over both; configure the api.
+    @pytest.mark.django_db
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
     def test_run_mixed_device_and_vm_import(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
         """Import both devices and VMs."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api = MagicMock()
         mock_api.server_key = "non-default"
+        # Distinct devices so the mixed batch resolves cleanly and both imports proceed.
+        mock_api.get_device_info.side_effect = lambda did: (
+            True,
+            {"device_id": did, "hostname": f"job-mix-{did}", "sysName": f"job-mix-{did}"},
+        )
         mock_api_class.return_value = mock_api
 
         # Mock device imports
@@ -662,6 +705,9 @@ class TestImportDevicesJob:
 
         assert 42 in job.job.data["imported_libre_device_ids"]
 
+    # device + VM = 2 ids → the batch-wide collision pre-check runs over both; configure the api so
+    # the batch resolves cleanly and the mocked device/VM error payloads are actually exercised.
+    @pytest.mark.django_db
     @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
@@ -669,7 +715,11 @@ class TestImportDevicesJob:
         """Device and VM errors are combined in job.data."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        mock_api_class.return_value = MagicMock()
+        mock_api_class.return_value = MagicMock(server_key="default")
+        mock_api_class.return_value.get_device_info.side_effect = lambda did: (
+            True,
+            {"device_id": did, "hostname": f"job-agg-{did}", "sysName": f"job-agg-{did}"},
+        )
 
         # Mock mixed results
         mock_bulk_devices.return_value = {

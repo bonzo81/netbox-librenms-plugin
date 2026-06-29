@@ -210,15 +210,20 @@ class ImportDevicesJob(JobRunner):
         # section below skips too — the synchronous view returns before importing ANY of the
         # submitted batch, and the async path must not partially import the same batch's VMs.
         batch_blocked_msg = None
-        if device_ids:
+        # Collision-check the WHOLE submitted batch — device imports AND VM imports — exactly like
+        # the synchronous view, which passes its full parsed id set (devices + VMs) to the same
+        # gate. device_ids here excludes VM rows (split out upstream), so checking it alone would
+        # let a VM-only batch, or a collision involving a VM row, slip through to bulk_import_vms().
+        collision_check_ids = list(dict.fromkeys([*device_ids, *vm_imports]))
+        if collision_check_ids:
             # Defense-in-depth: block a batch where two LibreNMS rows resolve to the same NetBox
             # device, mirroring the confirm-preview/sync-view gate so the async path can't import a
-            # colliding batch either. A single device can never collide, so skip the extra pass.
+            # colliding batch either. A single row can never collide, so skip the extra pass.
             collisions, unresolved = (
                 detect_collisions_for_device_ids(
-                    device_ids, api, libre_devices_cache=libre_devices_cache, sync_options=sync_options
+                    collision_check_ids, api, libre_devices_cache=libre_devices_cache, sync_options=sync_options
                 )
-                if len(device_ids) >= 2
+                if len(collision_check_ids) >= 2
                 else ([], [])
             )
             if unresolved:
@@ -243,7 +248,9 @@ class ImportDevicesJob(JobRunner):
                 self.logger.error(msg)
                 device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
                 batch_blocked_msg = msg
-            else:
+            elif device_ids:
+                # Clean batch with real device rows — import them. (A VM-only batch falls through
+                # here with nothing to do; its VMs are handled in the vm_imports block below.)
                 self.logger.info(f"Importing {len(device_ids)} devices...")
                 device_result = bulk_import_devices_shared(
                     device_ids=device_ids,
