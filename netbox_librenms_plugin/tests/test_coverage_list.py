@@ -300,6 +300,8 @@ class TestGetTable:
 
         view = object.__new__(LibreNMSImportView)
         view._import_data = [{"device_id": 1, "hostname": "router1"}]
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
 
         request = MagicMock()
         request.GET.get.return_value = None
@@ -313,6 +315,7 @@ class TestGetTable:
             mock_table_cls.assert_called_once_with(
                 view._import_data,
                 order_by=None,
+                server_key="default",
             )
 
     def test_get_table_loads_import_data_when_missing(self):
@@ -323,6 +326,8 @@ class TestGetTable:
         # No _import_data set
         view._job_results_loaded = False
         view._filters_submitted = False
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
 
         request = MagicMock()
         request.GET.get.return_value = None
