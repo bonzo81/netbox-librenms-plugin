@@ -374,6 +374,29 @@ class TestMergeTransceiverDataPortIdentity:
         assert result["table"] is None
         assert result["object"] is obj
 
+    def test_get_context_data_keys_cache_on_resolved_scoped_server(self):
+        """The cache read keys on the scoped server RETURNED by the resolver, not the bound api.server_key (equal only via the rebind side effect)."""
+        view = _make_view()
+        obj = MagicMock()
+        view._get_sync_device = MagicMock(return_value=obj)
+        view._librenms_api.get_librenms_id.return_value = 1
+        view._build_context = MagicMock()
+        request = MagicMock()
+        request.GET = {}
+        # Simulate the regression the finding guards against: the resolver returns a scoped server
+        # but does NOT rebind the bound client (which stays "test-server"). The cache key must
+        # follow the RESOLVED scoped server, not the now-stale bound api.server_key.
+        view.resolve_get_render_server_key = MagicMock(return_value=("scoped-srv", False))
+
+        with (
+            patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.base.modules_view.get_librenms_oob", return_value=None),
+        ):
+            mock_cache.get.return_value = {"inventory": [None], "librenms_id": 1}
+            view.get_context_data(request, obj)
+
+        view.get_cache_key.assert_called_once_with(obj, "inventory", server_key="scoped-srv")
+
     def test_post_warns_when_ports_fetch_fails(self):
         view = _make_view()
         view.model = MagicMock()

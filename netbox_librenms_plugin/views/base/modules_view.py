@@ -497,37 +497,33 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # empty table scoped to that key instead of silently falling back to the default
             # server's cached inventory and attributing it to the requested server.
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
-        # The helper already rebound self.librenms_api to the scoped server; bind the resolved key
-        # to a local so the cache read + OOB fingerprint below don't repeatedly hit the lazy
-        # librenms_api property (which can re-raise a misconfigured-server error mid-render).
-        server_key = scoped_server
         sync_device = self._get_sync_device(obj)
-        cache_key = self.get_cache_key(sync_device, "inventory", server_key=server_key)
+        cache_key = self.get_cache_key(sync_device, "inventory", server_key=scoped_server)
         cached_payload = cache.get(cache_key)
         if not isinstance(cached_payload, dict) or "inventory" not in cached_payload:
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # post() fails closed on malformed inventory before caching, but a stale pre-fix cache
         # entry (e.g. {"inventory": [None]}) can still reach _build_context() and crash on
         # item.get(...). Mirror the list-of-dicts guard on the read path too.
         cached_inventory = cached_payload.get("inventory")
         if not isinstance(cached_inventory, list) or any(not isinstance(item, dict) for item in cached_inventory):
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
         current_librenms_id = self.librenms_api.get_librenms_id(sync_device)
         if cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Same for the linked OOB controller: a re-link (or unlink) to a different
         # controller must drop merged inventory built for the old one. Symmetric on
         # None so had-OOB→none and none→has-OOB both invalidate.
-        current_oob = get_librenms_oob(sync_device, server_key=server_key)
+        current_oob = get_librenms_oob(sync_device, server_key=scoped_server)
         current_oob_id = current_oob.get("id") if isinstance(current_oob, dict) else None
         if cached_payload.get("oob_librenms_id") != current_oob_id:
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": server_key}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         return self._build_context(request, obj, cached_payload["inventory"], sync_device=sync_device)
 
     def _build_context(self, request, obj, inventory_data, server_key=None, sync_device=None):
