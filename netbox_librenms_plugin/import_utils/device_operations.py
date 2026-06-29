@@ -330,11 +330,22 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         and existing_link["host_id"] != normalized_device_id
     )
     already_linked_elsewhere = linked_to_other_id
-    chassis_pair_likely = (not names_match) or already_linked_elsewhere
+    # A bare hostname mismatch is NOT enough to treat this as a host/OOB chassis pair: a device
+    # reinstalled with a new hostname keeps its chassis serial, so "same serial, new hostname, no
+    # link, neither side OOB-flavoured" is a REINSTALL, not a pair — offering "Add as OOB
+    # controller" there mis-pairs a reinstalled host with its own stale record. Require a real OOB
+    # signal (incoming os/hardware or hostname looks OOB, or the existing device's name looks OOB)
+    # or an existing link to a DIFFERENT id before treating a name mismatch as a chassis pair.
+    existing_oob_from_name = _detect_oob_type_from_name(existing_by_serial.name)
+    incoming_oob_signal = bool(
+        oob_type_from_libre
+        or _detect_oob_type_from_name(libre_device.get("hostname") or libre_device.get("sysName") or "")
+    )
+    has_oob_signal = incoming_oob_signal or bool(existing_oob_from_name)
+    chassis_pair_likely = already_linked_elsewhere or ((not names_match) and has_oob_signal)
 
     oob_possible = chassis_pair_likely and existing_oob is None
     host_possible = chassis_pair_likely and bool(linked_to_other_id and not existing_link.get("oob_id"))
-    existing_oob_from_name = _detect_oob_type_from_name(existing_by_serial.name)
 
     # --- Compute all values before mutating result ---
     oob_candidate_data = None

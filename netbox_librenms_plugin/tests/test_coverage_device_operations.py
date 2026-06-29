@@ -2215,6 +2215,32 @@ class TestOOBDetection:
         assert result["promote_to_host"]["existing_libre_id"] == 99
         assert result["existing_librenms_link"]["host_id"] == 99
 
+    def test_serial_match_reinstall_no_oob_signal_yields_hostname_differs(self):
+        """Serial match + differing hostname with no OOB signal and no existing link is a reinstall (hostname_differs), not an OOB candidate."""
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        # Same chassis serial, a NEW hostname, no LibreNMS link, and neither side OOB-flavoured:
+        # this is a device reinstall, not a host/OOB chassis pair. Offering "Add as OOB controller"
+        # here would steer the user to mis-pair a reinstalled host with its own stale record.
+        make_device("old-server-name", serial="ABC123")  # no librenms_cf → not linked
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",  # differs from the existing device name
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",  # not OOB-typed
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        result = self._validate(libre_device)
+
+        assert result["serial_action"] == "hostname_differs"
+        assert result["serial_role_choice_available"] is False
+        assert result["oob_candidate"] is None
+        assert result.get("promote_to_host") is None
+
     # ------------------------------------------------------------------
     # Stage 2: two-NetBox-device merge detection
     # ------------------------------------------------------------------

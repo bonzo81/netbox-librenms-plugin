@@ -1841,8 +1841,8 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "serial"
         assert "not linked to LibreNMS" in result["warnings"][0]
 
-    def test_serial_match_diff_hostname_defaults_to_oob_candidate(self):
-        """Serial matches but hostname differs → default action is `oob_candidate`, with the host/OOB role-choice toggle NOT offered (serial_role_choice_available is False) because there is no existing LibreNMS link to promote from."""
+    def test_serial_match_diff_hostname_no_oob_signal_is_reinstall(self):
+        """Serial matches but hostname differs with no OOB signal and no link is a reinstall (hostname_differs), not an OOB candidate."""
         existing = MagicMock()
         existing.name = "old-hostname"
         existing.serial = "ABC123"
@@ -1866,11 +1866,11 @@ class TestSerialNumberMatching:
         device_data = {"device_id": 1, "hostname": "new-hostname", "serial": "ABC123"}
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
-        assert result["serial_action"] == "oob_candidate"
+        # Neither side is OOB-flavoured and there is no existing link, so a bare hostname mismatch
+        # on a shared chassis serial is a reinstall — NOT a host/OOB chassis pair.
+        assert result["serial_action"] == "hostname_differs"
         assert result["existing_match_type"] == "serial"
-        assert result.get("oob_candidate") is not None
-        # No existing LibreNMS/OOB link → oob_candidate-only baseline, so promote_to_host
-        # must stay absent (the documented "absent otherwise" convention).
+        assert result.get("oob_candidate") is None
         assert "promote_to_host" not in result
         assert result.get("serial_role_choice_available") is False
 
