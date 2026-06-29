@@ -420,6 +420,36 @@ class TestVerifyDualNameFallback:
         local_port_html = payload["formatted_row"]["local_port"]
         assert f"/interfaces/{iface.pk}/" in local_port_html
 
+    def test_verify_unresolved_none_local_port_does_not_render_literal_none(self):
+        """A row whose local_port is None and resolves to no interface must render "" (or a badge), not the literal "None"."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("verify-none-sw")
+        view = _make_view()
+        # OOB row whose local interface name couldn't be resolved: local_port is None while
+        # local_port_id is set (matches no NetBox interface → falls to the unmatched branch).
+        link = {
+            "local_port": None,
+            "local_port_alt": None,
+            "local_port_id": 7777,
+            "remote_device": "",
+            "remote_port": "",
+            "remote_port_id": None,
+            "remote_device_id": None,
+            "_source": "oob",
+        }
+        cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, 300)
+
+        request = _make_request({"device_id": device.pk, "local_port_id": 7777, "server_key": "default"})
+        response = view.post(request)
+        payload = json.loads(response.content)
+
+        # render_local_port in the table was fixed to normalize None→""; the verify path must match.
+        assert payload["formatted_row"]["local_port"] != "None"
+        assert "None" not in payload["formatted_row"]["local_port"]
+
 
 @pytest.mark.django_db
 class TestRemoteDeviceResolutionExcludesOOB:

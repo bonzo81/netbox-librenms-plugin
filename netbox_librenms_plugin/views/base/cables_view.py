@@ -893,7 +893,11 @@ class SingleCableVerifyView(NetBoxObjectPermissionMixin, BaseCableTableView):
                             link_data, remote_hostname, link_data.get("remote_device_id"), server_key=server_key
                         )
 
-                    local_port = link_data.get("local_port", "")
+                    # Normalize None → "" (link_data.get(..., "") still returns None when the key
+                    # is present-but-None, e.g. an OOB row whose port name couldn't be resolved).
+                    # Otherwise the unmatched-interface branch renders escape(None) == "None" as the
+                    # port label — the same defect tables/cables.py render_local_port was fixed for.
+                    local_port = link_data.get("local_port") or ""
                     formatted_row["local_port"] = local_port
 
                     # First try to find interface by librenms_id (handle VC members)
