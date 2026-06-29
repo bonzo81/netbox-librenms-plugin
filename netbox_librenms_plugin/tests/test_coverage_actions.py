@@ -691,6 +691,29 @@ class TestDeviceValidationDetailsView:
         ctx = mock_render.call_args[0][2]
         assert "sync_info" in ctx
 
+    def test_get_rebinds_to_request_server_key(self, mock_multi_server_config):
+        # Reached via its own URL (modal-open GET), the view must rebind to ?server_key so the
+        # fetch targets the import's server, not the global selected_server. Here the bound client
+        # is the default server; the request asks for "secondary" and the client must follow.
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        view = object.__new__(DeviceValidationDetailsView)
+        view._librenms_api = _make_api()  # bound to the default server
+        request = RequestFactory().get("/x/?server_key=secondary")
+
+        with (
+            patch(
+                "netbox_librenms_plugin.librenms_api.get_plugin_config",
+                side_effect=lambda _plugin, key: mock_multi_server_config if key == "servers" else None,
+            ),
+            patch.object(view, "get_validated_device_with_selections", return_value=(None, None, {})),
+        ):
+            view.get(request, device_id=1)
+
+        assert view._librenms_api.server_key == "secondary"
+
 
 class TestBuildSyncInfo:
     """Tests for _build_sync_info (lines 828-886)."""

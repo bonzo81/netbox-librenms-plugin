@@ -437,7 +437,7 @@ class DeviceImportHelperMixin:
             HttpResponse with rendered device row
         """
         libre_device["_validation"] = validation
-        table = DeviceImportTable([libre_device])
+        table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key)
 
         context = {
             "record": libre_device,
@@ -1057,7 +1057,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     cache.set(cache_key, libre_device, self.librenms_api.cache_timeout)
 
                     # Render updated row
-                    table = DeviceImportTable([libre_device])
+                    table = DeviceImportTable([libre_device], server_key=self.librenms_api.server_key)
                     context = {
                         "record": libre_device,
                         "table": table,
@@ -1182,6 +1182,13 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
 
     def get(self, request, device_id):
         """Render detailed validation information for a LibreNMS device."""
+        # Rebind to the import page's server (?server_key) before fetching. Reached via its own
+        # URL (the modal-open HTMX GET), this view has no parent handler to inject the
+        # import-scoped client, so without this it would fetch/cache against the global
+        # LibreNMSSettings.selected_server — which may differ from the server the import ran on,
+        # rendering "Device not found" for a device that only exists on the import's server. A
+        # blank/absent ?server_key keeps the already-bound (parent-injected) or session client.
+        self.resolve_get_render_server_key(request)
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:

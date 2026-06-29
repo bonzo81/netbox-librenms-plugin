@@ -1,4 +1,5 @@
 import json
+from urllib.parse import quote_plus
 
 import django_tables2 as tables
 from dcim.models import Device
@@ -93,6 +94,10 @@ class DeviceImportTable(tables.Table):
 
     def __init__(self, *args, **kwargs):
         """Initialize table with cached querysets and apply sorting."""
+        # The server the import page was rendered against. Threaded onto the validation-details
+        # modal URL so the modal-open HTMX GET fetches from this server rather than whatever
+        # LibreNMSSettings.selected_server happens to be when the modal is opened.
+        self.server_key = kwargs.pop("server_key", None)
         super().__init__(*args, **kwargs)
 
         # Cache querysets to avoid N queries per render
@@ -680,8 +685,7 @@ class DeviceImportTable(tables.Table):
             f'<i class="mdi mdi-server-network"></i> {member_count} members</button>'
         )
 
-    @staticmethod
-    def _build_validation_details_url(device_id: int, validation: dict) -> str:
+    def _build_validation_details_url(self, device_id: int, validation: dict) -> str:
         """
         Build validation details URL with appropriate query parameters.
 
@@ -702,6 +706,14 @@ class DeviceImportTable(tables.Table):
 
         # Build query params based on import type
         params = []
+
+        # Scope the modal to the server the import page was rendered for, so the modal-open GET
+        # (which reaches DeviceValidationDetailsView via its own URL, with no parent handler to
+        # inject the import-scoped client) fetches from that server rather than the global
+        # LibreNMSSettings.selected_server (which may have drifted).
+        server_key = getattr(self, "server_key", None)
+        if server_key:
+            params.append(f"server_key={quote_plus(str(server_key))}")
 
         # Add cluster_id if this is a VM import
         if validation.get("cluster", {}).get("found") and validation.get("cluster", {}).get("cluster"):

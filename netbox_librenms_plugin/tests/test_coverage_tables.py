@@ -970,6 +970,42 @@ class TestDeviceImportTableRenderActions:
 
         assert "View Device in NetBox" in result
 
+    def test_validation_details_url_carries_server_key(self):
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        table = self._table()
+        table.server_key = "secondary"  # the server the import page was rendered against
+
+        existing = MagicMock(spec=Device)
+        existing.__class__ = Device
+        existing.pk = 55
+
+        record = {
+            "device_id": 2,
+            "_validation": {
+                "existing_device": existing,
+                "is_ready": False,
+                "can_import": False,
+                "existing_match_type": "librenms_id",
+                "serial_action": None,
+                "device_type_mismatch": False,
+                "name_sync_available": False,
+                "librenms_id_needs_migration": False,
+                "virtual_chassis": None,
+            },
+        }
+
+        with (
+            patch("netbox_librenms_plugin.tables.device_status.VirtualMachine", VirtualMachine),
+            patch("netbox_librenms_plugin.tables.device_status.reverse", side_effect=self._fake_reverse),
+        ):
+            result = str(table.render_actions(value=2, record=record))
+
+        # The validation-details modal hx-get must carry the rendered server_key so the
+        # modal-open GET fetches from the import's server, not the global selected_server.
+        assert "server_key=secondary" in result
+
     def test_existing_device_type_mismatch_shows_conflict_danger(self):
         from dcim.models import Device
         from virtualization.models import VirtualMachine
@@ -1582,11 +1618,13 @@ class TestDeviceImportTableRenderActions:
 class TestBuildValidationDetailsUrl:
     """Tests for DeviceImportTable._build_validation_details_url()."""
 
-    def _call(self, device_id, validation):
+    def _call(self, device_id, validation, server_key=None):
         from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 
+        table = object.__new__(DeviceImportTable)
+        table.server_key = server_key
         with patch("netbox_librenms_plugin.tables.device_status.reverse", return_value="/validation/"):
-            return DeviceImportTable._build_validation_details_url(device_id, validation)
+            return table._build_validation_details_url(device_id, validation)
 
     def test_no_params_returns_plain_url(self):
         url = self._call(1, {})

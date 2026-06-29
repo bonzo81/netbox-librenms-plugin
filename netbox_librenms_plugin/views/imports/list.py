@@ -378,6 +378,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         table = DeviceImportTable(
             data,
             order_by=request.GET.get("sort"),
+            server_key=self.librenms_api.server_key,
         )
         return table
 
