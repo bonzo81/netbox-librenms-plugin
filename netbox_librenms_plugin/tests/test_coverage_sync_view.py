@@ -92,6 +92,10 @@ class TestBaseLibreNMSSyncViewGet:
             view.get(request, pk=1)
 
         mock_get_sync.assert_not_called()  # VC delegation skipped on unresolved
+        # The default client must never be queried: get_librenms_id can auto-discover/store a
+        # mapping, which is exactly the fail-open behaviour this branch blocks. Asserting the id is
+        # None alone would still pass if the lookup ran and its result were merely discarded.
+        view._librenms_api.get_librenms_id.assert_not_called()
         assert view._librenms_lookup_device is obj
         assert view.librenms_id is None  # no default-server mapping attributed to the gone server
 

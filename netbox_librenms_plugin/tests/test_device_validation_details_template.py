@@ -69,6 +69,10 @@ class TestDeviceValidationDetailsMergeBadge:
     def test_oob_ip_move_copy_states_the_real_condition(self):
         """The 'Moved to winner' copy must state the OOB IP only moves when the winner has no OOB IP AND the IP is already on a winner interface — the old copy over-promised the move."""
         html = self._render()
+        # Both halves of the real condition must be stated, not just one. Pinning only the
+        # "winner interface" clause would still pass if the "winner has no OOB IP" requirement
+        # were dropped again (the original over-promise this copy fixed).
+        assert "the winner has no OOB IP" in html
         assert "the IP is already on a winner interface" in html
         assert "(only if the winner has no OOB IP yet)" not in html
 
