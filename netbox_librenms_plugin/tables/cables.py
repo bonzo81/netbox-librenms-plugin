@@ -69,9 +69,12 @@ class LibreNMSCableTable(tables.Table):
             if record.get("_source") == "oob"
             else ""
         )
+        # Normalize None to "" in both branches; otherwise the linked branch
+        # renders the literal "None" as the link text when value is missing.
+        display_value = value or ""
         if url := record.get("local_port_url"):
-            return format_html('<a href="{}">{}</a>{}', url, value, oob_badge)
-        return format_html("{}{}", value or "", oob_badge)
+            return format_html('<a href="{}">{}</a>{}', url, display_value, oob_badge)
+        return format_html("{}{}", display_value, oob_badge)
 
     def render_remote_port(self, value, record):
         """Render remote port name as a link if URL is available."""

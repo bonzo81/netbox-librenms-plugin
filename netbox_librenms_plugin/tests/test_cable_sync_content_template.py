@@ -59,3 +59,16 @@ class TestCableSyncContentTemplateMigratedMode:
         assert "<form" in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
+
+    def test_render_local_port_link_branch_normalizes_missing_name(self):
+        """A linked local port with no name renders empty text, not the literal 'None'."""
+        from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("cable-render-dev")
+        table = LibreNMSCableTable([], device=device)
+
+        html = table.render_local_port(value=None, record={"local_port_url": "/dcim/interfaces/1/"})
+
+        assert 'href="/dcim/interfaces/1/"' in html
+        assert ">None<" not in html
