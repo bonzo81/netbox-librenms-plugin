@@ -2355,6 +2355,13 @@ def build_migrated_context(obj, server_key: str = "default") -> dict:
 
     # device_id is guaranteed a positive int by get_migrated_to_marker().
     winner = Device.objects.filter(pk=marker["device_id"]).first()
+    # A self-pointing marker (winner == this donor) is corrupt: it would flip the donor's own sync
+    # page into migrated mode resolving the "winner" to itself, hiding the ordinary sync controls.
+    # Fail closed to the non-migrated result. The marker is deliberately NOT rejected in
+    # get_migrated_to_marker(): the move views read it via _resolve_winner_for_donor() and need it
+    # present to report a self-pointing marker as "stale/corrupt" rather than "not migrated".
+    if winner is not None and winner.pk == getattr(obj, "pk", None):
+        return {"migrated_to_marker": None, "migrated_to_winner": None}
     return {"migrated_to_marker": marker, "migrated_to_winner": winner}
 
 

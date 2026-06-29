@@ -95,6 +95,21 @@ class TestGetMigratedToMarker:
         )
         assert get_migrated_to_marker(donor, "default") is None
 
+    def test_returns_self_pointing_marker_unchanged(self):
+        # get_migrated_to_marker() deliberately does NOT reject a self-pointing marker: the move
+        # views read it via _resolve_winner_for_donor() and need the marker present to classify it
+        # as "stale/corrupt" rather than "not migrated". The self-pointing fail-closed lives in
+        # build_migrated_context() (see TestBuildMigratedContext) instead.
+        from netbox_librenms_plugin.utils import get_migrated_to_marker
+
+        donor = _make_migrate_device("mig-selfpoint")
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default"}}
+        }
+        donor.save()
+        marker = get_migrated_to_marker(donor, "default")
+        assert marker["device_id"] == donor.pk
+
 
 @pytest.mark.django_db
 class TestBuildMigratedContext:
@@ -117,6 +132,20 @@ class TestBuildMigratedContext:
         ctx = build_migrated_context(donor, "default")
         assert ctx["migrated_to_marker"]["device_id"] == winner.pk
         assert ctx["migrated_to_winner"].pk == winner.pk
+
+    def test_self_pointing_marker_does_not_enter_migrated_mode(self):
+        # build_migrated_context() reads get_migrated_to_marker() directly (not the move views'
+        # _resolve_winner_for_donor), so a self-pointing marker must be rejected here too — otherwise
+        # the donor's sync page flips into migrated mode and resolves the "winner" to itself.
+        from netbox_librenms_plugin.utils import build_migrated_context
+
+        donor = _make_migrate_device("mig-ctx-selfpoint")
+        donor.custom_field_data["librenms_id"] = {
+            "default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default"}}
+        }
+        donor.save()
+        ctx = build_migrated_context(donor, "default")
+        assert ctx == {"migrated_to_marker": None, "migrated_to_winner": None}
 
 
 # ── helper: _resolve_winner_for_donor ─────────────────────────────────────
