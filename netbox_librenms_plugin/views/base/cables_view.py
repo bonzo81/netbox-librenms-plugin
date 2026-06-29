@@ -183,6 +183,130 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             return {"ports": []}
         return data
 
+    @staticmethod
+    def _build_cable_port_name_maps(ports_data, interface_name_field, alt_name_field):
+        """
+        Build ``{port_id: name}`` and ``{port_id: alt_name}`` maps from a get_ports payload.
+
+        Shared by the host and OOB cable branches so they name local ports identically. A
+        malformed payload (non-dict, non-list ports, non-dict rows) yields empty maps rather
+        than crashing.
+        """
+        name_map = {}
+        alt_map = {}
+        ports = ports_data.get("ports") if isinstance(ports_data, dict) else None
+        for port in ports if isinstance(ports, list) else []:
+            # A malformed LibreNMS/cache payload can carry non-dict rows (strings/nulls);
+            # dereferencing .get() on those would 500 the refresh, so skip them.
+            if not isinstance(port, dict):
+                continue
+            raw_port_id = port.get("port_id")
+            if raw_port_id is None:
+                continue
+            port_id = str(raw_port_id)
+            port_name = port.get(interface_name_field)
+            if port_name is None:
+                continue
+            name_map[port_id] = port_name
+            # Only record an alternate that differs from the displayed name (issue #88).
+            alt_name = port.get(alt_name_field)
+            if alt_name and alt_name != port_name:
+                alt_map[port_id] = alt_name
+        return name_map, alt_map
+
+    @staticmethod
+    def _collect_cable_links(links, name_map, alt_map, source):
+        """
+        Turn LibreNMS LLDP link rows into the table's row dicts, tagged with *source*.
+
+        Shared by the host (``source='main'``) and OOB (``source='oob'``) branches. Non-dict
+        rows are skipped; an unmapped local_port_id falls back to the LibreNMS-reported name.
+        """
+        rows = []
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            port_id = link.get("local_port_id")
+            key = str(port_id)
+            local_port_name = name_map.get(key)
+            if local_port_name is None:
+                # Fall back to the LibreNMS-reported local_port name so name-based resolution
+                # still works when the ports map misses or the ports fetch failed.
+                local_port_name = link.get("local_port")
+            rows.append(
+                {
+                    "local_port": local_port_name,
+                    "local_port_alt": alt_map.get(key),
+                    "local_port_id": port_id,
+                    "remote_port": link.get("remote_port"),
+                    "remote_device": link.get("remote_hostname"),
+                    "remote_port_id": link.get("remote_port_id"),
+                    "remote_device_id": link.get("remote_device_id"),
+                    "_source": source,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _classify_links_fetch_error(success, data):
+        """Extract a human-readable error string from a failed/garbled get_device_links response."""
+        if not success:
+            # A failed fetch may carry the detail under "error" OR "message"; capture either,
+            # else post() loses the real reason and can cache an empty "successful" refresh.
+            return (data.get("error") or data.get("message") or str(data)) if isinstance(data, dict) else str(data)
+        if isinstance(data, dict):
+            return data.get("message") or data.get("error") or "Unexpected response from LibreNMS"
+        return "Unexpected response from LibreNMS (expected an object)."
+
+    def _merge_oob_cable_links(self, links_data, lookup_device, server_key, interface_name_field, alt_name_field):
+        """
+        Append the linked OOB controller's LLDP links (``_source='oob'``) to *links_data*.
+
+        Returns True when an OOB controller is linked, so the caller's empty-refresh
+        classification can tell an OOB-only mapping from a truly unmapped device. Sets
+        ``self._oob_links_fetch_failed`` on a failed/malformed OOB fetch so post() can warn
+        rather than silently dropping OOB rows.
+        """
+        oob = get_librenms_oob(lookup_device, server_key=server_key)
+        # Coerce the OOB controller id like the host id: a non-numeric/bool/zero/negative stored
+        # id fails closed (skip the fetch) rather than building a GET /devices/<garbage>/... that
+        # 404s and silently drops OOB rows.
+        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
+        if not oob_id:
+            return False
+        oob_success, oob_data = self.librenms_api.get_device_links(oob_id)
+        # Mirror the main-device branch: a 200 {"status": "error", ...} body is also a failure.
+        oob_ok = (
+            oob_success and isinstance(oob_data, dict) and oob_data.get("status") != "error" and "error" not in oob_data
+        )
+        if not oob_ok:
+            self._oob_links_fetch_failed = True
+            logger.warning(
+                "OOB links fetch failed for device %s (OOB id %s): %s",
+                self.librenms_id,
+                oob_id,
+                oob_data.get("message") if isinstance(oob_data, dict) else oob_data,
+            )
+            return True
+        oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob_id)
+        oob_map, oob_alt_map = self._build_cable_port_name_maps(
+            oob_ports_data if oob_ports_success else {}, interface_name_field, alt_name_field
+        )
+        oob_links = oob_data.get("links")
+        if not isinstance(oob_links, list):
+            # Malformed "links" (null/object): flag the failure and keep the host links already
+            # collected rather than crashing on iteration.
+            self._oob_links_fetch_failed = True
+            logger.warning(
+                "OOB links fetch returned a malformed payload for device %s (OOB id %s): %s",
+                self.librenms_id,
+                oob_id,
+                oob_data,
+            )
+            return True
+        links_data.extend(self._collect_cable_links(oob_links, oob_map, oob_alt_map, "oob"))
+        return True
+
     def get_links_data(self, obj, server_key=None, sync_device=None):
         """Fetch links data from LibreNMS for the device and add local port names."""
         # Scope DB lookups (sync device / OOB) and the ports cache to the POST-resolved
@@ -227,19 +351,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if not lldp_ok:
             # Capture the real fetch failure so that when there's ultimately nothing to show,
             # post() can surface the actual LibreNMS error instead of a generic "No links found".
-            if not success:
-                # A failed fetch may carry the detail under "error" OR "message"; capture either,
-                # else post() loses the real reason and can cache an empty "successful" refresh
-                # over the existing cable snapshot.
-                self._links_fetch_error = (
-                    (data.get("error") or data.get("message") or str(data)) if isinstance(data, dict) else str(data)
-                )
-            elif isinstance(data, dict):
-                self._links_fetch_error = (
-                    data.get("message") or data.get("error") or "Unexpected response from LibreNMS"
-                )
-            else:
-                self._links_fetch_error = "Unexpected response from LibreNMS (expected an object)."
+            self._links_fetch_error = self._classify_links_fetch_error(success, data)
 
         interface_name_field = get_interface_name_field(getattr(self, "request", None))
         # The alternate LibreNMS name field: when the user displays ifName, a NetBox
@@ -247,27 +359,9 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # name lets enrich_local_port fall back to either field (issue #88).
         alt_name_field = "ifDescr" if interface_name_field == "ifName" else "ifName"
         ports_data = self.get_ports_data(lookup_device, server_key=server_key)
-        local_ports_map = {}
-        local_ports_alt_map = {}
-        ports = ports_data.get("ports", []) if isinstance(ports_data, dict) else []
-        for port in ports if isinstance(ports, list) else []:
-            # A malformed LibreNMS/cache payload can carry non-dict rows (strings/nulls);
-            # dereferencing .get() on those would 500 the refresh, so skip them.
-            if not isinstance(port, dict):
-                continue
-            raw_port_id = port.get("port_id")
-            if raw_port_id is None:
-                continue
-            port_id = str(raw_port_id)
-            port_name = port.get(interface_name_field)
-            if port_name is None:
-                continue
-            local_ports_map[port_id] = port_name
-            # Only record an alternate that differs from the displayed name (no point matching
-            # the same string twice).
-            alt_name = port.get(alt_name_field)
-            if alt_name and alt_name != port_name:
-                local_ports_alt_map[port_id] = alt_name
+        local_ports_map, local_ports_alt_map = self._build_cable_port_name_maps(
+            ports_data, interface_name_field, alt_name_field
+        )
 
         # Only consume links when the LLDP fetch was OK. A dict-shaped body can still carry a
         # malformed "links" (null/object); treat that as no links (and record the error)
@@ -278,118 +372,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 self._links_fetch_error or "Unexpected response from LibreNMS (links must be a list)."
             )
             links = []
-        links_data = []
-        for link in links:
-            if not isinstance(link, dict):
-                continue
-            link_local_port_id = str(link.get("local_port_id"))
-            local_port_name = local_ports_map.get(link_local_port_id)
-            if local_port_name is None:
-                # Fall back to the LibreNMS-reported local_port name so name-based
-                # resolution still works when the ports map misses or ports fetch failed.
-                local_port_name = link.get("local_port")
-            links_data.append(
-                {
-                    "local_port": local_port_name,
-                    "local_port_alt": local_ports_alt_map.get(link_local_port_id),
-                    "local_port_id": link.get("local_port_id"),
-                    "remote_port": link.get("remote_port"),
-                    "remote_device": link.get("remote_hostname"),
-                    "remote_port_id": link.get("remote_port_id"),
-                    "remote_device_id": link.get("remote_device_id"),
-                    "_source": "main",
-                }
-            )
+        links_data = self._collect_cable_links(links, local_ports_map, local_ports_alt_map, "main")
 
-        # If an OOB controller is linked, fetch its LLDP links and merge. Reuse the sync
-        # device resolved at the top so host + OOB data stay scoped to the same member.
-        oob = get_librenms_oob(lookup_device, server_key=server_key)
-        # Coerce the OOB controller id the same way the host id is coerced above: a non-numeric /
-        # bool / zero / negative stored id must fail closed (oob_id=None → skip the OOB fetch),
-        # never build a GET /devices/<garbage>/links|ports that 404s and silently drops OOB rows.
-        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
-        if oob_id:
-            oob_success, oob_data = self.librenms_api.get_device_links(oob_id)
-            # Mirror the main-device branch: a 200 {"status": "error", ...} body is also a
-            # failure (get_device_links returns the raw JSON), not just an "error" key.
-            oob_ok = (
-                oob_success
-                and isinstance(oob_data, dict)
-                and oob_data.get("status") != "error"
-                and "error" not in oob_data
-            )
-            if oob_ok:
-                # Build a port-id → name map for the OOB device using the same
-                # interface_name_field as the main device so names are consistent.
-                oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob_id)
-                oob_local_ports_map = {}
-                oob_local_ports_alt_map = {}
-                if oob_ports_success and isinstance(oob_ports_data, dict):
-                    oob_ports = oob_ports_data.get("ports")
-                    for port in oob_ports if isinstance(oob_ports, list) else []:
-                        # Skip non-dict rows (see the main-branch guard above) so a
-                        # malformed OOB ports payload can't 500 the refresh.
-                        if not isinstance(port, dict):
-                            continue
-                        raw_port_id = port.get("port_id")
-                        if raw_port_id is None:
-                            continue
-                        port_name = port.get(interface_name_field)
-                        if port_name is None:
-                            continue
-                        oob_local_ports_map[str(raw_port_id)] = port_name
-                        # Same alternate-field fallback as the main branch (issue #88).
-                        alt_name = port.get(alt_name_field)
-                        if alt_name and alt_name != port_name:
-                            oob_local_ports_alt_map[str(raw_port_id)] = alt_name
-
-                # Same malformed-payload guard as the main branch: oob_data is a dict here,
-                # but its "links" can still be null/object. Treat that as an OOB fetch failure
-                # (flag it, keep the main-device links already collected) rather than crashing.
-                oob_links = oob_data.get("links")
-                if not isinstance(oob_links, list):
-                    self._oob_links_fetch_failed = True
-                    logger.warning(
-                        "OOB links fetch returned a malformed payload for device %s (OOB id %s): %s",
-                        self.librenms_id,
-                        oob_id,
-                        oob_data,
-                    )
-                    # Don't early-return: fall through to the final failure classification below.
-                    # An early `return links_data` on an OOB-only device (empty links_data) would
-                    # be read as a *successful* empty refresh and clear cached rows. The final guard
-                    # returns None when _oob_links_fetch_failed, preserving the cache.
-                else:
-                    for link in oob_links:
-                        if not isinstance(link, dict):
-                            continue
-                        oob_port_id = link.get("local_port_id")
-                        oob_local_port = oob_local_ports_map.get(str(oob_port_id)) if oob_port_id else None
-                        if oob_local_port is None:
-                            oob_local_port = link.get("local_port")
-                        oob_local_port_alt = oob_local_ports_alt_map.get(str(oob_port_id)) if oob_port_id else None
-                        links_data.append(
-                            {
-                                "local_port": oob_local_port,
-                                "local_port_alt": oob_local_port_alt,
-                                "local_port_id": oob_port_id,
-                                "remote_port": link.get("remote_port"),
-                                "remote_device": link.get("remote_hostname"),
-                                "remote_port_id": link.get("remote_port_id"),
-                                "remote_device_id": link.get("remote_device_id"),
-                                "_source": "oob",
-                            }
-                        )
-            else:
-                # Don't silently drop OOB cable rows on a fetch failure — flag it so
-                # post() can warn the user (this method has no request to message on).
-                self._oob_links_fetch_failed = True
-                logger.warning(
-                    "OOB links fetch failed for device %s (OOB id %s): %s",
-                    self.librenms_id,
-                    oob_id,
-                    oob_data.get("message") if isinstance(oob_data, dict) else oob_data,
-                )
+        # If an OOB controller is linked, fetch its LLDP links and merge. Reuse the sync device
+        # resolved at the top so host + OOB data stay scoped to the same member.
+        oob_linked = self._merge_oob_cable_links(
+            links_data, lookup_device, server_key, interface_name_field, alt_name_field
+        )
 
         # Distinguish a *successful* zero-row refresh ([] — flows through to the success path in
         # _prepare_context(), where an OOB-fetch warning can still be surfaced) from a genuine
@@ -409,7 +398,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # that as a successful empty refresh would overwrite the cache with [] and drop the
         # very rows we couldn't re-fetch. So fall back to None (failure) in that case.
         host_mapping_absent_but_oob_scoped = (
-            self.librenms_id is None and oob_id is not None and not self._oob_links_fetch_failed
+            self.librenms_id is None and oob_linked and not self._oob_links_fetch_failed
         )
         if not links_data and self._links_fetch_error and not host_mapping_absent_but_oob_scoped:
             return None
