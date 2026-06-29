@@ -1235,6 +1235,39 @@ class TestMarkLibreNMSMigrated:
             assert "oob" not in entry
             assert entry["_migrated_to"]["device_id"] == 99
 
+    def test_fails_closed_on_unparseable_dict_host_id(self):
+        """A dict entry whose own id is non-blank but unparseable must raise, not be popped + marked.
+
+        The dict branch validated the nested oob but not entry["id"], so {"id": "abc"} / {"id": 0} /
+        {"id": True} was silently popped and stamped _migrated_to — erasing the corrupt-but-
+        recoverable host mapping instead of forcing the caller to migrate it first.
+        """
+        import pytest
+
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        for corrupt_id in ("abc", 0, True):
+            donor = MagicMock()
+            donor.name = "corrupt-host-id-donor"
+            donor.custom_field_data = {"librenms_id": {"default": {"id": corrupt_id}}}
+            with pytest.raises(ValueError):
+                mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+            # The raise happens before any mutation: no marker stamped, id preserved to migrate first.
+            assert donor.custom_field_data["librenms_id"]["default"] == {"id": corrupt_id}
+
+    def test_valid_or_blank_dict_host_id_does_not_raise(self):
+        """A dict entry with a numeric/blank/absent id is popped and the marker stamped (no raise)."""
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        for ok_id in ({"id": 55}, {"id": "55"}, {"id": ""}, {"id": None}, {}):
+            donor = MagicMock()
+            donor.name = "ok-host-id-donor"
+            donor.custom_field_data = {"librenms_id": {"default": dict(ok_id)}}
+            mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
+            entry = donor.custom_field_data["librenms_id"]["default"]
+            assert "id" not in entry
+            assert entry["_migrated_to"]["device_id"] == 99
+
     @pytest.mark.django_db
     def test_after_marker_find_by_librenms_id_no_longer_matches(self):
         """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned by find_by_librenms_id, queried against the REAL Device model."""

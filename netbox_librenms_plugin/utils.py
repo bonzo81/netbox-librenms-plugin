@@ -2239,6 +2239,19 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
         entry = {"id": coerced} if coerced else {}
     elif isinstance(entry, dict):
         entry = dict(entry)
+        # Validate the host id itself before it is popped below, the same way the bare-int and
+        # bare-string branches above do: a non-blank but unparseable id ({"id": "abc"}, {"id": 0},
+        # {"id": True}) is corrupt-but-recoverable state, not "no link". Without this the dict
+        # branch would silently pop it and stamp _migrated_to, erasing the recoverable mapping. A
+        # blank/None id ({}, {"id": None}) is a genuine "no active link" and proceeds.
+        raw_id = entry.get("id")
+        if isinstance(raw_id, str) and not raw_id.strip():
+            raw_id = None
+        if raw_id is not None and coerce_librenms_id(raw_id) is None:
+            raise ValueError(
+                f"Cannot mark '{getattr(donor, 'name', donor)}' migrated: "
+                f"librenms_id[{server_key!r}] has an unparseable id ({raw_id!r}); migrate it first."
+            )
         # Validate the nested oob before it is popped below, the same way
         # merge_librenms_links() does: a non-dict oob, or an oob carrying a
         # non-blank unparseable id, is corrupt-but-recoverable state. Failing
