@@ -1194,7 +1194,16 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         # LibreNMSSettings.selected_server — which may differ from the server the import ran on,
         # rendering "Device not found" for a device that only exists on the import's server. A
         # blank/absent ?server_key keeps the already-bound (parent-injected) or session client.
-        self.resolve_get_render_server_key(request)
+        _scoped_server, unresolved = self.resolve_get_render_server_key(request)
+        if unresolved:
+            # ?server_key named a server that no longer resolves (deleted/misconfigured); the rebind
+            # declined and left the default/session client bound. Fail closed rather than fetch and
+            # render validation data from the wrong server. 200, not 4xx — HTMX swaps the fragment in
+            # place (a 4xx makes it skip the swap), matching the "Device not found" branch below.
+            return HttpResponse(
+                '<div class="alert alert-danger">Selected LibreNMS server is no longer configured.</div>',
+                status=200,
+            )
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:

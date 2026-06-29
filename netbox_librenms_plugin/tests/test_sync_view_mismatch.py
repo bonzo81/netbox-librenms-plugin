@@ -10,6 +10,8 @@ primary IP, DNS name) matches ANY LibreNMS identity (sysName, hostname, ip).
 
 from unittest.mock import MagicMock, patch
 
+from django.test import RequestFactory
+
 
 def _make_view(librenms_id, device_info, librenms_url="https://librenms.example.com"):
     """Create a minimal BaseLibreNMSSyncView instance with mocked dependencies."""
@@ -516,7 +518,10 @@ class TestVCLookupDelegation:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        # Real request with no ?server_key: resolve_get_render_server_key falls back to the bound
+        # default server (unresolved=False), so VC delegation runs. A MagicMock() request would make
+        # ?server_key a truthy mock that fails to resolve, spuriously tripping the fail-closed path.
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         # get_librenms_sync_device must be called unconditionally for VC members
@@ -549,7 +554,7 @@ class TestVCLookupDelegation:
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
 
-        request = MagicMock()
+        request = RequestFactory().get("/")
         view.get(request, pk=1)
 
         mock_sync_device.assert_not_called()

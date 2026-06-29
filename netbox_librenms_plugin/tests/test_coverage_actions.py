@@ -714,6 +714,39 @@ class TestDeviceValidationDetailsView:
 
         assert view._librenms_api.server_key == "secondary"
 
+    def test_get_unresolved_server_key_fails_closed(self):
+        # A ?server_key that no longer resolves (deleted/misconfigured) must NOT fall through to a
+        # fetch against the still-bound default client — that would render another server's
+        # validation data as the requested server's. Real view.get -> real
+        # resolve_get_render_server_key -> real rebind_api_for_server; only the HTTP-client factory
+        # (build_librenms_api) and the LibreNMS fetch boundary are stubbed.
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        view = object.__new__(DeviceValidationDetailsView)
+        view._librenms_api = _make_api()  # bound to the default server
+        request = RequestFactory().get("/x/?server_key=ghost")
+
+        fetched = {"called": False}
+
+        def _spy(*_a, **_k):
+            fetched["called"] = True
+            return ({"device_id": 1}, {}, {})
+
+        with (
+            # Non-blank ?server_key=ghost that build_librenms_api can't resolve -> rebind returns
+            # None -> resolve_get_render_server_key reports unresolved=True.
+            patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None),
+            patch.object(view, "get_validated_device_with_selections", side_effect=_spy),
+        ):
+            result = view.get(request, device_id=1)
+
+        # With the fix, get() returns the fail-closed alert before fetching or rendering anything.
+        assert result.status_code == 200
+        assert b"no longer configured" in result.content
+        assert fetched["called"] is False  # never fetched from the wrong (default) server
+
 
 class TestBuildSyncInfo:
     """Tests for _build_sync_info (lines 828-886)."""

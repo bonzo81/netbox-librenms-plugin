@@ -74,6 +74,30 @@ class TestBaseLibreNMSSyncViewGet:
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_get_unresolved_server_key_fails_closed(self, mock_get_sync, mock_get_obj, mock_render):
+        """Stale ?server_key fails closed: no default-server librenms_id, VC delegation skipped."""
+        view = _make_view()
+        view._librenms_api.server_key = "default"  # stays bound to the default server
+        view._librenms_api.get_librenms_id.return_value = 99  # default server's mapping; must NOT surface
+
+        obj = MagicMock()
+        obj.virtual_chassis = MagicMock()  # VC member: delegation would normally run
+        mock_get_obj.return_value = obj
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = RequestFactory().get("/x/?server_key=ghost")
+        # Non-blank ?server_key=ghost the factory can't resolve -> rebind None -> unresolved=True.
+        with patch("netbox_librenms_plugin.librenms_api.build_librenms_api", return_value=None):
+            view.get(request, pk=1)
+
+        mock_get_sync.assert_not_called()  # VC delegation skipped on unresolved
+        assert view._librenms_lookup_device is obj
+        assert view.librenms_id is None  # no default-server mapping attributed to the gone server
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_get_vc_member_always_delegates_to_sync_device(self, mock_get_sync, mock_get_obj, mock_render):
         """VC member: no own librenms_id - get_librenms_sync_device returns VC primary."""
         view = _make_view()

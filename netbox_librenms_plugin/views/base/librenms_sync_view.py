@@ -39,7 +39,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # session/default server while a ?server_key load renders the tab tables for another server
         # — an internally inconsistent page. A blank/absent key keeps the session/default client, so
         # single-server and default renders are unchanged.
-        self.resolve_get_render_server_key(request)
+        _scoped_key, unresolved = self.resolve_get_render_server_key(request)
 
         # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
         # self._librenms_lookup_device and self.librenms_id are consistent with the
@@ -47,7 +47,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # on the viewed member must not shadow an explicit per-server mapping on another
         # member — get_librenms_sync_device() applies the full priority order.
         librenms_lookup_device = obj
-        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+        if not unresolved and hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
             if sync_device:
                 librenms_lookup_device = sync_device
@@ -55,10 +55,17 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # Store for use in get_context_data (badge generation needs the same object)
         self._librenms_lookup_device = librenms_lookup_device
 
-        # Get librenms_id using the determined lookup device. Normalise to a positive int
-        # or None at the source so every downstream `is not None` check (has_librenms_id,
-        # get_device_info, etc.) can rely on the invariant without re-validating.
-        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(librenms_lookup_device))
+        if unresolved:
+            # ?server_key named a server that no longer resolves; the rebind declined and left the
+            # default/session client bound. Fail closed — render the header with no mapping rather
+            # than attributing the default server's librenms_id to the requested (gone) server. The
+            # embedded tabs each rebind and render empty for the same unresolved key.
+            self.librenms_id = None
+        else:
+            # Get librenms_id using the determined lookup device. Normalise to a positive int
+            # or None at the source so every downstream `is not None` check (has_librenms_id,
+            # get_device_info, etc.) can rely on the invariant without re-validating.
+            self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(librenms_lookup_device))
 
         context = self.get_context_data(request, obj)
 
