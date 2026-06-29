@@ -505,10 +505,11 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
 
         # The garbage id must never reach a device-scoped LibreNMS call: that would build
         # GET /devices/not-a-number/... → 404 and silently drop the OOB rows. coerce_librenms_id
-        # rejects it exactly like the host id is coerced one block above.
-        for mocked in (view._librenms_api.get_device_links, view._librenms_api.get_ports):
-            for call in mocked.call_args_list:
-                assert not call.args or call.args[0] != "not-a-number"
+        # rejects it exactly like the host id is coerced one block above. This is OOB-only (host id
+        # is None too), so the fail-closed contract is the strongest form — NO device-scoped call at
+        # all, which also catches a regression that passes None (get_ports(None) → GET /devices/None).
+        view._librenms_api.get_device_links.assert_not_called()
+        view._librenms_api.get_ports.assert_not_called()
 
     def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):
         """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded."""
