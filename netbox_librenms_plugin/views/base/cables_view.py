@@ -304,8 +304,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # If an OOB controller is linked, fetch its LLDP links and merge. Reuse the sync
         # device resolved at the top so host + OOB data stay scoped to the same member.
         oob = get_librenms_oob(lookup_device, server_key=server_key)
-        if oob and oob.get("id"):
-            oob_success, oob_data = self.librenms_api.get_device_links(oob["id"])
+        # Coerce the OOB controller id the same way the host id is coerced above: a non-numeric /
+        # bool / zero / negative stored id must fail closed (oob_id=None → skip the OOB fetch),
+        # never build a GET /devices/<garbage>/links|ports that 404s and silently drops OOB rows.
+        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
+        if oob_id:
+            oob_success, oob_data = self.librenms_api.get_device_links(oob_id)
             # Mirror the main-device branch: a 200 {"status": "error", ...} body is also a
             # failure (get_device_links returns the raw JSON), not just an "error" key.
             oob_ok = (
@@ -317,7 +321,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             if oob_ok:
                 # Build a port-id → name map for the OOB device using the same
                 # interface_name_field as the main device so names are consistent.
-                oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob["id"])
+                oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob_id)
                 oob_local_ports_map = {}
                 oob_local_ports_alt_map = {}
                 if oob_ports_success and isinstance(oob_ports_data, dict):
@@ -348,7 +352,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                     logger.warning(
                         "OOB links fetch returned a malformed payload for device %s (OOB id %s): %s",
                         self.librenms_id,
-                        oob["id"],
+                        oob_id,
                         oob_data,
                     )
                     # Don't early-return: fall through to the final failure classification below.
@@ -383,7 +387,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 logger.warning(
                     "OOB links fetch failed for device %s (OOB id %s): %s",
                     self.librenms_id,
-                    oob["id"],
+                    oob_id,
                     oob_data.get("message") if isinstance(oob_data, dict) else oob_data,
                 )
 
@@ -405,7 +409,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # that as a successful empty refresh would overwrite the cache with [] and drop the
         # very rows we couldn't re-fetch. So fall back to None (failure) in that case.
         host_mapping_absent_but_oob_scoped = (
-            self.librenms_id is None and bool(oob and oob.get("id")) and not self._oob_links_fetch_failed
+            self.librenms_id is None and oob_id is not None and not self._oob_links_fetch_failed
         )
         if not links_data and self._links_fetch_error and not host_mapping_absent_but_oob_scoped:
             return None

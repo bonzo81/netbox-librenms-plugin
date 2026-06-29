@@ -231,9 +231,13 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         # for a VC member: the OOB relationship lives on the sync device, so
         # get_librenms_oob(obj) would miss it and drop OOB rows / shared-LOM flagging.
         oob = get_librenms_oob(lookup_device, server_key=_server_key)
+        # Coerce the OOB controller id the same way the host id is coerced above: a non-numeric /
+        # bool / zero / negative stored id must fail closed (oob_id=None → skip the OOB fetch),
+        # never build a GET /devices/<garbage>/ports that 404s and silently drops OOB ports.
+        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
         oob_ports_failed = False
-        if oob and oob.get("id"):
-            oob_success, oob_raw = self.librenms_api.get_ports(oob["id"])
+        if oob_id:
+            oob_success, oob_raw = self.librenms_api.get_ports(oob_id)
             # Treat a malformed-but-truthy OOB payload the same as oob_success=False so the
             # host-only warning path runs instead of 500-ing on .get()/_enrich below. get_ports
             # is an external boundary: success does not guarantee a dict with a list of dict rows.
@@ -291,7 +295,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                 logger.warning(
                     "OOB ports fetch failed for device %s (OOB id %s): %s",
                     self.librenms_id,
-                    oob["id"],
+                    oob_id,
                     oob_raw,
                 )
                 messages.warning(

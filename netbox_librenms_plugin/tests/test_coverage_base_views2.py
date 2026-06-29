@@ -478,6 +478,38 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         view._librenms_api.get_ports.assert_called_once_with(99)
         assert result == []  # empty OOB result still flows through as a successful empty refresh
 
+    def test_oob_non_numeric_id_is_coerced_not_passed_raw(self):
+        """A non-numeric stored OOB id must fail closed (coerced to None), never reach get_device_links/get_ports as a garbage device URL."""
+        view = self._make_view()
+        obj = _mock_obj()
+        obj.consoleserverports.exists.return_value = False
+        view._librenms_api.get_librenms_id.return_value = None  # OOB-only: no host id to fetch
+        view._librenms_api.get_device_links.return_value = (True, {"links": []})
+        view._librenms_api.get_ports.return_value = (True, {"ports": []})
+
+        with (
+            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="k"),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_interface_name_field",
+                return_value="ifName",
+            ),
+            patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device", return_value=obj),
+            patch(
+                "netbox_librenms_plugin.views.base.cables_view.get_librenms_oob",
+                return_value={"id": "not-a-number"},
+            ),
+        ):
+            mock_cache.get.return_value = None
+            view.get_links_data(obj)
+
+        # The garbage id must never reach a device-scoped LibreNMS call: that would build
+        # GET /devices/not-a-number/... → 404 and silently drop the OOB rows. coerce_librenms_id
+        # rejects it exactly like the host id is coerced one block above.
+        for mocked in (view._librenms_api.get_device_links, view._librenms_api.get_ports):
+            for call in mocked.call_args_list:
+                assert not call.args or call.args[0] != "not-a-number"
+
     def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):
         """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded."""
         view = self._make_view()
