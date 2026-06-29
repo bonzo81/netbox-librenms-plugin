@@ -962,6 +962,58 @@ class TestValidateDeviceForImportEdgeCases:
         assert any("resolve the duplicate" in i for i in result["issues"])
         assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
 
+    def test_duplicate_hostname_with_primary_ip_match_stays_terminal(self):
+        """A duplicate-hostname row whose management IP resolves to a SINGLE device must stay
+        terminal.
+
+        The hostname/serial ambiguity block clears existing_device and demotes match_type to
+        ``ambiguous_hostname_or_serial`` but (before the fix) did not return, so the later
+        primary-IP fallback pass re-bound existing_device and demoted match_type to
+        ``primary_ip`` — silently re-homing a duplicate-hostname row onto an arbitrary
+        IP-matched device and dropping the terminal blocker.
+        """
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        mfr, _ = Manufacturer.objects.get_or_create(name="ACME-clob", slug="acme-clob")
+        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-clob", slug="dt-clob")
+        role, _ = DeviceRole.objects.get_or_create(name="Role-clob", slug="role-clob")
+        site_a, _ = Site.objects.get_or_create(name="Site-cloba", slug="site-cloba")
+        site_b, _ = Site.objects.get_or_create(name="Site-clobb", slug="site-clobb")
+
+        # Two devices share hostname "dup-clob" (terminal ambiguity). The FIRST also owns the
+        # incoming management IP on an interface, so the primary-IP fallback pass resolves to a
+        # single device — the state that previously clobbered the terminal ambiguity.
+        dev1 = Device.objects.create(
+            name="dup-clob",
+            device_type=dt,
+            role=role,
+            site=site_a,
+            status="active",
+            custom_field_data={"librenms_id": {"default": 7}},
+        )
+        Device.objects.create(name="dup-clob", device_type=dt, role=role, site=site_b, status="active")
+        ip_on(dev1, "192.168.77.1/24", "eth0")
+
+        libre_device = {
+            "device_id": 999,
+            "hostname": "dup-clob",
+            "sysName": "dup-clob",
+            "serial": "-",  # hostname-only match → _match_type 'hostname', 2 peers → terminal
+            "hardware": "Model-X",
+            "os": "ios",
+            "ip": "192.168.77.1",  # owned by dev1's interface → single primary-IP match
+        }
+        result = self._validate(libre_device)
+
+        # The terminal hostname/serial ambiguity must survive the primary-IP fallback pass:
+        # neither the match_type nor the cleared existing_device may be overwritten.
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
+        assert result["existing_device"] is None
+        assert result["can_import"] is False
+        assert any("resolve the duplicate" in i for i in result["issues"])
+
     def test_vm_librenms_id_not_int_falls_back(self):
         """device_id None → no librenms_id lookup; validation still returns cleanly."""
         libre_device = {

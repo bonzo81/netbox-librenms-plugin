@@ -926,6 +926,13 @@ def validate_device_for_import(
                     )
                     if _dup_msg not in result.setdefault("issues", []):
                         result["issues"].append(_dup_msg)
+                    # Terminal, like the ambiguous_librenms_id and primary-IP-ambiguity guards:
+                    # return now. We cleared existing_device above, so without this the
+                    # primary-IP fallback pass (and the new-import validation) below would run
+                    # and re-bind existing_device + demote match_type to "primary_ip" — silently
+                    # re-homing this duplicate-hostname/serial row onto an arbitrary IP-matched
+                    # device and dropping the terminal blocker the cleanup keys on.
+                    return result
 
             # Stage 2 — merge-candidates detection.
             # When the hostname-matched device and the serial-matched device are
