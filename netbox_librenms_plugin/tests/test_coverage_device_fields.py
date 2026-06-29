@@ -2683,51 +2683,39 @@ class TestSyncRedirectServerKeyValidation:
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
 
         req = _make_request(post_data={"server_key": "prod"})
-        with (
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"prod": "Prod LibreNMS"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"prod": "Prod LibreNMS"},
         ):
-            CreateAndAssignPlatformView._sync_redirect(req, 1)
-        url = mock_redirect.call_args[0][0]
-        assert "server_key=prod" in url
+            resp = CreateAndAssignPlatformView._sync_redirect(req, 1)
+        assert "server_key=prod" in resp.url
 
     def test_unknown_server_key_is_dropped(self):
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
 
         req = _make_request(post_data={"server_key": "//evil.com/steal"})
-        with (
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"prod": "Prod LibreNMS"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"prod": "Prod LibreNMS"},
         ):
-            CreateAndAssignPlatformView._sync_redirect(req, 1)
-        url = mock_redirect.call_args[0][0]
-        assert "evil.com" not in url
-        assert "server_key" not in url
+            resp = CreateAndAssignPlatformView._sync_redirect(req, 1)
+        assert "evil.com" not in resp.url
+        assert "server_key" not in resp.url
 
     def test_falls_back_to_active_server_when_form_omits_key(self):
         """When the form omits server_key, _sync_redirect reflects the active API server (passed as fallback) so a multi-server user isn't dropped onto the default tab."""
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
 
         req = _make_request(post_data={})  # no server_key in POST
-        with (
-            patch(
-                "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
-                return_value={"prod": "Prod LibreNMS"},
-            ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+        with patch(
+            "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
+            return_value={"prod": "Prod LibreNMS"},
         ):
-            CreateAndAssignPlatformView._sync_redirect(req, 1, "prod")
-        url = mock_redirect.call_args[0][0]
-        assert "server_key=prod" in url
+            resp = CreateAndAssignPlatformView._sync_redirect(req, 1, "prod")
+        assert "server_key=prod" in resp.url
 
     def test_valid_server_key_is_dropped_when_redirect_url_fails_validation(self):
-        """Even an allowlisted server_key must be dropped if the resulting redirect URL fails url_has_allowed_host_and_scheme — mirrors the _sync_url guard (open-redirect barrier), so a regression that reflected a known key into a rejected URL is caught here too."""
+        """Even an allowlisted server_key must be dropped if the resulting redirect URL fails url_has_allowed_host_and_scheme (the shared redirect_with_server_key barrier), so a regression that reflected a known key into a rejected URL is caught here too."""
         from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView
 
         req = _make_request(post_data={"server_key": "prod"})
@@ -2736,12 +2724,11 @@ class TestSyncRedirectServerKeyValidation:
                 "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
                 return_value={"prod": "Prod LibreNMS"},
             ),
+            # The barrier now lives in the shared mixins.redirect_with_server_key helper.
             patch(
-                "netbox_librenms_plugin.views.sync.device_fields.url_has_allowed_host_and_scheme",
+                "netbox_librenms_plugin.views.mixins.url_has_allowed_host_and_scheme",
                 return_value=False,
             ),
-            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
         ):
-            CreateAndAssignPlatformView._sync_redirect(req, 1)
-        url = mock_redirect.call_args[0][0]
-        assert "server_key" not in url
+            resp = CreateAndAssignPlatformView._sync_redirect(req, 1)
+        assert "server_key" not in resp.url

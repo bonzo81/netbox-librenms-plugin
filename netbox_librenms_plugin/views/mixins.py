@@ -1,4 +1,5 @@
 import json
+from urllib.parse import quote_plus
 
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
@@ -111,6 +112,36 @@ def _safe_redirect_response(request):
     if is_htmx:
         return HttpResponse("", headers={"HX-Redirect": app_root})
     return redirect(app_root)
+
+
+def redirect_with_server_key(request, url, server_key):
+    """
+    Redirect to *url*, appending a validated ``?server_key`` query param when one is given.
+
+    Shared by the sync-tab redirect helpers (``device_fields._sync_redirect`` /
+    ``interfaces_view._failure_redirect``) so the server_key-preserving redirect is written once.
+    The candidate URL is gated by Django's ``url_has_allowed_host_and_scheme`` with the ``redirect``
+    sink inside the validated branch — the open-redirect barrier for py/url-redirection (CWE-601).
+    Callers own how *server_key* is sourced (a raw POST value, or one re-matched against the
+    configured servers); a blank/None one redirects to the bare *url* (a trusted ``reverse()`` path).
+
+    Args:
+        request: The current HTTP request (host allowlist + scheme for the barrier).
+        url (str): The already-reversed redirect target.
+        server_key (str | None): The server key to carry on the redirect; blank/None → bare *url*.
+
+    Returns:
+        HttpResponseRedirect: Redirect to *url*, with the validated ``server_key`` query param when
+            it passes the open-redirect barrier.
+    """
+    if server_key:
+        sep = "&" if "?" in url else "?"
+        candidate = f"{url}{sep}server_key={quote_plus(server_key)}"
+        if url_has_allowed_host_and_scheme(
+            candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+        ):
+            return redirect(candidate)
+    return redirect(url)
 
 
 class LibreNMSPermissionMixin(PermissionRequiredMixin):

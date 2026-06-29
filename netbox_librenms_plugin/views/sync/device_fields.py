@@ -28,7 +28,12 @@ from netbox_librenms_plugin.utils import (
     migrate_legacy_librenms_id,
     resolve_naming_preferences,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    redirect_with_server_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -586,16 +591,10 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         requested = (request.POST.get("server_key") or "").strip() or (fallback_server_key or "").strip()
-        # Re-source the matched key from the trusted config rather than echoing the raw
-        # request value, then gate the redirect on url_has_allowed_host_and_scheme.
+        # Re-source the matched key from the trusted config rather than echoing the raw request
+        # value; the shared helper then gates the redirect on url_has_allowed_host_and_scheme.
         server_key = next((key for key in LibreNMSAPI.get_available_servers() if key == requested), None)
-        if server_key:
-            candidate = f"{url}?server_key={quote_plus(server_key)}"
-            if url_has_allowed_host_and_scheme(
-                candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
-            ):
-                return redirect(candidate)
-        return redirect(url)
+        return redirect_with_server_key(request, url, server_key)
 
 
 class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):

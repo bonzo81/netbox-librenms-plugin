@@ -1261,7 +1261,6 @@ class TestBaseInterfaceTableViewBasics:
             # assertion stays focused on which API client (rebound vs session) is used.
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
-            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect", return_value="redir") as mock_redirect,
         ):
             view.get_redirect_url = MagicMock(return_value="/back/")
             result = view.post(req, pk=1)
@@ -1271,8 +1270,8 @@ class TestBaseInterfaceTableViewBasics:
         mock_build.assert_called_once_with("prod")
         rebound_api.get_librenms_id.assert_called_once_with(obj)
         session_api.get_librenms_id.assert_not_called()
-        assert result == "redir"
-        mock_redirect.assert_called_once()
+        # A real failure redirect came back (the rebound client has no host id).
+        assert result.status_code == 302
 
     def test_post_stale_server_key_redirects(self):
         """A posted server_key that no longer resolves (build returns None) → error + redirect, not an unhandled 500."""
@@ -1375,16 +1374,15 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
         ):
-            mock_redirect.return_value = MagicMock()
-            view.post(request, pk=1)
+            response = view.post(request, pk=1)
 
         mock_messages.error.assert_called_once()
         # The failure redirect must preserve the POST-scoped server_key so the user stays on
-        # the same LibreNMS server for the next retry.
-        mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
+        # the same LibreNMS server for the next retry (real HttpResponseRedirect via the shared
+        # redirect_with_server_key helper).
+        assert response.url == "/device/1/?server_key=prod"
         # The snapshot invalidation must run even on the missing-librenms_id path (it precedes
         # the early return); otherwise a prior successful snapshot survives a failed refresh.
         mock_cache.delete.assert_any_call("cache-key")
@@ -1409,15 +1407,13 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
         ):
-            mock_redirect.return_value = MagicMock()
-            view.post(request, pk=1)
+            response = view.post(request, pk=1)
 
         mock_messages.error.assert_called_once_with(request, "Connection refused")
-        # Failure redirect preserves the POST-scoped server_key (see _failure_redirect).
-        mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
+        # Failure redirect preserves the POST-scoped server_key (see redirect_with_server_key).
+        assert response.url == "/device/1/?server_key=prod"
         # The stale snapshot is cleared up front; a failed fetch must not re-populate it,
         # so the next render shows an empty view rather than old data.
         mock_cache.delete.assert_any_call("cache-key")
@@ -1442,16 +1438,14 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
         ):
-            mock_redirect.return_value = MagicMock()
-            view.post(request, pk=1)
+            response = view.post(request, pk=1)
 
         mock_messages.error.assert_called_once_with(
             request, "Unexpected response from LibreNMS (malformed ports payload)."
         )
-        mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
+        assert response.url == "/device/1/?server_key=prod"
         mock_cache.set.assert_not_called()
 
     def test_post_malformed_main_ports_non_dict_row_treated_as_failure(self):
@@ -1472,16 +1466,14 @@ class TestBaseInterfaceTableViewPost:
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_interface_name_field", return_value="ifName"),
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
             patch("netbox_librenms_plugin.views.base.interfaces_view.cache") as mock_cache,
         ):
-            mock_redirect.return_value = MagicMock()
-            view.post(request, pk=1)
+            response = view.post(request, pk=1)
 
         mock_messages.error.assert_called_once_with(
             request, "Unexpected response from LibreNMS (malformed ports payload)."
         )
-        mock_redirect.assert_called_once_with("/device/1/?server_key=prod")
+        assert response.url == "/device/1/?server_key=prod"
         mock_cache.set.assert_not_called()
 
     def test_failure_redirect_gated_by_open_redirect_barrier(self):
@@ -1506,14 +1498,13 @@ class TestBaseInterfaceTableViewPost:
             # fabricated mock rather than obj — the test would then pass only by accident.
             patch("netbox_librenms_plugin.views.base.interfaces_view.get_librenms_sync_device", return_value=obj),
             patch("netbox_librenms_plugin.views.base.interfaces_view.messages"),
+            # The open-redirect barrier now lives in the shared mixins.redirect_with_server_key.
             patch(
-                "netbox_librenms_plugin.views.base.interfaces_view.url_has_allowed_host_and_scheme",
+                "netbox_librenms_plugin.views.mixins.url_has_allowed_host_and_scheme",
                 return_value=False,
             ) as mock_barrier,
-            patch("netbox_librenms_plugin.views.base.interfaces_view.redirect") as mock_redirect,
         ):
-            mock_redirect.return_value = MagicMock()
-            view.post(request, pk=1)
+            response = view.post(request, pk=1)
 
         # post() must read the POSTed server_key (proving the redirect candidate really is
         # POST-derived), then the barrier must be consulted and the tainted key dropped on reject.
@@ -1524,7 +1515,8 @@ class TestBaseInterfaceTableViewPost:
         # Otherwise a regression that validated the bare "/device/1/" and appended the key after
         # the check would still pass this test while reintroducing the open-redirect path.
         assert mock_barrier.call_args.args[0] == "/device/1/?server_key=prod"
-        mock_redirect.assert_called_once_with("/device/1/")
+        # Barrier rejected → the tainted key is dropped, redirecting to the bare URL.
+        assert response.url == "/device/1/"
 
     def test_post_clears_stale_cache_before_fetch(self):
         """A refresh drops the previous ports snapshot before fetching, so a later failure can't leave stale data behind."""

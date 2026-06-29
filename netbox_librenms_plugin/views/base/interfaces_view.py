@@ -1,11 +1,9 @@
 import logging
-from urllib.parse import quote_plus
 
 from django.contrib import messages
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
@@ -23,6 +21,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     VlanAssignmentMixin,
+    redirect_with_server_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,14 +82,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
         """
         url = self.get_redirect_url(obj)
-        if server_key:
-            sep = "&" if "?" in url else "?"
-            candidate = f"{url}{sep}server_key={quote_plus(server_key)}"
-            if url_has_allowed_host_and_scheme(
-                candidate, allowed_hosts={request.get_host()}, require_https=request.is_secure()
-            ):
-                return redirect(candidate)
-        return redirect(url)
+        return redirect_with_server_key(request, url, server_key)
 
     def get_select_related_field(self, obj):
         """Determine the appropriate select_related field based on object type"""
