@@ -1302,6 +1302,18 @@ class TestIpAddressViewMethods:
         assert result == (True, [{"port_id": 1}])
         assert view.librenms_id == 99
 
+    def test_get_ip_addresses_coerces_poisoned_id(self):
+        """A poisoned cached librenms_id fails closed before the HTTP fetch."""
+        view = self._make_view()
+        # bool is the canonical poison: int(True) == 1 would otherwise look valid.
+        view._librenms_api.get_librenms_id.return_value = True
+
+        result = view.get_ip_addresses(_mock_obj())
+
+        view._librenms_api.get_device_ips.assert_not_called()
+        assert result == (False, "Device not found in LibreNMS")
+        assert view.librenms_id is None
+
 
 # =============================================================================
 # TestEnrichIpDataPortInfo  — port_info truthy branch (lines 68-69)

@@ -15,6 +15,7 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
+    coerce_librenms_id,
     get_interface_name_field,
     get_librenms_device_id,
     resolve_set_primary_ip,
@@ -43,7 +44,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
     def get_ip_addresses(self, obj):
         """Fetch IP address data from LibreNMS for the given object."""
-        self.librenms_id = self.librenms_api.get_librenms_id(obj)
+        # Coerce before the HTTP call: a poisoned cached id (e.g. True or a
+        # non-numeric string) must fail closed here rather than reach the
+        # LibreNMS device-ip endpoint, where it would build a malformed URL.
+        self.librenms_id = coerce_librenms_id(self.librenms_api.get_librenms_id(obj))
+        if self.librenms_id is None:
+            return False, "Device not found in LibreNMS"
         return self.librenms_api.get_device_ips(self.librenms_id)
 
     def enrich_ip_data(self, ip_data, obj, interface_name_field, mgmt_ip="", server_key=None, port_data_cache=None):
