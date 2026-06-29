@@ -121,7 +121,9 @@ def resolve_device_by_host_ip(primary_ip):
     from dcim.models import Device
     from ipam.models import IPAddress
 
-    matching_ips = IPAddress.objects.filter(address__net_host=primary_ip)
+    # prefetch_related on the assigned_object GenericForeignKey resolves every duplicate net_host
+    # row's interface in one bulk pass instead of a per-row content-type lookup (small N, but free).
+    matching_ips = IPAddress.objects.filter(address__net_host=primary_ip).prefetch_related("assigned_object")
     candidate_devices = {}
     matching_exists = False
     for existing_ip in matching_ips:
