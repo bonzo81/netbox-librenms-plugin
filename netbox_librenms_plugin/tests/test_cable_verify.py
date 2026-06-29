@@ -476,6 +476,15 @@ class TestVerifyDualNameFallback:
         response = view.post(request)
         payload = json.loads(response.content)
 
+        # Prove the intended branch actually ran. The default empty row (post() fallback) carries
+        # cable_status "Missing Ports" and local_port "", so the None-checks below would pass
+        # vacuously on it. The matched-link-but-unresolved-interface branch instead reports
+        # "Missing Interface" and re-applies the OOB badge — pin both so a regression that drops to
+        # the empty row (or stops processing the OOB row) fails here.
+        assert "formatted_row" in payload
+        assert "local_port" in payload["formatted_row"]
+        assert payload["formatted_row"]["cable_status"] == "Missing Interface"
+        assert "From OOB controller" in payload["formatted_row"]["local_port"]
         # render_local_port in the table was fixed to normalize None→""; the verify path must match.
         assert payload["formatted_row"]["local_port"] != "None"
         assert "None" not in payload["formatted_row"]["local_port"]
