@@ -136,6 +136,33 @@ class TestFindByLibreNMSId:
         legacy_str = _dev("42")
         assert find_by_librenms_id(Device, 42, "anyserver") == legacy_str
 
+    def test_librenms_id_q_resolves_each_storage_shape(self):
+        """cables_view._librenms_id_q (sharing build_librenms_id_qs with find_by_librenms_id) must resolve the same storage shapes — including the OOB sub-id — so the two can't drift apart."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.base.cables_view import _librenms_id_q
+
+        for shape in (
+            {"default": 42},
+            {"default": "42"},
+            {"default": {"id": 42}},
+            {"default": {"id": 1, "oob": {"id": 42}}},
+        ):
+            dev = _dev(shape)
+            assert Device.objects.filter(_librenms_id_q("default", 42)).first() == dev, shape
+            dev.delete()
+
+        # Legacy bare int/str resolve under any server key.
+        for legacy in (42, "42"):
+            dev = _dev(legacy)
+            assert Device.objects.filter(_librenms_id_q("anyserver", 42)).first() == dev, legacy
+            dev.delete()
+
+        # include_oob=False (resolving a device by its OWN identity) must NOT match an OOB sub-id.
+        oob_only = _dev({"default": {"id": 1, "oob": {"id": 42}}})
+        assert Device.objects.filter(_librenms_id_q("default", 42, include_oob=False)).first() is None
+        oob_only.delete()
+
     def test_returns_matching_object(self):
         from dcim.models import Device
 

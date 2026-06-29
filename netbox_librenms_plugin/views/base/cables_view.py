@@ -15,6 +15,7 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
+    build_librenms_id_qs,
     coerce_librenms_id,
     get_interface_name_field,
     get_librenms_oob,
@@ -74,27 +75,11 @@ def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
         # rather than failing closed (no behaviour change for that case).
         pass
 
-    def _paths(v) -> Q:
-        q = (
-            Q(**{f"custom_field_data__librenms_id__{server_key}": v})
-            | Q(**{f"custom_field_data__librenms_id__{server_key}__id": v})
-            | Q(custom_field_data__librenms_id=v)
-        )
-        if include_oob:
-            q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
-        return q
-
-    q = _paths(value)
-    try:
-        int_val = int(value)
-        str_val = str(int_val)
-        if int_val != value:  # value was a string; also add the integer variant
-            q |= _paths(int_val)
-        if str_val != value:  # value was an integer; also add the string variant
-            q |= _paths(str_val)
-    except (TypeError, ValueError):
-        pass
-    return q
+    # Single source of truth for the path coverage (host scalar / __id / legacy bare, + the OOB
+    # sub-key), shared with utils.find_by_librenms_id so the two can't drift on which stored
+    # shapes resolve.
+    host_q, oob_q = build_librenms_id_qs(server_key, value)
+    return host_q | oob_q if include_oob else host_q
 
 
 def _extract_cached_links(cached, cache_key=None):

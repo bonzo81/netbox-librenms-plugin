@@ -1328,6 +1328,55 @@ class AmbiguousLibreNMSIdError(LookupError):
     """
 
 
+def build_librenms_id_qs(server_key, value):
+    """
+    Build ``(host_q, oob_q)`` Q objects matching every stored form of a librenms_id under server_key.
+
+    Single source of truth for the librenms_id JSON-path coverage shared by
+    :func:`find_by_librenms_id` and ``cables_view._librenms_id_q``, so the two can't drift on
+    which stored shapes resolve. Matches the namespaced scalar (``{server_key: 42}``), the
+    dict-with-id form (``{server_key: {"id": 42}}``), the legacy bare int/str (pre multi-server),
+    and the OOB sub-key (``{server_key: {"oob": {"id": 42}}}``), across the value's int and string
+    representations (so ``"042"`` / ``" 42 "`` match JSON ``42``).
+
+    Callers must reject invalid ids (bool / None / non-int-str, and any positivity rules they
+    enforce) BEFORE calling — this builds predicates for whatever *value* it's given.
+
+    Args:
+        server_key (str): The LibreNMS server key whose JSON sub-key is matched.
+        value (int | str): The already-validated LibreNMS id.
+
+    Returns:
+        tuple[Q, Q]: ``(host_q, oob_q)`` — host-identity predicates (scalar / ``__id`` / legacy
+            bare) and the OOB-controller predicate (``__oob__id``), kept separate so callers can
+            fail closed on a host-vs-OOB cross-row collision.
+    """
+    variants = [value, str(value)]
+    if isinstance(value, str):
+        try:
+            int_value = int(value.strip())
+        except ValueError:
+            int_value = None
+        if int_value is not None and int_value > 0:
+            variants += [str(int_value), int_value]
+    seen = []
+    for v in variants:
+        if v not in seen:
+            seen.append(v)
+
+    host_q = Q()
+    oob_q = Q()
+    for v in seen:
+        # Namespaced scalar, the dict-with-id form ({"id": .., "oob": {..}}), and the legacy bare
+        # integer/string (pre multi-server) all identify the HOST device.
+        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}": v})
+        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": v})
+        host_q |= Q(custom_field_data__librenms_id=v)
+        # The OOB controller's own device id — so a re-import recognises the merged device.
+        oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
+    return host_q, oob_q
+
+
 def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, select_for_update: bool = False):
     """
     Return the first object of *model* whose ``librenms_id`` JSON field contains
@@ -1374,36 +1423,12 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, sele
         except ValueError:
             return None
 
-    # Build host-identity and OOB-identity predicates SEPARATELY. Folding both into one
-    # OR + .first() can silently bind to the wrong NetBox object when one row matches by
-    # host id and a *different* row matches by OOB id; query each set and fail closed on a
+    # Build host-identity and OOB-identity predicates SEPARATELY (via the shared path builder, so
+    # this and cables_view._librenms_id_q can't drift on the stored shapes they match). Folding
+    # both into one OR + .first() can silently bind to the wrong NetBox object when one row matches
+    # by host id and a *different* row matches by OOB id; query each set and fail closed on a
     # cross-row collision rather than trusting model ordering to pick "the" row.
-    def _id_variants(value):
-        """Value plus its string / canonical-int forms so "042"/" 42 " match JSON 42."""
-        variants = [value, str(value)]
-        if isinstance(value, str):
-            try:
-                int_value = int(value.strip())
-            except ValueError:
-                int_value = None
-            if int_value is not None and int_value > 0:
-                variants += [str(int_value), int_value]
-        seen = []
-        for v in variants:
-            if v not in seen:
-                seen.append(v)
-        return seen
-
-    host_q = Q()
-    oob_q = Q()
-    for v in _id_variants(librenms_id):
-        # Namespaced scalar form, the new dict-with-id form ({"id": .., "oob": {..}}), and
-        # the legacy bare integer/string (pre multi-server) all identify the HOST device.
-        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}": v})
-        host_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__id": v})
-        host_q |= Q(custom_field_data__librenms_id=v)
-        # The OOB controller's own device id — so a re-import recognises the merged device.
-        oob_q |= Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id": v})
+    host_q, oob_q = build_librenms_id_qs(server_key, librenms_id)
 
     # Lock the matched rows when asked so a concurrent conflict check serializes against an
     # existing owner (best-effort: a not-yet-created row can't be locked). Caller must hold a txn.
