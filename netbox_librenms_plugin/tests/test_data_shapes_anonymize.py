@@ -194,6 +194,28 @@ def test_find_pii_does_not_echo_secret_value_after_redaction():
     assert not any(f["kind"] == "email" for f in findings)
 
 
+def test_find_pii_redacts_nested_secret_container_without_echoing_children():
+    """A secret-keyed dict/list value is redacted once and not recursed into, so its child PII never surfaces."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/devices/1"] = {
+        "status": "ok",
+        # 'community' is a secret-key hint; here the value is a nested container whose children look
+        # like PII (email + public IP). Pre-fix, scan() recursed into the dict and re-reported those
+        # children, echoing the secret's contents.
+        "devices": [{"device_id": 1, "snmp_community": {"primary": "admin@corp.example.com", "host": "8.8.8.8"}}],
+    }
+
+    findings = find_pii(rec)
+
+    secret_findings = [f for f in findings if "snmp_community" in f["path"]]
+    # The secret container is reported exactly once, redacted — never recursed into.
+    assert secret_findings == [{"path": secret_findings[0]["path"], "kind": "credential", "value": "<redacted>"}]
+    # No child PII leaks out of the redacted secret.
+    assert not any(f["value"] == "admin@corp.example.com" for f in findings)
+    assert not any(f["kind"] == "email" for f in findings)
+    assert not any(f["value"] == "8.8.8.8" for f in findings)
+
+
 def test_find_pii_scans_top_level_fields_not_just_responses():
     """find_pii must scan the whole recording — residual PII in a top-level field (name/description/meta) is missed if only `responses` is scanned."""
     rec = _ports()

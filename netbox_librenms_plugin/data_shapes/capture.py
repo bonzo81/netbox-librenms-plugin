@@ -103,7 +103,11 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         production replay read — otherwise a Virtual-Chassis device is silently captured as a plain
         one. When the filtered query already returns data (the common case), nothing changes.
         """
-        _, body = record(f"inventory/{device_id}", query_params)
+        filtered_status, body = record(f"inventory/{device_id}", query_params)
+        # record() skips storing the route on a transport failure (status outside 100–599), so track
+        # whether the filtered key was actually persisted. If it was NOT, we must synthesize it below
+        # even when the client-side filter yields [], otherwise replay 404s on this structural route.
+        filtered_route_recorded = 100 <= filtered_status < 600
         items = body.get("inventory") if isinstance(body, dict) else None
         if items:
             return items
@@ -126,9 +130,11 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             filtered = [i for i in filtered if i.get("entPhysicalClass") == ent_class]
         if contained_in is not None:
             filtered = [i for i in filtered if str(i.get("entPhysicalContainedIn")) == str(contained_in)]
-        if filtered:
-            # Overwrite the empty filtered response with the client-filtered entities so the recording
-            # looks as if captured from a filter-honoring server (faithful signature + replay).
+        if filtered or not filtered_route_recorded:
+            # Overwrite the (empty or never-stored) filtered response with the client-filtered
+            # entities so the recording looks as if captured from a filter-honoring server (faithful
+            # signature + replay), and so the structural route always exists for replay even when the
+            # /all fallback filters down to [].
             responses[_route_key(f"inventory/{device_id}", query_params)] = {"status": "ok", "inventory": filtered}
         return filtered
 

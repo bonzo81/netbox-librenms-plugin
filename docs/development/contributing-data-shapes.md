@@ -8,8 +8,8 @@ automatically.
 
 A *recording* is one device scenario: the LibreNMS responses captured verbatim plus an
 `expected` block describing the outcome. Recordings live in
-`netbox_librenms_plugin/data_shapes/recordings/*.json`; `tests/test_recordings.py` parametrizes over
-them, so **a new JSON with an `expected` block is a new passing test, no code required**.
+`netbox_librenms_plugin/data_shapes/recordings/*.json`; `netbox_librenms_plugin/tests/test_recordings.py`
+parametrizes over them, so **a new JSON with an `expected` block is a new passing test, no code required**.
 
 ## Capturing a shape (contributors)
 

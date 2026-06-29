@@ -191,8 +191,11 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     assert "GET /api/v0/devices/1000" in keys
     assert any("inventory/1000?entPhysicalContainedIn=0" in k for k in keys)
     assert any("entPhysicalClass=chassis" in k for k in keys)
-    assert "GET /api/v0/devices/1000/ports" in keys
-    assert "GET /api/v0/devices/1000/port_stack" in keys
+    # The seed serves real (empty) ports/port_stack, so capture records them verbatim as ok
+    # responses — NOT the [404, error] entries it would store if the seed omitted those routes
+    # (capture requests both with required=True, and the mock 404s unregistered routes).
+    assert captured["responses"]["GET /api/v0/devices/1000/ports"] == {"status": "ok", "ports": []}
+    assert captured["responses"]["GET /api/v0/devices/1000/port_stack"] == {"status": "ok", "mappings": []}
 
     # Round-trip: replay the CAPTURED recording in a fresh mock and re-run VC detection.
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
@@ -286,6 +289,27 @@ def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(reco
     sig = compute_shape_signature(captured)
     assert sig["virtual_chassis"]["present"] is True
     assert sig["virtual_chassis"]["member_count"] == 2
+
+
+def test_capture_synthesizes_filtered_inventory_route_after_transport_failure():
+    """A filtered inventory query that fails at transport but whose /all fallback filters to [] must still record the filtered route, or replay 404s on a structural route."""
+    routes = {
+        "devices/1000": (200, {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]}),
+        # The filtered inventory query fails at the transport layer → record() skips storing it.
+        "inventory/1000": (0, None),
+        # /all answers, but client-side filtering yields [] (no containedIn=0 entities).
+        "inventory/1000/all": (200, {"status": "ok", "inventory": []}),
+        "devices/1000/ports": (200, {"status": "ok", "ports": []}),
+        "devices/1000/port_stack": (200, {"status": "ok", "mappings": []}),
+    }
+    api = _StubApi(routes)
+
+    captured = capture_device_recording(api, 1000)
+
+    # The structural route is still present (synthesized empty), not missing — so replay won't 404.
+    key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=0"
+    assert key in captured["responses"]
+    assert captured["responses"][key] == {"status": "ok", "inventory": []}
 
 
 def test_capture_skips_route_with_transport_error_status():

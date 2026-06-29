@@ -72,6 +72,14 @@
           "entPhysicalContainedIn": 1
         }
       ]
+    },
+    "GET /api/v0/devices/1000/ports": {
+      "status": "ok",
+      "ports": []
+    },
+    "GET /api/v0/devices/1000/port_stack": {
+      "status": "ok",
+      "mappings": []
     }
   },
   "expected": {

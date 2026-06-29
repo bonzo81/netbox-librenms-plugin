@@ -241,6 +241,9 @@ def test_classify_novelty_skips_malformed_manifest_entries():
         {"name": "y"},
         {"name": "z", "signature": {"virtual_chassis": None}},
         {"name": "w", "signature": {"lag": "bad", "sub_interfaces": 5}},
+        # sub_interfaces IS a dict here, so it passes the non-dict guard, but styles is null —
+        # tuple(None) used to raise inside _structural_axes().
+        {"name": "v", "signature": {"sub_interfaces": {"present": True, "styles": None}}},
         *good,
     ]
     verdict = classify_novelty(sig, malformed_manifest)  # must not raise

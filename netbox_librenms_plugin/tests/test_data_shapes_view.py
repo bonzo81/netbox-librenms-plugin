@@ -40,6 +40,10 @@ def test_capture_button_reads_server_key_from_url_in_shipped_template():
     assert "URLSearchParams(window.location.search).get('server_key')" in block
     # ...and does NOT depend on a top-level {% if server_key %} the base context never sets.
     assert "{% if server_key %}" not in block
+    # When the URL omits server_key, it falls back to the active page server (NOT an empty string,
+    # which would silently capture against the default server) — mirroring the interface-sync controls.
+    assert "librenms_server_info.server_key" in block
+    assert "get('server_key') || ''" not in block
 
 
 def _superuser_request(query=""):

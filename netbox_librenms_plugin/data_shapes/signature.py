@@ -196,6 +196,11 @@ def _structural_axes(signature):
     sub = signature.get("sub_interfaces")
     if not isinstance(sub, dict):
         sub = {}
+    # Coerce styles before tuple(): a malformed entry like {"styles": null} would otherwise raise
+    # here, while every other malformed section is degraded gracefully above.
+    styles = sub.get("styles", ())
+    if not isinstance(styles, (list, tuple)):
+        styles = ()
     return (
         vc.get("present", False),
         vc.get("root_class"),
@@ -204,7 +209,7 @@ def _structural_axes(signature):
         lag.get("present", False),
         lag.get("name_prefix"),
         sub.get("present", False),
-        tuple(sub.get("styles", ())),
+        tuple(styles),
         signature.get("port_stack", False),
         signature.get("vlans", False),
         signature.get("transceivers", False),
