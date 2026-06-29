@@ -2239,6 +2239,27 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
         entry = {"id": coerced} if coerced else {}
     elif isinstance(entry, dict):
         entry = dict(entry)
+        # Validate the nested oob before it is popped below, the same way
+        # merge_librenms_links() does: a non-dict oob, or an oob carrying a
+        # non-blank unparseable id, is corrupt-but-recoverable state. Failing
+        # closed here stops a donor like {"oob": "garbage"} or
+        # {"oob": {"id": "abc"}} from being silently converted to marker-only
+        # state (erasing the link data) instead of being migrated first.
+        raw_oob = entry.get("oob")
+        if raw_oob is not None:
+            if not isinstance(raw_oob, dict):
+                raise ValueError(
+                    f"Cannot mark '{getattr(donor, 'name', donor)}' migrated: "
+                    f"librenms_id[{server_key!r}] has unsupported oob type {type(raw_oob).__name__}."
+                )
+            raw_oob_id = raw_oob.get("id")
+            if isinstance(raw_oob_id, str) and not raw_oob_id.strip():
+                raw_oob_id = None
+            if raw_oob_id is not None and coerce_librenms_id(raw_oob_id) is None:
+                raise ValueError(
+                    f"Cannot mark '{getattr(donor, 'name', donor)}' migrated: "
+                    f"librenms_id[{server_key!r}] has an unparseable oob id ({raw_oob_id!r}); migrate it first."
+                )
     elif entry is None:
         entry = {}
     else:

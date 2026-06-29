@@ -1207,6 +1207,34 @@ class TestMarkLibreNMSMigrated:
         assert "id" not in entry
         assert entry["_migrated_to"]["device_id"] == 99
 
+    def test_fails_closed_on_corrupt_nested_oob(self):
+        """A dict entry with a non-dict oob, or an oob with a non-blank unparseable id, must raise."""
+        import pytest
+
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        for corrupt_oob in ("garbage", ["bad"], 7, {"id": "abc"}):
+            donor = MagicMock()
+            donor.name = "corrupt-oob-donor"
+            donor.custom_field_data = {"librenms_id": {"default": {"oob": corrupt_oob}}}
+            with pytest.raises(ValueError):
+                mark_librenms_migrated(donor, winner_pk=99, server_key="default")
+            # The raise happens before any mutation: no marker stamped, oob preserved to migrate first.
+            assert donor.custom_field_data["librenms_id"]["default"] == {"oob": corrupt_oob}
+
+    def test_valid_or_blank_nested_oob_does_not_raise(self):
+        """A well-formed oob (numeric/blank id, or empty dict) is popped and the marker is stamped."""
+        from netbox_librenms_plugin.utils import mark_librenms_migrated
+
+        for ok_oob in ({"id": 55}, {"id": "55"}, {"id": ""}, {}):
+            donor = MagicMock()
+            donor.name = "ok-oob-donor"
+            donor.custom_field_data = {"librenms_id": {"default": {"oob": ok_oob}}}
+            mark_librenms_migrated(donor, winner_pk=99, server_key="default", at="2025-01-01T00:00:00Z")
+            entry = donor.custom_field_data["librenms_id"]["default"]
+            assert "oob" not in entry
+            assert entry["_migrated_to"]["device_id"] == 99
+
     @pytest.mark.django_db
     def test_after_marker_find_by_librenms_id_no_longer_matches(self):
         """A donor whose librenms_id entry holds only the _migrated_to marker must NOT be returned by find_by_librenms_id, queried against the REAL Device model."""
