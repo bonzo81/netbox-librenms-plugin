@@ -5666,6 +5666,7 @@ class TestAttachOOBIp:
         mock_ip_cls.objects.select_for_update.assert_called_once()
 
 
+@pytest.mark.django_db
 class TestMissingOOBIpPermissions:
     """AddAsOOBView._missing_oob_ip_permissions: the IP-set sub-flow must require Interface/IPAddress perms, not just the top-level ('change', Device)."""
 
@@ -5675,83 +5676,94 @@ class TestMissingOOBIpPermissions:
         return object.__new__(AddAsOOBView)
 
     def test_none_when_user_has_all_perms(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         view = self._view()
+        device = make_device("oob-perm-all")  # no idrac0 interface, no IP for 10.0.0.9 yet
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
         req.user.has_perm.return_value = True
-        # Patch only the manager so IPAddress._meta stays real for perm strings.
-        with patch("ipam.models.IPAddress.objects") as mock_objects:
-            mock_objects.filter.return_value.__getitem__.return_value = []
-            assert view._missing_oob_ip_permissions(req, "10.0.0.9") is None
+        assert view._missing_oob_ip_permissions(req, "10.0.0.9", device=device) is None
 
     def test_blocks_new_interface_without_add_interface(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         view = self._view()
+        # idrac0 does NOT exist on the device → _resolve_oob_interface would create it → add_interface.
+        device = make_device("oob-perm-noaddiface")
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
         req.user.has_perm.side_effect = lambda p: "add_interface" not in p
-        with patch("ipam.models.IPAddress.objects") as mock_objects:
-            mock_objects.filter.return_value.__getitem__.return_value = []
-            msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
+        msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
         assert msg is not None and "add_interface" in msg
 
     def test_invalid_ip_short_circuits_before_net_host_lookup(self):
-        """A malformed IP must return an invalid-IP warning without hitting the address__net_host queryset (which would raise on it)."""
+        """A malformed IP returns an invalid-IP warning without running the address__net_host preflight (which would raise on it)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         view = self._view()
+        device = make_device("oob-perm-badip")
         req = _make_request(post={"oob_interface_id": "5"})
         req.user.has_perm.return_value = True
-        with patch("ipam.models.IPAddress.objects") as mock_objects:
-            msg = view._missing_oob_ip_permissions(req, "not-an-ip")
+        with CaptureQueriesContext(connection) as ctx:
+            msg = view._missing_oob_ip_permissions(req, "not-an-ip", device=device)
         assert msg is not None and "invalid" in msg.lower()
-        # The net_host preflight must never run for a malformed IP.
-        mock_objects.filter.assert_not_called()
+        # The net_host preflight must never run for a malformed IP (real-DB proof it short-circuits).
+        assert not any("ipam_ipaddress" in q["sql"].lower() for q in ctx.captured_queries)
 
     def test_no_interface_target_skips_ip_permission_check(self):
-        """No interface selected (empty, or '__new__' without a name) => _resolve_oob_interface sets no interface and oob_ip is never written, so no IPAddress add/change perm should be demanded."""
+        """No interface selected (empty, or '__new__' without a name) → no Interface/IPAddress write runs, so no add/change perm is demanded and the net_host preflight never runs."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         view = self._view()
+        device = make_device("oob-perm-notarget")
         for post in ({}, {"oob_interface_id": ""}, {"oob_interface_id": "__new__", "oob_new_interface_name": ""}):
             req = _make_request(post=post)
-            # Deny everything except change-Device; if the IP check ran it would demand a perm.
+            # Deny everything; if the IP check ran it would demand a perm and return a warning.
             req.user.has_perm.return_value = False
-            with patch("ipam.models.IPAddress.objects") as mock_objects:
-                assert view._missing_oob_ip_permissions(req, "10.0.0.9", device=MagicMock()) is None
-                # The net_host queryset must not even run when there's no interface target.
-                mock_objects.filter.assert_not_called()
+            with CaptureQueriesContext(connection) as ctx:
+                assert view._missing_oob_ip_permissions(req, "10.0.0.9", device=device) is None
+            assert not any("ipam_ipaddress" in q["sql"].lower() for q in ctx.captured_queries)
 
     def test_new_interface_name_that_already_exists_does_not_require_add(self):
-        """__new__ + an existing interface name is reused by _resolve_oob_interface, so no Interface write happens — 'add_interface' must NOT be required even for a user who only has change-Device + add_ipaddress."""
+        """__new__ + an existing interface name is reused by _resolve_oob_interface, so no Interface write happens — 'add_interface' must NOT be required for a user with change-Device + add_ipaddress."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
         view = self._view()
+        device = make_device("oob-perm-reuse")
+        make_interface(device, "idrac0")  # already exists on THIS device → reused, no create
+        # A same-named interface on ANOTHER device must not count (the existence check is device-scoped).
+        make_interface(make_device("oob-perm-reuse-other"), "idrac0")
         req = _make_request(post={"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"})
-        req.user.has_perm.side_effect = lambda p: "add_interface" not in p  # deny only add_interface
-        device = MagicMock()
-        with (
-            patch("ipam.models.IPAddress.objects") as mock_ip_objects,
-            patch("dcim.models.Interface.objects") as mock_iface_objects,
-        ):
-            mock_ip_objects.filter.return_value.__getitem__.return_value = []  # IP create (user has add_ipaddress)
-            mock_iface_objects.filter.return_value.exists.return_value = True  # interface already exists → reused
-            msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
-        # No add_interface demanded since the interface is reused, not created.
-        assert msg is None
-        # Pin the existence check to the passed device: a regression dropping the
-        # device= scope would let a same-named interface on any device skip add_interface.
-        mock_iface_objects.filter.assert_called_once_with(device=device, name="idrac0")
+        req.user.has_perm.side_effect = lambda p: "add_interface" not in p  # allow add_ipaddress, deny add_interface
+        assert view._missing_oob_ip_permissions(req, "10.0.0.9", device=device) is None
 
     def test_requires_add_ipaddress_when_creating(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
         view = self._view()
-        req = _make_request(post={"oob_interface_id": "5"})  # existing iface → no add_interface
+        device = make_device("oob-perm-addip")
+        iface = make_interface(device, "eth0")  # existing iface → no add_interface; no IP → create
+        req = _make_request(post={"oob_interface_id": str(iface.pk)})
         req.user.has_perm.side_effect = lambda p: "add_ipaddress" not in p
-        with patch("ipam.models.IPAddress.objects") as mock_objects:
-            mock_objects.filter.return_value.__getitem__.return_value = []  # no record → create
-            msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
+        msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
         assert msg is not None and "add_ipaddress" in msg
 
     def test_requires_change_ipaddress_when_rehoming(self):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+
         view = self._view()
-        req = _make_request(post={"oob_interface_id": "5"})
+        device = make_device("oob-perm-rehome")
+        selected = make_interface(device, "idrac0")  # the chosen interface
+        other = make_interface(device, "eth9")
+        make_ip("10.0.0.9/32", assigned_object=other)  # IP exists on a DIFFERENT interface → re-home
+        req = _make_request(post={"oob_interface_id": str(selected.pk)})
         req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
-        with patch("ipam.models.IPAddress.objects") as mock_objects:
-            existing = MagicMock()
-            existing.assigned_object.pk = 7  # assigned to a DIFFERENT interface → re-home
-            mock_objects.filter.return_value.__getitem__.return_value = [existing]
-            msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
+        msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
         assert msg is not None and "change_ipaddress" in msg
 
     @pytest.mark.django_db
@@ -5791,14 +5803,19 @@ class TestMissingOOBIpPermissions:
 
     def test_ambiguous_match_requires_change_despite_selected_interface(self):
         """Multiple rows share the host IP: the write path refuses, so the preflight must NOT take the already-on-selected-interface shortcut — it requires change_ipaddress."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip
+
         view = self._view()
-        req = _make_request(post={"oob_interface_id": "5"})
+        device = make_device("oob-perm-ambig")
+        selected = make_interface(device, "idrac0")
+        # net_host ignores prefix length, so two rows share host 10.0.0.9 → ambiguous. One IS on the
+        # selected interface, which would otherwise short-circuit to "no perms"; the ambiguity must
+        # still force change_ipaddress because _attach_oob_ip refuses an ambiguous match.
+        make_ip("10.0.0.9/32", assigned_object=selected)
+        make_ip("10.0.0.9/24")
+        req = _make_request(post={"oob_interface_id": str(selected.pk)})
         req.user.has_perm.side_effect = lambda p: "change_ipaddress" not in p
-        with patch("ipam.models.IPAddress.objects") as mock_objects:
-            on_iface = MagicMock()
-            on_iface.assigned_object.pk = 5  # would otherwise short-circuit to "no perms"
-            mock_objects.filter.return_value.__getitem__.return_value = [on_iface, MagicMock()]
-            msg = view._missing_oob_ip_permissions(req, "10.0.0.9")
+        msg = view._missing_oob_ip_permissions(req, "10.0.0.9", device=device)
         assert msg is not None and "change_ipaddress" in msg
 
 
